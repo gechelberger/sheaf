@@ -1,0 +1,15 @@
+[package]
+name = "sheaf-doc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sheaf-core.workspace = true
+lopdf.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+env_logger.workspace = true

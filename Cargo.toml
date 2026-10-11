@@ -1,0 +1,58 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/sheaf-core",
+    "crates/sheaf-doc",
+    "crates/sheaf-render",
+    "crates/sheaf-ui",
+    "crates/sheaf-app",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/gregechelberger/sheaf"
+rust-version = "1.98"
+
+[workspace.dependencies]
+sheaf-core = { path = "crates/sheaf-core" }
+sheaf-doc = { path = "crates/sheaf-doc" }
+sheaf-render = { path = "crates/sheaf-render" }
+sheaf-ui = { path = "crates/sheaf-ui" }
+
+# GPUI is pre-1.0 and only published sporadically; track Zed main at a pinned rev.
+# Bump ZED_REV deliberately — breaking changes are routine.
+gpui = { git = "https://github.com/zed-industries/zed", rev = "93d745668805029476e6d7fbb19652116fed51de" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "93d745668805029476e6d7fbb19652116fed51de", features = ["wayland", "x11"] }
+
+# PDF engines. NOTE: the `pdfium` crate (newinnovations) is GPL-3 — do not use it.
+pdfium-render = "0.9.4"
+lopdf = "0.45"
+
+anyhow = "1.0"
+thiserror = "2.0"
+log = "0.4"
+env_logger = "0.11"
+image = { version = "0.25", default-features = false, features = ["png"] }
+parking_lot = "0.12"
+
+# Zed's workspace patches that GPUI's Linux backend relies on. Mirrored from
+# zed/Cargo.toml [patch.crates-io] at the pinned rev; patches here are not
+# inherited through a git dependency, so they must be repeated.
+[patch.crates-io]
+async-task = { git = "https://github.com/zed-industries/async-task.git", rev = "015845a19fc31752c02367567d3b8900a406f9da" }
+async-process = { git = "https://github.com/zed-industries/async-process.git", rev = "0b6d6713570af61806e1e5cb40e0f757cb93fd9d" }
+calloop = { git = "https://github.com/zed-industries/calloop", rev = "3759371fee14c40066d64777e2a36b6ffcc22590" }
+khronos-egl = { git = "https://github.com/zed-industries/khronos-egl", rev = "42214b36347b108fd9630ca6254b96dde59e04fe" }
+windows-capture = { git = "https://github.com/zed-industries/windows-capture.git", rev = "f0d6c1b6691db75461b732f6d5ff56eed002eeb9" }
+
+[profile.dev]
+# GPUI and PDFium bindings are unusably slow unoptimized; mirror Zed's approach.
+opt-level = 1
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

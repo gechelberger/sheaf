@@ -1,0 +1,17 @@
+[package]
+name = "sheaf-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "sheaf"
+path = "src/main.rs"
+
+[dependencies]
+sheaf-core.workspace = true
+sheaf-ui.workspace = true
+gpui.workspace = true
+gpui_platform.workspace = true
+anyhow.workspace = true
+env_logger.workspace = true

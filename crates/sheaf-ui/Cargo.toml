@@ -1,0 +1,9 @@
+[package]
+name = "sheaf-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sheaf-core.workspace = true
+gpui.workspace = true

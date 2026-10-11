@@ -1,0 +1,16 @@
+[package]
+name = "sheaf-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sheaf-core.workspace = true
+pdfium-render.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+log.workspace = true
+image.workspace = true
+
+[dev-dependencies]
+env_logger.workspace = true

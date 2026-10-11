@@ -1,0 +1,5 @@
+/target
+/vendor/pdfium
+*.pdf
+!tests/fixtures/*.pdf
+*.png
