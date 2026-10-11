@@ -10,8 +10,13 @@ path = "src/main.rs"
 
 [dependencies]
 sheaf-core.workspace = true
+sheaf-render.workspace = true
 sheaf-ui.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
 anyhow.workspace = true
 env_logger.workspace = true
+log.workspace = true
+image.workspace = true
+smallvec.workspace = true
+futures.workspace = true

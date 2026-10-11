@@ -281,6 +281,10 @@ cargo run -p sheaf-app                                        # GPUI window
 `sheaf-render` finds libpdfium via `$PDFIUM_LIB_DIR`, then
 `vendor/pdfium/<os>-<arch>/`, then the system library.
 
+`sheaf --timing <file.pdf>` prints open / first-render timings to stderr. On
+WSL, keep test PDFs on the Linux filesystem: `/mnt/c` goes through 9P, which
+is 5–10× slower for this workload and will mislead you about trends.
+
 > Licensing note: there are two PDFium wrappers on crates.io. `pdfium-render`
 > (MIT/Apache) is the one we use. `pdfium` (newinnovations) is GPL-3 and must
 > not be added.

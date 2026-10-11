@@ -15,8 +15,8 @@ pub struct Document {
 impl Document {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
-        let inner = lopdf::Document::load(path)
-            .with_context(|| format!("loading {}", path.display()))?;
+        let inner =
+            lopdf::Document::load(path).with_context(|| format!("loading {}", path.display()))?;
         Ok(Self { inner })
     }
 
@@ -34,7 +34,12 @@ impl Document {
             .inherited(id, b"MediaBox")?
             .and_then(|o| o.as_array().ok().cloned())
             .unwrap_or_default();
-        let num = |i: usize| media_box.get(i).and_then(|o| o.as_float().ok()).unwrap_or(0.0);
+        let num = |i: usize| {
+            media_box
+                .get(i)
+                .and_then(|o| o.as_float().ok())
+                .unwrap_or(0.0)
+        };
         let size = PageSize {
             width: (num(2) - num(0)).abs(),
             height: (num(3) - num(1)).abs(),

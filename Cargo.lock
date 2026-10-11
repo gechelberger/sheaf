@@ -4995,10 +4995,15 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "env_logger",
+ "futures",
  "gpui",
  "gpui_platform",
+ "image",
+ "log",
  "sheaf-core",
+ "sheaf-render",
  "sheaf-ui",
+ "smallvec",
 ]
 
 [[package]]
@@ -5023,6 +5028,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "env_logger",
+ "futures",
  "image",
  "log",
  "pdfium-render",

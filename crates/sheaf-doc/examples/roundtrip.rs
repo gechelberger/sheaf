@@ -27,7 +27,10 @@ fn synth_pdf(path: &std::path::Path) -> Result<()> {
                 Operation::new("BT", vec![]),
                 Operation::new("Tf", vec!["F1".into(), 36.into()]),
                 Operation::new("Td", vec![72.into(), 720.into()]),
-                Operation::new("Tj", vec![Object::string_literal(format!("sheaf spike page {n}"))]),
+                Operation::new(
+                    "Tj",
+                    vec![Object::string_literal(format!("sheaf spike page {n}"))],
+                ),
                 Operation::new("ET", vec![]),
             ],
         };
@@ -75,7 +78,12 @@ fn main() -> Result<()> {
     println!("{}: {n} pages, loaded in {load:?}", input.display());
     for i in 0..n.min(5) {
         let (size, rot) = doc.page_geometry(PageIndex(i))?;
-        println!("  page {i}: {:.0}x{:.0} pt, rotate {}", size.width, size.height, rot.degrees());
+        println!(
+            "  page {i}: {:.0}x{:.0} pt, rotate {}",
+            size.width,
+            size.height,
+            rot.degrees()
+        );
     }
 
     let out = out_dir.join("roundtrip.pdf");

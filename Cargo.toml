@@ -36,6 +36,8 @@ log = "0.4"
 env_logger = "0.11"
 image = { version = "0.25", default-features = false, features = ["png"] }
 parking_lot = "0.12"
+futures = "0.3"
+smallvec = "1"
 
 # Zed's workspace patches that GPUI's Linux backend relies on. Mirrored from
 # zed/Cargo.toml [patch.crates-io] at the pinned rev; patches here are not
