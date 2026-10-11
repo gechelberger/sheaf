@@ -187,6 +187,21 @@ struct Version {
     marginal_bytes: usize,
 }
 
+/// Everything a save needs, detached from the document so it can run on
+/// another thread while editing continues.
+#[derive(Clone)]
+pub struct Snapshot {
+    pub state: DocState,
+    pub primary: SourceId,
+    pub sources: HashMap<SourceId, Arc<SourceInfo>>,
+}
+
+impl Snapshot {
+    pub fn source(&self, id: SourceId) -> Option<&Arc<SourceInfo>> {
+        self.sources.get(&id)
+    }
+}
+
 pub struct Document {
     sources: HashMap<SourceId, Arc<SourceInfo>>,
     primary: SourceId,
@@ -278,6 +293,40 @@ impl Document {
 
     pub fn state(&self) -> &DocState {
         &self.history[self.cursor].state
+    }
+
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            state: self.state().clone(),
+            primary: self.primary,
+            sources: self.sources.clone(),
+        }
+    }
+
+    /// After a successful save of the current version to a file described by
+    /// `saved`: register it as a new source and make the current version an
+    /// identity mapping over it, keeping `PageId`s (and bookmarks) intact so
+    /// the view doesn't flicker. Older versions still reference the old
+    /// sources, so undo across a save keeps working. Rotation deltas are now
+    /// baked into the file, so they reset to zero.
+    pub fn rebase_to_saved(&mut self, saved: SourceInfo) -> SourceId {
+        let id = self.add_source(saved);
+        self.primary = id;
+        let v = &mut self.history[self.cursor];
+        v.state.pages = v
+            .state
+            .pages
+            .iter()
+            .enumerate()
+            .map(|(i, p)| PageRef {
+                id: p.id,
+                source: id,
+                index: i as u32,
+                rotation: Rotation::R0,
+            })
+            .collect();
+        self.saved = Some(self.cursor);
+        id
     }
 
     pub fn page_count(&self) -> usize {
@@ -1342,6 +1391,44 @@ mod tests {
         d.undo();
         assert!(!d.can_undo());
         // The saved version was trimmed away, so we're dirty everywhere.
+        assert!(d.is_dirty());
+    }
+
+    #[test]
+    fn rebase_after_save_keeps_ids_and_history() {
+        let mut d = doc();
+        let p5 = id_at(&d, 5);
+        d.apply(
+            Edit::MovePages {
+                ids: vec![p5],
+                before: Some(id_at(&d, 0)),
+            },
+            "move",
+        )
+        .unwrap();
+        d.apply(
+            Edit::RotatePages {
+                ids: vec![p5],
+                by: Rotation::R90,
+            },
+            "rotate",
+        )
+        .unwrap();
+        let old_primary = d.primary();
+        let new = d.rebase_to_saved(SourceInfo {
+            path: "saved.pdf".into(),
+            ..src(6)
+        });
+        assert_ne!(new, old_primary);
+        assert!(!d.is_dirty());
+        assert_eq!(d.page(0).unwrap().id, p5);
+        assert_eq!(d.page(0).unwrap().source, new);
+        assert_eq!(order(&d), vec![0, 1, 2, 3, 4, 5]);
+        assert_eq!(d.page(0).unwrap().rotation, Rotation::R0);
+        // Undo still reaches the pre-save version over the old source.
+        d.undo();
+        assert_eq!(d.page(0).unwrap().source, old_primary);
+        assert_eq!(d.page(0).unwrap().index, 5);
         assert!(d.is_dirty());
     }
 

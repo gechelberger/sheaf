@@ -8,6 +8,7 @@
 pub mod file;
 pub mod history;
 pub mod model;
+pub mod save;
 
 pub use history::{AllOf, FixedCount, HistoryPolicy, HistoryStats, MemoryBudget};
 pub use model::{

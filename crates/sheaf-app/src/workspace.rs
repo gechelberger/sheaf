@@ -39,6 +39,7 @@ impl Workspace {
         paths: Vec<PathBuf>,
         timing: bool,
         find: Option<String>,
+        selftest_save: Option<PathBuf>,
         launched: Instant,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -55,6 +56,9 @@ impl Workspace {
         }
         if let (Some(q), Some(doc)) = (find, this.docs.first().cloned()) {
             doc.update(cx, |d, cx| d.set_initial_query(q, cx));
+        }
+        if let (Some(p), Some(doc)) = (selftest_save, this.docs.first().cloned()) {
+            doc.update(cx, |d, _| d.set_selftest_save(p));
         }
         this
     }

@@ -43,7 +43,9 @@ actions!(
         Undo,
         Redo,
         DuplicatePages,
-        SelectAllPages
+        SelectAllPages,
+        Save,
+        SaveAs
     ]
 );
 actions!(
@@ -65,6 +67,8 @@ struct Cli {
     timing: bool,
     /// Open the search bar with this query once the first document loads.
     find: Option<String>,
+    /// Dev: rotate page 1 of the first document and save it here.
+    selftest_save: Option<PathBuf>,
 }
 
 fn parse_cli() -> Cli {
@@ -72,12 +76,14 @@ fn parse_cli() -> Cli {
         paths: Vec::new(),
         timing: false,
         find: None,
+        selftest_save: None,
     };
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--timing") => cli.timing = true,
             Some("--find") => cli.find = args.next().and_then(|q| q.to_str().map(String::from)),
+            Some("--selftest-save") => cli.selftest_save = args.next().map(PathBuf::from),
             Some(s) if s.starts_with("--") => eprintln!("unknown flag {s}"),
             _ => cli.paths.push(arg.into()),
         }
@@ -119,6 +125,8 @@ fn main() {
             KeyBinding::new("ctrl-z", Undo, doc),
             KeyBinding::new("ctrl-shift-z", Redo, doc),
             KeyBinding::new("ctrl-y", Redo, doc),
+            KeyBinding::new("ctrl-s", Save, doc),
+            KeyBinding::new("ctrl-shift-s", SaveAs, doc),
             KeyBinding::new("ctrl-f", Find, doc),
             KeyBinding::new("escape", CloseSearch, doc),
             KeyBinding::new("f3", SearchNext, doc),
@@ -163,7 +171,16 @@ fn main() {
                 ..Default::default()
             },
             move |window, cx| {
-                let ws = cx.new(|cx| Workspace::new(cli.paths, cli.timing, cli.find, launched, cx));
+                let ws = cx.new(|cx| {
+                    Workspace::new(
+                        cli.paths,
+                        cli.timing,
+                        cli.find,
+                        cli.selftest_save,
+                        launched,
+                        cx,
+                    )
+                });
                 ws.update(cx, |ws, cx| ws.focus_active(window, cx));
                 ws
             },

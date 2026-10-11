@@ -21,6 +21,7 @@ use gpui::{
     img, point, prelude::*, px, rgb, rgba,
 };
 use sheaf_core::{PageIndex, PageSize, Rotation};
+use sheaf_doc::save;
 use sheaf_doc::{
     Document, Edit, FlatOutlineItem, OutlineId, PageId, PageRef, SourceId, SourceInfo,
 };
@@ -32,8 +33,8 @@ use sheaf_render::{
 use crate::text_input::TextInput;
 use crate::{
     CloseSearch, DeletePage, DuplicatePages, Find, FirstPage, LastPage, LineDown, LineUp, NextPage,
-    PrevPage, Redo, RotatePageCcw, RotatePageCw, ScreenDown, ScreenUp, SearchNext, SearchPrev,
-    SelectAllPages, Undo, ZoomActual, ZoomFitPage, ZoomFitWidth, ZoomIn, ZoomOut,
+    PrevPage, Redo, RotatePageCcw, RotatePageCw, Save, SaveAs, ScreenDown, ScreenUp, SearchNext,
+    SearchPrev, SelectAllPages, Undo, ZoomActual, ZoomFitPage, ZoomFitWidth, ZoomIn, ZoomOut,
 };
 
 pub const KEY_CONTEXT: &str = "DocView";
@@ -212,6 +213,8 @@ struct Doc {
     sel_anchor: Option<usize>,
     /// Insert index under the cursor while pages are being dragged.
     drop_target: Option<usize>,
+    /// A save is running on a background thread.
+    saving: bool,
 }
 
 impl Doc {
@@ -272,6 +275,7 @@ pub struct DocView {
     search: Option<Search>,
     initial_query: Option<String>,
     search_started: Option<Instant>,
+    selftest_save: Option<PathBuf>,
 }
 
 /// An open search bar and the running / finished query behind it.
@@ -300,6 +304,7 @@ impl DocView {
             search: None,
             initial_query: None,
             search_started: None,
+            selftest_save: None,
         };
         this.open(cx);
         this
@@ -381,9 +386,13 @@ impl DocView {
                             selection: HashSet::new(),
                             sel_anchor: None,
                             drop_target: None,
+                            saving: false,
                         }));
                         viewer.fetch_page_sizes(cx);
                         viewer.fetch_outline(cx);
+                        if let Some(p) = viewer.selftest_save.take() {
+                            viewer.selftest_save(p, cx);
+                        }
                         if let Some(q) = viewer.initial_query.take() {
                             viewer.search = Some(Search {
                                 input: cx.new(|cx| TextInput::new("Find in document", cx)),
@@ -693,6 +702,128 @@ impl DocView {
         doc.touched();
         self.prune_selection();
         cx.notify();
+    }
+
+    // ----- save --------------------------------------------------------------
+
+    /// Save As: ask for a path, then save there.
+    fn save_as(&mut self, cx: &mut Context<Self>) {
+        let dir = self
+            .path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default();
+        let suggested = self
+            .path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(String::from);
+        let rx = cx.prompt_for_new_path(&dir, suggested.as_deref());
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(path))) = rx.await {
+                this.update(cx, |view, cx| view.save_to(path, cx)).ok();
+            }
+        })
+        .detach();
+    }
+
+    /// Save to `path` (the document's own path for plain Save). Runs the
+    /// rewrite on a background thread from a snapshot, then reopens the saved
+    /// file as the new primary source without disturbing undo history.
+    pub fn save_to(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let State::Ready(doc) = &mut self.state else {
+            return;
+        };
+        if doc.saving {
+            doc.notice = Some("Already saving…".into());
+            cx.notify();
+            return;
+        }
+        doc.saving = true;
+        doc.notice = Some(format!("Saving {}…", path.display()));
+        let snapshot = doc.model.snapshot();
+        let timing = self.timing;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let t = Instant::now();
+            let result = cx
+                .background_executor()
+                .spawn({
+                    let path = path.clone();
+                    async move {
+                        save::rewrite_to_path(&snapshot, &path)?;
+                        let bytes = std::fs::metadata(&path)
+                            .map(|m| m.len() as usize)
+                            .unwrap_or(0);
+                        let handle = RenderHandle::open(path.clone(), None)?;
+                        anyhow::Ok((handle, bytes))
+                    }
+                })
+                .await;
+            this.update(cx, |view, cx| {
+                let State::Ready(doc) = &mut view.state else {
+                    return;
+                };
+                doc.saving = false;
+                match result {
+                    Ok((handle, bytes)) => {
+                        let (page_count, first_page) =
+                            (handle.info().page_count, handle.info().first_page);
+                        let saved = SourceInfo {
+                            path: path.clone(),
+                            page_count,
+                            first_page,
+                            page_sizes: None,
+                            bytes,
+                        };
+                        let sid = doc.model.rebase_to_saved(saved);
+                        doc.handles.insert(sid, handle);
+                        view.path = path.clone();
+                        doc.notice = Some(format!("Saved {} in {:?}", path.display(), t.elapsed()));
+                        if timing {
+                            eprintln!(
+                                "[timing] saved {} ({} pages) in {:?}",
+                                path.display(),
+                                page_count,
+                                t.elapsed()
+                            );
+                        }
+                        doc.touched();
+                        view.fetch_page_sizes(cx);
+                    }
+                    Err(e) => {
+                        doc.notice = Some(format!("Save failed: {e:#}"));
+                        log::error!("save: {e:#}");
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Dev hook: rotate the first page and save to `path`, so the save path
+    /// can be exercised without a keyboard.
+    pub fn selftest_save(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let State::Ready(doc) = &self.state else {
+            return;
+        };
+        if let Some(p) = doc.page_ref(0) {
+            self.apply(
+                Edit::RotatePages {
+                    ids: vec![p.id],
+                    by: Rotation::R90,
+                },
+                "Rotate page",
+                cx,
+            );
+        }
+        self.save_to(path, cx);
+    }
+
+    pub fn set_selftest_save(&mut self, path: PathBuf) {
+        self.selftest_save = Some(path);
     }
 
     // ----- search -----------------------------------------------------------
@@ -1608,6 +1739,11 @@ impl Render for DocView {
             .on_action(cx.listener(|v, _: &DeletePage, _, cx| v.delete_current(cx)))
             .on_action(cx.listener(|v, _: &DuplicatePages, _, cx| v.duplicate_current(cx)))
             .on_action(cx.listener(|v, _: &SelectAllPages, _, cx| v.select_all(cx)))
+            .on_action(cx.listener(|v, _: &Save, _, cx| {
+                let path = v.path.clone();
+                v.save_to(path, cx)
+            }))
+            .on_action(cx.listener(|v, _: &SaveAs, _, cx| v.save_as(cx)))
             .on_action(cx.listener(|v, _: &Undo, _, cx| v.undo(cx)))
             .on_action(cx.listener(|v, _: &Redo, _, cx| v.redo(cx)))
             .flex()
