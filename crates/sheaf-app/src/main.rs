@@ -3,6 +3,7 @@
 //!     sheaf [--timing] [file.pdf ...]
 
 mod docview;
+mod frame;
 mod markup_tools;
 mod outline_panel;
 mod pattern_panel;
@@ -246,8 +247,18 @@ fn main() {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {
                     title: Some("sheaf".into()),
+                    // We draw the title bar ourselves (see frame.rs).
+                    appears_transparent: true,
                     ..Default::default()
                 }),
+                // Wayland compositors (WSLg included) may not draw a frame
+                // at all; ask to draw it ourselves there.
+                window_decorations: if cfg!(target_os = "linux") {
+                    Some(gpui::WindowDecorations::Client)
+                } else {
+                    None
+                },
+                window_background: gpui::WindowBackgroundAppearance::Opaque,
                 ..Default::default()
             },
             move |window, cx| {

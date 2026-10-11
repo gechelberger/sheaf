@@ -13,6 +13,7 @@ use gpui::{
 };
 
 use crate::docview::DocView;
+use crate::frame;
 use crate::{
     CloseTab, NextTab, OpenFile, PrevTab, Quit, ShowOutline, ShowPatterns, ShowThumbnails,
     ToggleBottomDock, ToggleLeftDock, ToggleRightDock, ToggleSidebar,
@@ -589,7 +590,13 @@ impl Render for Workspace {
                 d.child(self.splitter(Side::Bottom, cx)).child(b)
             });
 
-        div()
+        let title: SharedString = match self.active_doc() {
+            Some(doc) => doc.read(cx).title(),
+            None => "".into(),
+        };
+        let title_bar = frame::title_bar(title, window, cx);
+
+        let content = div()
             .key_context(KEY_CONTEXT)
             .on_action(cx.listener(|ws, _: &ToggleSidebar, _, cx| {
                 ws.all_hidden = !ws.all_hidden;
@@ -646,6 +653,7 @@ impl Render for Workspace {
             .size_full()
             .bg(rgb(0x2b2b2b))
             .text_color(rgb(0xd0d0d0))
+            .child(title_bar)
             .child(self.render_tabs(cx))
             .child(
                 div()
@@ -660,6 +668,7 @@ impl Render for Workspace {
                         d.child(self.splitter(Side::Right, cx)).child(r)
                     }),
             )
-            .children(menu)
+            .children(menu);
+        frame::client_side_decorations(content, window, cx)
     }
 }
