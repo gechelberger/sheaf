@@ -21,7 +21,10 @@ magnitude snappier than Acrobat on the same machine.
 
 ## Goals
 
-1. **Fast.** Concrete budgets, measured in CI, not vibes:
+1. **Fast.** The real test is qualitative: does it feel obviously snappier
+   than Acrobat on the same (older) machine? The numbers below are directional
+   targets to keep us honest about trends, not release gates — at least until
+   there's a working viewer to measure:
    - Cold start to empty window: **< 300 ms**
    - Open a 1,000-page scanned PDF to first painted page: **< 500 ms**
    - Page flip (cached): **< 1 frame**; (uncached): first tile visible < 100 ms
