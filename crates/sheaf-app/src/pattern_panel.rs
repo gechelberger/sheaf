@@ -213,7 +213,14 @@ impl DocView {
     }
 
     /// The Patterns sidebar panel.
-    pub fn render_patterns(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    /// `wide`: the panel sits in a bottom dock, so the controls go in a
+    /// column on the left with the results beside them.
+    pub fn render_patterns(
+        &mut self,
+        wide: bool,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         self.ensure_pattern(cx);
         let ps = self.pattern.as_ref().unwrap();
         let input = ps.input.clone();
@@ -325,41 +332,52 @@ impl DocView {
             });
         }
 
-        div()
-            .size_full()
+        let controls = div()
+            .flex_shrink_0()
             .flex()
             .flex_col()
+            .gap_1()
+            .p_2()
+            .child(input)
+            .child(div().flex().flex_wrap().gap_1().children(chips))
             .child(
                 div()
-                    .flex_shrink_0()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .p_2()
-                    .border_b_1()
-                    .border_color(rgb(0x111111))
-                    .child(input)
-                    .child(div().flex().flex_wrap().gap_1().children(chips))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(if ps.error.is_some() {
-                                rgb(0xe08080)
-                            } else {
-                                rgb(0x9a9a9a)
-                            })
-                            .child(status),
-                    ),
-            )
-            .child(
-                div()
-                    .id("pattern-results")
-                    .track_scroll(&ps.scroll)
-                    .overflow_y_scroll()
-                    .flex_1()
-                    .min_h(px(0.0))
-                    .child(div().relative().w_full().h(px(total_h)).children(els)),
-            )
-            .into_any_element()
+                    .text_xs()
+                    .text_color(if ps.error.is_some() {
+                        rgb(0xe08080)
+                    } else {
+                        rgb(0x9a9a9a)
+                    })
+                    .child(status),
+            );
+        let results = div()
+            .id("pattern-results")
+            .track_scroll(&ps.scroll)
+            .overflow_y_scroll()
+            .flex_1()
+            .min_h(px(0.0))
+            .min_w(px(0.0))
+            .child(div().relative().w_full().h(px(total_h)).children(els));
+        if wide {
+            div()
+                .size_full()
+                .flex()
+                .child(
+                    controls
+                        .w(px(340.0))
+                        .border_r_1()
+                        .border_color(rgb(0x111111)),
+                )
+                .child(results)
+                .into_any_element()
+        } else {
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(controls.border_b_1().border_color(rgb(0x111111)))
+                .child(results)
+                .into_any_element()
+        }
     }
 }
