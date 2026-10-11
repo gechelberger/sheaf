@@ -194,6 +194,8 @@ pub struct Snapshot {
     pub state: DocState,
     pub primary: SourceId,
     pub sources: HashMap<SourceId, Arc<SourceInfo>>,
+    /// The outline differs from what's in the primary file.
+    pub outline_dirty: bool,
 }
 
 impl Snapshot {
@@ -212,6 +214,8 @@ pub struct Document {
     next_outline: u64,
     next_source: u32,
     policy: Box<dyn HistoryPolicy>,
+    /// Outline as it exists in the primary file on disk.
+    saved_outline: Vector<OutlineNode>,
 }
 
 impl Document {
@@ -232,6 +236,7 @@ impl Document {
             next_outline: 0,
             next_source: 1,
             policy,
+            saved_outline: Vector::new(),
         };
         let pages: Vector<PageRef> = (0..primary.page_count)
             .map(|index| PageRef {
@@ -244,6 +249,7 @@ impl Document {
         doc.sources.insert(source, Arc::new(primary));
         let by_index: Vec<PageId> = pages.iter().map(|p| p.id).collect();
         let outline = doc.outline_from_flat(outline, &by_index);
+        doc.saved_outline = outline.clone();
         doc.history.push(Version {
             label: "Open".into(),
             state: DocState { pages, outline },
@@ -288,6 +294,7 @@ impl Document {
         }
         let by_index: Vec<PageId> = self.history[0].state.pages.iter().map(|p| p.id).collect();
         self.history[0].state.outline = self.outline_from_flat(outline, &by_index);
+        self.saved_outline = self.history[0].state.outline.clone();
         Ok(())
     }
 
@@ -300,6 +307,7 @@ impl Document {
             state: self.state().clone(),
             primary: self.primary,
             sources: self.sources.clone(),
+            outline_dirty: self.state().outline != self.saved_outline,
         }
     }
 
@@ -325,6 +333,7 @@ impl Document {
                 rotation: Rotation::R0,
             })
             .collect();
+        self.saved_outline = self.history[self.cursor].state.outline.clone();
         self.saved = Some(self.cursor);
         id
     }

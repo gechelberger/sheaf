@@ -751,12 +751,12 @@ impl DocView {
                 .spawn({
                     let path = path.clone();
                     async move {
-                        save::rewrite_to_path(&snapshot, &path)?;
+                        let strategy = save::save_to_path(&snapshot, &path)?;
                         let bytes = std::fs::metadata(&path)
                             .map(|m| m.len() as usize)
                             .unwrap_or(0);
                         let handle = RenderHandle::open(path.clone(), None)?;
-                        anyhow::Ok((handle, bytes))
+                        anyhow::Ok((handle, bytes, strategy))
                     }
                 })
                 .await;
@@ -766,7 +766,7 @@ impl DocView {
                 };
                 doc.saving = false;
                 match result {
-                    Ok((handle, bytes)) => {
+                    Ok((handle, bytes, strategy)) => {
                         let (page_count, first_page) =
                             (handle.info().page_count, handle.info().first_page);
                         let saved = SourceInfo {
@@ -779,10 +779,14 @@ impl DocView {
                         let sid = doc.model.rebase_to_saved(saved);
                         doc.handles.insert(sid, handle);
                         view.path = path.clone();
-                        doc.notice = Some(format!("Saved {} in {:?}", path.display(), t.elapsed()));
+                        doc.notice = Some(format!(
+                            "Saved {} ({strategy:?}) in {:?}",
+                            path.display(),
+                            t.elapsed()
+                        ));
                         if timing {
                             eprintln!(
-                                "[timing] saved {} ({} pages) in {:?}",
+                                "[timing] saved {} ({} pages, {strategy:?}) in {:?}",
                                 path.display(),
                                 page_count,
                                 t.elapsed()

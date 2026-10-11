@@ -7,6 +7,7 @@
 
 pub mod file;
 pub mod history;
+pub mod incremental;
 pub mod model;
 pub mod save;
 

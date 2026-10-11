@@ -121,9 +121,9 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 ### Page organization
 | Feature | Status |
 |---|---|
-| Reorder pages (drag in thumbnails) | 🎯 |
-| Rotate **individual** pages (PDFlyer-style, not whole doc) | 🎯 |
-| Delete / extract / duplicate pages | 🎯 |
+| Reorder pages (drag in thumbnails) | ✅ |
+| Rotate **individual** pages (PDFlyer-style, not whole doc) | ✅ |
+| Delete / extract / duplicate pages | ✅ delete, duplicate; extract 📋 |
 | Insert PDF at position (PDFlyer "Insert PDF") | 🎯 |
 | Merge bookmarks on insert (parents merged, children appended) | 🎯 |
 | Split document (by page range, by bookmark, by size) | 📋 |
@@ -238,7 +238,7 @@ decide on accuracy for scanned tax forms, not on purity.
 |---|---|---|
 | M0 | **Spikes**: GPUI window on Windows and Linux (both tier 1); pdfium-render renders a page; lopdf round-trips a PDF. *Linux: all three pass (2026-10-11). Windows: pending.* | The stack is viable |
 | M1 | **Viewer**: tiled async rendering, continuous scroll, zoom, thumbnails, outline, tabs, search. *Done 2026-10-11 (Linux).* | The performance thesis |
-| M2 | **Organizer**: page reorder/rotate/delete/insert, bookmark tree editing, incremental save, undo; pattern (regex) search as its own tool | The document model |
+| M2 | **Organizer**: page reorder/rotate/delete/insert, bookmark tree editing, incremental save, undo; pattern (regex) search as its own tool. *In progress: model, organizer UI, save (rewrite + incremental) done.* | The document model |
 | M3 | **Markup**: standard annotations, stamps, tickmarks, connectors, calc tape, clean copy export | The PDFlyer workflow |
 | M4 | **Polish → v0.1**: keybindings, command palette, settings, crash-safe autosave, packaging | Daily-driver readiness |
 

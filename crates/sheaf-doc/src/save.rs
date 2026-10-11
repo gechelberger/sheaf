@@ -127,30 +127,66 @@ pub fn rewrite(model: &Snapshot) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Rewrite to `path` atomically (temp file + rename).
-pub fn rewrite_to_path(model: &Snapshot, path: &Path) -> Result<()> {
-    let bytes = rewrite(model)?;
+/// Which strategy a save used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Strategy {
+    Incremental,
+    Rewrite,
+}
+
+/// Save `model` to `path`, incrementally when that's its own primary file
+/// (and the file on disk is still what we opened), otherwise by rewrite.
+/// An incremental failure falls back to a rewrite.
+pub fn save_to_path(model: &Snapshot, path: &Path) -> Result<Strategy> {
+    let primary = model
+        .source(model.primary)
+        .context("primary source missing")?;
+    let same_file = std::fs::canonicalize(path).ok() == std::fs::canonicalize(&primary.path).ok();
+    let unchanged = primary.bytes == 0
+        || std::fs::metadata(&primary.path)
+            .map(|m| m.len() as usize == primary.bytes)
+            .unwrap_or(false);
+    if same_file && unchanged {
+        match crate::incremental::incremental(model) {
+            Ok(bytes) => {
+                write_atomic(path, &bytes)?;
+                return Ok(Strategy::Incremental);
+            }
+            Err(e) => log::warn!("incremental save failed, rewriting instead: {e:#}"),
+        }
+    }
+    rewrite_to_path(model, path)?;
+    Ok(Strategy::Rewrite)
+}
+
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let dir = path.parent().unwrap_or(Path::new("."));
     let tmp = dir.join(format!(
         ".{}.sheaf-tmp",
         path.file_name().and_then(|s| s.to_str()).unwrap_or("save")
     ));
-    std::fs::write(&tmp, &bytes).with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
     std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
     Ok(())
 }
 
-struct LoadedSource {
+/// Rewrite to `path` atomically (temp file + rename).
+pub fn rewrite_to_path(model: &Snapshot, path: &Path) -> Result<()> {
+    let bytes = rewrite(model)?;
+    write_atomic(path, &bytes)
+}
+
+pub(crate) struct LoadedSource {
     /// Kept for non-primary sources so pages can be copied out of them.
-    pdf: Option<Pdf>,
+    pub(crate) pdf: Option<Pdf>,
     /// Page object ids in page order.
-    pages: Vec<ObjectId>,
+    pub(crate) pages: Vec<ObjectId>,
     /// Inherited attributes per page, as found in the original tree.
-    inherited: HashMap<ObjectId, Vec<(Vec<u8>, Object)>>,
+    pub(crate) inherited: HashMap<ObjectId, Vec<(Vec<u8>, Object)>>,
 }
 
 impl LoadedSource {
-    fn from_pdf(pdf: &Pdf) -> Result<Self> {
+    pub(crate) fn from_pdf(pdf: &Pdf) -> Result<Self> {
         let pages: Vec<ObjectId> = pdf.get_pages().into_values().collect();
         let mut inherited = HashMap::new();
         for &page in &pages {
@@ -165,7 +201,7 @@ impl LoadedSource {
 }
 
 impl LoadedSource {
-    fn from_pdf_owned(pdf: Pdf) -> Result<Self> {
+    pub(crate) fn from_pdf_owned(pdf: Pdf) -> Result<Self> {
         let mut s = Self::from_pdf(&pdf)?;
         s.pdf = Some(pdf);
         Ok(s)
@@ -199,7 +235,7 @@ fn inherited_attrs(pdf: &Pdf, page: ObjectId) -> Vec<(Vec<u8>, Object)> {
     out
 }
 
-fn is_identity(model: &Snapshot, primary: &LoadedSource) -> bool {
+pub(crate) fn is_identity(model: &Snapshot, primary: &LoadedSource) -> bool {
     let pages = &model.state.pages;
     pages.len() == primary.pages.len()
         && pages
@@ -210,7 +246,7 @@ fn is_identity(model: &Snapshot, primary: &LoadedSource) -> bool {
 
 /// Clone a page dictionary from `src` into `dst`, deep-copying everything it
 /// references (resources, content, annotations…) with fresh object numbers.
-fn copy_page_dict(
+pub(crate) fn copy_page_dict(
     src: &Pdf,
     page: ObjectId,
     dst: &mut Pdf,
@@ -300,7 +336,7 @@ fn text_string(s: &str) -> Object {
     }
 }
 
-fn write_outline(
+pub(crate) fn write_outline(
     pdf: &mut Pdf,
     nodes: &Vector<OutlineNode>,
     page_obj: &HashMap<PageId, ObjectId>,
@@ -498,15 +534,24 @@ mod tests {
                     .next()
                     .unwrap()
                     .to_string();
+                // Attributes may live on the page or be inherited; both are valid.
+                let resolved = inherited_attrs(&pdf, id);
                 let dict = pdf.get_dictionary(id).unwrap();
+                let has = |k: &[u8]| dict.has(k) || resolved.iter().any(|(kk, _)| kk == k);
                 let rot = dict
                     .get(b"Rotate")
                     .ok()
+                    .cloned()
+                    .or_else(|| {
+                        resolved
+                            .iter()
+                            .find(|(k, _)| k == b"Rotate")
+                            .map(|(_, v)| v.clone())
+                    })
                     .and_then(|o| o.as_i64().ok())
                     .unwrap_or(0);
-                // Inherited resources must have been flattened onto the page.
-                assert!(dict.has(b"Resources"), "page lost its resources");
-                assert!(dict.has(b"MediaBox"), "page lost its media box");
+                assert!(has(b"Resources"), "page lost its resources");
+                assert!(has(b"MediaBox"), "page lost its media box");
                 (mark, rot)
             })
             .collect()
@@ -696,6 +741,122 @@ mod tests {
         assert!(out.exists());
         assert!(!dir.join(".out.pdf.sheaf-tmp").exists());
         assert_eq!(read_pages(&std::fs::read(&out).unwrap()).len(), 2);
+    }
+
+    fn save_modern(path: &Path) {
+        let mut pdf = Pdf::load(path).unwrap();
+        let mut bytes = Vec::new();
+        pdf.save_modern(&mut bytes).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    fn incremental_case(modern: bool) {
+        let dir = tempdir();
+        let a = make_pdf(&dir, "a.pdf", "A", 4, &[("One", 2, 0)]);
+        let b = make_pdf(&dir, "b.pdf", "B", 1, &[]);
+        if modern {
+            save_modern(&a);
+        }
+        let original = std::fs::read(&a).unwrap();
+        let mut model = Document::new(
+            {
+                let mut i = info(&a, 4);
+                i.bytes = original.len();
+                i
+            },
+            &[FlatOutlineItem {
+                title: "One".into(),
+                page: Some(2),
+                depth: 0,
+            }],
+            Box::new(FixedCount(10)),
+        );
+        let ids: Vec<PageId> = model.state().pages.iter().map(|p| p.id).collect();
+
+        // Rotation only: tree untouched, one page object rewritten.
+        model
+            .apply(
+                Edit::RotatePages {
+                    ids: vec![ids[1]],
+                    by: Rotation::R180,
+                },
+                "rot",
+            )
+            .unwrap();
+        let bytes = crate::incremental::incremental(&model.snapshot()).unwrap();
+        assert!(bytes.starts_with(&original), "original bytes preserved");
+        assert_eq!(
+            read_pages(&bytes),
+            vec![
+                ("A 0".into(), 0),
+                ("A 1".into(), 180),
+                ("A 2".into(), 0),
+                ("A 3".into(), 0)
+            ]
+        );
+        assert_eq!(read_outline(&bytes), vec![(0, "One".into(), Some(3))]);
+
+        // Structural: delete, insert from another file, bookmark rename.
+        let sb = model.add_source(info(&b, 1));
+        model
+            .apply(Edit::DeletePages { ids: vec![ids[0]] }, "del")
+            .unwrap();
+        model
+            .apply(
+                Edit::InsertPages {
+                    source: sb,
+                    range: 0..1,
+                    before: None,
+                    outline: None,
+                },
+                "ins",
+            )
+            .unwrap();
+        let one = model.state().outline_flat()[0].1.id;
+        model
+            .apply(
+                Edit::OutlineEdit {
+                    id: one,
+                    title: Some("Uno".into()),
+                    target: Some(Some(ids[2])),
+                    color: None,
+                },
+                "bm",
+            )
+            .unwrap();
+        let bytes = crate::incremental::incremental(&model.snapshot()).unwrap();
+        assert!(bytes.starts_with(&original));
+        assert_eq!(
+            read_pages(&bytes),
+            vec![
+                ("A 1".into(), 180),
+                ("A 2".into(), 0),
+                ("A 3".into(), 0),
+                ("B 0".into(), 0)
+            ]
+        );
+        assert_eq!(read_outline(&bytes), vec![(0, "Uno".into(), Some(2))]);
+
+        // Saving through the chooser picks incremental for the primary path.
+        assert_eq!(
+            save_to_path(&model.snapshot(), &a).unwrap(),
+            Strategy::Incremental
+        );
+        assert!(std::fs::read(&a).unwrap().starts_with(&original));
+        assert_eq!(
+            save_to_path(&model.snapshot(), &dir.join("elsewhere.pdf")).unwrap(),
+            Strategy::Rewrite
+        );
+    }
+
+    #[test]
+    fn incremental_classic_xref() {
+        incremental_case(false);
+    }
+
+    #[test]
+    fn incremental_xref_stream() {
+        incremental_case(true);
     }
 
     fn tempdir() -> std::path::PathBuf {
