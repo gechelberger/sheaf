@@ -41,7 +41,9 @@ actions!(
         RotatePageCcw,
         DeletePage,
         Undo,
-        Redo
+        Redo,
+        DuplicatePages,
+        SelectAllPages
     ]
 );
 actions!(
@@ -112,6 +114,8 @@ fn main() {
             KeyBinding::new("r", RotatePageCw, doc),
             KeyBinding::new("shift-r", RotatePageCcw, doc),
             KeyBinding::new("delete", DeletePage, doc),
+            KeyBinding::new("ctrl-d", DuplicatePages, doc),
+            KeyBinding::new("ctrl-a", SelectAllPages, doc),
             KeyBinding::new("ctrl-z", Undo, doc),
             KeyBinding::new("ctrl-shift-z", Redo, doc),
             KeyBinding::new("ctrl-y", Redo, doc),

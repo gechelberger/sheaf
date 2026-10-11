@@ -16,9 +16,9 @@ use std::time::Instant;
 
 use futures::StreamExt;
 use gpui::{
-    AnyElement, App, Context, Entity, FocusHandle, Focusable, ObjectFit, RenderImage, ScrollHandle,
-    ScrollWheelEvent, SharedString, Subscription, Task, Window, div, img, point, prelude::*, px,
-    rgb, rgba,
+    AnyElement, App, Context, DragMoveEvent, Entity, FocusHandle, Focusable, ObjectFit,
+    RenderImage, ScrollHandle, ScrollWheelEvent, SharedString, Subscription, Task, Window, div,
+    img, point, prelude::*, px, rgb, rgba,
 };
 use sheaf_core::{PageIndex, PageSize, Rotation};
 use sheaf_doc::{
@@ -31,9 +31,9 @@ use sheaf_render::{
 
 use crate::text_input::TextInput;
 use crate::{
-    CloseSearch, DeletePage, Find, FirstPage, LastPage, LineDown, LineUp, NextPage, PrevPage, Redo,
-    RotatePageCcw, RotatePageCw, ScreenDown, ScreenUp, SearchNext, SearchPrev, Undo, ZoomActual,
-    ZoomFitPage, ZoomFitWidth, ZoomIn, ZoomOut,
+    CloseSearch, DeletePage, DuplicatePages, Find, FirstPage, LastPage, LineDown, LineUp, NextPage,
+    PrevPage, Redo, RotatePageCcw, RotatePageCw, ScreenDown, ScreenUp, SearchNext, SearchPrev,
+    SelectAllPages, Undo, ZoomActual, ZoomFitPage, ZoomFitWidth, ZoomIn, ZoomOut,
 };
 
 pub const KEY_CONTEXT: &str = "DocView";
@@ -206,6 +206,12 @@ struct Doc {
     outline_loaded: bool,
     outline_expanded: HashSet<OutlineId>,
     outline_scroll: ScrollHandle,
+    // Selection and drag state for the thumbnail panel.
+    selection: HashSet<PageId>,
+    /// Index the last plain/ctrl click landed on; shift-click extends from it.
+    sel_anchor: Option<usize>,
+    /// Insert index under the cursor while pages are being dragged.
+    drop_target: Option<usize>,
 }
 
 impl Doc {
@@ -372,6 +378,9 @@ impl DocView {
                             outline_loaded: false,
                             outline_expanded: HashSet::new(),
                             outline_scroll: ScrollHandle::new(),
+                            selection: HashSet::new(),
+                            sel_anchor: None,
+                            drop_target: None,
                         }));
                         viewer.fetch_page_sizes(cx);
                         viewer.fetch_outline(cx);
@@ -509,6 +518,7 @@ impl DocView {
                     format!("{label}: removed {} — Ctrl+Z to undo", parts.join(" and "))
                 });
                 doc.touched();
+                self.prune_selection();
                 cx.notify();
             }
             Err(e) => {
@@ -518,22 +528,144 @@ impl DocView {
         }
     }
 
-    fn current_page_id(&self) -> Option<PageId> {
-        match &self.state {
-            State::Ready(doc) => doc.page_ref(doc.current_page).map(|p| p.id),
-            _ => None,
+    /// Pages an operation applies to: the selection, or the current page.
+    fn target_ids(&self) -> Vec<PageId> {
+        let State::Ready(doc) = &self.state else {
+            return Vec::new();
+        };
+        if doc.selection.is_empty() {
+            return doc
+                .page_ref(doc.current_page)
+                .map(|p| vec![p.id])
+                .unwrap_or_default();
+        }
+        // Keep document order so the label and any insertion are predictable.
+        doc.model
+            .state()
+            .pages
+            .iter()
+            .filter(|p| doc.selection.contains(&p.id))
+            .map(|p| p.id)
+            .collect()
+    }
+
+    fn label(&self, verb: &str, n: usize) -> String {
+        if n == 1 {
+            format!("{verb} page")
+        } else {
+            format!("{verb} {n} pages")
         }
     }
 
     fn rotate_current(&mut self, by: Rotation, cx: &mut Context<Self>) {
-        if let Some(id) = self.current_page_id() {
-            self.apply(Edit::RotatePages { ids: vec![id], by }, "Rotate page", cx);
+        let ids = self.target_ids();
+        if !ids.is_empty() {
+            let label = self.label("Rotate", ids.len());
+            self.apply(Edit::RotatePages { ids, by }, &label, cx);
         }
     }
 
     fn delete_current(&mut self, cx: &mut Context<Self>) {
-        if let Some(id) = self.current_page_id() {
-            self.apply(Edit::DeletePages { ids: vec![id] }, "Delete page", cx);
+        let ids = self.target_ids();
+        if !ids.is_empty() {
+            let label = self.label("Delete", ids.len());
+            self.apply(Edit::DeletePages { ids }, &label, cx);
+        }
+    }
+
+    fn duplicate_current(&mut self, cx: &mut Context<Self>) {
+        let ids = self.target_ids();
+        if !ids.is_empty() {
+            let label = self.label("Duplicate", ids.len());
+            self.apply(Edit::DuplicatePages { ids }, &label, cx);
+        }
+    }
+
+    fn select_all(&mut self, cx: &mut Context<Self>) {
+        let State::Ready(doc) = &mut self.state else {
+            return;
+        };
+        doc.selection = doc.model.state().pages.iter().map(|p| p.id).collect();
+        cx.notify();
+    }
+
+    fn clear_selection(&mut self, cx: &mut Context<Self>) {
+        let State::Ready(doc) = &mut self.state else {
+            return;
+        };
+        if !doc.selection.is_empty() {
+            doc.selection.clear();
+            cx.notify();
+        }
+    }
+
+    /// Drop pages that no longer exist (after delete/undo/redo).
+    fn prune_selection(&mut self) {
+        let State::Ready(doc) = &mut self.state else {
+            return;
+        };
+        let live: HashSet<PageId> = doc.model.state().pages.iter().map(|p| p.id).collect();
+        doc.selection.retain(|id| live.contains(id));
+    }
+
+    /// Thumbnail click: plain selects just that page, Ctrl toggles, Shift
+    /// extends from the anchor. All of them navigate there.
+    fn select_click(&mut self, index: usize, modifiers: gpui::Modifiers, cx: &mut Context<Self>) {
+        let State::Ready(doc) = &mut self.state else {
+            return;
+        };
+        let refs: Vec<PageId> = doc.model.state().pages.iter().map(|p| p.id).collect();
+        let Some(&id) = refs.get(index) else { return };
+        if modifiers.shift {
+            let anchor = doc
+                .sel_anchor
+                .unwrap_or(doc.current_page)
+                .min(refs.len() - 1);
+            let (a, b) = if anchor <= index {
+                (anchor, index)
+            } else {
+                (index, anchor)
+            };
+            if !modifiers.control {
+                doc.selection.clear();
+            }
+            doc.selection.extend(refs[a..=b].iter().copied());
+        } else if modifiers.control {
+            if !doc.selection.remove(&id) {
+                doc.selection.insert(id);
+            }
+            doc.sel_anchor = Some(index);
+        } else {
+            doc.selection.clear();
+            doc.selection.insert(id);
+            doc.sel_anchor = Some(index);
+        }
+        self.go_to_page(index, cx);
+    }
+
+    /// Finish a thumbnail drag: move `ids` to the recorded insert index.
+    fn drop_pages(&mut self, ids: Vec<PageId>, cx: &mut Context<Self>) {
+        let State::Ready(doc) = &mut self.state else {
+            return;
+        };
+        let Some(at) = doc.drop_target.take() else {
+            return;
+        };
+        let moving: HashSet<PageId> = ids.iter().copied().collect();
+        // "Before" must be a page that isn't moving; walk forward past any that are.
+        let before = doc
+            .model
+            .state()
+            .pages
+            .iter()
+            .skip(at)
+            .find(|p| !moving.contains(&p.id))
+            .map(|p| p.id);
+        let n = ids.len();
+        let label = self.label("Move", n);
+        self.apply(Edit::MovePages { ids, before }, &label, cx);
+        if let State::Ready(doc) = &mut self.state {
+            doc.selection = moving;
         }
     }
 
@@ -546,6 +678,7 @@ impl DocView {
             None => Some("Nothing to undo".into()),
         };
         doc.touched();
+        self.prune_selection();
         cx.notify();
     }
 
@@ -558,6 +691,7 @@ impl DocView {
             None => Some("Nothing to redo".into()),
         };
         doc.touched();
+        self.prune_selection();
         cx.notify();
     }
 
@@ -1456,7 +1590,13 @@ impl Render for DocView {
             )
             .on_action(cx.listener(|v, _: &ZoomFitPage, _, cx| v.set_zoom(Zoom::FitPage, None, cx)))
             .on_action(cx.listener(|v, _: &Find, window, cx| v.open_search(window, cx)))
-            .on_action(cx.listener(|v, _: &CloseSearch, window, cx| v.close_search(window, cx)))
+            .on_action(cx.listener(|v, _: &CloseSearch, window, cx| {
+                if v.search.is_some() {
+                    v.close_search(window, cx)
+                } else {
+                    v.clear_selection(cx)
+                }
+            }))
             .on_action(cx.listener(|v, _: &SearchNext, _, cx| v.search_step(1, cx)))
             .on_action(cx.listener(|v, _: &SearchPrev, _, cx| v.search_step(-1, cx)))
             .on_action(
@@ -1466,6 +1606,8 @@ impl Render for DocView {
                 cx.listener(|v, _: &RotatePageCcw, _, cx| v.rotate_current(Rotation::R270, cx)),
             )
             .on_action(cx.listener(|v, _: &DeletePage, _, cx| v.delete_current(cx)))
+            .on_action(cx.listener(|v, _: &DuplicatePages, _, cx| v.duplicate_current(cx)))
+            .on_action(cx.listener(|v, _: &SelectAllPages, _, cx| v.select_all(cx)))
             .on_action(cx.listener(|v, _: &Undo, _, cx| v.undo(cx)))
             .on_action(cx.listener(|v, _: &Redo, _, cx| v.redo(cx)))
             .flex()
@@ -1494,7 +1636,8 @@ impl Render for DocView {
 // can share this view's caches and render handles.
 
 impl DocView {
-    /// Thumbnail strip: virtualized, follows the current page.
+    /// Thumbnail strip: virtualized, follows the current page, and is the
+    /// page-organizer surface: click/Ctrl/Shift to select, drag to reorder.
     pub fn render_thumbnails(
         &mut self,
         panel_w: f32,
@@ -1504,6 +1647,9 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return div().p_2().text_sm().child("…").into_any_element();
         };
+        if !cx.has_active_drag() {
+            doc.drop_target = None;
+        }
         let refs: Vec<PageRef> = doc.model.state().pages.iter().copied().collect();
         let count = refs.len();
         if count == 0 {
@@ -1530,6 +1676,12 @@ impl DocView {
             y += item_h(i);
         }
         let total_h = y;
+        // Midpoints decide which gap a drag is over.
+        let mids: Arc<Vec<f32>> = Arc::new(
+            (0..count)
+                .map(|i| tops[i] + (item_h(i) - THUMB_PAD) / 2.0)
+                .collect(),
+        );
 
         let bounds = doc.thumb_scroll.bounds();
         let view_h = f32::from(bounds.size.height).max(1.0);
@@ -1569,6 +1721,7 @@ impl DocView {
             .iter()
             .filter_map(|(_, n)| n.target)
             .collect();
+        let selection = doc.selection.clone();
 
         let mut wants = Vec::new();
         let mut items = Vec::new();
@@ -1591,8 +1744,19 @@ impl DocView {
                 .get(&pref.id)
                 .filter(|(r, _)| *r == pref.rotation)
                 .map(|(_, im)| im.clone());
-            let selected = i == cur;
+            let current = i == cur;
+            let selected = selection.contains(&pref.id);
             let bookmarked = targets.contains(&pref.id);
+            // What a drag from this thumb carries: the selection if it's part
+            // of it, otherwise just this page.
+            let drag_ids: Vec<PageId> = if selected {
+                refs.iter()
+                    .filter(|p| selection.contains(&p.id))
+                    .map(|p| p.id)
+                    .collect()
+            } else {
+                vec![pref.id]
+            };
             items.push(
                 div()
                     .id(("thumb", pref.id.0 as usize))
@@ -1604,7 +1768,13 @@ impl DocView {
                     .flex_col()
                     .items_center()
                     .cursor_pointer()
-                    .on_click(cx.listener(move |v, _, _, cx| v.go_to_page(i, cx)))
+                    .on_click(cx.listener(move |v, ev: &gpui::ClickEvent, _, cx| {
+                        v.select_click(i, ev.modifiers(), cx)
+                    }))
+                    .on_drag(DragPages { ids: drag_ids }, |d: &DragPages, _, _, cx| {
+                        let n = d.ids.len();
+                        cx.new(|_| DragPreview { count: n })
+                    })
                     .child(
                         div()
                             .relative()
@@ -1612,13 +1782,18 @@ impl DocView {
                             .h(px(h))
                             .bg(rgb(0xffffff))
                             .border_2()
-                            .border_color(if selected {
+                            .border_color(if current {
                                 rgb(0x4a9eff)
+                            } else if selected {
+                                rgb(0x2f6fbf)
                             } else {
                                 rgb(0x3a3a3a)
                             })
                             .when_some(image, |d, im| {
                                 d.child(img(im).size_full().object_fit(ObjectFit::Fill))
+                            })
+                            .when(selected, |d| {
+                                d.child(div().absolute().inset_0().bg(rgba(0x4a9eff30)))
                             })
                             .when(bookmarked, |d| {
                                 d.child(
@@ -1636,7 +1811,7 @@ impl DocView {
                         div()
                             .h(px(THUMB_LABEL_H))
                             .text_xs()
-                            .text_color(if selected {
+                            .text_color(if current || selected {
                                 rgb(0xffffff)
                             } else {
                                 rgb(0x9a9a9a)
@@ -1645,12 +1820,50 @@ impl DocView {
                     ),
             );
         }
+
+        // Drop indicator: a line in the gap the drag is over.
+        let indicator = doc.drop_target.map(|at| {
+            let y = if at >= count {
+                tops[last] + item_h(last) - THUMB_PAD / 2.0
+            } else {
+                tops[at] - THUMB_PAD / 2.0
+            };
+            div()
+                .absolute()
+                .left(px(THUMB_PAD / 2.0))
+                .top(px(y - 1.0))
+                .w(px(thumb_w + THUMB_PAD))
+                .h(px(2.0))
+                .bg(rgb(0x4a9eff))
+        });
+
+        let mids_for_move = mids.clone();
         let el = div()
             .id("thumbs")
             .track_scroll(&doc.thumb_scroll)
             .overflow_y_scroll()
             .size_full()
-            .child(div().relative().w_full().h(px(total_h)).children(items))
+            .on_drag_move(cx.listener(move |v, ev: &DragMoveEvent<DragPages>, _, cx| {
+                let State::Ready(doc) = &mut v.state else {
+                    return;
+                };
+                let local_y = f32::from(ev.event.position.y - ev.bounds.origin.y)
+                    - f32::from(doc.thumb_scroll.offset().y);
+                let at = mids_for_move.partition_point(|&m| m <= local_y);
+                if doc.drop_target != Some(at) {
+                    doc.drop_target = Some(at);
+                    cx.notify();
+                }
+            }))
+            .on_drop(cx.listener(|v, d: &DragPages, _, cx| v.drop_pages(d.ids.clone(), cx)))
+            .child(
+                div()
+                    .relative()
+                    .w_full()
+                    .h(px(total_h))
+                    .children(items)
+                    .children(indicator),
+            )
             .into_any_element();
         for (pref, want) in wants {
             self.ensure_rendered(pref, want, cx);
@@ -1790,5 +2003,33 @@ impl DocView {
             .size_full()
             .child(div().relative().w_full().h(px(total_h)).children(els))
             .into_any_element()
+    }
+}
+
+/// Payload of a thumbnail drag.
+#[derive(Clone)]
+struct DragPages {
+    ids: Vec<PageId>,
+}
+
+/// What follows the cursor while dragging pages.
+struct DragPreview {
+    count: usize,
+}
+
+impl Render for DragPreview {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .bg(rgb(0x4a9eff))
+            .text_color(rgb(0xffffff))
+            .text_sm()
+            .child(if self.count == 1 {
+                "1 page".to_string()
+            } else {
+                format!("{} pages", self.count)
+            })
     }
 }
