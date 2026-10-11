@@ -103,6 +103,7 @@ fn main() -> Result<()> {
         y: 1024,
         w: 1024,
         h: 1024,
+        rotation: sheaf_core::Rotation::R0,
     };
     let t = Instant::now();
     let tile = r.render(PageIndex(0), job, PixelFormat::Rgba)?;

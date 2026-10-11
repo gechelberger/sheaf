@@ -110,7 +110,7 @@ fn main() -> Result<()> {
     };
 
     let t = Instant::now();
-    let mut doc = sheaf_doc::Document::open(&input)?;
+    let mut doc = sheaf_doc::file::PdfFile::open(&input)?;
     let load = t.elapsed();
     let n = doc.page_count();
     println!("{}: {n} pages, loaded in {load:?}", input.display());
@@ -130,7 +130,7 @@ fn main() -> Result<()> {
     println!("resaved to {} in {:?}", out.display(), t.elapsed());
 
     // Prove the resave is loadable and has the same page count.
-    let again = sheaf_doc::Document::open(&out)?;
+    let again = sheaf_doc::file::PdfFile::open(&out)?;
     assert_eq!(again.page_count(), n, "page count changed on round-trip");
     println!("round-trip OK");
     Ok(())

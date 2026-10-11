@@ -196,8 +196,12 @@ truncated).
   bookmarks (the outline panel already greys them), so they need a fix path.
 - Thumbnails show a bookmark glyph on pages that are bookmark targets, so a
   cascade is visible before the delete.
-- `PageRef.rotation` is absolute (display) rotation; `Source` records the
-  original `/Rotate` per page for the save-time diff.
+- `PageRef.rotation` is a **delta** over the source page as PDFium renders
+  it (i.e. on top of its own `/Rotate`). Reading originals up front would
+  cost a page load per page; the absolute value is only needed at save time,
+  where lopdf has the original anyway.
+- `im` is MPL-2.0 (file-scoped copyleft); fine as an unmodified dependency
+  of an MIT/Apache project.
 
 ## Open questions
 

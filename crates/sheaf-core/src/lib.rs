@@ -3,7 +3,7 @@
 //! Everything here is plain data with no engine dependency, so `sheaf-doc`,
 //! `sheaf-render`, and `sheaf-ui` can all speak the same vocabulary.
 
-/// Zero-based index of a page within a document.
+/// Zero-based index of a page within a *source file* (what the engine sees).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PageIndex(pub u32);
 
@@ -14,8 +14,22 @@ pub struct PageSize {
     pub height: f32,
 }
 
-/// Page rotation as stored in the `/Rotate` entry, clockwise.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+impl PageSize {
+    /// The size after rotating the page by `r` (quarter turns swap axes).
+    pub fn rotated(self, r: Rotation) -> Self {
+        if r.is_quarter() {
+            Self {
+                width: self.height,
+                height: self.width,
+            }
+        } else {
+            self
+        }
+    }
+}
+
+/// A clockwise quarter-turn rotation, as in the `/Rotate` entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Rotation {
     #[default]
     R0,
@@ -47,6 +61,23 @@ impl Rotation {
     pub fn cw(self) -> Self {
         Self::from_degrees(self.degrees() + 90)
     }
+
+    pub fn ccw(self) -> Self {
+        Self::from_degrees(self.degrees() - 90)
+    }
+
+    pub fn plus(self, other: Rotation) -> Self {
+        Self::from_degrees(self.degrees() + other.degrees())
+    }
+
+    pub fn minus(self, other: Rotation) -> Self {
+        Self::from_degrees(self.degrees() - other.degrees())
+    }
+
+    /// 90° or 270°: width and height swap.
+    pub fn is_quarter(self) -> bool {
+        matches!(self, Self::R90 | Self::R270)
+    }
 }
 
 #[cfg(test)]
@@ -56,6 +87,19 @@ mod tests {
     #[test]
     fn rotation_wraps() {
         assert_eq!(Rotation::R270.cw(), Rotation::R0);
+        assert_eq!(Rotation::R0.ccw(), Rotation::R270);
         assert_eq!(Rotation::from_degrees(-90), Rotation::R270);
+        assert_eq!(Rotation::R90.plus(Rotation::R270), Rotation::R0);
+        assert_eq!(Rotation::R0.minus(Rotation::R90), Rotation::R270);
+    }
+
+    #[test]
+    fn size_rotates() {
+        let s = PageSize {
+            width: 612.0,
+            height: 792.0,
+        };
+        assert_eq!(s.rotated(Rotation::R90).width, 792.0);
+        assert_eq!(s.rotated(Rotation::R180).width, 612.0);
     }
 }

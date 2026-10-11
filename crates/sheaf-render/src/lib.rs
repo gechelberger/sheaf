@@ -18,7 +18,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use futures::channel::oneshot;
-use sheaf_core::{PageIndex, PageSize};
+use sheaf_core::{PageIndex, PageSize, Rotation};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PixelFormat {
@@ -39,11 +39,11 @@ pub struct Raster {
 /// What to rasterize. Sizes are device pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Job {
-    /// The whole page, scaled to `width` wide.
-    Page { width: u32 },
+    /// The whole page, scaled to `width` wide (after `rotation`).
+    Page { width: u32, rotation: Rotation },
     /// The `w`×`h` region at (`x`, `y`) of the page scaled to
-    /// `page_width`×`page_height`. Lets a zoomed-in page be rendered a
-    /// viewport's worth at a time instead of as one huge bitmap.
+    /// `page_width`×`page_height` (after `rotation`). Lets a zoomed-in page
+    /// be rendered a viewport's worth at a time instead of as one huge bitmap.
     Tile {
         page_width: u32,
         page_height: u32,
@@ -51,7 +51,16 @@ pub enum Job {
         y: u32,
         w: u32,
         h: u32,
+        rotation: Rotation,
     },
+}
+
+impl Job {
+    pub fn rotation(&self) -> Rotation {
+        match self {
+            Job::Page { rotation, .. } | Job::Tile { rotation, .. } => *rotation,
+        }
+    }
 }
 
 /// One bookmark, in pre-order with its depth, so a tree can be stored flat.
@@ -116,6 +125,7 @@ pub trait Renderer {
             page,
             Job::Page {
                 width: target_width,
+                rotation: Rotation::R0,
             },
             format,
         )
@@ -323,10 +333,28 @@ pub mod pdfium {
 
         fn render(&self, page: PageIndex, job: Job, format: PixelFormat) -> Result<Raster> {
             let p = self.doc.pages().get(page.0 as i32)?;
+            let rot = match job.rotation() {
+                Rotation::R0 => PdfPageRenderRotation::None,
+                Rotation::R90 => PdfPageRenderRotation::Degrees90,
+                Rotation::R180 => PdfPageRenderRotation::Degrees180,
+                Rotation::R270 => PdfPageRenderRotation::Degrees270,
+            };
             let bmp = match job {
-                Job::Page { width } => {
+                Job::Page { width, rotation } => {
+                    // Output dims are post-rotation; PDFium's size_x/size_y are
+                    // the rotated frame, so fixed size + rotate is consistent.
+                    let src = PageSize {
+                        width: p.width().value,
+                        height: p.height().value,
+                    }
+                    .rotated(rotation);
+                    let w = width.max(1);
+                    let h = ((w as f32) * src.height / src.width.max(1.0))
+                        .round()
+                        .max(1.0) as u32;
                     let cfg = PdfRenderConfig::new()
-                        .set_target_width(width.max(1) as i32)
+                        .set_fixed_size(w as i32, h as i32)
+                        .rotate(rot, false)
                         .set_format(PdfBitmapFormat::BGRA)
                         .render_form_data(true);
                     p.render_with_config(&cfg)?
@@ -338,6 +366,7 @@ pub mod pdfium {
                     y,
                     w,
                     h,
+                    ..
                 } => {
                     // Scale the page to its full size but draw into a
                     // tile-sized bitmap offset so only our region lands.
@@ -348,6 +377,7 @@ pub mod pdfium {
                     let cfg = PdfRenderConfig::new()
                         .set_fixed_size(page_width.max(1) as i32, page_height.max(1) as i32)
                         .set_origin(-(x as i32), -(y as i32))
+                        .rotate(rot, false)
                         .set_format(PdfBitmapFormat::BGRA)
                         .render_form_data(true);
                     p.render_into_bitmap_with_config(&mut bmp, &cfg)?;

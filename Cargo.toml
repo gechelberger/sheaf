@@ -39,6 +39,7 @@ parking_lot = "0.12"
 futures = "0.3"
 smallvec = "1"
 unicode-segmentation = "1"
+im = "15"
 
 # Zed's workspace patches that GPUI's Linux backend relies on. Mirrored from
 # zed/Cargo.toml [patch.crates-io] at the pinned rev; patches here are not

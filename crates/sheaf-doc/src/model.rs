@@ -1,0 +1,1362 @@
+//! Virtual document, edits, and snapshot history.
+
+use std::collections::{HashMap, HashSet};
+use std::ops::Range;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use anyhow::{Context, Result, bail};
+use im::Vector;
+use sheaf_core::{PageSize, Rotation};
+
+use crate::history::{HistoryPolicy, HistoryStats};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SourceId(pub u32);
+
+/// Stable identity of a page in the virtual document. Never reused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PageId(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct OutlineId(pub u64);
+
+/// What the model knows about an opened file. Sizes are as the engine
+/// renders them (after the file's own `/Rotate`). `page_sizes` may be absent
+/// briefly after open while the engine enumerates them.
+#[derive(Debug, Clone)]
+pub struct SourceInfo {
+    pub path: PathBuf,
+    pub page_count: u32,
+    pub first_page: PageSize,
+    pub page_sizes: Option<Vec<PageSize>>,
+    /// File size, for the history memory estimate.
+    pub bytes: usize,
+}
+
+impl SourceInfo {
+    pub fn page_size(&self, index: u32) -> PageSize {
+        self.page_sizes
+            .as_ref()
+            .and_then(|s| s.get(index as usize).copied())
+            .unwrap_or(self.first_page)
+    }
+}
+
+/// One page of the virtual document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PageRef {
+    pub id: PageId,
+    pub source: SourceId,
+    pub index: u32,
+    /// Extra rotation on top of the source page as rendered.
+    pub rotation: Rotation,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct OutlineNode {
+    pub id: OutlineId,
+    pub title: String,
+    pub target: Option<PageId>,
+    pub color: Option<[u8; 3]>,
+    pub children: Vector<OutlineNode>,
+}
+
+/// A bookmark as read from a file: pre-order with depth.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FlatOutlineItem {
+    pub title: String,
+    pub page: Option<u32>,
+    pub depth: u16,
+}
+
+/// One immutable snapshot of the document.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DocState {
+    pub pages: Vector<PageRef>,
+    pub outline: Vector<OutlineNode>,
+}
+
+impl DocState {
+    pub fn index_of(&self, id: PageId) -> Option<usize> {
+        self.pages.iter().position(|p| p.id == id)
+    }
+
+    /// Pre-order walk of the outline with depth.
+    pub fn outline_flat(&self) -> Vec<(u16, &OutlineNode)> {
+        fn walk<'a>(
+            nodes: &'a Vector<OutlineNode>,
+            depth: u16,
+            out: &mut Vec<(u16, &'a OutlineNode)>,
+        ) {
+            for n in nodes {
+                out.push((depth, n));
+                walk(&n.children, depth + 1, out);
+            }
+        }
+        let mut out = Vec::new();
+        walk(&self.outline, 0, &mut out);
+        out
+    }
+
+    fn page_positions(&self) -> HashMap<PageId, usize> {
+        self.pages
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.id, i))
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Edit {
+    /// Move `ids` (kept in document order) to just before `before`, or to the end.
+    MovePages {
+        ids: Vec<PageId>,
+        before: Option<PageId>,
+    },
+    RotatePages {
+        ids: Vec<PageId>,
+        by: Rotation,
+    },
+    /// Removes the pages and cascades to bookmarks targeting them (their
+    /// children are promoted).
+    DeletePages {
+        ids: Vec<PageId>,
+    },
+    /// Insert `range` of `source` before `before` (or at the end). If
+    /// `outline` is given, merge it: top-level bookmarks whose title matches
+    /// an existing top-level bookmark contribute their children to it;
+    /// others are appended.
+    InsertPages {
+        source: SourceId,
+        range: Range<u32>,
+        before: Option<PageId>,
+        outline: Option<Vec<FlatOutlineItem>>,
+    },
+    /// Copies inserted directly after each original.
+    DuplicatePages {
+        ids: Vec<PageId>,
+    },
+    /// Replace pages in place. The first `min(ids.len(), range.len())`
+    /// keep their `PageId` (and so their bookmarks); extra originals are
+    /// deleted, extra replacements inserted after.
+    ReplacePages {
+        ids: Vec<PageId>,
+        source: SourceId,
+        range: Range<u32>,
+    },
+    OutlineInsert {
+        parent: Option<OutlineId>,
+        after: Option<OutlineId>,
+        title: String,
+        target: Option<PageId>,
+    },
+    /// Move a bookmark subtree. With `with_pages`, the pages it spans (from
+    /// its first target up to the next bookmark's target) move with it.
+    OutlineMove {
+        id: OutlineId,
+        parent: Option<OutlineId>,
+        after: Option<OutlineId>,
+        with_pages: bool,
+    },
+    OutlineEdit {
+        id: OutlineId,
+        title: Option<String>,
+        target: Option<Option<PageId>>,
+        color: Option<Option<[u8; 3]>>,
+    },
+    /// Delete a bookmark and its subtree.
+    OutlineDelete {
+        id: OutlineId,
+    },
+}
+
+/// What an edit did, for user-facing notices.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct EditOutcome {
+    pub pages_removed: usize,
+    pub pages_added: usize,
+    pub bookmarks_removed: usize,
+    pub bookmarks_added: usize,
+}
+
+struct Version {
+    label: String,
+    state: DocState,
+    marginal_bytes: usize,
+}
+
+pub struct Document {
+    sources: HashMap<SourceId, Arc<SourceInfo>>,
+    primary: SourceId,
+    history: Vec<Version>,
+    cursor: usize,
+    saved: Option<usize>,
+    next_page: u64,
+    next_outline: u64,
+    next_source: u32,
+    policy: Box<dyn HistoryPolicy>,
+}
+
+impl Document {
+    /// A document showing `primary` in its entirety.
+    pub fn new(
+        primary: SourceInfo,
+        outline: &[FlatOutlineItem],
+        policy: Box<dyn HistoryPolicy>,
+    ) -> Self {
+        let source = SourceId(0);
+        let mut doc = Self {
+            sources: HashMap::new(),
+            primary: source,
+            history: Vec::new(),
+            cursor: 0,
+            saved: Some(0),
+            next_page: 0,
+            next_outline: 0,
+            next_source: 1,
+            policy,
+        };
+        let pages: Vector<PageRef> = (0..primary.page_count)
+            .map(|index| PageRef {
+                id: doc.fresh_page_id(),
+                source,
+                index,
+                rotation: Rotation::R0,
+            })
+            .collect();
+        doc.sources.insert(source, Arc::new(primary));
+        let by_index: Vec<PageId> = pages.iter().map(|p| p.id).collect();
+        let outline = doc.outline_from_flat(outline, &by_index);
+        doc.history.push(Version {
+            label: "Open".into(),
+            state: DocState { pages, outline },
+            marginal_bytes: 0,
+        });
+        doc
+    }
+
+    pub fn primary(&self) -> SourceId {
+        self.primary
+    }
+
+    pub fn source(&self, id: SourceId) -> Option<&Arc<SourceInfo>> {
+        self.sources.get(&id)
+    }
+
+    pub fn sources(&self) -> impl Iterator<Item = (SourceId, &Arc<SourceInfo>)> {
+        self.sources.iter().map(|(k, v)| (*k, v))
+    }
+
+    /// Register another file so its pages can be inserted.
+    pub fn add_source(&mut self, info: SourceInfo) -> SourceId {
+        let id = SourceId(self.next_source);
+        self.next_source += 1;
+        self.sources.insert(id, Arc::new(info));
+        id
+    }
+
+    /// Page sizes arrive after open; they're not part of any snapshot.
+    pub fn set_source_sizes(&mut self, id: SourceId, sizes: Vec<PageSize>) {
+        if let Some(src) = self.sources.get_mut(&id) {
+            let mut info = (**src).clone();
+            info.page_sizes = Some(sizes);
+            *src = Arc::new(info);
+        }
+    }
+
+    /// The outline also arrives after open. Only valid before any edit.
+    pub fn set_initial_outline(&mut self, outline: &[FlatOutlineItem]) -> Result<()> {
+        if self.history.len() != 1 {
+            bail!("outline can only be set before editing");
+        }
+        let by_index: Vec<PageId> = self.history[0].state.pages.iter().map(|p| p.id).collect();
+        self.history[0].state.outline = self.outline_from_flat(outline, &by_index);
+        Ok(())
+    }
+
+    pub fn state(&self) -> &DocState {
+        &self.history[self.cursor].state
+    }
+
+    pub fn page_count(&self) -> usize {
+        self.state().pages.len()
+    }
+
+    pub fn page(&self, index: usize) -> Option<&PageRef> {
+        self.state().pages.get(index)
+    }
+
+    pub fn index_of(&self, id: PageId) -> Option<usize> {
+        self.state().index_of(id)
+    }
+
+    /// Displayed size of a page: its source size rotated by its delta.
+    pub fn page_size(&self, page: &PageRef) -> PageSize {
+        let src = self
+            .sources
+            .get(&page.source)
+            .map(|s| s.page_size(page.index))
+            .unwrap_or(PageSize {
+                width: 612.0,
+                height: 792.0,
+            });
+        src.rotated(page.rotation)
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.saved != Some(self.cursor)
+    }
+
+    pub fn mark_saved(&mut self) {
+        self.saved = Some(self.cursor);
+    }
+
+    pub fn can_undo(&self) -> bool {
+        self.cursor > 0
+    }
+
+    pub fn can_redo(&self) -> bool {
+        self.cursor + 1 < self.history.len()
+    }
+
+    /// Label of the edit that `undo` would revert.
+    pub fn undo_label(&self) -> Option<&str> {
+        self.can_undo()
+            .then(|| self.history[self.cursor].label.as_str())
+    }
+
+    pub fn redo_label(&self) -> Option<&str> {
+        self.can_redo()
+            .then(|| self.history[self.cursor + 1].label.as_str())
+    }
+
+    pub fn undo(&mut self) -> Option<&str> {
+        if !self.can_undo() {
+            return None;
+        }
+        self.cursor -= 1;
+        Some(self.history[self.cursor + 1].label.as_str())
+    }
+
+    pub fn redo(&mut self) -> Option<&str> {
+        if !self.can_redo() {
+            return None;
+        }
+        self.cursor += 1;
+        Some(self.history[self.cursor].label.as_str())
+    }
+
+    /// Apply an edit as a new version. Versions after the cursor are discarded.
+    pub fn apply(&mut self, edit: Edit, label: impl Into<String>) -> Result<EditOutcome> {
+        let (state, outcome) = self.compute(self.state().clone(), edit)?;
+        if state == *self.state() {
+            return Ok(outcome);
+        }
+        self.history.truncate(self.cursor + 1);
+        if let Some(s) = self.saved
+            && s > self.cursor
+        {
+            self.saved = None;
+        }
+        let marginal_bytes = Self::marginal(&self.history[self.cursor].state, &state);
+        self.history.push(Version {
+            label: label.into(),
+            state,
+            marginal_bytes,
+        });
+        self.cursor += 1;
+        self.trim();
+        Ok(outcome)
+    }
+
+    fn trim(&mut self) {
+        let stats = self.stats();
+        let n = self.policy.trim(&stats).min(self.cursor);
+        if n > 0 {
+            self.history.drain(0..n);
+            self.cursor -= n;
+            self.saved = self.saved.and_then(|s| s.checked_sub(n));
+        }
+    }
+
+    pub fn stats(&self) -> HistoryStats {
+        let current: HashSet<SourceId> = self.history[..=self.cursor]
+            .iter()
+            .flat_map(|v| v.state.pages.iter().map(|p| p.source))
+            .collect();
+        let undone_source_bytes = self.history[self.cursor + 1..]
+            .iter()
+            .flat_map(|v| v.state.pages.iter().map(|p| p.source))
+            .collect::<HashSet<_>>()
+            .difference(&current)
+            .filter_map(|s| self.sources.get(s))
+            .map(|s| s.bytes)
+            .sum();
+        HistoryStats {
+            versions: self.history.len(),
+            cursor: self.cursor,
+            marginal_bytes: self.history.iter().map(|v| v.marginal_bytes).collect(),
+            undone_source_bytes,
+        }
+    }
+
+    /// Rough bytes `new` holds that `old` doesn't share.
+    fn marginal(old: &DocState, new: &DocState) -> usize {
+        let mut bytes = 0;
+        if !old.pages.ptr_eq(&new.pages) {
+            // im shares structure, but assume the worst for a modified vector.
+            bytes += new.pages.len() * std::mem::size_of::<PageRef>();
+        }
+        if !old.outline.ptr_eq(&new.outline) {
+            bytes += new.outline_flat().len() * 96;
+        }
+        bytes
+    }
+
+    fn fresh_page_id(&mut self) -> PageId {
+        let id = PageId(self.next_page);
+        self.next_page += 1;
+        id
+    }
+
+    fn fresh_outline_id(&mut self) -> OutlineId {
+        let id = OutlineId(self.next_outline);
+        self.next_outline += 1;
+        id
+    }
+
+    fn outline_from_flat(
+        &mut self,
+        items: &[FlatOutlineItem],
+        by_index: &[PageId],
+    ) -> Vector<OutlineNode> {
+        // Build with a stack of (depth, node) and attach children on pop.
+        let mut roots: Vec<OutlineNode> = Vec::new();
+        let mut stack: Vec<(u16, OutlineNode)> = Vec::new();
+        let flush =
+            |stack: &mut Vec<(u16, OutlineNode)>, roots: &mut Vec<OutlineNode>, depth: u16| {
+                while let Some((d, _)) = stack.last()
+                    && *d >= depth
+                {
+                    let (_, node) = stack.pop().unwrap();
+                    match stack.last_mut() {
+                        Some((_, parent)) => parent.children.push_back(node),
+                        None => roots.push(node),
+                    }
+                }
+            };
+        for item in items {
+            flush(&mut stack, &mut roots, item.depth);
+            let node = OutlineNode {
+                id: self.fresh_outline_id(),
+                title: item.title.clone(),
+                target: item.page.and_then(|p| by_index.get(p as usize).copied()),
+                color: None,
+                children: Vector::new(),
+            };
+            stack.push((item.depth, node));
+        }
+        flush(&mut stack, &mut roots, 0);
+        roots.into_iter().collect()
+    }
+
+    // ----- edits ------------------------------------------------------------
+
+    fn compute(&mut self, mut st: DocState, edit: Edit) -> Result<(DocState, EditOutcome)> {
+        let mut out = EditOutcome::default();
+        match edit {
+            Edit::MovePages { ids, before } => {
+                let set: HashSet<PageId> = ids.iter().copied().collect();
+                if let Some(b) = before
+                    && set.contains(&b)
+                {
+                    bail!("cannot move pages before one of themselves");
+                }
+                let moving: Vec<PageRef> = st
+                    .pages
+                    .iter()
+                    .filter(|p| set.contains(&p.id))
+                    .copied()
+                    .collect();
+                let mut rest: Vector<PageRef> = st
+                    .pages
+                    .iter()
+                    .filter(|p| !set.contains(&p.id))
+                    .copied()
+                    .collect();
+                let at = match before {
+                    Some(b) => rest
+                        .iter()
+                        .position(|p| p.id == b)
+                        .context("destination page not found")?,
+                    None => rest.len(),
+                };
+                for (k, p) in moving.into_iter().enumerate() {
+                    rest.insert(at + k, p);
+                }
+                st.pages = rest;
+            }
+            Edit::RotatePages { ids, by } => {
+                let set: HashSet<PageId> = ids.into_iter().collect();
+                st.pages = st
+                    .pages
+                    .iter()
+                    .map(|p| {
+                        if set.contains(&p.id) {
+                            PageRef {
+                                rotation: p.rotation.plus(by),
+                                ..*p
+                            }
+                        } else {
+                            *p
+                        }
+                    })
+                    .collect();
+            }
+            Edit::DeletePages { ids } => {
+                let set: HashSet<PageId> = ids.into_iter().collect();
+                let before = st.pages.len();
+                st.pages = st
+                    .pages
+                    .iter()
+                    .filter(|p| !set.contains(&p.id))
+                    .copied()
+                    .collect();
+                out.pages_removed = before - st.pages.len();
+                let (outline, removed) = cascade_delete(&st.outline, &set);
+                st.outline = outline;
+                out.bookmarks_removed = removed;
+            }
+            Edit::InsertPages {
+                source,
+                range,
+                before,
+                outline,
+            } => {
+                let info = self.sources.get(&source).context("unknown source")?.clone();
+                if range.end > info.page_count {
+                    bail!("range exceeds source page count");
+                }
+                let at = match before {
+                    Some(b) => st.index_of(b).context("destination page not found")?,
+                    None => st.pages.len(),
+                };
+                let new: Vec<PageRef> = range
+                    .clone()
+                    .map(|index| PageRef {
+                        id: self.fresh_page_id(),
+                        source,
+                        index,
+                        rotation: Rotation::R0,
+                    })
+                    .collect();
+                out.pages_added = new.len();
+                // Map source index -> new PageId for bookmark targets.
+                let mut by_index = vec![PageId(u64::MAX); info.page_count as usize];
+                for p in &new {
+                    by_index[p.index as usize] = p.id;
+                }
+                for (k, p) in new.into_iter().enumerate() {
+                    st.pages.insert(at + k, p);
+                }
+                if let Some(items) = outline {
+                    let valid: Vec<PageId> = by_index.iter().copied().collect();
+                    let incoming = self.outline_from_flat(&items, &valid);
+                    // Targets outside the inserted range resolve to a sentinel; drop them.
+                    let incoming = strip_targets(&incoming, PageId(u64::MAX));
+                    let (merged, added) = merge_outline(&st.outline, &incoming);
+                    st.outline = merged;
+                    out.bookmarks_added = added;
+                }
+            }
+            Edit::DuplicatePages { ids } => {
+                let set: HashSet<PageId> = ids.into_iter().collect();
+                let mut pages = Vector::new();
+                for p in st.pages.iter() {
+                    pages.push_back(*p);
+                    if set.contains(&p.id) {
+                        pages.push_back(PageRef {
+                            id: self.fresh_page_id(),
+                            ..*p
+                        });
+                        out.pages_added += 1;
+                    }
+                }
+                st.pages = pages;
+            }
+            Edit::ReplacePages { ids, source, range } => {
+                let info = self.sources.get(&source).context("unknown source")?.clone();
+                if range.end > info.page_count {
+                    bail!("range exceeds source page count");
+                }
+                let mut replacements = range.clone();
+                let mut last_pos = None;
+                let mut extra_old = HashSet::new();
+                let pos = st.page_positions();
+                let mut pages = st.pages.clone();
+                for id in &ids {
+                    let i = *pos.get(id).context("page to replace not found")?;
+                    match replacements.next() {
+                        Some(index) => {
+                            pages.set(
+                                i,
+                                PageRef {
+                                    id: *id,
+                                    source,
+                                    index,
+                                    rotation: Rotation::R0,
+                                },
+                            );
+                            last_pos = Some(i);
+                        }
+                        None => {
+                            extra_old.insert(*id);
+                        }
+                    }
+                }
+                // Extra replacements go after the last replaced page.
+                let mut at = last_pos.map(|i| i + 1).unwrap_or(pages.len());
+                for index in replacements {
+                    pages.insert(
+                        at,
+                        PageRef {
+                            id: self.fresh_page_id(),
+                            source,
+                            index,
+                            rotation: Rotation::R0,
+                        },
+                    );
+                    at += 1;
+                    out.pages_added += 1;
+                }
+                if !extra_old.is_empty() {
+                    out.pages_removed = extra_old.len();
+                    pages = pages
+                        .iter()
+                        .filter(|p| !extra_old.contains(&p.id))
+                        .copied()
+                        .collect();
+                    let (outline, removed) = cascade_delete(&st.outline, &extra_old);
+                    st.outline = outline;
+                    out.bookmarks_removed = removed;
+                }
+                st.pages = pages;
+            }
+            Edit::OutlineInsert {
+                parent,
+                after,
+                title,
+                target,
+            } => {
+                let node = OutlineNode {
+                    id: self.fresh_outline_id(),
+                    title,
+                    target,
+                    color: None,
+                    children: Vector::new(),
+                };
+                st.outline = outline_insert(&st.outline, parent, after, node)?;
+                out.bookmarks_added = 1;
+            }
+            Edit::OutlineMove {
+                id,
+                parent,
+                after,
+                with_pages,
+            } => {
+                if parent == Some(id) || outline_find(&st.outline, id).is_none() {
+                    bail!("bookmark not found or moved into itself");
+                }
+                if let Some(p) = parent
+                    && subtree_contains(&st.outline, id, p)
+                {
+                    bail!("cannot move a bookmark under its own descendant");
+                }
+                let (without, node) = outline_remove(&st.outline, id);
+                let node = node.context("bookmark not found")?;
+                let span = with_pages.then(|| bookmark_span(&st, &node)).flatten();
+                st.outline = outline_insert(&without, parent, after, node.clone())?;
+                if let Some(span) = span {
+                    // Destination: right after the span of whatever precedes the
+                    // moved node in the new pre-order (or the start).
+                    let flat = st.outline_flat();
+                    let my_pos = flat.iter().position(|(_, n)| n.id == id).unwrap();
+                    let moving: Vec<PageId> = span.iter().map(|p| p.id).collect();
+                    let moving_set: HashSet<PageId> = moving.iter().copied().collect();
+                    let rest: Vector<PageRef> = st
+                        .pages
+                        .iter()
+                        .filter(|p| !moving_set.contains(&p.id))
+                        .copied()
+                        .collect();
+                    let dest = match flat[..my_pos].iter().rev().find_map(|(_, n)| n.target) {
+                        Some(prev_target) => {
+                            // End of the previous bookmark's span, in `rest`.
+                            let rest_state = DocState {
+                                pages: rest.clone(),
+                                outline: st.outline.clone(),
+                            };
+                            let prev_node = flat[..my_pos]
+                                .iter()
+                                .rev()
+                                .find(|(_, n)| n.target.is_some())
+                                .unwrap()
+                                .1;
+                            match bookmark_span(&rest_state, prev_node) {
+                                Some(s) => rest_state
+                                    .index_of(s.last().unwrap().id)
+                                    .map(|i| i + 1)
+                                    .unwrap_or(0),
+                                None => {
+                                    rest_state.index_of(prev_target).map(|i| i + 1).unwrap_or(0)
+                                }
+                            }
+                        }
+                        None => 0,
+                    };
+                    let mut pages = rest;
+                    for (k, p) in span.into_iter().enumerate() {
+                        pages.insert(dest + k, p);
+                    }
+                    st.pages = pages;
+                }
+            }
+            Edit::OutlineEdit {
+                id,
+                title,
+                target,
+                color,
+            } => {
+                let updated = outline_update(&st.outline, id, |n| {
+                    if let Some(t) = &title {
+                        n.title = t.clone();
+                    }
+                    if let Some(t) = target {
+                        n.target = t;
+                    }
+                    if let Some(c) = color {
+                        n.color = c;
+                    }
+                });
+                st.outline = updated.context("bookmark not found")?;
+            }
+            Edit::OutlineDelete { id } => {
+                let (without, node) = outline_remove(&st.outline, id);
+                let node = node.context("bookmark not found")?;
+                out.bookmarks_removed = 1 + count_nodes(&node.children);
+                st.outline = without;
+            }
+        }
+        Ok((st, out))
+    }
+}
+
+// ----- outline helpers (path-copying over im::Vector) ---------------------
+
+fn count_nodes(nodes: &Vector<OutlineNode>) -> usize {
+    nodes.iter().map(|n| 1 + count_nodes(&n.children)).sum()
+}
+
+/// Path of child indices to `id`.
+fn outline_find(nodes: &Vector<OutlineNode>, id: OutlineId) -> Option<Vec<usize>> {
+    for (i, n) in nodes.iter().enumerate() {
+        if n.id == id {
+            return Some(vec![i]);
+        }
+        if let Some(mut path) = outline_find(&n.children, id) {
+            path.insert(0, i);
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn subtree_contains(nodes: &Vector<OutlineNode>, root: OutlineId, needle: OutlineId) -> bool {
+    fn get<'a>(nodes: &'a Vector<OutlineNode>, path: &[usize]) -> &'a OutlineNode {
+        let n = &nodes[path[0]];
+        if path.len() == 1 {
+            n
+        } else {
+            get(&n.children, &path[1..])
+        }
+    }
+    match outline_find(nodes, root) {
+        Some(path) => outline_find(&get(nodes, &path).children, needle).is_some(),
+        None => false,
+    }
+}
+
+fn outline_update(
+    nodes: &Vector<OutlineNode>,
+    id: OutlineId,
+    f: impl FnOnce(&mut OutlineNode),
+) -> Option<Vector<OutlineNode>> {
+    fn go(
+        nodes: &Vector<OutlineNode>,
+        path: &[usize],
+        f: Box<dyn FnOnce(&mut OutlineNode) + '_>,
+    ) -> Vector<OutlineNode> {
+        let mut nodes = nodes.clone();
+        let mut node = nodes[path[0]].clone();
+        if path.len() == 1 {
+            f(&mut node);
+        } else {
+            node.children = go(&node.children, &path[1..], f);
+        }
+        nodes.set(path[0], node);
+        nodes
+    }
+    let path = outline_find(nodes, id)?;
+    Some(go(nodes, &path, Box::new(f)))
+}
+
+fn outline_remove(
+    nodes: &Vector<OutlineNode>,
+    id: OutlineId,
+) -> (Vector<OutlineNode>, Option<OutlineNode>) {
+    fn go(nodes: &Vector<OutlineNode>, path: &[usize]) -> (Vector<OutlineNode>, OutlineNode) {
+        let mut nodes = nodes.clone();
+        if path.len() == 1 {
+            let removed = nodes.remove(path[0]);
+            (nodes, removed)
+        } else {
+            let mut node = nodes[path[0]].clone();
+            let (children, removed) = go(&node.children, &path[1..]);
+            node.children = children;
+            nodes.set(path[0], node);
+            (nodes, removed)
+        }
+    }
+    match outline_find(nodes, id) {
+        Some(path) => {
+            let (n, r) = go(nodes, &path);
+            (n, Some(r))
+        }
+        None => (nodes.clone(), None),
+    }
+}
+
+fn outline_insert(
+    nodes: &Vector<OutlineNode>,
+    parent: Option<OutlineId>,
+    after: Option<OutlineId>,
+    node: OutlineNode,
+) -> Result<Vector<OutlineNode>> {
+    fn insert_in(
+        siblings: &Vector<OutlineNode>,
+        after: Option<OutlineId>,
+        node: OutlineNode,
+    ) -> Result<Vector<OutlineNode>> {
+        let mut s = siblings.clone();
+        let at = match after {
+            Some(a) => {
+                s.iter()
+                    .position(|n| n.id == a)
+                    .context("'after' bookmark not among siblings")?
+                    + 1
+            }
+            None => 0,
+        };
+        s.insert(at, node);
+        Ok(s)
+    }
+    match parent {
+        None => insert_in(nodes, after, node),
+        Some(p) => {
+            let mut err = None;
+            let updated = outline_update(nodes, p, |n| match insert_in(&n.children, after, node) {
+                Ok(c) => n.children = c,
+                Err(e) => err = Some(e),
+            })
+            .context("parent bookmark not found")?;
+            match err {
+                Some(e) => Err(e),
+                None => Ok(updated),
+            }
+        }
+    }
+}
+
+/// Remove nodes targeting deleted pages, promoting their children.
+fn cascade_delete(
+    nodes: &Vector<OutlineNode>,
+    gone: &HashSet<PageId>,
+) -> (Vector<OutlineNode>, usize) {
+    let mut out = Vector::new();
+    let mut removed = 0;
+    for n in nodes {
+        let (children, r) = cascade_delete(&n.children, gone);
+        removed += r;
+        if n.target.is_some_and(|t| gone.contains(&t)) {
+            removed += 1;
+            out.append(children);
+        } else {
+            let mut n = n.clone();
+            n.children = children;
+            out.push_back(n);
+        }
+    }
+    (out, removed)
+}
+
+fn strip_targets(nodes: &Vector<OutlineNode>, sentinel: PageId) -> Vector<OutlineNode> {
+    nodes
+        .iter()
+        .map(|n| {
+            let mut n = n.clone();
+            if n.target == Some(sentinel) {
+                n.target = None;
+            }
+            n.children = strip_targets(&n.children, sentinel);
+            n
+        })
+        .collect()
+}
+
+/// PDFlyer-style merge: incoming top-level nodes with a matching title fold
+/// their children into the existing node; others are appended.
+fn merge_outline(
+    existing: &Vector<OutlineNode>,
+    incoming: &Vector<OutlineNode>,
+) -> (Vector<OutlineNode>, usize) {
+    let mut out = existing.clone();
+    let mut added = 0;
+    for inc in incoming {
+        match out.iter().position(|e| e.title == inc.title) {
+            Some(i) => {
+                let mut e = out[i].clone();
+                added += count_nodes(&inc.children);
+                e.children.append(inc.children.clone());
+                out.set(i, e);
+            }
+            None => {
+                added += 1 + count_nodes(&inc.children);
+                out.push_back(inc.clone());
+            }
+        }
+    }
+    (out, added)
+}
+
+/// The pages a bookmark "owns": from its first target (in document order)
+/// up to, but not including, the first page targeted by a bookmark outside
+/// its subtree that comes after it in reading order.
+fn bookmark_span(st: &DocState, node: &OutlineNode) -> Option<Vec<PageRef>> {
+    let pos = st.page_positions();
+    let mut subtree = Vec::new();
+    collect_targets(node, &mut subtree);
+    let start = subtree.iter().filter_map(|t| pos.get(t)).min().copied()?;
+    let subtree_ids: HashSet<OutlineId> = {
+        let mut ids = HashSet::new();
+        collect_ids(node, &mut ids);
+        ids
+    };
+    let end = st
+        .outline_flat()
+        .iter()
+        .filter(|(_, n)| !subtree_ids.contains(&n.id))
+        .filter_map(|(_, n)| n.target.and_then(|t| pos.get(&t)).copied())
+        .filter(|&i| i > start)
+        .min()
+        .unwrap_or(st.pages.len());
+    Some(
+        st.pages
+            .iter()
+            .skip(start)
+            .take(end - start)
+            .copied()
+            .collect(),
+    )
+}
+
+fn collect_targets(node: &OutlineNode, out: &mut Vec<PageId>) {
+    if let Some(t) = node.target {
+        out.push(t);
+    }
+    for c in &node.children {
+        collect_targets(c, out);
+    }
+}
+
+fn collect_ids(node: &OutlineNode, out: &mut HashSet<OutlineId>) {
+    out.insert(node.id);
+    for c in &node.children {
+        collect_ids(c, out);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::history::FixedCount;
+
+    fn src(n: u32) -> SourceInfo {
+        SourceInfo {
+            path: "a.pdf".into(),
+            page_count: n,
+            first_page: PageSize {
+                width: 612.0,
+                height: 792.0,
+            },
+            page_sizes: None,
+            bytes: 1000,
+        }
+    }
+
+    fn flat(items: &[(&str, Option<u32>, u16)]) -> Vec<FlatOutlineItem> {
+        items
+            .iter()
+            .map(|(t, p, d)| FlatOutlineItem {
+                title: t.to_string(),
+                page: *p,
+                depth: *d,
+            })
+            .collect()
+    }
+
+    fn doc() -> Document {
+        // Pages 0..6; bookmarks: A->0 { A1->1, A2->2 }, B->3, C->5
+        Document::new(
+            src(6),
+            &flat(&[
+                ("A", Some(0), 0),
+                ("A1", Some(1), 1),
+                ("A2", Some(2), 1),
+                ("B", Some(3), 0),
+                ("C", Some(5), 0),
+            ]),
+            Box::new(FixedCount(100)),
+        )
+    }
+
+    fn order(d: &Document) -> Vec<u32> {
+        d.state().pages.iter().map(|p| p.index).collect()
+    }
+
+    fn titles(d: &Document) -> Vec<(u16, String)> {
+        d.state()
+            .outline_flat()
+            .iter()
+            .map(|(depth, n)| (*depth, n.title.clone()))
+            .collect()
+    }
+
+    fn id_at(d: &Document, i: usize) -> PageId {
+        d.page(i).unwrap().id
+    }
+
+    fn bm(d: &Document, title: &str) -> OutlineId {
+        d.state()
+            .outline_flat()
+            .iter()
+            .find(|(_, n)| n.title == title)
+            .unwrap()
+            .1
+            .id
+    }
+
+    #[test]
+    fn opens_with_identity_pages_and_tree() {
+        let d = doc();
+        assert_eq!(order(&d), vec![0, 1, 2, 3, 4, 5]);
+        assert_eq!(
+            titles(&d),
+            vec![
+                (0, "A".into()),
+                (1, "A1".into()),
+                (1, "A2".into()),
+                (0, "B".into()),
+                (0, "C".into())
+            ]
+        );
+        assert!(!d.is_dirty());
+    }
+
+    #[test]
+    fn move_rotate_undo_redo() {
+        let mut d = doc();
+        let p5 = id_at(&d, 5);
+        d.apply(
+            Edit::MovePages {
+                ids: vec![p5],
+                before: Some(id_at(&d, 0)),
+            },
+            "move",
+        )
+        .unwrap();
+        assert_eq!(order(&d), vec![5, 0, 1, 2, 3, 4]);
+        d.apply(
+            Edit::RotatePages {
+                ids: vec![p5],
+                by: Rotation::R90,
+            },
+            "rotate",
+        )
+        .unwrap();
+        assert_eq!(d.page(0).unwrap().rotation, Rotation::R90);
+        assert_eq!(d.page_size(d.page(0).unwrap()).width, 792.0);
+        assert!(d.is_dirty());
+        assert_eq!(d.undo(), Some("rotate"));
+        assert_eq!(d.page(0).unwrap().rotation, Rotation::R0);
+        assert_eq!(d.undo(), Some("move"));
+        assert_eq!(order(&d), vec![0, 1, 2, 3, 4, 5]);
+        assert!(!d.is_dirty());
+        assert_eq!(d.redo(), Some("move"));
+        assert_eq!(order(&d), vec![5, 0, 1, 2, 3, 4]);
+        // A new edit discards the redo branch.
+        d.apply(Edit::DeletePages { ids: vec![p5] }, "delete")
+            .unwrap();
+        assert!(!d.can_redo());
+    }
+
+    #[test]
+    fn delete_cascades_and_promotes_children() {
+        let mut d = doc();
+        let out = d
+            .apply(
+                Edit::DeletePages {
+                    ids: vec![id_at(&d, 0)],
+                },
+                "delete",
+            )
+            .unwrap();
+        assert_eq!(out.pages_removed, 1);
+        assert_eq!(out.bookmarks_removed, 1);
+        // A is gone; A1 and A2 promoted to top level.
+        assert_eq!(
+            titles(&d),
+            vec![
+                (0, "A1".into()),
+                (0, "A2".into()),
+                (0, "B".into()),
+                (0, "C".into())
+            ]
+        );
+        d.undo();
+        assert_eq!(titles(&d).len(), 5);
+    }
+
+    #[test]
+    fn insert_with_outline_merge() {
+        let mut d = doc();
+        let s = d.add_source(SourceInfo {
+            path: "b.pdf".into(),
+            ..src(3)
+        });
+        let out = d
+            .apply(
+                Edit::InsertPages {
+                    source: s,
+                    range: 0..3,
+                    before: Some(id_at(&d, 3)),
+                    outline: Some(flat(&[
+                        ("A", Some(0), 0),
+                        ("A3", Some(1), 1),
+                        ("D", Some(2), 0),
+                    ])),
+                },
+                "insert",
+            )
+            .unwrap();
+        assert_eq!(out.pages_added, 3);
+        assert_eq!(out.bookmarks_added, 2);
+        assert_eq!(order(&d), vec![0, 1, 2, 0, 1, 2, 3, 4, 5]);
+        assert_eq!(d.page(3).unwrap().source, s);
+        // "A" merged: A3 joined A's children; "D" appended.
+        assert_eq!(
+            titles(&d),
+            vec![
+                (0, "A".into()),
+                (1, "A1".into()),
+                (1, "A2".into()),
+                (1, "A3".into()),
+                (0, "B".into()),
+                (0, "C".into()),
+                (0, "D".into())
+            ]
+        );
+        // A3 targets the inserted page with source index 1.
+        let a3 = d
+            .state()
+            .outline_flat()
+            .iter()
+            .find(|(_, n)| n.title == "A3")
+            .unwrap()
+            .1
+            .target
+            .unwrap();
+        assert_eq!(d.index_of(a3), Some(4));
+    }
+
+    #[test]
+    fn replace_keeps_ids_and_bookmarks() {
+        let mut d = doc();
+        let s = d.add_source(SourceInfo {
+            path: "b.pdf".into(),
+            ..src(2)
+        });
+        let p3 = id_at(&d, 3);
+        d.apply(
+            Edit::ReplacePages {
+                ids: vec![p3],
+                source: s,
+                range: 0..2,
+            },
+            "replace",
+        )
+        .unwrap();
+        assert_eq!(d.page(3).unwrap().id, p3);
+        assert_eq!(d.page(3).unwrap().source, s);
+        assert_eq!(d.page(4).unwrap().source, s);
+        assert_eq!(order(&d), vec![0, 1, 2, 0, 1, 4, 5]);
+        let b = d
+            .state()
+            .outline_flat()
+            .iter()
+            .find(|(_, n)| n.title == "B")
+            .unwrap()
+            .1;
+        assert_eq!(b.target, Some(p3));
+    }
+
+    #[test]
+    fn duplicate() {
+        let mut d = doc();
+        d.apply(
+            Edit::DuplicatePages {
+                ids: vec![id_at(&d, 1)],
+            },
+            "dup",
+        )
+        .unwrap();
+        assert_eq!(order(&d), vec![0, 1, 1, 2, 3, 4, 5]);
+        assert_ne!(id_at(&d, 1), id_at(&d, 2));
+    }
+
+    #[test]
+    fn outline_edit_insert_delete() {
+        let mut d = doc();
+        let a = bm(&d, "A");
+        d.apply(
+            Edit::OutlineEdit {
+                id: a,
+                title: Some("Alpha".into()),
+                target: None,
+                color: Some(Some([255, 0, 0])),
+            },
+            "e",
+        )
+        .unwrap();
+        assert_eq!(titles(&d)[0].1, "Alpha");
+        d.apply(
+            Edit::OutlineInsert {
+                parent: Some(a),
+                after: Some(bm(&d, "A1")),
+                title: "A1b".into(),
+                target: None,
+            },
+            "ins",
+        )
+        .unwrap();
+        assert_eq!(titles(&d)[2], (1, "A1b".into()));
+        let out = d.apply(Edit::OutlineDelete { id: a }, "del").unwrap();
+        assert_eq!(out.bookmarks_removed, 4);
+        assert_eq!(titles(&d), vec![(0, "B".into()), (0, "C".into())]);
+    }
+
+    #[test]
+    fn outline_move_with_pages() {
+        let mut d = doc();
+        // Move C (span: page 5) to before B (as first top-level after A? use after=A).
+        let c = bm(&d, "C");
+        d.apply(
+            Edit::OutlineMove {
+                id: c,
+                parent: None,
+                after: Some(bm(&d, "A")),
+                with_pages: true,
+            },
+            "mv",
+        )
+        .unwrap();
+        assert_eq!(
+            titles(&d).iter().map(|t| t.1.as_str()).collect::<Vec<_>>(),
+            vec!["A", "A1", "A2", "C", "B"]
+        );
+        // A's span is pages 0..3 (A, A1, A2 target 0,1,2; next outside is B->3), so C's page lands at index 3.
+        assert_eq!(order(&d), vec![0, 1, 2, 5, 3, 4]);
+        // Move B (span: pages 3,4) to the very start.
+        let b = bm(&d, "B");
+        d.apply(
+            Edit::OutlineMove {
+                id: b,
+                parent: None,
+                after: None,
+                with_pages: true,
+            },
+            "mv",
+        )
+        .unwrap();
+        assert_eq!(order(&d), vec![3, 4, 0, 1, 2, 5]);
+        assert_eq!(titles(&d)[0].1, "B");
+        d.undo();
+        assert_eq!(order(&d), vec![0, 1, 2, 5, 3, 4]);
+    }
+
+    #[test]
+    fn outline_move_rejects_cycles() {
+        let mut d = doc();
+        let a = bm(&d, "A");
+        let a1 = bm(&d, "A1");
+        assert!(
+            d.apply(
+                Edit::OutlineMove {
+                    id: a,
+                    parent: Some(a1),
+                    after: None,
+                    with_pages: false
+                },
+                "x"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn history_trims_oldest() {
+        let mut d = Document::new(src(3), &[], Box::new(FixedCount(3)));
+        for i in 0..5 {
+            d.apply(
+                Edit::RotatePages {
+                    ids: vec![id_at(&d, 0)],
+                    by: Rotation::R90,
+                },
+                format!("r{i}"),
+            )
+            .unwrap();
+        }
+        assert_eq!(d.stats().versions, 3);
+        assert_eq!(d.undo_label(), Some("r4"));
+        d.undo();
+        d.undo();
+        assert!(!d.can_undo());
+        // The saved version was trimmed away, so we're dirty everywhere.
+        assert!(d.is_dirty());
+    }
+
+    #[test]
+    fn noop_edit_adds_no_version() {
+        let mut d = doc();
+        d.apply(
+            Edit::RotatePages {
+                ids: vec![],
+                by: Rotation::R90,
+            },
+            "noop",
+        )
+        .unwrap();
+        assert!(!d.can_undo());
+    }
+}

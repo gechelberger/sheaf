@@ -36,7 +36,12 @@ actions!(
         Find,
         CloseSearch,
         SearchNext,
-        SearchPrev
+        SearchPrev,
+        RotatePageCw,
+        RotatePageCcw,
+        DeletePage,
+        Undo,
+        Redo
     ]
 );
 actions!(
@@ -104,6 +109,12 @@ fn main() {
             KeyBinding::new("ctrl-0", ZoomFitWidth, doc),
             KeyBinding::new("ctrl-9", ZoomFitPage, doc),
             KeyBinding::new("ctrl-1", ZoomActual, doc),
+            KeyBinding::new("r", RotatePageCw, doc),
+            KeyBinding::new("shift-r", RotatePageCcw, doc),
+            KeyBinding::new("delete", DeletePage, doc),
+            KeyBinding::new("ctrl-z", Undo, doc),
+            KeyBinding::new("ctrl-shift-z", Redo, doc),
+            KeyBinding::new("ctrl-y", Redo, doc),
             KeyBinding::new("ctrl-f", Find, doc),
             KeyBinding::new("escape", CloseSearch, doc),
             KeyBinding::new("f3", SearchNext, doc),

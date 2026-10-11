@@ -2,7 +2,12 @@
 //! rendered as tiles so only what's on screen is rasterized, with a cheap
 //! low-res preview under the tiles so something appears immediately. Also
 //! owns the per-document sidebar content (thumbnails, outline), since those
-//! share its render handle and caches.
+//! share its render handles and caches.
+//!
+//! The page sequence comes from `sheaf_doc::Document` (see
+//! docs/document-model.md): a virtual list of `PageRef`s over one or more
+//! source files, each with its own render worker. Caches key by `PageId`, so
+//! reordering pages costs nothing visually.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -15,15 +20,20 @@ use gpui::{
     ScrollWheelEvent, SharedString, Subscription, Task, Window, div, img, point, prelude::*, px,
     rgb, rgba,
 };
-use sheaf_core::{PageIndex, PageSize};
+use sheaf_core::{PageIndex, PageSize, Rotation};
+use sheaf_doc::{
+    Document, Edit, FlatOutlineItem, OutlineId, PageId, PageRef, SourceId, SourceInfo,
+};
 use sheaf_render::{
-    Job, OutlineItem, PixelFormat, RenderHandle, RenderRequest, Rendered, SearchEvent, SearchHit,
+    Job, OutlineItem, PixelFormat, Rect, RenderHandle, RenderRequest, Rendered, SearchEvent,
+    SearchHit,
 };
 
 use crate::text_input::TextInput;
 use crate::{
-    CloseSearch, Find, FirstPage, LastPage, LineDown, LineUp, NextPage, PrevPage, ScreenDown,
-    ScreenUp, SearchNext, SearchPrev, ZoomActual, ZoomFitPage, ZoomFitWidth, ZoomIn, ZoomOut,
+    CloseSearch, DeletePage, Find, FirstPage, LastPage, LineDown, LineUp, NextPage, PrevPage, Redo,
+    RotatePageCcw, RotatePageCw, ScreenDown, ScreenUp, SearchNext, SearchPrev, Undo, ZoomActual,
+    ZoomFitPage, ZoomFitWidth, ZoomIn, ZoomOut,
 };
 
 pub const KEY_CONTEXT: &str = "DocView";
@@ -33,9 +43,9 @@ const MARGIN: f32 = 16.0;
 const GAP: f32 = 12.0;
 const STATUS_H: f32 = 24.0;
 /// Pages beyond the visible range to prefetch previews for.
-const PREFETCH: u32 = 1;
+const PREFETCH: usize = 1;
 /// Pages beyond the visible range to keep cached before releasing textures.
-const KEEP: u32 = 3;
+const KEEP: usize = 3;
 const LINE_STEP: f32 = 80.0;
 /// Tile edge in device pixels. 1024² BGRA = 4 MB per tile.
 const TILE: u32 = 1024;
@@ -70,14 +80,16 @@ enum State {
     Ready(Box<Doc>),
 }
 
-/// Page geometry in logical px at the current zoom.
+/// Page geometry in logical px at the current zoom, for one snapshot of the
+/// page sequence.
 struct Layout {
     zoom: Zoom,
     view_w: f32,
     view_h: f32,
-    sizes_known: bool,
+    version: u64,
     /// Logical px per PDF point.
     k: f32,
+    refs: Vec<PageRef>,
     widths: Vec<f32>,
     heights: Vec<f32>,
     tops: Vec<f32>,
@@ -92,15 +104,15 @@ impl Layout {
         zoom: Zoom,
         view_w: f32,
         view_h: f32,
-        count: u32,
-        size_of: &dyn Fn(u32) -> PageSize,
-        sizes_known: bool,
+        version: u64,
+        refs: Vec<PageRef>,
+        model: &Document,
     ) -> Self {
         let avail_w = (view_w - 2.0 * MARGIN).max(1.0);
         let avail_h = (view_h - 2.0 * MARGIN).max(1.0);
+        let sizes: Vec<PageSize> = refs.iter().map(|r| model.page_size(r)).collect();
         let (mut max_w, mut max_h) = (1.0f32, 1.0f32);
-        for i in 0..count {
-            let s = size_of(i);
+        for s in &sizes {
             max_w = max_w.max(s.width);
             max_h = max_h.max(s.height);
         }
@@ -110,13 +122,15 @@ impl Layout {
             Zoom::Custom(z) => z * PX_PER_PT_AT_100,
         };
         let total_w = (max_w * k + 2.0 * MARGIN).max(view_w);
-        let mut widths = Vec::with_capacity(count as usize);
-        let mut heights = Vec::with_capacity(count as usize);
-        let mut tops = Vec::with_capacity(count as usize);
-        let mut lefts = Vec::with_capacity(count as usize);
+        let n = refs.len();
+        let (mut widths, mut heights, mut tops, mut lefts) = (
+            Vec::with_capacity(n),
+            Vec::with_capacity(n),
+            Vec::with_capacity(n),
+            Vec::with_capacity(n),
+        );
         let mut y = MARGIN;
-        for i in 0..count {
-            let s = size_of(i);
+        for s in &sizes {
             let (w, h) = (s.width * k, s.height * k);
             widths.push(w);
             heights.push(h);
@@ -124,13 +138,14 @@ impl Layout {
             lefts.push((total_w - w) / 2.0);
             y += h + GAP;
         }
-        let total_h = (y - GAP + MARGIN).max(view_h);
+        let total_h = (if n > 0 { y - GAP } else { y } + MARGIN).max(view_h);
         Self {
             zoom,
             view_w,
             view_h,
-            sizes_known,
+            version,
             k,
+            refs,
             widths,
             heights,
             tops,
@@ -140,13 +155,17 @@ impl Layout {
         }
     }
 
-    /// Page whose vertical span contains `y` (or the last one that starts above it).
-    fn page_at(&self, y: f32) -> u32 {
-        self.tops.partition_point(|&top| top <= y).saturating_sub(1) as u32
+    fn len(&self) -> usize {
+        self.refs.len()
     }
 
-    fn visible(&self, top: f32, bottom: f32) -> std::ops::RangeInclusive<u32> {
-        let last = self.tops.len().saturating_sub(1) as u32;
+    /// Page whose vertical span contains `y` (or the last one that starts above it).
+    fn page_at(&self, y: f32) -> usize {
+        self.tops.partition_point(|&top| top <= y).saturating_sub(1)
+    }
+
+    fn visible(&self, top: f32, bottom: f32) -> std::ops::RangeInclusive<usize> {
+        let last = self.len().saturating_sub(1);
         self.page_at(top).min(last)..=self.page_at(bottom).min(last)
     }
 
@@ -155,15 +174,17 @@ impl Layout {
     }
 }
 
-type TileKey = (u32, Job);
+type TileKey = (PageId, Job);
 
 struct Doc {
-    handle: RenderHandle,
-    sizes: Option<Arc<Vec<PageSize>>>,
+    model: Document,
+    handles: HashMap<SourceId, RenderHandle>,
+    /// Bumped on every model change so layouts and lookups can tell.
+    version: u64,
     zoom: Zoom,
     scroll: ScrollHandle,
     layout: Option<Layout>,
-    previews: HashMap<u32, Arc<RenderImage>>,
+    previews: HashMap<PageId, (Rotation, Arc<RenderImage>)>,
     tiles: HashMap<TileKey, Arc<RenderImage>>,
     /// Dropping the task drops the oneshot receiver, which tells the worker
     /// to skip the render if it hasn't started.
@@ -171,36 +192,64 @@ struct Doc {
     /// Images we've stopped showing; GPU textures are released in `render`,
     /// the only place we have a `Window`.
     retired: Vec<Arc<RenderImage>>,
-    current_page: u32,
+    current_page: usize,
     pending_scroll: Option<ScrollTo>,
     first_paint: Option<Instant>,
+    /// Last edit notice, shown in the status bar.
+    notice: Option<String>,
     // Sidebar state.
     thumb_scroll: ScrollHandle,
     /// Pages whose previews the thumbnail panel is showing; kept cached.
-    thumb_keep: Option<std::ops::RangeInclusive<u32>>,
+    thumb_keep: HashSet<PageId>,
     /// Last page the thumbnail panel auto-scrolled to follow.
-    thumb_followed: Option<u32>,
-    outline: Option<Arc<Vec<OutlineItem>>>,
-    outline_expanded: HashSet<u32>,
+    thumb_followed: Option<PageId>,
+    outline_loaded: bool,
+    outline_expanded: HashSet<OutlineId>,
     outline_scroll: ScrollHandle,
+}
+
+impl Doc {
+    fn primary(&self) -> &RenderHandle {
+        &self.handles[&self.model.primary()]
+    }
+
+    fn page_ref(&self, index: usize) -> Option<PageRef> {
+        self.model.page(index).copied()
+    }
+
+    /// Display index of the primary source's page `index`, if it's still in
+    /// the document (search hits are reported in source pages).
+    fn index_of_source_page(&self, index: u32) -> Option<usize> {
+        let primary = self.model.primary();
+        self.model
+            .state()
+            .pages
+            .iter()
+            .position(|p| p.source == primary && p.index == index)
+    }
+
+    fn touched(&mut self) {
+        self.version += 1;
+        self.layout = None;
+    }
 }
 
 #[derive(Clone, Copy)]
 enum ScrollTo {
-    Page(u32),
+    Page(usize),
     By(f32),
     End,
     /// Bring a page-relative point (fractions) into view if it isn't already,
     /// landing it a third of the way down the viewport.
     Reveal {
-        page: u32,
+        page: usize,
         fx: f32,
         fy: f32,
     },
     /// Keep the document point (`page`, `fx`, `fy` as fractions of the page)
     /// under viewport-local point (`vx`, `vy`). Used to anchor zooms.
     Anchor {
-        page: u32,
+        page: usize,
         fx: f32,
         fy: f32,
         vx: f32,
@@ -225,7 +274,7 @@ struct Search {
     _input_sub: Subscription,
     /// Query the current results are for.
     query: String,
-    /// Hits in page order (the worker scans pages in order).
+    /// Hits in primary-source page order (the worker scans pages in order).
     hits: Vec<SearchHit>,
     current: Option<usize>,
     scanned: u32,
@@ -251,12 +300,17 @@ impl DocView {
     }
 
     pub fn title(&self) -> SharedString {
-        self.path
+        let name = self
+            .path
             .file_name()
             .and_then(|s| s.to_str())
-            .unwrap_or("?")
-            .to_string()
-            .into()
+            .unwrap_or("?");
+        let dirty = matches!(&self.state, State::Ready(d) if d.model.is_dirty());
+        if dirty {
+            format!("{name} •").into()
+        } else {
+            name.to_string().into()
+        }
     }
 
     fn open(&mut self, cx: &mut Context<Self>) {
@@ -267,13 +321,18 @@ impl DocView {
         cx.spawn(async move |this, cx| {
             let opened = cx
                 .background_executor()
-                .spawn(async move { RenderHandle::open(path, None) })
+                .spawn(async move {
+                    let bytes = std::fs::metadata(&path)
+                        .map(|m| m.len() as usize)
+                        .unwrap_or(0);
+                    RenderHandle::open(path.clone(), None).map(|h| (h, path, bytes))
+                })
                 .await;
             this.update(cx, |viewer, cx| {
                 match opened {
-                    Ok(handle) => {
+                    Ok((handle, path, bytes)) => {
+                        let info = handle.info();
                         if timing {
-                            let info = handle.info();
                             eprintln!(
                                 "[timing] open: {:?} engine, {:?} since launch, {} pages",
                                 info.open_time,
@@ -281,9 +340,21 @@ impl DocView {
                                 info.page_count
                             );
                         }
+                        let source = SourceInfo {
+                            path,
+                            page_count: info.page_count,
+                            first_page: info.first_page,
+                            page_sizes: None,
+                            bytes,
+                        };
+                        let model =
+                            Document::new(source, &[], sheaf_doc::history::default_policy());
+                        let mut handles = HashMap::new();
+                        handles.insert(model.primary(), handle);
                         viewer.state = State::Ready(Box::new(Doc {
-                            handle,
-                            sizes: None,
+                            model,
+                            handles,
+                            version: 0,
                             zoom: Zoom::FitWidth,
                             scroll: ScrollHandle::new(),
                             layout: None,
@@ -294,10 +365,11 @@ impl DocView {
                             current_page: 0,
                             pending_scroll: None,
                             first_paint: None,
+                            notice: None,
                             thumb_scroll: ScrollHandle::new(),
-                            thumb_keep: None,
+                            thumb_keep: HashSet::new(),
                             thumb_followed: None,
-                            outline: None,
+                            outline_loaded: false,
                             outline_expanded: HashSet::new(),
                             outline_scroll: ScrollHandle::new(),
                         }));
@@ -330,7 +402,7 @@ impl DocView {
         let State::Ready(doc) = &self.state else {
             return;
         };
-        let rx = doc.handle.page_sizes();
+        let rx = doc.primary().page_sizes();
         let timing = self.timing;
         let t = Instant::now();
         cx.spawn(async move |this, cx| {
@@ -348,8 +420,9 @@ impl DocView {
                                 t.elapsed()
                             );
                         }
-                        doc.sizes = Some(Arc::new(sizes));
-                        doc.layout = None; // rebuild with real heights
+                        let primary = doc.model.primary();
+                        doc.model.set_source_sizes(primary, sizes);
+                        doc.touched();
                         cx.notify();
                     }
                     Err(e) => log::error!("page sizes: {e:#}"),
@@ -364,7 +437,7 @@ impl DocView {
         let State::Ready(doc) = &self.state else {
             return;
         };
-        let rx = doc.handle.outline();
+        let rx = doc.primary().outline();
         let timing = self.timing;
         let t = Instant::now();
         cx.spawn(async move |this, cx| {
@@ -382,13 +455,17 @@ impl DocView {
                                 t.elapsed()
                             );
                         }
-                        // Start with the top level expanded.
-                        doc.outline_expanded = items
-                            .iter()
-                            .filter(|i| i.depth == 0)
-                            .map(|i| i.id)
-                            .collect();
-                        doc.outline = Some(Arc::new(items));
+                        let flat: Vec<FlatOutlineItem> = items.iter().map(flat_item).collect();
+                        match doc.model.set_initial_outline(&flat) {
+                            Ok(()) => {
+                                // Start with the top level expanded.
+                                doc.outline_expanded =
+                                    doc.model.state().outline.iter().map(|n| n.id).collect();
+                                doc.outline_loaded = true;
+                                doc.touched();
+                            }
+                            Err(e) => log::warn!("outline arrived after edits; ignored: {e:#}"),
+                        }
                         cx.notify();
                     }
                     Err(e) => log::error!("outline: {e:#}"),
@@ -399,8 +476,89 @@ impl DocView {
         .detach();
     }
 
-    pub fn go_to_page(&mut self, page: u32, cx: &mut Context<Self>) {
+    pub fn go_to_page(&mut self, page: usize, cx: &mut Context<Self>) {
         self.scroll(ScrollTo::Page(page), cx);
+    }
+
+    // ----- edits ------------------------------------------------------------
+
+    fn apply(&mut self, edit: Edit, label: &str, cx: &mut Context<Self>) {
+        let State::Ready(doc) = &mut self.state else {
+            return;
+        };
+        match doc.model.apply(edit, label) {
+            Ok(out) => {
+                let mut parts = Vec::new();
+                if out.pages_removed > 0 {
+                    parts.push(format!(
+                        "{} page{}",
+                        out.pages_removed,
+                        if out.pages_removed == 1 { "" } else { "s" }
+                    ));
+                }
+                if out.bookmarks_removed > 0 {
+                    parts.push(format!(
+                        "{} bookmark{}",
+                        out.bookmarks_removed,
+                        if out.bookmarks_removed == 1 { "" } else { "s" }
+                    ));
+                }
+                doc.notice = Some(if parts.is_empty() {
+                    label.to_string()
+                } else {
+                    format!("{label}: removed {} — Ctrl+Z to undo", parts.join(" and "))
+                });
+                doc.touched();
+                cx.notify();
+            }
+            Err(e) => {
+                doc.notice = Some(format!("{label} failed: {e:#}"));
+                cx.notify();
+            }
+        }
+    }
+
+    fn current_page_id(&self) -> Option<PageId> {
+        match &self.state {
+            State::Ready(doc) => doc.page_ref(doc.current_page).map(|p| p.id),
+            _ => None,
+        }
+    }
+
+    fn rotate_current(&mut self, by: Rotation, cx: &mut Context<Self>) {
+        if let Some(id) = self.current_page_id() {
+            self.apply(Edit::RotatePages { ids: vec![id], by }, "Rotate page", cx);
+        }
+    }
+
+    fn delete_current(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self.current_page_id() {
+            self.apply(Edit::DeletePages { ids: vec![id] }, "Delete page", cx);
+        }
+    }
+
+    fn undo(&mut self, cx: &mut Context<Self>) {
+        let State::Ready(doc) = &mut self.state else {
+            return;
+        };
+        doc.notice = match doc.model.undo() {
+            Some(label) => Some(format!("Undid: {label}")),
+            None => Some("Nothing to undo".into()),
+        };
+        doc.touched();
+        cx.notify();
+    }
+
+    fn redo(&mut self, cx: &mut Context<Self>) {
+        let State::Ready(doc) = &mut self.state else {
+            return;
+        };
+        doc.notice = match doc.model.redo() {
+            Some(label) => Some(format!("Redid: {label}")),
+            None => Some("Nothing to redo".into()),
+        };
+        doc.touched();
+        cx.notify();
     }
 
     // ----- search -----------------------------------------------------------
@@ -451,7 +609,7 @@ impl DocView {
         let State::Ready(doc) = &self.state else {
             return;
         };
-        let handle = doc.handle.clone();
+        let handle = doc.primary().clone();
         let Some(search) = &mut self.search else {
             return;
         };
@@ -527,16 +685,25 @@ impl DocView {
         let ix = ix % search.hits.len();
         search.current = Some(ix);
         let hit = &search.hits[ix];
-        let ps = match &doc.sizes {
-            Some(s) => s
-                .get(hit.page as usize)
-                .copied()
-                .unwrap_or(doc.handle.info().first_page),
-            None => doc.handle.info().first_page,
+        let Some(index) = doc.index_of_source_page(hit.page) else {
+            return;
         };
+        let Some(pref) = doc.page_ref(index) else {
+            return;
+        };
+        let src = doc
+            .model
+            .source(pref.source)
+            .map(|s| s.page_size(pref.index))
+            .unwrap_or(PageSize {
+                width: 612.0,
+                height: 792.0,
+            });
         if let Some(r) = hit.rects.first() {
+            let r = rotate_rect(*r, src, pref.rotation);
+            let ps = src.rotated(pref.rotation);
             doc.pending_scroll = Some(ScrollTo::Reveal {
-                page: hit.page,
+                page: index,
                 fx: (r.x + r.w / 2.0) / ps.width.max(1.0),
                 fy: (r.y + r.h / 2.0) / ps.height.max(1.0),
             });
@@ -621,15 +788,7 @@ impl DocView {
         )
     }
 
-    fn page_size(doc: &Doc, page: u32) -> PageSize {
-        match &doc.sizes {
-            Some(s) => s
-                .get(page as usize)
-                .copied()
-                .unwrap_or(doc.handle.info().first_page),
-            None => doc.handle.info().first_page,
-        }
-    }
+    // ----- scrolling and zoom ------------------------------------------------
 
     fn scroll(&mut self, to: ScrollTo, cx: &mut Context<Self>) {
         if let State::Ready(doc) = &mut self.state {
@@ -647,15 +806,16 @@ impl DocView {
         if doc.zoom == zoom {
             return;
         }
-        if let Some(layout) = &doc.layout {
+        if let Some(layout) = &doc.layout
+            && layout.len() > 0
+        {
             let (vx, vy) = anchor.unwrap_or((layout.view_w / 2.0, layout.view_h / 2.0));
             let sx = -f32::from(doc.scroll.offset().x);
             let sy = -f32::from(doc.scroll.offset().y);
             let (dx, dy) = (sx + vx, sy + vy);
             let page = layout.page_at(dy);
-            let p = page as usize;
-            let fx = (dx - layout.lefts[p]) / layout.widths[p];
-            let fy = (dy - layout.tops[p]) / layout.heights[p];
+            let fx = (dx - layout.lefts[page]) / layout.widths[page];
+            let fy = (dy - layout.tops[page]) / layout.heights[page];
             doc.pending_scroll = Some(ScrollTo::Anchor {
                 page,
                 fx,
@@ -703,30 +863,41 @@ impl DocView {
         cx.stop_propagation();
     }
 
-    fn ensure_rendered(&mut self, want: RenderRequest, cx: &mut Context<Self>) {
+    // ----- rendering pipeline -------------------------------------------------
+
+    fn ensure_rendered(&mut self, pref: PageRef, want: RenderRequest, cx: &mut Context<Self>) {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        let key = (want.page.0, want.job);
+        let key = (pref.id, want.job);
         if doc.tiles.contains_key(&key) || doc.inflight.contains_key(&key) {
             return;
         }
-        if let Job::Page { .. } = want.job
-            && doc.previews.contains_key(&want.page.0)
+        if let Job::Page { rotation, .. } = want.job
+            && doc
+                .previews
+                .get(&pref.id)
+                .is_some_and(|(r, _)| *r == rotation)
         {
             return;
         }
-        let rx = doc.handle.render(want);
+        let Some(handle) = doc.handles.get(&pref.source) else {
+            return;
+        };
+        let rx = handle.render(want);
         let task = cx.spawn(async move |this, cx| {
             let result = rx.await;
-            this.update(cx, |viewer, cx| viewer.on_rendered(want, result, cx))
-                .ok();
+            this.update(cx, |viewer, cx| {
+                viewer.on_rendered(pref.id, want, result, cx)
+            })
+            .ok();
         });
         doc.inflight.insert(key, task);
     }
 
     fn on_rendered(
         &mut self,
+        id: PageId,
         want: RenderRequest,
         result: Result<anyhow::Result<Rendered>, futures::channel::oneshot::Canceled>,
         cx: &mut Context<Self>,
@@ -736,7 +907,7 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        let key = (want.page.0, want.job);
+        let key = (id, want.job);
         // We're running inside this task; detach rather than drop it.
         if let Some(task) = doc.inflight.remove(&key) {
             task.detach();
@@ -767,7 +938,9 @@ impl DocView {
                 doc.first_paint.get_or_insert_with(Instant::now);
                 let image = Arc::new(to_render_image(rendered.raster));
                 let old = match want.job {
-                    Job::Page { .. } => doc.previews.insert(want.page.0, image),
+                    Job::Page { rotation, .. } => {
+                        doc.previews.insert(id, (rotation, image)).map(|(_, im)| im)
+                    }
                     Job::Tile { .. } => doc.tiles.insert(key, image),
                 };
                 if let Some(old) = old {
@@ -778,11 +951,19 @@ impl DocView {
         }
     }
 
-    pub fn current_page(&self) -> u32 {
+    pub fn current_page(&self) -> usize {
         match &self.state {
             State::Ready(doc) => doc.current_page,
             _ => 0,
         }
+    }
+}
+
+fn flat_item(i: &OutlineItem) -> FlatOutlineItem {
+    FlatOutlineItem {
+        title: i.title.clone(),
+        page: i.page,
+        depth: i.depth,
     }
 }
 
@@ -795,6 +976,32 @@ fn to_render_image(raster: sheaf_render::Raster) -> RenderImage {
     RenderImage::new(smallvec::smallvec![image::Frame::new(buf)])
 }
 
+/// Map a rect in a page's source orientation (size `src`) to where it lands
+/// after rotating the page clockwise by `rot`.
+fn rotate_rect(r: Rect, src: PageSize, rot: Rotation) -> Rect {
+    match rot {
+        Rotation::R0 => r,
+        Rotation::R90 => Rect {
+            x: src.height - (r.y + r.h),
+            y: r.x,
+            w: r.h,
+            h: r.w,
+        },
+        Rotation::R180 => Rect {
+            x: src.width - (r.x + r.w),
+            y: src.height - (r.y + r.h),
+            w: r.w,
+            h: r.h,
+        },
+        Rotation::R270 => Rect {
+            x: r.y,
+            y: src.width - (r.x + r.w),
+            w: r.h,
+            h: r.w,
+        },
+    }
+}
+
 impl Focusable for DocView {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
@@ -804,7 +1011,7 @@ impl Focusable for DocView {
 /// Everything `render` decides for one page: where it goes and which tiles
 /// cover the visible part of it.
 struct PagePlan {
-    page: u32,
+    pref: PageRef,
     left: f32,
     top: f32,
     w: f32,
@@ -830,15 +1037,11 @@ impl Render for DocView {
 
         let search_bar = self.render_search_bar(cx);
         let mut body = None;
-        let mut wants: Vec<RenderRequest> = Vec::new();
+        let mut wants: Vec<(PageRef, RenderRequest)> = Vec::new();
         let status: SharedString = match &mut self.state {
             State::Loading => "Opening…".into(),
             State::Failed(e) => format!("Failed: {e}").into(),
             State::Ready(doc) => {
-                let info = doc.handle.info();
-                let count = info.page_count;
-                let last = count - 1;
-
                 // The scroll container's bounds lag a frame behind on first
                 // layout; fall back to the window size until we have them.
                 let bounds = doc.scroll.bounds();
@@ -851,47 +1054,43 @@ impl Render for DocView {
                         f32::from(viewport.height) - STATUS_H,
                     )
                 };
-                let sizes_known = doc.sizes.is_some();
                 let zoom = doc.zoom;
 
                 let stale = doc.layout.as_ref().is_none_or(|l| {
                     l.zoom != zoom
+                        || l.version != doc.version
                         || (l.view_w - view_w).abs() > 0.5
                         || (l.view_h - view_h).abs() > 0.5
-                        || l.sizes_known != sizes_known
                 });
                 if stale {
-                    let sizes = doc.sizes.clone();
-                    let first = info.first_page;
-                    let size_of = |i: u32| {
-                        sizes
-                            .as_ref()
-                            .and_then(|s| s.get(i as usize).copied())
-                            .unwrap_or(first)
-                    };
+                    let refs: Vec<PageRef> = doc.model.state().pages.iter().copied().collect();
                     doc.layout = Some(Layout::build(
                         zoom,
                         view_w,
                         view_h,
-                        count,
-                        &size_of,
-                        sizes_known,
+                        doc.version,
+                        refs,
+                        &doc.model,
                     ));
                 }
                 let layout = doc.layout.as_ref().expect("built above");
+                let count = layout.len();
 
                 // Apply any queued scroll now that we know geometry.
                 let max_x = (layout.total_w - view_w).max(0.0);
                 let max_y = (layout.total_h - view_h).max(0.0);
                 let mut scroll_x = (-f32::from(doc.scroll.offset().x)).clamp(0.0, max_x);
                 let mut scroll_y = (-f32::from(doc.scroll.offset().y)).clamp(0.0, max_y);
-                if let Some(to) = doc.pending_scroll.take() {
+                if let Some(to) = doc.pending_scroll.take()
+                    && count > 0
+                {
+                    let last = count - 1;
                     match to {
-                        ScrollTo::Page(p) => scroll_y = layout.tops[p.min(last) as usize] - MARGIN,
+                        ScrollTo::Page(p) => scroll_y = layout.tops[p.min(last)] - MARGIN,
                         ScrollTo::By(dy) => scroll_y += dy,
                         ScrollTo::End => scroll_y = max_y,
                         ScrollTo::Reveal { page, fx, fy } => {
-                            let p = page.min(last) as usize;
+                            let p = page.min(last);
                             let (x, y) = (
                                 layout.lefts[p] + fx * layout.widths[p],
                                 layout.tops[p] + fy * layout.heights[p],
@@ -910,7 +1109,7 @@ impl Render for DocView {
                             vx,
                             vy,
                         } => {
-                            let p = page.min(last) as usize;
+                            let p = page.min(last);
                             scroll_x = layout.lefts[p] + fx * layout.widths[p] - vx;
                             scroll_y = layout.tops[p] + fy * layout.heights[p] - vy;
                         }
@@ -920,113 +1119,138 @@ impl Render for DocView {
                     doc.scroll.set_offset(point(px(-scroll_x), px(-scroll_y)));
                 }
 
-                let visible = layout.visible(scroll_y, scroll_y + view_h);
-                doc.current_page = layout.page_at(scroll_y + view_h * 0.5).min(last);
-
-                // Plan tiles for pages near the viewport.
-                let overdraw = view_h * TILE_OVERDRAW;
-                let fetch =
-                    visible.start().saturating_sub(PREFETCH)..=(visible.end() + PREFETCH).min(last);
-                let keep = visible.start().saturating_sub(KEEP)..=(visible.end() + KEEP).min(last);
                 let mut plans: Vec<PagePlan> = Vec::new();
-                for p in fetch.clone() {
-                    let i = p as usize;
-                    let (left, top, w, h) = (
-                        layout.lefts[i],
-                        layout.tops[i],
-                        layout.widths[i],
-                        layout.heights[i],
-                    );
-                    let dev_w = (w * scale).round().max(1.0) as u32;
-                    let dev_h = (h * scale).round().max(1.0) as u32;
-                    // Priorities: visible previews, visible tiles, then the
-                    // same for prefetch pages — so an expensive off-screen
-                    // preview never delays on-screen tiles.
-                    let on_screen_page = visible.contains(&p);
-                    wants.push(RenderRequest {
-                        page: PageIndex(p),
-                        job: Job::Page { width: PREVIEW_W },
-                        format: PixelFormat::Bgra,
-                        priority: if on_screen_page { 0 } else { 2 },
-                    });
-                    // Visible part of this page, in page-local device px.
-                    let vis_x0 = ((scroll_x - left) * scale).max(0.0);
-                    let vis_x1 = ((scroll_x + view_w - left) * scale).min(dev_w as f32);
-                    let vis_y0 = ((scroll_y - overdraw - top) * scale).max(0.0);
-                    let vis_y1 = ((scroll_y + view_h + overdraw - top) * scale).min(dev_h as f32);
-                    let strict_y0 = ((scroll_y - top) * scale).max(0.0);
-                    let strict_y1 = ((scroll_y + view_h - top) * scale).min(dev_h as f32);
-                    let mut tiles = Vec::new();
-                    // Until the container has been laid out once, the width
-                    // is a guess; don't rasterize tiles at the wrong zoom.
-                    if bounds_known && vis_x1 > vis_x0 && vis_y1 > vis_y0 {
-                        let (c0, c1) = (
-                            (vis_x0 / TILE as f32) as u32,
-                            ((vis_x1 / TILE as f32).ceil() as u32).max(1),
+                let mut keep: HashSet<PageId> = HashSet::new();
+                if count > 0 {
+                    let last = count - 1;
+                    let visible = layout.visible(scroll_y, scroll_y + view_h);
+                    doc.current_page = layout.page_at(scroll_y + view_h * 0.5).min(last);
+
+                    // Plan tiles for pages near the viewport.
+                    let overdraw = view_h * TILE_OVERDRAW;
+                    let fetch = visible.start().saturating_sub(PREFETCH)
+                        ..=(visible.end() + PREFETCH).min(last);
+                    for i in visible.start().saturating_sub(KEEP)..=(visible.end() + KEEP).min(last)
+                    {
+                        keep.insert(layout.refs[i].id);
+                    }
+                    for i in fetch {
+                        let pref = layout.refs[i];
+                        let (left, top, w, h) = (
+                            layout.lefts[i],
+                            layout.tops[i],
+                            layout.widths[i],
+                            layout.heights[i],
                         );
-                        let (r0, r1) = (
-                            (vis_y0 / TILE as f32) as u32,
-                            ((vis_y1 / TILE as f32).ceil() as u32).max(1),
-                        );
-                        for row in r0..r1 {
-                            for col in c0..c1 {
-                                let (x, y) = (col * TILE, row * TILE);
-                                let (tw, th) = (TILE.min(dev_w - x), TILE.min(dev_h - y));
-                                let on_screen =
-                                    (y as f32) < strict_y1 && ((y + th) as f32) > strict_y0;
-                                tiles.push((
-                                    Job::Tile {
-                                        page_width: dev_w,
-                                        page_height: dev_h,
-                                        x,
-                                        y,
-                                        w: tw,
-                                        h: th,
-                                    },
-                                    if on_screen { 1 } else { 3 },
-                                ));
+                        let dev_w = (w * scale).round().max(1.0) as u32;
+                        let dev_h = (h * scale).round().max(1.0) as u32;
+                        // Priorities: visible previews, visible tiles, then the
+                        // same for prefetch pages — so an expensive off-screen
+                        // preview never delays on-screen tiles.
+                        let on_screen_page = visible.contains(&i);
+                        wants.push((
+                            pref,
+                            RenderRequest {
+                                page: PageIndex(pref.index),
+                                job: Job::Page {
+                                    width: PREVIEW_W,
+                                    rotation: pref.rotation,
+                                },
+                                format: PixelFormat::Bgra,
+                                priority: if on_screen_page { 0 } else { 2 },
+                            },
+                        ));
+                        // Visible part of this page, in page-local device px.
+                        let vis_x0 = ((scroll_x - left) * scale).max(0.0);
+                        let vis_x1 = ((scroll_x + view_w - left) * scale).min(dev_w as f32);
+                        let vis_y0 = ((scroll_y - overdraw - top) * scale).max(0.0);
+                        let vis_y1 =
+                            ((scroll_y + view_h + overdraw - top) * scale).min(dev_h as f32);
+                        let strict_y0 = ((scroll_y - top) * scale).max(0.0);
+                        let strict_y1 = ((scroll_y + view_h - top) * scale).min(dev_h as f32);
+                        let mut tiles = Vec::new();
+                        // Until the container has been laid out once, the width
+                        // is a guess; don't rasterize tiles at the wrong zoom.
+                        if bounds_known && vis_x1 > vis_x0 && vis_y1 > vis_y0 {
+                            let (c0, c1) = (
+                                (vis_x0 / TILE as f32) as u32,
+                                ((vis_x1 / TILE as f32).ceil() as u32).max(1),
+                            );
+                            let (r0, r1) = (
+                                (vis_y0 / TILE as f32) as u32,
+                                ((vis_y1 / TILE as f32).ceil() as u32).max(1),
+                            );
+                            for row in r0..r1 {
+                                for col in c0..c1 {
+                                    let (x, y) = (col * TILE, row * TILE);
+                                    let (tw, th) = (TILE.min(dev_w - x), TILE.min(dev_h - y));
+                                    let on_screen =
+                                        (y as f32) < strict_y1 && ((y + th) as f32) > strict_y0;
+                                    tiles.push((
+                                        Job::Tile {
+                                            page_width: dev_w,
+                                            page_height: dev_h,
+                                            x,
+                                            y,
+                                            w: tw,
+                                            h: th,
+                                            rotation: pref.rotation,
+                                        },
+                                        if on_screen { 1 } else { 3 },
+                                    ));
+                                }
                             }
                         }
-                    }
-                    for (job, priority) in &tiles {
-                        wants.push(RenderRequest {
-                            page: PageIndex(p),
-                            job: *job,
-                            format: PixelFormat::Bgra,
-                            priority: *priority,
+                        for (job, priority) in &tiles {
+                            wants.push((
+                                pref,
+                                RenderRequest {
+                                    page: PageIndex(pref.index),
+                                    job: *job,
+                                    format: PixelFormat::Bgra,
+                                    priority: *priority,
+                                },
+                            ));
+                        }
+                        plans.push(PagePlan {
+                            pref,
+                            left,
+                            top,
+                            w,
+                            h,
+                            dev_w,
+                            tiles,
                         });
                     }
-                    plans.push(PagePlan {
-                        page: p,
-                        left,
-                        top,
-                        w,
-                        h,
-                        dev_w,
-                        tiles,
-                    });
+                } else {
+                    doc.current_page = 0;
                 }
 
-                // Evict: anything outside the keep range; and, per page, tiles
-                // at a stale zoom once every needed tile at the current zoom is in.
-                let wanted: std::collections::HashSet<TileKey> = plans
+                // Evict: anything outside the keep set; and, per page, tiles at
+                // a stale zoom or rotation once every needed tile at the current
+                // zoom is in (stale rotation goes immediately).
+                let wanted: HashSet<TileKey> = plans
                     .iter()
-                    .flat_map(|pl| pl.tiles.iter().map(move |(j, _)| (pl.page, *j)))
+                    .flat_map(|pl| pl.tiles.iter().map(move |(j, _)| (pl.pref.id, *j)))
                     .collect();
-                let mut complete: HashMap<u32, bool> = HashMap::new();
+                let mut complete: HashMap<PageId, bool> = HashMap::new();
+                let mut rotation_of: HashMap<PageId, Rotation> = HashMap::new();
                 for pl in &plans {
-                    let all = pl
-                        .tiles
-                        .iter()
-                        .all(|(j, _)| doc.tiles.contains_key(&(pl.page, *j)));
-                    complete.insert(pl.page, all);
+                    complete.insert(
+                        pl.pref.id,
+                        pl.tiles
+                            .iter()
+                            .all(|(j, _)| doc.tiles.contains_key(&(pl.pref.id, *j))),
+                    );
+                    rotation_of.insert(pl.pref.id, pl.pref.rotation);
                 }
                 let evict: Vec<TileKey> = doc
                     .tiles
                     .keys()
                     .copied()
-                    .filter(|k @ (p, _)| {
+                    .filter(|k @ (p, j)| {
                         !keep.contains(p)
+                            || rotation_of.get(p).is_some_and(|r| *r != j.rotation())
                             || (!wanted.contains(k) && complete.get(p).copied().unwrap_or(true))
                     })
                     .collect();
@@ -1036,28 +1260,26 @@ impl Render for DocView {
                     }
                 }
                 let thumb_keep = doc.thumb_keep.clone();
-                let evict: Vec<u32> = doc
+                let evict: Vec<PageId> = doc
                     .previews
                     .keys()
                     .copied()
-                    .filter(|p| {
-                        !keep.contains(p) && !thumb_keep.as_ref().is_some_and(|r| r.contains(p))
-                    })
+                    .filter(|p| !keep.contains(p) && !thumb_keep.contains(p))
                     .collect();
                 for p in evict {
-                    if let Some(im) = doc.previews.remove(&p) {
+                    if let Some((_, im)) = doc.previews.remove(&p) {
                         doc.retired.push(im);
                     }
                 }
                 doc.inflight.retain(|k, _| {
                     wanted.contains(k)
                         || matches!(k.1, Job::Page { .. })
-                            && (keep.contains(&k.0)
-                                || thumb_keep.as_ref().is_some_and(|r| r.contains(&k.0)))
+                            && (keep.contains(&k.0) || thumb_keep.contains(&k.0))
                 });
 
                 // Build elements: preview underneath, then any tiles we have
                 // for the page (stale-zoom ones scaled to fit, current on top).
+                let primary = doc.model.primary();
                 let pages: Vec<_> = plans
                     .iter()
                     .map(|pl| {
@@ -1069,7 +1291,9 @@ impl Render for DocView {
                             .h(px(pl.h))
                             .bg(rgb(0xffffff))
                             .shadow_md();
-                        if let Some(prev) = doc.previews.get(&pl.page) {
+                        if let Some((rot, prev)) = doc.previews.get(&pl.pref.id)
+                            && *rot == pl.pref.rotation
+                        {
                             page_div =
                                 page_div.child(div().absolute().inset_0().child(
                                     img(prev.clone()).size_full().object_fit(ObjectFit::Fill),
@@ -1078,7 +1302,7 @@ impl Render for DocView {
                         let mut page_tiles: Vec<(&TileKey, &Arc<RenderImage>)> = doc
                             .tiles
                             .iter()
-                            .filter(|((p, _), _)| *p == pl.page)
+                            .filter(|((p, _), _)| *p == pl.pref.id)
                             .collect();
                         // Stale zoom levels first so current ones paint over them.
                         page_tiles.sort_by_key(|((_, j), _)| match j {
@@ -1093,6 +1317,7 @@ impl Render for DocView {
                                 y,
                                 w,
                                 h,
+                                ..
                             } = job
                             else {
                                 continue;
@@ -1110,18 +1335,29 @@ impl Render for DocView {
                                     .child(img(im.clone()).size_full().object_fit(ObjectFit::Fill)),
                             );
                         }
-                        // Search highlights on top of everything.
+                        // Search highlights on top of everything. Hits are in
+                        // the primary source's page coordinates.
                         if let Some(search) = &self.search
                             && !search.hits.is_empty()
+                            && pl.pref.source == primary
                         {
-                            let k = pl.w / Self::page_size(doc, pl.page).width.max(1.0);
-                            let start = search.hits.partition_point(|h| h.page < pl.page);
+                            let src = doc
+                                .model
+                                .source(primary)
+                                .map(|s| s.page_size(pl.pref.index))
+                                .unwrap_or(PageSize {
+                                    width: 612.0,
+                                    height: 792.0,
+                                });
+                            let k = pl.w / src.rotated(pl.pref.rotation).width.max(1.0);
+                            let start = search.hits.partition_point(|h| h.page < pl.pref.index);
                             for (ix, hit) in search.hits.iter().enumerate().skip(start) {
-                                if hit.page != pl.page {
+                                if hit.page != pl.pref.index {
                                     break;
                                 }
                                 let current = search.current == Some(ix);
                                 for r in &hit.rects {
+                                    let r = rotate_rect(*r, src, pl.pref.rotation);
                                     page_div = page_div.child(
                                         div()
                                             .absolute()
@@ -1160,27 +1396,33 @@ impl Render for DocView {
                         ),
                 );
 
-                let ps = Self::page_size(doc, doc.current_page);
                 let mode = match zoom {
                     Zoom::FitWidth => "fit width",
                     Zoom::FitPage => "fit page",
                     Zoom::Custom(_) => "custom",
                 };
+                let ps = doc
+                    .page_ref(doc.current_page)
+                    .map(|p| doc.model.page_size(&p));
+                let size = ps
+                    .map(|s| format!("{:.0}×{:.0} pt", s.width, s.height))
+                    .unwrap_or_default();
+                let notice = doc
+                    .notice
+                    .as_deref()
+                    .map(|n| format!("  —  {n}"))
+                    .unwrap_or_default();
                 format!(
-                    "{}  —  page {} / {}  —  {:.0}×{:.0} pt  —  {:.0}% ({mode})  —  {} tiles",
-                    self.path.display(),
-                    doc.current_page + 1,
+                    "page {} / {}  —  {size}  —  {:.0}% ({mode}){notice}",
+                    (doc.current_page + 1).min(count),
                     count,
-                    ps.width,
-                    ps.height,
                     layout.zoom_percent(),
-                    doc.tiles.len(),
                 )
                 .into()
             }
         };
-        for want in wants {
-            self.ensure_rendered(want, cx);
+        for (pref, want) in wants {
+            self.ensure_rendered(pref, want, cx);
         }
 
         div()
@@ -1217,6 +1459,15 @@ impl Render for DocView {
             .on_action(cx.listener(|v, _: &CloseSearch, window, cx| v.close_search(window, cx)))
             .on_action(cx.listener(|v, _: &SearchNext, _, cx| v.search_step(1, cx)))
             .on_action(cx.listener(|v, _: &SearchPrev, _, cx| v.search_step(-1, cx)))
+            .on_action(
+                cx.listener(|v, _: &RotatePageCw, _, cx| v.rotate_current(Rotation::R90, cx)),
+            )
+            .on_action(
+                cx.listener(|v, _: &RotatePageCcw, _, cx| v.rotate_current(Rotation::R270, cx)),
+            )
+            .on_action(cx.listener(|v, _: &DeletePage, _, cx| v.delete_current(cx)))
+            .on_action(cx.listener(|v, _: &Undo, _, cx| v.undo(cx)))
+            .on_action(cx.listener(|v, _: &Redo, _, cx| v.redo(cx)))
             .flex()
             .flex_col()
             .size_full()
@@ -1240,7 +1491,7 @@ impl Render for DocView {
 
 // ---------------------------------------------------------------------------
 // Sidebar panels. Rendered on behalf of the workspace via `update`, so they
-// can share this view's caches and render handle.
+// can share this view's caches and render handles.
 
 impl DocView {
     /// Thumbnail strip: virtualized, follows the current page.
@@ -1253,26 +1504,26 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return div().p_2().text_sm().child("…").into_any_element();
         };
-        let info = doc.handle.info();
-        let count = info.page_count;
-        let last = count.saturating_sub(1);
+        let refs: Vec<PageRef> = doc.model.state().pages.iter().copied().collect();
+        let count = refs.len();
+        if count == 0 {
+            doc.thumb_keep.clear();
+            return div()
+                .p_2()
+                .text_sm()
+                .text_color(rgb(0x9a9a9a))
+                .child("No pages")
+                .into_any_element();
+        }
+        let last = count - 1;
         let thumb_w = (panel_w - 2.0 * THUMB_PAD).clamp(40.0, THUMB_W);
 
-        // Item geometry.
-        let sizes = doc.sizes.clone();
-        let first = info.first_page;
-        let size_of = |i: u32| {
-            sizes
-                .as_ref()
-                .and_then(|s| s.get(i as usize).copied())
-                .unwrap_or(first)
+        // Item geometry. Cumulative tops are cheap enough per frame.
+        let sizes: Vec<PageSize> = refs.iter().map(|r| doc.model.page_size(r)).collect();
+        let item_h = |i: usize| {
+            thumb_w * sizes[i].height / sizes[i].width.max(1.0) + THUMB_LABEL_H + THUMB_PAD
         };
-        let item_h = |i: u32| {
-            let s = size_of(i);
-            thumb_w * s.height / s.width.max(1.0) + THUMB_LABEL_H + THUMB_PAD
-        };
-        // Cumulative tops; cheap enough per frame for the page counts we care about.
-        let mut tops = Vec::with_capacity(count as usize);
+        let mut tops = Vec::with_capacity(count);
         let mut y = THUMB_PAD;
         for i in 0..count {
             tops.push(y);
@@ -1287,9 +1538,10 @@ impl DocView {
 
         // Follow the main view: when the current page changes, make sure its
         // thumbnail is visible.
-        let cur = doc.current_page;
-        if doc.thumb_followed != Some(cur) && count > 0 {
-            let top = tops[cur as usize];
+        let cur = doc.current_page.min(last);
+        let cur_id = refs[cur].id;
+        if doc.thumb_followed != Some(cur_id) {
+            let top = tops[cur];
             let bottom = top + item_h(cur);
             if top < scroll_y {
                 scroll_y = (top - THUMB_PAD).clamp(0.0, max_y);
@@ -1297,44 +1549,65 @@ impl DocView {
                 scroll_y = (bottom - view_h + THUMB_PAD).clamp(0.0, max_y);
             }
             doc.thumb_scroll.set_offset(point(px(0.0), px(-scroll_y)));
-            doc.thumb_followed = Some(cur);
+            doc.thumb_followed = Some(cur_id);
         }
 
-        let page_at = |y: f32| tops.partition_point(|&t| t <= y).saturating_sub(1) as u32;
+        let page_at = |y: f32| tops.partition_point(|&t| t <= y).saturating_sub(1);
         let (v0, v1) = (
             page_at(scroll_y).min(last),
             page_at(scroll_y + view_h).min(last),
         );
-        let keep = v0.saturating_sub(2)..=(v1 + 2).min(last);
-        doc.thumb_keep = Some(keep.clone());
+        doc.thumb_keep = (v0.saturating_sub(2)..=(v1 + 2).min(last))
+            .map(|i| refs[i].id)
+            .collect();
+
+        // Pages that are bookmark targets get a marker (a delete would cascade).
+        let targets: HashSet<PageId> = doc
+            .model
+            .state()
+            .outline_flat()
+            .iter()
+            .filter_map(|(_, n)| n.target)
+            .collect();
 
         let mut wants = Vec::new();
         let mut items = Vec::new();
-        for p in v0..=v1 {
-            wants.push(RenderRequest {
-                page: PageIndex(p),
-                job: Job::Page { width: PREVIEW_W },
-                format: PixelFormat::Bgra,
-                priority: 2,
-            });
-            let s = size_of(p);
-            let h = thumb_w * s.height / s.width.max(1.0);
-            let image = doc.previews.get(&p).cloned();
-            let selected = p == cur;
+        for (i, pref) in refs.iter().enumerate().take(v1 + 1).skip(v0) {
+            wants.push((
+                *pref,
+                RenderRequest {
+                    page: PageIndex(pref.index),
+                    job: Job::Page {
+                        width: PREVIEW_W,
+                        rotation: pref.rotation,
+                    },
+                    format: PixelFormat::Bgra,
+                    priority: 2,
+                },
+            ));
+            let h = thumb_w * sizes[i].height / sizes[i].width.max(1.0);
+            let image = doc
+                .previews
+                .get(&pref.id)
+                .filter(|(r, _)| *r == pref.rotation)
+                .map(|(_, im)| im.clone());
+            let selected = i == cur;
+            let bookmarked = targets.contains(&pref.id);
             items.push(
                 div()
-                    .id(("thumb", p as usize))
+                    .id(("thumb", pref.id.0 as usize))
                     .absolute()
-                    .top(px(tops[p as usize]))
+                    .top(px(tops[i]))
                     .left(px(THUMB_PAD))
                     .w(px(thumb_w))
                     .flex()
                     .flex_col()
                     .items_center()
                     .cursor_pointer()
-                    .on_click(cx.listener(move |v, _, _, cx| v.go_to_page(p, cx)))
+                    .on_click(cx.listener(move |v, _, _, cx| v.go_to_page(i, cx)))
                     .child(
                         div()
+                            .relative()
                             .w(px(thumb_w))
                             .h(px(h))
                             .bg(rgb(0xffffff))
@@ -1346,6 +1619,17 @@ impl DocView {
                             })
                             .when_some(image, |d, im| {
                                 d.child(img(im).size_full().object_fit(ObjectFit::Fill))
+                            })
+                            .when(bookmarked, |d| {
+                                d.child(
+                                    div()
+                                        .absolute()
+                                        .top(px(0.0))
+                                        .right(px(4.0))
+                                        .w(px(10.0))
+                                        .h(px(14.0))
+                                        .bg(rgb(0xe0a000)),
+                                )
                             }),
                     )
                     .child(
@@ -1357,7 +1641,7 @@ impl DocView {
                             } else {
                                 rgb(0x9a9a9a)
                             })
-                            .child(format!("{}", p + 1)),
+                            .child(format!("{}", i + 1)),
                     ),
             );
         }
@@ -1368,8 +1652,8 @@ impl DocView {
             .size_full()
             .child(div().relative().w_full().h(px(total_h)).children(items))
             .into_any_element();
-        for want in wants {
-            self.ensure_rendered(want, cx);
+        for (pref, want) in wants {
+            self.ensure_rendered(pref, want, cx);
         }
         el
     }
@@ -1379,15 +1663,16 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return div().p_2().text_sm().child("…").into_any_element();
         };
-        let Some(outline) = doc.outline.clone() else {
+        if !doc.outline_loaded {
             return div()
                 .p_2()
                 .text_sm()
                 .text_color(rgb(0x9a9a9a))
                 .child("Loading bookmarks…")
                 .into_any_element();
-        };
-        if outline.is_empty() {
+        }
+        let flat = doc.model.state().outline_flat();
+        if flat.is_empty() {
             return div()
                 .p_2()
                 .text_sm()
@@ -1399,16 +1684,16 @@ impl DocView {
         // Flatten to the visible rows: skip descendants of collapsed nodes.
         let mut rows: Vec<usize> = Vec::new();
         let mut hide_below: Option<u16> = None;
-        for (ix, item) in outline.iter().enumerate() {
+        for (ix, (depth, node)) in flat.iter().enumerate() {
             if let Some(d) = hide_below {
-                if item.depth > d {
+                if *depth > d {
                     continue;
                 }
                 hide_below = None;
             }
             rows.push(ix);
-            if item.has_children && !doc.outline_expanded.contains(&item.id) {
-                hide_below = Some(item.depth);
+            if !node.children.is_empty() && !doc.outline_expanded.contains(&node.id) {
+                hide_below = Some(*depth);
             }
         }
         let total_h = rows.len() as f32 * OUTLINE_ROW_H + THUMB_PAD;
@@ -1418,15 +1703,24 @@ impl DocView {
         let r0 = ((scroll_y / OUTLINE_ROW_H) as usize).min(rows.len());
         let r1 = (((scroll_y + view_h) / OUTLINE_ROW_H) as usize + 1).min(rows.len());
 
-        let cur = doc.current_page;
+        let cur_id = doc.page_ref(doc.current_page).map(|p| p.id);
+        let positions: HashMap<PageId, usize> = doc
+            .model
+            .state()
+            .pages
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.id, i))
+            .collect();
         let mut els = Vec::new();
         for r in r0..r1 {
-            let item = &outline[rows[r]];
-            let id = item.id;
-            let page = item.page;
+            let (depth, node) = &flat[rows[r]];
+            let id = node.id;
+            let target = node.target.and_then(|t| positions.get(&t).copied());
+            let orphan = node.target.is_some() && target.is_none();
             let expanded = doc.outline_expanded.contains(&id);
-            let active = page == Some(cur);
-            let chevron = if !item.has_children {
+            let active = node.target.is_some() && node.target == cur_id;
+            let chevron = if node.children.is_empty() {
                 " "
             } else if expanded {
                 "▾"
@@ -1435,13 +1729,13 @@ impl DocView {
             };
             els.push(
                 div()
-                    .id(("outline", id as usize))
+                    .id(("outline", id.0 as usize))
                     .absolute()
                     .top(px(r as f32 * OUTLINE_ROW_H))
                     .left(px(0.0))
                     .w_full()
                     .h(px(OUTLINE_ROW_H))
-                    .pl(px(6.0 + item.depth as f32 * OUTLINE_INDENT))
+                    .pl(px(6.0 + *depth as f32 * OUTLINE_INDENT))
                     .pr_2()
                     .flex()
                     .items_center()
@@ -1451,13 +1745,13 @@ impl DocView {
                     .when(active, |d| d.bg(rgb(0x3a4a60)))
                     .hover(|s| s.bg(rgb(0x3a3a3a)))
                     .on_click(cx.listener(move |v, _, _, cx| {
-                        if let Some(p) = page {
+                        if let Some(p) = target {
                             v.go_to_page(p, cx);
                         }
                     }))
                     .child(
                         div()
-                            .id(("outline-toggle", id as usize))
+                            .id(("outline-toggle", id.0 as usize))
                             .w(px(14.0))
                             .text_color(rgb(0x9a9a9a))
                             .cursor_pointer()
@@ -1478,12 +1772,14 @@ impl DocView {
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .text_ellipsis()
-                            .text_color(if page.is_some() {
+                            .text_color(if target.is_some() {
                                 rgb(0xd0d0d0)
+                            } else if orphan {
+                                rgb(0x8a6a6a)
                             } else {
                                 rgb(0x8a8a8a)
                             })
-                            .child(item.title.clone()),
+                            .child(node.title.clone()),
                     ),
             );
         }
