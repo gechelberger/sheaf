@@ -39,6 +39,7 @@ pub struct Raster {
 /// Synchronous engine interface. Implementations may block.
 pub trait Renderer {
     fn page_count(&self) -> u32;
+    fn page_size(&self, page: PageIndex) -> Result<PageSize>;
     fn page_sizes(&self) -> Result<Vec<PageSize>>;
     /// Render a whole page scaled so its width is `target_width` device pixels.
     fn render_page(
@@ -122,9 +123,18 @@ pub mod pdfium {
             self.doc.pages().len() as u32
         }
 
+        fn page_size(&self, page: PageIndex) -> Result<PageSize> {
+            let r = self.doc.pages().page_size(page.0 as i32)?;
+            Ok(PageSize {
+                width: r.width().value,
+                height: r.height().value,
+            })
+        }
+
         fn page_sizes(&self) -> Result<Vec<PageSize>> {
-            // FPDF_GetPageSizeByIndexF: reads the page dictionary without
-            // loading page content, so this is cheap even for 1,000 pages.
+            // FPDF_GetPageSizeByIndexF reads the page dictionary without
+            // loading page content: ~30µs/page, so ~200ms for 7k pages. Cheap
+            // but not free, which is why DocInfo doesn't wait for it.
             Ok(self
                 .doc
                 .pages()
@@ -163,12 +173,15 @@ pub mod pdfium {
     }
 }
 
-/// What the worker learned about the document at open time.
+/// What the worker learned about the document at open time. Deliberately
+/// O(1) in page count so first paint doesn't wait on a 7,000-page walk; the
+/// full size table comes later via [`RenderHandle::page_sizes`].
 #[derive(Debug)]
 pub struct DocInfo {
     pub page_count: u32,
-    pub page_sizes: Vec<PageSize>,
-    /// Wall time to open and read page sizes.
+    /// Size of page 0, used as the layout estimate until all sizes arrive.
+    pub first_page: PageSize,
+    /// Wall time to read, parse, and size the first page.
     pub open_time: std::time::Duration,
 }
 
@@ -188,6 +201,7 @@ pub struct Rendered {
 
 enum Msg {
     Render(RenderRequest, oneshot::Sender<Result<Rendered>>),
+    PageSizes(oneshot::Sender<Result<Vec<PageSize>>>),
 }
 
 /// Handle to a render worker thread. Cheap to clone; the thread exits when the
@@ -216,9 +230,9 @@ impl RenderHandle {
                         return;
                     }
                 };
-                let info = engine.page_sizes().map(|page_sizes| DocInfo {
+                let info = engine.page_size(PageIndex(0)).map(|first_page| DocInfo {
                     page_count: engine.page_count(),
-                    page_sizes,
+                    first_page,
                     open_time: t.elapsed(),
                 });
                 let failed = info.is_err();
@@ -245,33 +259,85 @@ impl RenderHandle {
 
     /// Queue a render. The receiver resolves with `Err(Canceled)` if the
     /// request was superseded by a newer one for the same page before it ran.
+    /// Dropping the receiver before the worker gets to it skips the render.
     pub fn render(&self, request: RenderRequest) -> oneshot::Receiver<Result<Rendered>> {
         let (tx, rx) = oneshot::channel();
-        if self.tx.send(Msg::Render(request, tx)).is_err() {
+        self.send(Msg::Render(request, tx));
+        rx
+    }
+
+    /// Fetch the size of every page. Runs on the worker between renders.
+    pub fn page_sizes(&self) -> oneshot::Receiver<Result<Vec<PageSize>>> {
+        let (tx, rx) = oneshot::channel();
+        self.send(Msg::PageSizes(tx));
+        rx
+    }
+
+    fn send(&self, msg: Msg) {
+        if self.tx.send(msg).is_err() {
             log::error!("render thread is gone");
         }
-        rx
     }
 }
 
+/// Pages sized per chunk before checking the channel for render requests.
+const SIZE_CHUNK: u32 = 64;
+
+/// A page-size walk in progress, resumed between renders so a 7,000-page
+/// enumeration never delays a visible page.
+struct SizeWalk {
+    reply: oneshot::Sender<Result<Vec<PageSize>>>,
+    sizes: Vec<PageSize>,
+}
+
 fn worker_loop(engine: impl Renderer, rx: mpsc::Receiver<Msg>) {
-    while let Ok(first) = rx.recv() {
+    let page_count = engine.page_count();
+    let mut walk: Option<SizeWalk> = None;
+
+    loop {
+        // Block only when there's no background work to resume.
+        let first = if walk.is_some() {
+            match rx.try_recv() {
+                Ok(m) => Some(m),
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(mpsc::TryRecvError::Disconnected) => return,
+            }
+        } else {
+            match rx.recv() {
+                Ok(m) => Some(m),
+                Err(_) => return,
+            }
+        };
+
         // Drain whatever else is queued so a burst of requests for the same
         // page (resize storms, rapid flipping) collapses to the newest one.
-        let mut batch = vec![first];
+        let mut batch: Vec<Msg> = first.into_iter().collect();
         while let Ok(m) = rx.try_recv() {
             batch.push(m);
         }
         let mut latest: Vec<(RenderRequest, oneshot::Sender<Result<Rendered>>)> = Vec::new();
-        for Msg::Render(req, reply) in batch {
-            if let Some(pos) = latest.iter().position(|(r, _)| r.page == req.page) {
-                // Dropping the older sender cancels its receiver.
-                latest[pos] = (req, reply);
-            } else {
-                latest.push((req, reply));
+        for msg in batch {
+            match msg {
+                Msg::Render(req, reply) => {
+                    if let Some(pos) = latest.iter().position(|(r, _)| r.page == req.page) {
+                        // Dropping the older sender cancels its receiver.
+                        latest[pos] = (req, reply);
+                    } else {
+                        latest.push((req, reply));
+                    }
+                }
+                Msg::PageSizes(reply) => {
+                    walk = Some(SizeWalk {
+                        reply,
+                        sizes: Vec::with_capacity(page_count as usize),
+                    });
+                }
             }
         }
+
         for (req, reply) in latest {
+            // The viewer drops receivers for pages that scrolled out of view;
+            // don't waste the worker on them.
             if reply.is_canceled() {
                 continue;
             }
@@ -284,6 +350,31 @@ fn worker_loop(engine: impl Renderer, rx: mpsc::Receiver<Msg>) {
                     render_time: t.elapsed(),
                 });
             let _ = reply.send(result);
+        }
+
+        // Renders done; advance the size walk by one chunk.
+        if let Some(w) = &mut walk {
+            if w.reply.is_canceled() {
+                walk = None;
+                continue;
+            }
+            let from = w.sizes.len() as u32;
+            let to = (from + SIZE_CHUNK).min(page_count);
+            for i in from..to {
+                match engine.page_size(PageIndex(i)) {
+                    Ok(sz) => w.sizes.push(sz),
+                    Err(e) => {
+                        let _ = walk.take().unwrap().reply.send(Err(e));
+                        break;
+                    }
+                }
+            }
+            if let Some(w) = &walk
+                && w.sizes.len() as u32 >= page_count
+            {
+                let w = walk.take().unwrap();
+                let _ = w.reply.send(Ok(w.sizes));
+            }
         }
     }
 }
