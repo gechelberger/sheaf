@@ -562,7 +562,7 @@ impl Document {
                     st.pages.insert(at + k, p);
                 }
                 if let Some(items) = outline {
-                    let valid: Vec<PageId> = by_index.iter().copied().collect();
+                    let valid: Vec<PageId> = by_index.to_vec();
                     let incoming = self.outline_from_flat(&items, &valid);
                     // Targets outside the inserted range resolve to a sentinel; drop them.
                     let incoming = strip_targets(&incoming, PageId(u64::MAX));
@@ -617,10 +617,10 @@ impl Document {
                     }
                 }
                 // Extra replacements go after the last replaced page.
-                let mut at = last_pos.map(|i| i + 1).unwrap_or(pages.len());
-                for index in replacements {
+                let at = last_pos.map(|i| i + 1).unwrap_or(pages.len());
+                for (k, index) in replacements.enumerate() {
                     pages.insert(
-                        at,
+                        at + k,
                         PageRef {
                             id: self.fresh_page_id(),
                             source,
@@ -628,7 +628,6 @@ impl Document {
                             rotation: Rotation::R0,
                         },
                     );
-                    at += 1;
                     out.pages_added += 1;
                 }
                 if !extra_old.is_empty() {
