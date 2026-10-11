@@ -5033,6 +5033,7 @@ dependencies = [
  "im",
  "image",
  "log",
+ "regex",
  "sheaf-core",
  "sheaf-doc",
  "sheaf-render",
@@ -5068,6 +5069,7 @@ dependencies = [
  "image",
  "log",
  "pdfium-render",
+ "regex",
  "sheaf-core",
  "thiserror 2.0.21",
 ]

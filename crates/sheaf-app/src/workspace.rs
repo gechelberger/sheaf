@@ -11,7 +11,8 @@ use gpui::{
 
 use crate::docview::DocView;
 use crate::{
-    CloseTab, NextTab, OpenFile, PrevTab, Quit, ShowOutline, ShowThumbnails, ToggleSidebar,
+    CloseTab, NextTab, OpenFile, PrevTab, Quit, ShowOutline, ShowPatterns, ShowThumbnails,
+    ToggleSidebar,
 };
 
 pub const KEY_CONTEXT: &str = "Workspace";
@@ -26,7 +27,9 @@ pub struct Launch {
     pub selftest_save: Option<PathBuf>,
     /// Dev: insert this PDF after page 1 of the first document.
     pub selftest_insert: Option<PathBuf>,
-    pub start_with_bookmarks: bool,
+    pub start_panel: Option<String>,
+    /// Run this regex in the Patterns panel of the first document.
+    pub pattern: Option<String>,
     pub launched: Instant,
 }
 
@@ -37,6 +40,7 @@ const SIDEBAR_W: f32 = 220.0;
 pub enum Panel {
     Thumbnails,
     Outline,
+    Patterns,
 }
 
 pub struct Workspace {
@@ -56,17 +60,18 @@ impl Workspace {
             find,
             selftest_save,
             selftest_insert,
-            start_with_bookmarks,
+            start_panel,
+            pattern,
             launched,
         } = launch;
         let mut this = Self {
             docs: Vec::new(),
             active: 0,
             sidebar_open: true,
-            panel: if start_with_bookmarks {
-                Panel::Outline
-            } else {
-                Panel::Thumbnails
+            panel: match start_panel.as_deref() {
+                Some("bookmarks") => Panel::Outline,
+                Some("patterns") => Panel::Patterns,
+                _ => Panel::Thumbnails,
             },
             timing,
             launched,
@@ -82,6 +87,9 @@ impl Workspace {
         }
         if let (Some(p), Some(doc)) = (selftest_insert, this.docs.first().cloned()) {
             doc.update(cx, |d, _| d.set_selftest_insert(p));
+        }
+        if let (Some(p), Some(doc)) = (pattern, this.docs.first().cloned()) {
+            doc.update(cx, |d, _| d.set_initial_pattern(p));
         }
         this
     }
@@ -223,6 +231,7 @@ impl Workspace {
             Some(doc) => doc.update(cx, |d, cx| match panel {
                 Panel::Thumbnails => d.render_thumbnails(SIDEBAR_W, window, cx),
                 Panel::Outline => d.render_outline(window, cx),
+                Panel::Patterns => d.render_patterns(window, cx),
             }),
             None => div().into_any_element(),
         };
@@ -241,7 +250,8 @@ impl Workspace {
                     .gap_1()
                     .p_1()
                     .child(header_btn("Pages", Panel::Thumbnails, cx))
-                    .child(header_btn("Bookmarks", Panel::Outline, cx)),
+                    .child(header_btn("Bookmarks", Panel::Outline, cx))
+                    .child(header_btn("Patterns", Panel::Patterns, cx)),
             )
             .child(div().flex_1().min_h(px(0.0)).child(body))
             .into_any_element()
@@ -278,6 +288,14 @@ impl Render for Workspace {
             .on_action(cx.listener(|ws, _: &ShowThumbnails, _, cx| {
                 ws.sidebar_open = true;
                 ws.panel = Panel::Thumbnails;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|ws, _: &ShowPatterns, window, cx| {
+                ws.sidebar_open = true;
+                ws.panel = Panel::Patterns;
+                if let Some(doc) = ws.active_doc().cloned() {
+                    doc.update(cx, |d, cx| d.focus_pattern_input(window, cx));
+                }
                 cx.notify();
             }))
             .on_action(cx.listener(|ws, _: &ShowOutline, _, cx| {

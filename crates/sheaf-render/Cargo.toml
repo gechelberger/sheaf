@@ -12,6 +12,7 @@ thiserror.workspace = true
 log.workspace = true
 image.workspace = true
 futures.workspace = true
+regex.workspace = true
 
 [dev-dependencies]
 env_logger.workspace = true

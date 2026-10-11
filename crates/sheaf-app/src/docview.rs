@@ -225,7 +225,7 @@ pub(crate) struct Doc {
 }
 
 impl Doc {
-    fn primary(&self) -> &RenderHandle {
+    pub(crate) fn primary(&self) -> &RenderHandle {
         &self.handles[&self.model.primary()]
     }
 
@@ -235,7 +235,7 @@ impl Doc {
 
     /// Display index of the primary source's page `index`, if it's still in
     /// the document (search hits are reported in source pages).
-    fn index_of_source_page(&self, index: u32) -> Option<usize> {
+    pub(crate) fn index_of_source_page(&self, index: u32) -> Option<usize> {
         let primary = self.model.primary();
         self.model
             .state()
@@ -280,6 +280,8 @@ pub struct DocView {
     pub(crate) launched: Instant,
     pub(crate) state: State,
     pub(crate) search: Option<Search>,
+    pub(crate) pattern: Option<crate::pattern_panel::PatternSearch>,
+    pub(crate) initial_pattern: Option<String>,
     pub(crate) initial_query: Option<String>,
     pub(crate) search_started: Option<Instant>,
     pub(crate) selftest_save: Option<PathBuf>,
@@ -315,6 +317,8 @@ impl DocView {
             launched,
             state: State::Loading,
             search: None,
+            pattern: None,
+            initial_pattern: None,
             initial_query: None,
             search_started: None,
             selftest_save: None,
@@ -417,6 +421,9 @@ impl DocView {
                         }
                         if let Some(p) = viewer.selftest_insert.take() {
                             viewer.insert_pdf(p, cx);
+                        }
+                        if let Some(src) = viewer.initial_pattern.take() {
+                            viewer.run_initial_pattern(src, cx);
                         }
                         if let Some(q) = viewer.initial_query.take() {
                             viewer.new_search(cx);
@@ -1434,7 +1441,7 @@ fn to_render_image(raster: sheaf_render::Raster) -> RenderImage {
 
 /// Map a rect in a page's source orientation (size `src`) to where it lands
 /// after rotating the page clockwise by `rot`.
-fn rotate_rect(r: Rect, src: PageSize, rot: Rotation) -> Rect {
+pub(crate) fn rotate_rect(r: Rect, src: PageSize, rot: Rotation) -> Rect {
     match rot {
         Rotation::R0 => r,
         Rotation::R90 => Rect {
@@ -1828,6 +1835,44 @@ impl Render for DocView {
                                                 rgba(0xff9800a0)
                                             } else {
                                                 rgba(0xffe60070)
+                                            }),
+                                    );
+                                }
+                            }
+                        }
+                        // Pattern hits, in their own color.
+                        if let Some(ps) = &self.pattern
+                            && !ps.hits.is_empty()
+                            && pl.pref.source == primary
+                        {
+                            let src = doc
+                                .model
+                                .source(primary)
+                                .map(|s| s.page_size(pl.pref.index))
+                                .unwrap_or(PageSize {
+                                    width: 612.0,
+                                    height: 792.0,
+                                });
+                            let k = pl.w / src.rotated(pl.pref.rotation).width.max(1.0);
+                            let start = ps.hits.partition_point(|h| h.page < pl.pref.index);
+                            for (ix, hit) in ps.hits.iter().enumerate().skip(start) {
+                                if hit.page != pl.pref.index {
+                                    break;
+                                }
+                                let current = ps.current == Some(ix);
+                                for r in &hit.rects {
+                                    let r = rotate_rect(*r, src, pl.pref.rotation);
+                                    page_div = page_div.child(
+                                        div()
+                                            .absolute()
+                                            .left(px(r.x * k))
+                                            .top(px(r.y * k))
+                                            .w(px(r.w * k))
+                                            .h(px(r.h * k))
+                                            .bg(if current {
+                                                rgba(0xd040d0a0)
+                                            } else {
+                                                rgba(0x6aa6ff70)
                                             }),
                                     );
                                 }

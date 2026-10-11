@@ -89,6 +89,8 @@ pub struct Rect {
 pub struct SearchHit {
     pub page: u32,
     pub rects: Vec<Rect>,
+    /// The matched text.
+    pub text: String,
 }
 
 /// Progress of a document-wide search, streamed as pages are scanned.
@@ -111,6 +113,9 @@ pub trait Renderer {
     /// All matches of `query` on one page.
     fn search_page(&self, page: PageIndex, query: &str, match_case: bool)
     -> Result<Vec<SearchHit>>;
+    /// All matches of a regular expression on one page, run over the
+    /// page's extracted text.
+    fn pattern_search_page(&self, page: PageIndex, re: &regex::Regex) -> Result<Vec<SearchHit>>;
     /// Render a whole page scaled so its width is `target_width` device pixels.
     fn render(&self, page: PageIndex, job: Job, format: PixelFormat) -> Result<Raster>;
 
@@ -306,7 +311,9 @@ pub mod pdfium {
             let mut hits = Vec::new();
             for segments in search.iter(PdfSearchDirection::SearchForward) {
                 let mut rects = Vec::new();
+                let mut text = String::new();
                 for seg in segments.iter() {
+                    text.push_str(&seg.text());
                     let b = seg.bounds();
                     let (Some((x0, y0)), Some((x1, y1))) = (
                         to_display(b.left().value, b.bottom().value),
@@ -325,6 +332,96 @@ pub mod pdfium {
                     hits.push(SearchHit {
                         page: page.0,
                         rects,
+                        text,
+                    });
+                }
+            }
+            Ok(hits)
+        }
+
+        fn pattern_search_page(
+            &self,
+            page: PageIndex,
+            re: &regex::Regex,
+        ) -> Result<Vec<SearchHit>> {
+            let p = self.doc.pages().get(page.0 as i32)?;
+            let text = p.text()?;
+            let chars = text.chars();
+            if chars.is_empty() {
+                return Ok(Vec::new());
+            }
+
+            // Build the page string and remember each char's byte offset and
+            // box, so regex byte ranges map back to glyphs. Generated chars
+            // (synthesized spaces/newlines) still count — "\b" needs them —
+            // but carry no box so they never draw.
+            let mut s = String::with_capacity(chars.len());
+            let mut starts: Vec<usize> = Vec::with_capacity(chars.len());
+            let mut boxes: Vec<Option<PdfRect>> = Vec::with_capacity(chars.len());
+            for c in chars.iter() {
+                let ch = c.unicode_char().unwrap_or(' ');
+                starts.push(s.len());
+                s.push(ch);
+                let generated = c.is_generated().unwrap_or(false);
+                boxes.push(if generated {
+                    None
+                } else {
+                    c.loose_bounds().ok()
+                });
+            }
+
+            const SCALE: f32 = 16.0;
+            let (pw, ph) = (p.width().value, p.height().value);
+            let cfg =
+                PdfRenderConfig::new().set_fixed_size((pw * SCALE) as i32, (ph * SCALE) as i32);
+            let to_display = |x: f32, y: f32| -> Option<(f32, f32)> {
+                let (dx, dy) = p
+                    .points_to_pixels(PdfPoints::new(x), PdfPoints::new(y), &cfg)
+                    .ok()?;
+                Some((dx as f32 / SCALE, dy as f32 / SCALE))
+            };
+            let display_rect = |b: &PdfRect| -> Option<Rect> {
+                let (x0, y0) = to_display(b.left().value, b.bottom().value)?;
+                let (x1, y1) = to_display(b.right().value, b.top().value)?;
+                Some(Rect {
+                    x: x0.min(x1),
+                    y: y0.min(y1),
+                    w: (x1 - x0).abs(),
+                    h: (y1 - y0).abs(),
+                })
+            };
+
+            let mut hits = Vec::new();
+            for m in re.find_iter(&s) {
+                if m.is_empty() {
+                    continue;
+                }
+                let first = starts.partition_point(|&b| b < m.start());
+                let last = starts.partition_point(|&b| b < m.end());
+                // Merge glyph boxes into one rect per line.
+                let mut rects: Vec<Rect> = Vec::new();
+                for b in boxes[first..last].iter().flatten() {
+                    let Some(r) = display_rect(b) else { continue };
+                    match rects.last_mut() {
+                        Some(prev)
+                            if (prev.y - r.y).abs() < prev.h.max(r.h) * 0.5
+                                && r.x >= prev.x - 1.0 =>
+                        {
+                            let right = (prev.x + prev.w).max(r.x + r.w);
+                            let bottom = (prev.y + prev.h).max(r.y + r.h);
+                            prev.x = prev.x.min(r.x);
+                            prev.y = prev.y.min(r.y);
+                            prev.w = right - prev.x;
+                            prev.h = bottom - prev.y;
+                        }
+                        _ => rects.push(r),
+                    }
+                }
+                if !rects.is_empty() {
+                    hits.push(SearchHit {
+                        page: page.0,
+                        rects,
+                        text: m.as_str().to_string(),
                     });
                 }
             }
@@ -427,13 +524,19 @@ pub struct Rendered {
     pub render_time: std::time::Duration,
 }
 
+/// What a document-wide search looks for.
+#[derive(Clone)]
+pub enum Matcher {
+    Literal { query: String, match_case: bool },
+    Pattern(std::sync::Arc<regex::Regex>),
+}
+
 enum Msg {
     Render(RenderRequest, oneshot::Sender<Result<Rendered>>),
     PageSizes(oneshot::Sender<Result<Vec<PageSize>>>),
     Outline(oneshot::Sender<Result<Vec<OutlineItem>>>),
     Search {
-        query: String,
-        match_case: bool,
+        matcher: Matcher,
         tx: futures::channel::mpsc::UnboundedSender<SearchEvent>,
     },
 }
@@ -521,12 +624,23 @@ impl RenderHandle {
         query: String,
         match_case: bool,
     ) -> futures::channel::mpsc::UnboundedReceiver<SearchEvent> {
+        self.search_with(Matcher::Literal { query, match_case })
+    }
+
+    /// Start a regex search over every page's text.
+    pub fn pattern_search(
+        &self,
+        re: std::sync::Arc<regex::Regex>,
+    ) -> futures::channel::mpsc::UnboundedReceiver<SearchEvent> {
+        self.search_with(Matcher::Pattern(re))
+    }
+
+    fn search_with(
+        &self,
+        matcher: Matcher,
+    ) -> futures::channel::mpsc::UnboundedReceiver<SearchEvent> {
         let (tx, rx) = futures::channel::mpsc::unbounded();
-        self.send(Msg::Search {
-            query,
-            match_case,
-            tx,
-        });
+        self.send(Msg::Search { matcher, tx });
         rx
     }
 
@@ -552,8 +666,7 @@ const SEARCH_CHUNK: u32 = 4;
 
 /// A document search in progress, likewise resumed between renders.
 struct SearchWalk {
-    query: String,
-    match_case: bool,
+    matcher: Matcher,
     next: u32,
     tx: futures::channel::mpsc::UnboundedSender<SearchEvent>,
 }
@@ -601,14 +714,9 @@ fn worker_loop(engine: impl Renderer, rx: mpsc::Receiver<Msg>) {
                 Msg::Outline(reply) => {
                     let _ = reply.send(engine.outline());
                 }
-                Msg::Search {
-                    query,
-                    match_case,
-                    tx,
-                } => {
+                Msg::Search { matcher, tx } => {
                     search = Some(SearchWalk {
-                        query,
-                        match_case,
+                        matcher,
                         next: 0,
                         tx,
                     });
@@ -647,7 +755,13 @@ fn worker_loop(engine: impl Renderer, rx: mpsc::Receiver<Msg>) {
             } else {
                 let to = (sw.next + SEARCH_CHUNK).min(page_count);
                 for i in sw.next..to {
-                    match engine.search_page(PageIndex(i), &sw.query, sw.match_case) {
+                    let found = match &sw.matcher {
+                        Matcher::Literal { query, match_case } => {
+                            engine.search_page(PageIndex(i), query, *match_case)
+                        }
+                        Matcher::Pattern(re) => engine.pattern_search_page(PageIndex(i), re),
+                    };
+                    match found {
                         Ok(hits) if !hits.is_empty() => {
                             let _ = sw.tx.unbounded_send(SearchEvent::Hits(hits));
                         }

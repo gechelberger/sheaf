@@ -1,6 +1,6 @@
 //! M0 spike: render pages of a PDF to PNG via PDFium and report timings.
 //!
-//!     cargo run -p sheaf-render --example render_page [input.pdf] [max_pages]
+//!     cargo run -p sheaf-render --example render_page [input.pdf] [max_pages] [query [--re]]
 //!
 //! Defaults to target/spike/synth.pdf (produced by the sheaf-doc roundtrip
 //! spike). PNGs land in target/spike/.
@@ -62,7 +62,10 @@ fn main() -> Result<()> {
     if let Some(query) = std::env::args().nth(3) {
         for i in 0..r.page_count().min(max_pages) {
             let t = Instant::now();
-            let hits = r.search_page(PageIndex(i), &query, false)?;
+            let hits = match std::env::args().nth(4).as_deref() {
+                Some("--re") => r.pattern_search_page(PageIndex(i), &regex::Regex::new(&query)?)?,
+                _ => r.search_page(PageIndex(i), &query, false)?,
+            };
             println!(
                 "  page {i}: {} hits for {query:?} in {:?}",
                 hits.len(),

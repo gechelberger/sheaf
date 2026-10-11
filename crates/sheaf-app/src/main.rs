@@ -4,6 +4,7 @@
 
 mod docview;
 mod outline_panel;
+mod pattern_panel;
 mod text_input;
 mod workspace;
 
@@ -68,6 +69,7 @@ actions!(
         ToggleSidebar,
         ShowThumbnails,
         ShowOutline,
+        ShowPatterns,
         NextTab,
         PrevTab,
         CloseTab,
@@ -85,8 +87,10 @@ struct Cli {
     selftest_save: Option<PathBuf>,
     /// Dev: insert this PDF after page 1 of the first document.
     selftest_insert: Option<PathBuf>,
-    /// Sidebar panel to open with: "pages" (default) or "bookmarks".
+    /// Sidebar panel to open with: "pages" (default), "bookmarks" or "patterns".
     panel: Option<String>,
+    /// Run this regex in the Patterns panel once the first document loads.
+    pattern: Option<String>,
 }
 
 fn parse_cli() -> Cli {
@@ -97,6 +101,7 @@ fn parse_cli() -> Cli {
         selftest_save: None,
         selftest_insert: None,
         panel: None,
+        pattern: None,
     };
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {
@@ -106,6 +111,9 @@ fn parse_cli() -> Cli {
             Some("--selftest-save") => cli.selftest_save = args.next().map(PathBuf::from),
             Some("--selftest-insert") => cli.selftest_insert = args.next().map(PathBuf::from),
             Some("--panel") => cli.panel = args.next().and_then(|p| p.to_str().map(String::from)),
+            Some("--pattern") => {
+                cli.pattern = args.next().and_then(|p| p.to_str().map(String::from))
+            }
             Some(s) if s.starts_with("--") => eprintln!("unknown flag {s}"),
             _ => cli.paths.push(arg.into()),
         }
@@ -119,6 +127,7 @@ fn main() {
     let cli = parse_cli();
 
     application().run(move |cx: &mut App| {
+        let mut cli = cli;
         let doc = Some(docview::KEY_CONTEXT);
         let ws = Some(workspace::KEY_CONTEXT);
         let ti = Some(text_input::KEY_CONTEXT);
@@ -183,6 +192,7 @@ fn main() {
             KeyBinding::new("f4", ToggleSidebar, ws),
             KeyBinding::new("ctrl-shift-p", ShowThumbnails, ws),
             KeyBinding::new("ctrl-shift-b", ShowOutline, ws),
+            KeyBinding::new("ctrl-shift-f", ShowPatterns, ws),
             KeyBinding::new("ctrl-tab", NextTab, ws),
             KeyBinding::new("ctrl-shift-tab", PrevTab, ws),
             KeyBinding::new("ctrl-pagedown", NextTab, ws),
@@ -211,7 +221,8 @@ fn main() {
                             find: cli.find,
                             selftest_save: cli.selftest_save,
                             selftest_insert: cli.selftest_insert,
-                            start_with_bookmarks: cli.panel.as_deref() == Some("bookmarks"),
+                            start_panel: cli.panel.take(),
+                            pattern: cli.pattern.take(),
                             launched,
                         },
                         cx,
