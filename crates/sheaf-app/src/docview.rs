@@ -22,7 +22,9 @@ use gpui::{
 };
 use sheaf_core::{PageIndex, PageSize, Rotation};
 use sheaf_doc::save;
-use sheaf_doc::{Annot, AnnotKind, Box2, Pt};
+use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, Pt};
+
+use crate::markup_tools::{Drag, Tool, arrow_head, rotate_pt, stroke_canvas};
 use sheaf_doc::{
     Document, Edit, FlatOutlineItem, OutlineId, PageId, PageRef, SourceId, SourceInfo,
 };
@@ -35,8 +37,9 @@ use crate::text_input::{TextInput, TextInputEvent};
 use crate::{
     CloseSearch, DeletePage, DuplicatePages, Find, FirstPage, InsertPdf, LastPage, LineDown,
     LineUp, NewBookmark, NextPage, PrevPage, Redo, RotatePageCcw, RotatePageCw, Save, SaveAs,
-    ScreenDown, ScreenUp, SearchNext, SearchPrev, SelectAllPages, Undo, ZoomActual, ZoomFitPage,
-    ZoomFitWidth, ZoomIn, ZoomOut,
+    ScreenDown, ScreenUp, SearchNext, SearchPrev, SelectAllPages, ToolArrow, ToolEllipse,
+    ToolFreeText, ToolHighlight, ToolInk, ToolLine, ToolNote, ToolSelect, ToolSquare, ToolTick,
+    Undo, ZoomActual, ZoomFitPage, ZoomFitWidth, ZoomIn, ZoomOut,
 };
 
 pub const KEY_CONTEXT: &str = "DocView";
@@ -84,20 +87,20 @@ pub(crate) enum State {
 /// Page geometry in logical px at the current zoom, for one snapshot of the
 /// page sequence.
 pub(crate) struct Layout {
-    zoom: Zoom,
-    view_w: f32,
-    view_h: f32,
-    version: u64,
+    pub(crate) zoom: Zoom,
+    pub(crate) view_w: f32,
+    pub(crate) view_h: f32,
+    pub(crate) version: u64,
     /// Logical px per PDF point.
-    k: f32,
-    refs: Vec<PageRef>,
-    widths: Vec<f32>,
-    heights: Vec<f32>,
-    tops: Vec<f32>,
-    lefts: Vec<f32>,
+    pub(crate) k: f32,
+    pub(crate) refs: Vec<PageRef>,
+    pub(crate) widths: Vec<f32>,
+    pub(crate) heights: Vec<f32>,
+    pub(crate) tops: Vec<f32>,
+    pub(crate) lefts: Vec<f32>,
     /// Scrollable content size.
-    total_w: f32,
-    total_h: f32,
+    pub(crate) total_w: f32,
+    pub(crate) total_h: f32,
 }
 
 impl Layout {
@@ -156,12 +159,12 @@ impl Layout {
         }
     }
 
-    fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.refs.len()
     }
 
     /// Page whose vertical span contains `y` (or the last one that starts above it).
-    fn page_at(&self, y: f32) -> usize {
+    pub(crate) fn page_at(&self, y: f32) -> usize {
         self.tops.partition_point(|&top| top <= y).saturating_sub(1)
     }
 
@@ -223,6 +226,10 @@ pub(crate) struct Doc {
     pub(crate) outline_menu: Option<(OutlineId, gpui::Point<gpui::Pixels>)>,
     /// Rows as last rendered: (id, depth, display index of target).
     pub(crate) outline_rows: Vec<(OutlineId, u16, Option<usize>)>,
+    // Markup tool state (see markup_tools.rs).
+    pub(crate) drag: Option<Drag>,
+    pub(crate) selected_annot: Option<(PageId, AnnotId)>,
+    pub(crate) annot_editor: Option<AnnotEditor>,
 }
 
 impl Doc {
@@ -287,6 +294,14 @@ pub(crate) enum ScrollTo {
     },
 }
 
+/// Inline editor for an annotation's text.
+pub(crate) struct AnnotEditor {
+    pub page: PageId,
+    pub id: AnnotId,
+    pub input: Entity<TextInput>,
+    pub _sub: Subscription,
+}
+
 pub struct DocView {
     pub(crate) focus_handle: FocusHandle,
     pub(crate) path: PathBuf,
@@ -305,6 +320,9 @@ pub struct DocView {
     pub(crate) pending_outline_focus: bool,
     pub(crate) selftest_insert: Option<PathBuf>,
     pub(crate) selftest_annot: Option<PathBuf>,
+    pub(crate) tool: Tool,
+    pub(crate) tool_color: [u8; 3],
+    pub(crate) tick_glyph: String,
 }
 
 /// An open search bar and the running / finished query behind it.
@@ -341,6 +359,9 @@ impl DocView {
             pending_outline_focus: false,
             selftest_insert: None,
             selftest_annot: None,
+            tool: Tool::Select,
+            tool_color: [255, 230, 0],
+            tick_glyph: "✓".into(),
         };
         this.open(cx);
         this
@@ -429,6 +450,9 @@ impl DocView {
                             outline_rename: None,
                             outline_menu: None,
                             outline_rows: Vec::new(),
+                            drag: None,
+                            selected_annot: None,
+                            annot_editor: None,
                         }));
                         viewer.fetch_page_sizes(cx);
                         viewer.fetch_outline(cx);
@@ -667,6 +691,15 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
+        if let Some((pid, aid)) = doc.selected_annot
+            && !doc
+                .model
+                .state()
+                .annots_on(pid)
+                .is_some_and(|l| l.iter().any(|a| a.id == aid))
+        {
+            doc.selected_annot = None;
+        }
         let live: HashSet<PageId> = doc.model.state().pages.iter().map(|p| p.id).collect();
         doc.selection.retain(|id| live.contains(id));
     }
@@ -1072,11 +1105,93 @@ impl DocView {
             [200, 0, 0],
         );
         self.add_annot(p0, tick2, "Tickmark", cx);
+        let arrow = self.new_annot(
+            AnnotKind::Line {
+                a: Pt { x: 80.0, y: 220.0 },
+                b: Pt { x: 300.0, y: 260.0 },
+                arrow: true,
+            },
+            [0, 120, 255],
+        );
+        self.add_annot(p0, arrow, "Arrow", cx);
+        let mut ink = self.new_annot(
+            AnnotKind::Ink {
+                paths: vec![
+                    (0..40)
+                        .map(|i| Pt {
+                            x: 350.0 + i as f32 * 5.0,
+                            y: 240.0 + (i as f32 * 0.5).sin() * 20.0,
+                        })
+                        .collect(),
+                ],
+            },
+            [160, 60, 220],
+        );
+        ink.stroke = 2.5;
+        self.add_annot(p0, ink, "Pencil", cx);
         self.save_to(path, cx);
     }
 
     pub fn set_selftest_annot(&mut self, path: PathBuf) {
         self.selftest_annot = Some(path);
+    }
+
+    /// Open an inline text field for the contents of the most recently
+    /// added annotation on `page` (notes and free text).
+    pub(crate) fn start_annot_editor(
+        &mut self,
+        page: PageId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let State::Ready(doc) = &mut self.state else {
+            return;
+        };
+        let Some(annot) = doc
+            .model
+            .state()
+            .annots_on(page)
+            .and_then(|l| l.last().cloned())
+        else {
+            return;
+        };
+        let id = annot.id;
+        let input = cx.new(|cx| {
+            let mut i = TextInput::new("Type, then Enter", cx);
+            i.set_text(annot.contents.clone(), cx);
+            i
+        });
+        let sub = cx.subscribe(&input, move |this, input, ev: &TextInputEvent, cx| {
+            let text = input.read(cx).text().to_string();
+            if *ev == TextInputEvent::Confirm
+                && let State::Ready(doc) = &this.state
+                && let Some(cur) = doc
+                    .model
+                    .state()
+                    .annots_on(page)
+                    .and_then(|l| l.iter().find(|a| a.id == id).cloned())
+                && cur.contents != text
+            {
+                let mut upd = cur;
+                upd.contents = text;
+                upd.modified = sheaf_doc::pdf_date_now();
+                this.apply(Edit::AnnotUpdate { page, annot: upd }, "Edit text", cx);
+            }
+            if let State::Ready(doc) = &mut this.state {
+                doc.annot_editor = None;
+            }
+            this.pending_focus = true;
+            cx.notify();
+        });
+        window.focus(&input.read(cx).focus_handle(cx), cx);
+        doc.annot_editor = Some(AnnotEditor {
+            page,
+            id,
+            input,
+            _sub: sub,
+        });
+        doc.selected_annot = Some((page, id));
+        cx.notify();
     }
 
     // ----- insert pdf ---------------------------------------------------------
@@ -1689,6 +1804,7 @@ impl Focusable for DocView {
 /// Everything `render` decides for one page: where it goes and which tiles
 /// cover the visible part of it.
 struct PagePlan {
+    index: usize,
     pref: PageRef,
     left: f32,
     top: f32,
@@ -1717,6 +1833,9 @@ impl Render for DocView {
         }
 
         let search_bar = self.render_search_bar(cx);
+        let toolbar = self.render_toolbar(cx);
+        let page_cursor = self.page_cursor();
+        let (tool, tool_color) = (self.tool, self.tool_color);
         let mut body = None;
         let mut wants: Vec<(PageRef, RenderRequest)> = Vec::new();
         let status: SharedString = match &mut self.state {
@@ -1894,6 +2013,7 @@ impl Render for DocView {
                             ));
                         }
                         plans.push(PagePlan {
+                            index: i,
                             pref,
                             left,
                             top,
@@ -2109,6 +2229,88 @@ impl Render for DocView {
                                     page_div.children(annot_elements(a, src, pl.pref.rotation, k));
                             }
                         }
+                        // Selection outline, inline editor, drag preview.
+                        {
+                            let src = doc
+                                .model
+                                .source(pl.pref.source)
+                                .map(|s| s.page_size(pl.pref.index))
+                                .unwrap_or(PageSize {
+                                    width: 612.0,
+                                    height: 792.0,
+                                });
+                            let k = pl.w / src.rotated(pl.pref.rotation).width.max(1.0);
+                            if let Some((pid, aid)) = doc.selected_annot
+                                && pid == pl.pref.id
+                                && let Some(a) = doc
+                                    .model
+                                    .state()
+                                    .annots_on(pid)
+                                    .and_then(|l| l.iter().find(|a| a.id == aid))
+                            {
+                                let b = a.bounds();
+                                let r = rotate_rect(
+                                    Rect {
+                                        x: b.x - 2.0,
+                                        y: b.y - 2.0,
+                                        w: b.w + 4.0,
+                                        h: b.h + 4.0,
+                                    },
+                                    src,
+                                    pl.pref.rotation,
+                                );
+                                page_div = page_div.child(
+                                    div()
+                                        .absolute()
+                                        .left(px(r.x * k))
+                                        .top(px(r.y * k))
+                                        .w(px(r.w * k))
+                                        .h(px(r.h * k))
+                                        .border_1()
+                                        .border_dashed()
+                                        .border_color(rgb(0x4a9eff)),
+                                );
+                            }
+                            if let Some(ed) = &doc.annot_editor
+                                && ed.page == pl.pref.id
+                                && let Some(a) = doc
+                                    .model
+                                    .state()
+                                    .annots_on(ed.page)
+                                    .and_then(|l| l.iter().find(|a| a.id == ed.id))
+                            {
+                                let b = a.bounds();
+                                let r = rotate_rect(
+                                    Rect {
+                                        x: b.x,
+                                        y: b.y + b.h + 2.0,
+                                        w: b.w,
+                                        h: 24.0,
+                                    },
+                                    src,
+                                    pl.pref.rotation,
+                                );
+                                page_div = page_div.child(
+                                    div()
+                                        .absolute()
+                                        .left(px(r.x * k))
+                                        .top(px(r.y * k))
+                                        .w(px(240.0))
+                                        .child(ed.input.clone()),
+                                );
+                            }
+                            if let Some(preview) = DocView::drag_preview(
+                                doc,
+                                tool,
+                                tool_color,
+                                pl.index,
+                                src,
+                                pl.pref.rotation,
+                                k,
+                            ) {
+                                page_div = page_div.child(preview);
+                            }
+                        }
                         page_div
                     })
                     .collect();
@@ -2121,6 +2323,22 @@ impl Render for DocView {
                         .size_full()
                         .on_scroll_wheel(
                             cx.listener(|v, ev, window, cx| v.on_wheel(ev, window, cx)),
+                        )
+                        .cursor(page_cursor)
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(|v, ev, window, cx| v.on_page_mouse_down(ev, window, cx)),
+                        )
+                        .on_mouse_move(
+                            cx.listener(|v, ev, window, cx| v.on_page_mouse_move(ev, window, cx)),
+                        )
+                        .on_mouse_up(
+                            gpui::MouseButton::Left,
+                            cx.listener(|v, ev, window, cx| v.on_page_mouse_up(ev, window, cx)),
+                        )
+                        .on_mouse_up_out(
+                            gpui::MouseButton::Left,
+                            cx.listener(|v, ev, window, cx| v.on_page_mouse_up(ev, window, cx)),
                         )
                         .child(
                             div()
@@ -2195,6 +2413,13 @@ impl Render for DocView {
                 if v.search.is_some() {
                     v.close_search(window, cx)
                 } else {
+                    if let State::Ready(doc) = &mut v.state {
+                        doc.selected_annot = None;
+                        doc.drag = None;
+                    }
+                    if v.tool != Tool::Select {
+                        v.set_tool(Tool::Select, cx);
+                    }
                     v.clear_selection(cx)
                 }
             }))
@@ -2206,7 +2431,11 @@ impl Render for DocView {
             .on_action(
                 cx.listener(|v, _: &RotatePageCcw, _, cx| v.rotate_current(Rotation::R270, cx)),
             )
-            .on_action(cx.listener(|v, _: &DeletePage, _, cx| v.delete_current(cx)))
+            .on_action(cx.listener(|v, _: &DeletePage, _, cx| {
+                if !v.delete_selected_annot(cx) {
+                    v.delete_current(cx)
+                }
+            }))
             .on_action(cx.listener(|v, _: &DuplicatePages, _, cx| v.duplicate_current(cx)))
             .on_action(cx.listener(|v, _: &SelectAllPages, _, cx| v.select_all(cx)))
             .on_action(cx.listener(|v, _: &Save, _, cx| {
@@ -2215,6 +2444,16 @@ impl Render for DocView {
             }))
             .on_action(cx.listener(|v, _: &SaveAs, _, cx| v.save_as(cx)))
             .on_action(cx.listener(|v, _: &InsertPdf, _, cx| v.insert_pdf_prompt(cx)))
+            .on_action(cx.listener(|v, _: &ToolSelect, _, cx| v.set_tool(Tool::Select, cx)))
+            .on_action(cx.listener(|v, _: &ToolNote, _, cx| v.set_tool(Tool::Note, cx)))
+            .on_action(cx.listener(|v, _: &ToolHighlight, _, cx| v.set_tool(Tool::Highlight, cx)))
+            .on_action(cx.listener(|v, _: &ToolFreeText, _, cx| v.set_tool(Tool::FreeText, cx)))
+            .on_action(cx.listener(|v, _: &ToolSquare, _, cx| v.set_tool(Tool::Square, cx)))
+            .on_action(cx.listener(|v, _: &ToolEllipse, _, cx| v.set_tool(Tool::Ellipse, cx)))
+            .on_action(cx.listener(|v, _: &ToolLine, _, cx| v.set_tool(Tool::Line, cx)))
+            .on_action(cx.listener(|v, _: &ToolArrow, _, cx| v.set_tool(Tool::Arrow, cx)))
+            .on_action(cx.listener(|v, _: &ToolInk, _, cx| v.set_tool(Tool::Ink, cx)))
+            .on_action(cx.listener(|v, _: &ToolTick, _, cx| v.set_tool(Tool::Tick, cx)))
             .on_action(cx.listener(|v, _: &NewBookmark, window, cx| v.new_bookmark(window, cx)))
             .on_action(cx.listener(|v, _: &Undo, _, cx| v.undo(cx)))
             .on_action(cx.listener(|v, _: &Redo, _, cx| v.redo(cx)))
@@ -2224,6 +2463,7 @@ impl Render for DocView {
             .bg(rgb(0x2b2b2b))
             .text_color(rgb(0xd0d0d0))
             .children(search_bar)
+            .child(toolbar)
             .child(div().flex_grow(1.0).min_h(px(0.0)).children(body))
             .child(
                 div()
@@ -2511,7 +2751,7 @@ impl Render for DragPreview {
 /// GPUI elements for one annotation, positioned in page-local logical px.
 /// `src` is the source page size, `rot` the page's extra rotation, `k` logical
 /// px per point.
-fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) -> Vec<AnyElement> {
+pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) -> Vec<AnyElement> {
     let rgb_u32 = ((a.color[0] as u32) << 16) | ((a.color[1] as u32) << 8) | a.color[2] as u32;
     let color = rgb(rgb_u32);
     let alpha = (a.opacity.clamp(0.0, 1.0) * 255.0) as u32;
@@ -2605,15 +2845,44 @@ fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) -> Vec<AnyEle
                     .into_any_element(),
             );
         }
-        // Lines and ink need path drawing; a bounding box stands in until
-        // the canvas-based renderer lands with the drawing tools.
-        AnnotKind::Line { .. } | AnnotKind::Ink { .. } => {
-            out.push(
-                place(a.bounds())
-                    .border_1()
-                    .border_color(color)
-                    .into_any_element(),
-            );
+        AnnotKind::Line {
+            a: pa,
+            b: pb,
+            arrow,
+        } => {
+            let (qa, qb) = (rotate_pt(*pa, src, rot), rotate_pt(*pb, src, rot));
+            let (a2, b2) = ((qa.x * k, qa.y * k), (qb.x * k, qb.y * k));
+            let mut paths = vec![vec![a2, b2]];
+            if *arrow {
+                paths.push(arrow_head(a2, b2, (6.0 + a.stroke * 2.0) * k));
+            }
+            out.push(stroke_canvas(
+                paths,
+                color,
+                a.stroke * k,
+                src.rotated(rot),
+                k,
+            ));
+        }
+        AnnotKind::Ink { paths } => {
+            let polylines: Vec<Vec<(f32, f32)>> = paths
+                .iter()
+                .map(|p| {
+                    p.iter()
+                        .map(|q| {
+                            let r = rotate_pt(*q, src, rot);
+                            (r.x * k, r.y * k)
+                        })
+                        .collect()
+                })
+                .collect();
+            out.push(stroke_canvas(
+                polylines,
+                color,
+                a.stroke * k,
+                src.rotated(rot),
+                k,
+            ));
         }
     }
     out

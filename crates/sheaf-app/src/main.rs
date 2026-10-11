@@ -3,6 +3,7 @@
 //!     sheaf [--timing] [file.pdf ...]
 
 mod docview;
+mod markup_tools;
 mod outline_panel;
 mod pattern_panel;
 mod text_input;
@@ -50,6 +51,21 @@ actions!(
         SaveAs,
         InsertPdf,
         NewBookmark
+    ]
+);
+actions!(
+    tools,
+    [
+        ToolSelect,
+        ToolNote,
+        ToolHighlight,
+        ToolFreeText,
+        ToolSquare,
+        ToolEllipse,
+        ToolLine,
+        ToolArrow,
+        ToolInk,
+        ToolTick
     ]
 );
 actions!(
@@ -173,6 +189,17 @@ fn main() {
             KeyBinding::new("f2", RenameBookmark, outline),
             KeyBinding::new("delete", DeleteBookmark, outline),
             KeyBinding::new("escape", DeselectBookmark, outline),
+            // Markup tools (Acrobat's single-key accelerators where it has them).
+            KeyBinding::new("v", ToolSelect, doc),
+            KeyBinding::new("s", ToolNote, doc),
+            KeyBinding::new("u", ToolHighlight, doc),
+            KeyBinding::new("t", ToolFreeText, doc),
+            KeyBinding::new("d", ToolSquare, doc),
+            KeyBinding::new("o", ToolEllipse, doc),
+            KeyBinding::new("l", ToolLine, doc),
+            KeyBinding::new("a", ToolArrow, doc),
+            KeyBinding::new("n", ToolInk, doc),
+            KeyBinding::new("k", ToolTick, doc),
             KeyBinding::new("ctrl-f", Find, doc),
             KeyBinding::new("escape", CloseSearch, doc),
             KeyBinding::new("f3", SearchNext, doc),

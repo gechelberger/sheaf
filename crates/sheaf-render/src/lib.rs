@@ -119,6 +119,9 @@ pub trait Renderer {
     /// Hide (from rendering) every annotation on `page` whose /NM starts
     /// with `sheaf:`; the app draws those itself. Returns how many.
     fn hide_sheaf_annots(&self, page: PageIndex) -> Result<usize>;
+    /// Glyph boxes (merged per line) of text intersecting `rect`, in the
+    /// page's displayed space. Used to turn a drag into a text highlight.
+    fn text_boxes_in_rect(&self, page: PageIndex, rect: Rect) -> Result<Vec<Rect>>;
     /// Render a whole page scaled so its width is `target_width` device pixels.
     fn render(&self, page: PageIndex, job: Job, format: PixelFormat) -> Result<Raster>;
 
@@ -342,6 +345,60 @@ pub mod pdfium {
             Ok(hits)
         }
 
+        fn text_boxes_in_rect(&self, page: PageIndex, rect: Rect) -> Result<Vec<Rect>> {
+            let p = self.doc.pages().get(page.0 as i32)?;
+            let text = p.text()?;
+            const SCALE: f32 = 16.0;
+            let (pw, ph) = (p.width().value, p.height().value);
+            let cfg =
+                PdfRenderConfig::new().set_fixed_size((pw * SCALE) as i32, (ph * SCALE) as i32);
+            let to_display = |x: f32, y: f32| -> Option<(f32, f32)> {
+                let (dx, dy) = p
+                    .points_to_pixels(PdfPoints::new(x), PdfPoints::new(y), &cfg)
+                    .ok()?;
+                Some((dx as f32 / SCALE, dy as f32 / SCALE))
+            };
+            let (rx0, ry0, rx1, ry1) = (rect.x, rect.y, rect.x + rect.w, rect.y + rect.h);
+            let mut rects: Vec<Rect> = Vec::new();
+            for c in text.chars().iter() {
+                if c.is_generated().unwrap_or(false) {
+                    continue;
+                }
+                let Ok(b) = c.loose_bounds() else { continue };
+                let (Some((x0, y0)), Some((x1, y1))) = (
+                    to_display(b.left().value, b.bottom().value),
+                    to_display(b.right().value, b.top().value),
+                ) else {
+                    continue;
+                };
+                let r = Rect {
+                    x: x0.min(x1),
+                    y: y0.min(y1),
+                    w: (x1 - x0).abs(),
+                    h: (y1 - y0).abs(),
+                };
+                // Keep glyphs whose centre is inside the drag rectangle.
+                let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+                if cx < rx0 || cx > rx1 || cy < ry0 || cy > ry1 {
+                    continue;
+                }
+                match rects.last_mut() {
+                    Some(prev)
+                        if (prev.y - r.y).abs() < prev.h.max(r.h) * 0.5 && r.x >= prev.x - 1.0 =>
+                    {
+                        let right = (prev.x + prev.w).max(r.x + r.w);
+                        let bottom = (prev.y + prev.h).max(r.y + r.h);
+                        prev.x = prev.x.min(r.x);
+                        prev.y = prev.y.min(r.y);
+                        prev.w = right - prev.x;
+                        prev.h = bottom - prev.y;
+                    }
+                    _ => rects.push(r),
+                }
+            }
+            Ok(rects)
+        }
+
         fn hide_sheaf_annots(&self, page: PageIndex) -> Result<usize> {
             let mut p = self.doc.pages().get(page.0 as i32)?;
             let annots = p.annotations_mut();
@@ -553,6 +610,11 @@ enum Msg {
     Render(RenderRequest, oneshot::Sender<Result<Rendered>>),
     PageSizes(oneshot::Sender<Result<Vec<PageSize>>>),
     Outline(oneshot::Sender<Result<Vec<OutlineItem>>>),
+    TextBoxes {
+        page: u32,
+        rect: Rect,
+        reply: oneshot::Sender<Result<Vec<Rect>>>,
+    },
     HideAnnots {
         pages: Vec<u32>,
         reply: oneshot::Sender<Result<usize>>,
@@ -637,6 +699,21 @@ impl RenderHandle {
     pub fn hide_sheaf_annots(&self, pages: Vec<u32>) -> oneshot::Receiver<Result<usize>> {
         let (tx, rx) = oneshot::channel();
         self.send(Msg::HideAnnots { pages, reply: tx });
+        rx
+    }
+
+    /// Glyph boxes of text under a drag rectangle (displayed page space).
+    pub fn text_boxes_in_rect(
+        &self,
+        page: u32,
+        rect: Rect,
+    ) -> oneshot::Receiver<Result<Vec<Rect>>> {
+        let (tx, rx) = oneshot::channel();
+        self.send(Msg::TextBoxes {
+            page,
+            rect,
+            reply: tx,
+        });
         rx
     }
 
@@ -743,6 +820,9 @@ fn worker_loop(engine: impl Renderer, rx: mpsc::Receiver<Msg>) {
                 }
                 Msg::Outline(reply) => {
                     let _ = reply.send(engine.outline());
+                }
+                Msg::TextBoxes { page, rect, reply } => {
+                    let _ = reply.send(engine.text_boxes_in_rect(PageIndex(page), rect));
                 }
                 Msg::HideAnnots { pages, reply } => {
                     let mut n = 0;
