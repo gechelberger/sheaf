@@ -116,6 +116,9 @@ pub trait Renderer {
     /// All matches of a regular expression on one page, run over the
     /// page's extracted text.
     fn pattern_search_page(&self, page: PageIndex, re: &regex::Regex) -> Result<Vec<SearchHit>>;
+    /// Hide (from rendering) every annotation on `page` whose /NM starts
+    /// with `sheaf:`; the app draws those itself. Returns how many.
+    fn hide_sheaf_annots(&self, page: PageIndex) -> Result<usize>;
     /// Render a whole page scaled so its width is `target_width` device pixels.
     fn render(&self, page: PageIndex, job: Job, format: PixelFormat) -> Result<Raster>;
 
@@ -339,6 +342,21 @@ pub mod pdfium {
             Ok(hits)
         }
 
+        fn hide_sheaf_annots(&self, page: PageIndex) -> Result<usize> {
+            let mut p = self.doc.pages().get(page.0 as i32)?;
+            let annots = p.annotations_mut();
+            let mut n = 0;
+            for i in 0..annots.len() {
+                if let Ok(mut a) = annots.get(i)
+                    && a.name().is_some_and(|name| name.starts_with("sheaf:"))
+                    && a.set_is_hidden(true).is_ok()
+                {
+                    n += 1;
+                }
+            }
+            Ok(n)
+        }
+
         fn pattern_search_page(
             &self,
             page: PageIndex,
@@ -535,6 +553,10 @@ enum Msg {
     Render(RenderRequest, oneshot::Sender<Result<Rendered>>),
     PageSizes(oneshot::Sender<Result<Vec<PageSize>>>),
     Outline(oneshot::Sender<Result<Vec<OutlineItem>>>),
+    HideAnnots {
+        pages: Vec<u32>,
+        reply: oneshot::Sender<Result<usize>>,
+    },
     Search {
         matcher: Matcher,
         tx: futures::channel::mpsc::UnboundedSender<SearchEvent>,
@@ -607,6 +629,14 @@ impl RenderHandle {
     pub fn page_sizes(&self) -> oneshot::Receiver<Result<Vec<PageSize>>> {
         let (tx, rx) = oneshot::channel();
         self.send(Msg::PageSizes(tx));
+        rx
+    }
+
+    /// Hide sheaf-written annotations on these pages so they aren't drawn
+    /// twice (the app overlays its own). Resolves with the count hidden.
+    pub fn hide_sheaf_annots(&self, pages: Vec<u32>) -> oneshot::Receiver<Result<usize>> {
+        let (tx, rx) = oneshot::channel();
+        self.send(Msg::HideAnnots { pages, reply: tx });
         rx
     }
 
@@ -713,6 +743,20 @@ fn worker_loop(engine: impl Renderer, rx: mpsc::Receiver<Msg>) {
                 }
                 Msg::Outline(reply) => {
                     let _ = reply.send(engine.outline());
+                }
+                Msg::HideAnnots { pages, reply } => {
+                    let mut n = 0;
+                    let mut err = None;
+                    for p in pages {
+                        match engine.hide_sheaf_annots(PageIndex(p)) {
+                            Ok(k) => n += k,
+                            Err(e) => err = Some(e),
+                        }
+                    }
+                    let _ = reply.send(match err {
+                        Some(e) => Err(e),
+                        None => Ok(n),
+                    });
                 }
                 Msg::Search { matcher, tx } => {
                     search = Some(SearchWalk {

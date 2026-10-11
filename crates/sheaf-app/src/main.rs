@@ -90,6 +90,8 @@ struct Cli {
     selftest_save: Option<PathBuf>,
     /// Dev: insert this PDF after page 1 of the first document.
     selftest_insert: Option<PathBuf>,
+    /// Dev: add one of each mark to page 1 and save here.
+    selftest_annot: Option<PathBuf>,
     /// Sidebar panel to open with: "pages" (default), "bookmarks" or "patterns".
     panel: Option<String>,
     /// Run this regex in the Patterns panel once the first document loads.
@@ -103,6 +105,7 @@ fn parse_cli() -> Cli {
         find: None,
         selftest_save: None,
         selftest_insert: None,
+        selftest_annot: None,
         panel: None,
         pattern: None,
     };
@@ -113,6 +116,7 @@ fn parse_cli() -> Cli {
             Some("--find") => cli.find = args.next().and_then(|q| q.to_str().map(String::from)),
             Some("--selftest-save") => cli.selftest_save = args.next().map(PathBuf::from),
             Some("--selftest-insert") => cli.selftest_insert = args.next().map(PathBuf::from),
+            Some("--selftest-annot") => cli.selftest_annot = args.next().map(PathBuf::from),
             Some("--panel") => cli.panel = args.next().and_then(|p| p.to_str().map(String::from)),
             Some("--pattern") => {
                 cli.pattern = args.next().and_then(|p| p.to_str().map(String::from))
@@ -228,6 +232,7 @@ fn main() {
                             find: cli.find,
                             selftest_save: cli.selftest_save,
                             selftest_insert: cli.selftest_insert,
+                            selftest_annot: cli.selftest_annot,
                             start_panel: cli.panel.take(),
                             pattern: cli.pattern.take(),
                             launched,

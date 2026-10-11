@@ -13,6 +13,7 @@ use anyhow::{Context, Result, bail};
 use im::Vector;
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, StringFormat, dictionary};
 
+use crate::annot::{Annot, PageGeom, to_pdf};
 use crate::model::{OutlineNode, PageId, Snapshot, SourceId};
 
 /// Page-level keys a page may inherit from its ancestors in the page tree.
@@ -74,6 +75,12 @@ pub fn rewrite(model: &Snapshot) -> Result<Vec<u8>> {
             .ok()
             .and_then(|o| o.as_i64().ok())
             .unwrap_or(0);
+        if let Some(list) = state.annots.get(&pref.id) {
+            let geom = geom_of(&dict, original as i32);
+            write_page_annots(&mut pdf, &mut dict, list.iter(), &geom);
+        } else {
+            strip_sheaf_annots(&pdf, &mut dict);
+        }
         let rotate = (original + pref.rotation.degrees() as i64).rem_euclid(360);
         if rotate == 0 {
             dict.remove(b"Rotate");
@@ -859,6 +866,144 @@ mod tests {
         incremental_case(true);
     }
 
+    #[test]
+    fn annots_written_and_read_back() {
+        use crate::annot::{AnnotKind, Box2, Pt};
+        let dir = tempdir();
+        let a_path = make_pdf(&dir, "a.pdf", "A", 2, &[]);
+        let original = std::fs::read(&a_path).unwrap();
+        let mut model = Document::new(
+            {
+                let mut i = info(&a_path, 2);
+                i.bytes = original.len();
+                i
+            },
+            &[],
+            Box::new(FixedCount(10)),
+        );
+        let p0 = model.page(0).unwrap().id;
+        let mk = |kind: AnnotKind| Annot {
+            id: crate::annot::AnnotId(0),
+            kind,
+            color: [255, 200, 0],
+            opacity: 0.5,
+            stroke: 1.5,
+            author: "greg".into(),
+            contents: "note".into(),
+            modified: "D:20261011000000".into(),
+        };
+        model
+            .apply(
+                Edit::AnnotAdd {
+                    page: p0,
+                    annot: mk(AnnotKind::Highlight {
+                        rects: vec![Box2 {
+                            x: 72.0,
+                            y: 80.0,
+                            w: 200.0,
+                            h: 14.0,
+                        }],
+                    }),
+                },
+                "hl",
+            )
+            .unwrap();
+        model
+            .apply(
+                Edit::AnnotAdd {
+                    page: p0,
+                    annot: mk(AnnotKind::Note {
+                        pos: Pt { x: 300.0, y: 80.0 },
+                    }),
+                },
+                "note",
+            )
+            .unwrap();
+        model
+            .apply(
+                Edit::AnnotAdd {
+                    page: p0,
+                    annot: mk(AnnotKind::Stamp {
+                        rect: Box2 {
+                            x: 400.0,
+                            y: 80.0,
+                            w: 24.0,
+                            h: 24.0,
+                        },
+                        glyph: "✓".into(),
+                    }),
+                },
+                "tick",
+            )
+            .unwrap();
+
+        let bytes = crate::incremental::incremental(&model.snapshot()).unwrap();
+        assert!(bytes.starts_with(&original));
+        let out = dir.join("inc.pdf");
+        std::fs::write(&out, &bytes).unwrap();
+        let back = crate::file::read_sheaf_annots(&out).unwrap();
+        assert_eq!(back.len(), 1);
+        let want: Vec<Annot> = model
+            .state()
+            .annots_on(p0)
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect();
+        assert_eq!(back[&0], want);
+        let pdf = Pdf::load_mem(&bytes).unwrap();
+        let page0 = pdf.get_pages()[&1];
+        let annots = pdf
+            .get_dictionary(page0)
+            .unwrap()
+            .get(b"Annots")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        assert_eq!(annots.len(), 3);
+
+        // Reopen, delete one, save again: no duplicates.
+        let out2 = dir.join("inc2.pdf");
+        std::fs::copy(&out, &out2).unwrap();
+        let mut model2 = Document::new(
+            {
+                let mut i = info(&out2, 2);
+                i.bytes = bytes.len();
+                i
+            },
+            &[],
+            Box::new(FixedCount(10)),
+        );
+        model2.set_initial_annots(back).unwrap();
+        let p0b = model2.page(0).unwrap().id;
+        let first = model2.state().annots_on(p0b).unwrap()[0].clone();
+        model2
+            .apply(
+                Edit::AnnotDelete {
+                    page: p0b,
+                    id: first.id,
+                },
+                "rm",
+            )
+            .unwrap();
+        let bytes2 = crate::incremental::incremental(&model2.snapshot()).unwrap();
+        let pdf = Pdf::load_mem(&bytes2).unwrap();
+        let page0 = pdf.get_pages()[&1];
+        let annots = pdf
+            .get_dictionary(page0)
+            .unwrap()
+            .get(b"Annots")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        assert_eq!(annots.len(), 2);
+
+        let rw = rewrite(&model.snapshot()).unwrap();
+        let out3 = dir.join("rw.pdf");
+        std::fs::write(&out3, &rw).unwrap();
+        assert_eq!(crate::file::read_sheaf_annots(&out3).unwrap()[&0], want);
+    }
+
     fn tempdir() -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!(
             "sheaf-save-{}-{}",
@@ -877,5 +1022,86 @@ mod tests {
             .unwrap()
             .as_nanos() as u64;
         t ^ N.fetch_add(1, Ordering::Relaxed)
+    }
+}
+
+/// Page geometry from a (flattened) page dictionary and its original rotation.
+pub(crate) fn geom_of(dict: &Dictionary, rotate: i32) -> PageGeom {
+    let media = dict
+        .get(b"MediaBox")
+        .ok()
+        .and_then(|o| o.as_array().ok())
+        .filter(|a| a.len() == 4)
+        .map(|a| {
+            let v: Vec<f32> = a.iter().map(|o| o.as_float().unwrap_or(0.0)).collect();
+            [
+                v[0].min(v[2]),
+                v[1].min(v[3]),
+                v[0].max(v[2]),
+                v[1].max(v[3]),
+            ]
+        })
+        .unwrap_or([0.0, 0.0, 612.0, 792.0]);
+    PageGeom {
+        media,
+        rotate: rotate.rem_euclid(360),
+    }
+}
+
+/// Is this /Annots entry one of ours?
+fn is_sheaf_annot(pdf: &Pdf, entry: &Object) -> bool {
+    pdf.dereference(entry)
+        .ok()
+        .and_then(|(_, o)| o.as_dict().ok().map(|d| d.has(b"SheafAnnot")))
+        .unwrap_or(false)
+}
+
+/// Drop sheaf-written entries from a page's /Annots, keeping third-party ones.
+pub(crate) fn strip_sheaf_annots(pdf: &Pdf, page: &mut Dictionary) {
+    let Some(existing) = page
+        .get(b"Annots")
+        .ok()
+        .and_then(|a| pdf.dereference(a).ok())
+        .and_then(|(_, o)| o.as_array().ok().cloned())
+    else {
+        return;
+    };
+    let kept: Vec<Object> = existing
+        .into_iter()
+        .filter(|e| !is_sheaf_annot(pdf, e))
+        .collect();
+    if kept.is_empty() {
+        page.remove(b"Annots");
+    } else {
+        page.set("Annots", Object::Array(kept));
+    }
+}
+
+/// Replace the page's sheaf annotations with `annots`, as new objects with
+/// appearance streams. `/P` is left unset; PDFium and Acrobat don't need it.
+pub(crate) fn write_page_annots<'a>(
+    pdf: &mut Pdf,
+    page: &mut Dictionary,
+    annots: impl Iterator<Item = &'a Annot>,
+    geom: &PageGeom,
+) {
+    strip_sheaf_annots(pdf, page);
+    let mut list: Vec<Object> = page
+        .get(b"Annots")
+        .ok()
+        .and_then(|a| pdf.dereference(a).ok())
+        .and_then(|(_, o)| o.as_array().ok().cloned())
+        .unwrap_or_default();
+    for a in annots {
+        let (mut dict, stream) = to_pdf(a, geom);
+        let ap_id = pdf.add_object(Object::Stream(stream));
+        dict.set("AP", dictionary! { "N" => ap_id });
+        let id = pdf.add_object(Object::Dictionary(dict));
+        list.push(Object::Reference(id));
+    }
+    if list.is_empty() {
+        page.remove(b"Annots");
+    } else {
+        page.set("Annots", Object::Array(list));
     }
 }

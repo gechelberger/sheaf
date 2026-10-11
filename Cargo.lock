@@ -5055,6 +5055,8 @@ dependencies = [
  "im",
  "log",
  "lopdf",
+ "serde",
+ "serde_json",
  "sheaf-core",
  "thiserror 2.0.21",
 ]

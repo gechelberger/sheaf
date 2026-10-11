@@ -75,3 +75,89 @@ impl PdfFile {
         self.inner
     }
 }
+
+use std::collections::HashMap;
+
+use crate::annot::{Annot, PageGeom, from_json};
+
+/// Annotations sheaf wrote into `path` earlier, keyed by page index.
+pub fn read_sheaf_annots(path: impl AsRef<Path>) -> Result<HashMap<u32, Vec<Annot>>> {
+    let pdf = lopdf::Document::load(path.as_ref())?;
+    let mut out: HashMap<u32, Vec<Annot>> = HashMap::new();
+    for (i, page_id) in pdf.get_pages().into_values().enumerate() {
+        let Ok(page) = pdf.get_dictionary(page_id) else {
+            continue;
+        };
+        let Ok(annots) = page
+            .get(b"Annots")
+            .and_then(|a| pdf.dereference(a).map(|(_, o)| o))
+        else {
+            continue;
+        };
+        let Ok(list) = annots.as_array() else {
+            continue;
+        };
+        for entry in list {
+            let Ok((_, obj)) = pdf.dereference(entry) else {
+                continue;
+            };
+            let Ok(dict) = obj.as_dict() else { continue };
+            let Ok(payload) = dict.get(b"SheafAnnot").and_then(|o| o.as_str()) else {
+                continue;
+            };
+            let bytes = if payload.starts_with(&[0xFE, 0xFF]) {
+                let units: Vec<u16> = payload[2..]
+                    .chunks(2)
+                    .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                    .collect();
+                String::from_utf16_lossy(&units).into_bytes()
+            } else {
+                payload.to_vec()
+            };
+            if let Some(a) = from_json(&bytes) {
+                out.entry(i as u32).or_default().push(a);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// MediaBox and /Rotate of a page (inherited attributes resolved).
+pub fn page_geom(pdf: &lopdf::Document, page: lopdf::ObjectId) -> PageGeom {
+    let mut media = None;
+    let mut rotate = None;
+    let mut id = page;
+    for _ in 0..64 {
+        let Ok(dict) = pdf.get_dictionary(id) else {
+            break;
+        };
+        if media.is_none()
+            && let Ok(mb) = dict
+                .get(b"MediaBox")
+                .and_then(|o| pdf.dereference(o).map(|(_, o)| o))
+            && let Ok(arr) = mb.as_array()
+            && arr.len() == 4
+        {
+            let v: Vec<f32> = arr.iter().map(|o| o.as_float().unwrap_or(0.0)).collect();
+            media = Some([
+                v[0].min(v[2]),
+                v[1].min(v[3]),
+                v[0].max(v[2]),
+                v[1].max(v[3]),
+            ]);
+        }
+        if rotate.is_none()
+            && let Ok(r) = dict.get(b"Rotate").and_then(|o| o.as_i64())
+        {
+            rotate = Some(r as i32);
+        }
+        match dict.get(b"Parent").and_then(|p| p.as_reference()) {
+            Ok(parent) => id = parent,
+            Err(_) => break,
+        }
+    }
+    PageGeom {
+        media: media.unwrap_or([0.0, 0.0, 612.0, 792.0]),
+        rotate: rotate.unwrap_or(0).rem_euclid(360),
+    }
+}

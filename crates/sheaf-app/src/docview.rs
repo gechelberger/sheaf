@@ -22,6 +22,7 @@ use gpui::{
 };
 use sheaf_core::{PageIndex, PageSize, Rotation};
 use sheaf_doc::save;
+use sheaf_doc::{Annot, AnnotKind, Box2, Pt};
 use sheaf_doc::{
     Document, Edit, FlatOutlineItem, OutlineId, PageId, PageRef, SourceId, SourceInfo,
 };
@@ -248,6 +249,19 @@ impl Doc {
         self.version += 1;
         self.layout = None;
     }
+
+    /// Drop every rendered image so pages re-rasterize (after the engine's
+    /// view of a page changed, e.g. annotations hidden).
+    fn invalidate_tiles(&mut self) {
+        for (_, im) in self.tiles.drain() {
+            self.retired.push(im);
+        }
+        for (_, (_, im)) in self.previews.drain() {
+            self.retired.push(im);
+        }
+        self.inflight.clear();
+        self.version += 1;
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -290,6 +304,7 @@ pub struct DocView {
     /// Re-focus the Bookmarks panel on its next render (after a rename field closes).
     pub(crate) pending_outline_focus: bool,
     pub(crate) selftest_insert: Option<PathBuf>,
+    pub(crate) selftest_annot: Option<PathBuf>,
 }
 
 /// An open search bar and the running / finished query behind it.
@@ -325,6 +340,7 @@ impl DocView {
             pending_focus: false,
             pending_outline_focus: false,
             selftest_insert: None,
+            selftest_annot: None,
         };
         this.open(cx);
         this
@@ -416,11 +432,15 @@ impl DocView {
                         }));
                         viewer.fetch_page_sizes(cx);
                         viewer.fetch_outline(cx);
+                        viewer.load_sheaf_annots(cx);
                         if let Some(p) = viewer.selftest_save.take() {
                             viewer.selftest_save(p, cx);
                         }
                         if let Some(p) = viewer.selftest_insert.take() {
                             viewer.insert_pdf(p, cx);
+                        }
+                        if let Some(p) = viewer.selftest_annot.take() {
+                            viewer.selftest_annot(p, cx);
                         }
                         if let Some(src) = viewer.initial_pattern.take() {
                             viewer.run_initial_pattern(src, cx);
@@ -811,6 +831,30 @@ impl DocView {
                             bytes,
                         };
                         let sid = doc.model.rebase_to_saved(saved);
+                        // Our marks are now in the file; keep PDFium from drawing them.
+                        let pages: Vec<u32> = doc
+                            .model
+                            .state()
+                            .pages
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, p)| doc.model.state().annots.contains_key(&p.id))
+                            .map(|(i, _)| i as u32)
+                            .collect();
+                        if !pages.is_empty() {
+                            let rx = handle.hide_sheaf_annots(pages);
+                            cx.spawn(async move |this, cx| {
+                                let _ = rx.await;
+                                this.update(cx, |view, cx| {
+                                    if let State::Ready(doc) = &mut view.state {
+                                        doc.invalidate_tiles();
+                                    }
+                                    cx.notify();
+                                })
+                                .ok();
+                            })
+                            .detach();
+                        }
                         doc.handles.insert(sid, handle);
                         view.path = path.clone();
                         doc.notice = Some(format!(
@@ -862,6 +906,177 @@ impl DocView {
 
     pub fn set_selftest_save(&mut self, path: PathBuf) {
         self.selftest_save = Some(path);
+    }
+
+    // ----- markup -------------------------------------------------------------
+
+    /// Read back annotations sheaf wrote into the primary file earlier and
+    /// take over their rendering.
+    fn load_sheaf_annots(&mut self, cx: &mut Context<Self>) {
+        let path = self.path.clone();
+        let timing = self.timing;
+        cx.spawn(async move |this, cx| {
+            let t = Instant::now();
+            let found = cx
+                .background_executor()
+                .spawn(async move { sheaf_doc::file::read_sheaf_annots(&path) })
+                .await;
+            let by_index = match found {
+                Ok(m) if !m.is_empty() => m,
+                Ok(_) => return,
+                Err(e) => {
+                    log::warn!("reading sheaf annotations: {e:#}");
+                    return;
+                }
+            };
+            this.update(cx, |view, cx| {
+                let State::Ready(doc) = &mut view.state else {
+                    return;
+                };
+                let pages: Vec<u32> = by_index.keys().copied().collect();
+                let n: usize = by_index.values().map(|v| v.len()).sum();
+                match doc.model.set_initial_annots(by_index) {
+                    Ok(()) => {
+                        if timing {
+                            eprintln!(
+                                "[timing] loaded {n} sheaf annotations on {} pages in {:?}",
+                                pages.len(),
+                                t.elapsed()
+                            );
+                        }
+                        let rx = doc.primary().hide_sheaf_annots(pages);
+                        doc.touched();
+                        cx.spawn(async move |this, cx| {
+                            let _ = rx.await;
+                            this.update(cx, |view, cx| {
+                                if let State::Ready(doc) = &mut view.state {
+                                    doc.invalidate_tiles();
+                                }
+                                cx.notify();
+                            })
+                            .ok();
+                        })
+                        .detach();
+                    }
+                    Err(e) => log::warn!("annotations arrived after edits; ignored: {e:#}"),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// A new annotation with the document's defaults filled in.
+    pub(crate) fn new_annot(&self, kind: AnnotKind, color: [u8; 3]) -> Annot {
+        Annot {
+            id: sheaf_doc::AnnotId(0),
+            kind,
+            color,
+            opacity: 1.0,
+            stroke: 1.5,
+            author: sheaf_doc::default_author(),
+            contents: String::new(),
+            modified: sheaf_doc::pdf_date_now(),
+        }
+    }
+
+    pub(crate) fn add_annot(
+        &mut self,
+        page: PageId,
+        annot: Annot,
+        label: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.apply(Edit::AnnotAdd { page, annot }, label, cx);
+    }
+
+    /// Dev hook: drop one of each mark on page 1 and save to `path`.
+    pub fn selftest_annot(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let State::Ready(doc) = &self.state else {
+            return;
+        };
+        let Some(p0) = doc.page_ref(0).map(|p| p.id) else {
+            return;
+        };
+        let mut hl = self.new_annot(
+            AnnotKind::Highlight {
+                rects: vec![Box2 {
+                    x: 72.0,
+                    y: 60.0,
+                    w: 300.0,
+                    h: 30.0,
+                }],
+            },
+            [255, 230, 0],
+        );
+        hl.opacity = 0.6;
+        self.add_annot(p0, hl, "Highlight", cx);
+        let mut note = self.new_annot(
+            AnnotKind::Note {
+                pos: Pt { x: 400.0, y: 60.0 },
+            },
+            [255, 200, 0],
+        );
+        note.contents = "A sticky note".into();
+        self.add_annot(p0, note, "Note", cx);
+        let mut text = self.new_annot(
+            AnnotKind::FreeText {
+                rect: Box2 {
+                    x: 72.0,
+                    y: 120.0,
+                    w: 240.0,
+                    h: 48.0,
+                },
+                size: 12.0,
+            },
+            [200, 0, 0],
+        );
+        text.contents = "Free text written by sheaf, wrapped onto a second line.".into();
+        self.add_annot(p0, text, "Text", cx);
+        let sq = self.new_annot(
+            AnnotKind::Square {
+                rect: Box2 {
+                    x: 350.0,
+                    y: 120.0,
+                    w: 120.0,
+                    h: 48.0,
+                },
+            },
+            [0, 120, 255],
+        );
+        self.add_annot(p0, sq, "Square", cx);
+        let tick = self.new_annot(
+            AnnotKind::Stamp {
+                rect: Box2 {
+                    x: 500.0,
+                    y: 120.0,
+                    w: 28.0,
+                    h: 28.0,
+                },
+                glyph: "✓".into(),
+            },
+            [0, 150, 0],
+        );
+        self.add_annot(p0, tick, "Tickmark", cx);
+        let tick2 = self.new_annot(
+            AnnotKind::Stamp {
+                rect: Box2 {
+                    x: 540.0,
+                    y: 120.0,
+                    w: 28.0,
+                    h: 28.0,
+                },
+                glyph: "F".into(),
+            },
+            [200, 0, 0],
+        );
+        self.add_annot(p0, tick2, "Tickmark", cx);
+        self.save_to(path, cx);
+    }
+
+    pub fn set_selftest_annot(&mut self, path: PathBuf) {
+        self.selftest_annot = Some(path);
     }
 
     // ----- insert pdf ---------------------------------------------------------
@@ -1878,6 +2093,22 @@ impl Render for DocView {
                                 }
                             }
                         }
+                        // Our markup, drawn over the page in the displayed orientation.
+                        if let Some(list) = doc.model.state().annots_on(pl.pref.id) {
+                            let src = doc
+                                .model
+                                .source(pl.pref.source)
+                                .map(|s| s.page_size(pl.pref.index))
+                                .unwrap_or(PageSize {
+                                    width: 612.0,
+                                    height: 792.0,
+                                });
+                            let k = pl.w / src.rotated(pl.pref.rotation).width.max(1.0);
+                            for a in list.iter() {
+                                page_div =
+                                    page_div.children(annot_elements(a, src, pl.pref.rotation, k));
+                            }
+                        }
                         page_div
                     })
                     .collect();
@@ -2276,3 +2507,116 @@ impl Render for DragPreview {
             })
     }
 }
+
+/// GPUI elements for one annotation, positioned in page-local logical px.
+/// `src` is the source page size, `rot` the page's extra rotation, `k` logical
+/// px per point.
+fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) -> Vec<AnyElement> {
+    let rgb_u32 = ((a.color[0] as u32) << 16) | ((a.color[1] as u32) << 8) | a.color[2] as u32;
+    let color = rgb(rgb_u32);
+    let alpha = (a.opacity.clamp(0.0, 1.0) * 255.0) as u32;
+    let fill = rgba((rgb_u32 << 8) | alpha);
+    let place = |b: Box2| {
+        let r = rotate_rect(
+            Rect {
+                x: b.x,
+                y: b.y,
+                w: b.w,
+                h: b.h,
+            },
+            src,
+            rot,
+        );
+        div()
+            .absolute()
+            .left(px(r.x * k))
+            .top(px(r.y * k))
+            .w(px(r.w * k))
+            .h(px(r.h * k))
+    };
+    let mut out = Vec::new();
+    match &a.kind {
+        AnnotKind::Highlight { rects } => {
+            for r in rects {
+                out.push(place(*r).bg(fill).into_any_element());
+            }
+        }
+        AnnotKind::Note { pos } => {
+            let b = Box2 {
+                x: pos.x,
+                y: pos.y,
+                w: sheaf_doc::annot::NOTE_SIZE,
+                h: sheaf_doc::annot::NOTE_SIZE,
+            };
+            out.push(
+                place(b)
+                    .bg(fill)
+                    .border_1()
+                    .border_color(rgb(0x000000))
+                    .rounded_sm()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(rgb(0x000000))
+                    .text_size(px((NOTE_GLYPH * k).max(6.0)))
+                    .child("…")
+                    .into_any_element(),
+            );
+        }
+        AnnotKind::FreeText { rect, size } => {
+            out.push(
+                place(*rect)
+                    .p(px(2.0 * k))
+                    .overflow_hidden()
+                    .text_color(color)
+                    .text_size(px(*size * k))
+                    .line_height(px(*size * 1.2 * k))
+                    .child(a.contents.clone())
+                    .into_any_element(),
+            );
+        }
+        AnnotKind::Square { rect } => {
+            out.push(
+                place(*rect)
+                    .border(px((a.stroke * k).max(1.0)))
+                    .border_color(color)
+                    .into_any_element(),
+            );
+        }
+        AnnotKind::Ellipse { rect } => {
+            out.push(
+                place(*rect)
+                    .border(px((a.stroke * k).max(1.0)))
+                    .border_color(color)
+                    .rounded_full()
+                    .into_any_element(),
+            );
+        }
+        AnnotKind::Stamp { rect, glyph } => {
+            out.push(
+                place(*rect)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(color)
+                    .text_size(px(rect.h * 0.8 * k))
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .child(glyph.clone())
+                    .into_any_element(),
+            );
+        }
+        // Lines and ink need path drawing; a bounding box stands in until
+        // the canvas-based renderer lands with the drawing tools.
+        AnnotKind::Line { .. } | AnnotKind::Ink { .. } => {
+            out.push(
+                place(a.bounds())
+                    .border_1()
+                    .border_color(color)
+                    .into_any_element(),
+            );
+        }
+    }
+    out
+}
+
+const NOTE_GLYPH: f32 = 12.0;

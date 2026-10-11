@@ -12,7 +12,10 @@ use lopdf::xref::{XrefEntry, XrefType};
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, StringFormat, dictionary};
 
 use crate::model::Snapshot;
-use crate::save::{LoadedSource, copy_page_dict, is_identity, write_outline};
+use crate::save::{
+    LoadedSource, copy_page_dict, geom_of, is_identity, strip_sheaf_annots, write_outline,
+    write_page_annots,
+};
 
 /// Produce the full new file (original bytes + update section).
 pub fn incremental(snap: &Snapshot) -> Result<Vec<u8>> {
@@ -86,6 +89,17 @@ pub fn incremental(snap: &Snapshot) -> Result<Vec<u8>> {
                     dict.set(k.clone(), v.clone());
                 }
             }
+            let original_rot = dict
+                .get(b"Rotate")
+                .ok()
+                .and_then(|o| o.as_i64().ok())
+                .unwrap_or(0) as i32;
+            if let Some(list) = snap.state.annots.get(&pref.id) {
+                let geom = geom_of(&dict, original_rot);
+                write_page_annots(&mut pdf, &mut dict, list.iter(), &geom);
+            } else {
+                strip_sheaf_annots(&pdf, &mut dict);
+            }
             apply_rotation(&mut dict, pref.rotation.degrees());
             dict.set("Parent", pages_id);
             dict.set("Type", Object::Name(b"Page".to_vec()));
@@ -112,7 +126,7 @@ pub fn incremental(snap: &Snapshot) -> Result<Vec<u8>> {
         for pref in &snap.state.pages {
             let id = primary.pages[pref.index as usize];
             page_obj.insert(pref.id, id);
-            if pref.rotation.degrees() != 0 {
+            if pref.rotation.degrees() != 0 || snap.annots_dirty.contains(&pref.id) {
                 let mut dict = pdf.get_dictionary(id)?.clone();
                 if !dict.has(b"Rotate")
                     && let Some((_, v)) = primary
@@ -121,6 +135,13 @@ pub fn incremental(snap: &Snapshot) -> Result<Vec<u8>> {
                         .and_then(|a| a.iter().find(|(k, _)| k == b"Rotate"))
                 {
                     dict.set("Rotate", v.clone());
+                }
+                if snap.annots_dirty.contains(&pref.id) {
+                    let geom = crate::file::page_geom(&pdf, id);
+                    match snap.state.annots.get(&pref.id) {
+                        Some(list) => write_page_annots(&mut pdf, &mut dict, list.iter(), &geom),
+                        None => strip_sheaf_annots(&pdf, &mut dict),
+                    }
                 }
                 apply_rotation(&mut dict, pref.rotation.degrees());
                 changed.insert(id, Object::Dictionary(dict));

@@ -9,6 +9,7 @@ use anyhow::{Context, Result, bail};
 use im::Vector;
 use sheaf_core::{PageSize, Rotation};
 
+use crate::annot::{Annot, AnnotId};
 use crate::history::{HistoryPolicy, HistoryStats};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -75,9 +76,16 @@ pub struct FlatOutlineItem {
 pub struct DocState {
     pub pages: Vector<PageRef>,
     pub outline: Vector<OutlineNode>,
+    /// Our markup, per page. Annotations already in a source file are not
+    /// here unless they were written by sheaf (see `annot`).
+    pub annots: im::HashMap<PageId, Vector<Annot>>,
 }
 
 impl DocState {
+    pub fn annots_on(&self, page: PageId) -> Option<&Vector<Annot>> {
+        self.annots.get(&page)
+    }
+
     pub fn index_of(&self, id: PageId) -> Option<usize> {
         self.pages.iter().position(|p| p.id == id)
     }
@@ -170,6 +178,20 @@ pub enum Edit {
     OutlineDelete {
         id: OutlineId,
     },
+    /// Add markup to a page. The annotation's id is assigned by the document.
+    AnnotAdd {
+        page: PageId,
+        annot: Annot,
+    },
+    /// Replace an annotation (matched by id) with a new version.
+    AnnotUpdate {
+        page: PageId,
+        annot: Annot,
+    },
+    AnnotDelete {
+        page: PageId,
+        id: AnnotId,
+    },
 }
 
 /// What an edit did, for user-facing notices.
@@ -196,6 +218,8 @@ pub struct Snapshot {
     pub sources: HashMap<SourceId, Arc<SourceInfo>>,
     /// The outline differs from what's in the primary file.
     pub outline_dirty: bool,
+    /// Pages whose markup differs from what's in the primary file.
+    pub annots_dirty: HashSet<PageId>,
 }
 
 impl Snapshot {
@@ -214,8 +238,11 @@ pub struct Document {
     next_outline: u64,
     next_source: u32,
     policy: Box<dyn HistoryPolicy>,
+    next_annot: u64,
     /// Outline as it exists in the primary file on disk.
     saved_outline: Vector<OutlineNode>,
+    /// Markup as it exists in the primary file on disk.
+    saved_annots: im::HashMap<PageId, Vector<Annot>>,
 }
 
 impl Document {
@@ -236,7 +263,9 @@ impl Document {
             next_outline: 0,
             next_source: 1,
             policy,
+            next_annot: 1,
             saved_outline: Vector::new(),
+            saved_annots: im::HashMap::new(),
         };
         let pages: Vector<PageRef> = (0..primary.page_count)
             .map(|index| PageRef {
@@ -252,7 +281,11 @@ impl Document {
         doc.saved_outline = outline.clone();
         doc.history.push(Version {
             label: "Open".into(),
-            state: DocState { pages, outline },
+            state: DocState {
+                pages,
+                outline,
+                annots: im::HashMap::new(),
+            },
             marginal_bytes: 0,
         });
         doc
@@ -298,6 +331,49 @@ impl Document {
         Ok(())
     }
 
+    /// Markup read back from the primary file (annotations sheaf wrote
+    /// earlier), keyed by source page index. Only valid before any edit.
+    pub fn set_initial_annots(&mut self, by_index: HashMap<u32, Vec<Annot>>) -> Result<()> {
+        if self.history.len() != 1 {
+            bail!("annotations can only be loaded before editing");
+        }
+        let ids: Vec<PageId> = self.history[0].state.pages.iter().map(|p| p.id).collect();
+        let mut map = im::HashMap::new();
+        for (index, list) in by_index {
+            if let Some(&pid) = ids.get(index as usize) {
+                for a in &list {
+                    self.next_annot = self.next_annot.max(a.id.0 + 1);
+                }
+                map.insert(pid, list.into_iter().collect());
+            }
+        }
+        self.history[0].state.annots = map.clone();
+        self.saved_annots = map;
+        Ok(())
+    }
+
+    fn annots_dirty_pages(&self) -> HashSet<PageId> {
+        let cur = &self.state().annots;
+        let mut dirty = HashSet::new();
+        for (pid, list) in cur.iter() {
+            if self.saved_annots.get(pid) != Some(list) {
+                dirty.insert(*pid);
+            }
+        }
+        for pid in self.saved_annots.keys() {
+            if !cur.contains_key(pid) {
+                dirty.insert(*pid);
+            }
+        }
+        dirty
+    }
+
+    pub fn fresh_annot_id(&mut self) -> AnnotId {
+        let id = AnnotId(self.next_annot);
+        self.next_annot += 1;
+        id
+    }
+
     pub fn state(&self) -> &DocState {
         &self.history[self.cursor].state
     }
@@ -308,6 +384,7 @@ impl Document {
             primary: self.primary,
             sources: self.sources.clone(),
             outline_dirty: self.state().outline != self.saved_outline,
+            annots_dirty: self.annots_dirty_pages(),
         }
     }
 
@@ -334,6 +411,7 @@ impl Document {
             })
             .collect();
         self.saved_outline = self.history[self.cursor].state.outline.clone();
+        self.saved_annots = self.history[self.cursor].state.annots.clone();
         self.saved = Some(self.cursor);
         id
     }
@@ -470,6 +548,9 @@ impl Document {
         if !old.outline.ptr_eq(&new.outline) {
             bytes += new.outline_flat().len() * 96;
         }
+        if !old.annots.ptr_eq(&new.annots) {
+            bytes += new.annots.values().map(|l| l.len() * 256).sum::<usize>();
+        }
         bytes
     }
 
@@ -583,6 +664,9 @@ impl Document {
                     .copied()
                     .collect();
                 out.pages_removed = before - st.pages.len();
+                for id in &set {
+                    st.annots.remove(id);
+                }
                 let (outline, removed) = cascade_delete(&st.outline, &set);
                 st.outline = outline;
                 out.bookmarks_removed = removed;
@@ -635,10 +719,18 @@ impl Document {
                 for p in st.pages.iter() {
                     pages.push_back(*p);
                     if set.contains(&p.id) {
-                        pages.push_back(PageRef {
-                            id: self.fresh_page_id(),
-                            ..*p
-                        });
+                        let copy = self.fresh_page_id();
+                        if let Some(list) = st.annots.get(&p.id).cloned() {
+                            let list: Vector<Annot> = list
+                                .into_iter()
+                                .map(|mut a| {
+                                    a.id = self.fresh_annot_id();
+                                    a
+                                })
+                                .collect();
+                            st.annots.insert(copy, list);
+                        }
+                        pages.push_back(PageRef { id: copy, ..*p });
                         out.pages_added += 1;
                     }
                 }
@@ -754,6 +846,7 @@ impl Document {
                             let rest_state = DocState {
                                 pages: rest.clone(),
                                 outline: st.outline.clone(),
+                                annots: st.annots.clone(),
                             };
                             let prev_node = flat[..my_pos]
                                 .iter()
@@ -804,6 +897,45 @@ impl Document {
                 let node = node.context("bookmark not found")?;
                 out.bookmarks_removed = 1 + count_nodes(&node.children);
                 st.outline = without;
+            }
+            Edit::AnnotAdd { page, mut annot } => {
+                if st.index_of(page).is_none() {
+                    bail!("page not found");
+                }
+                annot.id = self.fresh_annot_id();
+                let mut list = st.annots.get(&page).cloned().unwrap_or_default();
+                list.push_back(annot);
+                st.annots.insert(page, list);
+            }
+            Edit::AnnotUpdate { page, annot } => {
+                let mut list = st
+                    .annots
+                    .get(&page)
+                    .cloned()
+                    .context("page has no annotations")?;
+                let i = list
+                    .iter()
+                    .position(|a| a.id == annot.id)
+                    .context("annotation not found")?;
+                list.set(i, annot);
+                st.annots.insert(page, list);
+            }
+            Edit::AnnotDelete { page, id } => {
+                let mut list = st
+                    .annots
+                    .get(&page)
+                    .cloned()
+                    .context("page has no annotations")?;
+                let i = list
+                    .iter()
+                    .position(|a| a.id == id)
+                    .context("annotation not found")?;
+                list.remove(i);
+                if list.is_empty() {
+                    st.annots.remove(&page);
+                } else {
+                    st.annots.insert(page, list);
+                }
             }
         }
         Ok((st, out))
@@ -1439,6 +1571,70 @@ mod tests {
         assert_eq!(d.page(0).unwrap().source, old_primary);
         assert_eq!(d.page(0).unwrap().index, 5);
         assert!(d.is_dirty());
+    }
+
+    #[test]
+    fn annot_add_update_delete_and_cascade() {
+        use crate::annot::{AnnotKind, Box2};
+        let mut d = doc();
+        let p1 = id_at(&d, 1);
+        let a = Annot {
+            id: AnnotId(0),
+            kind: AnnotKind::Square {
+                rect: Box2 {
+                    x: 10.0,
+                    y: 10.0,
+                    w: 50.0,
+                    h: 20.0,
+                },
+            },
+            color: [255, 0, 0],
+            opacity: 1.0,
+            stroke: 2.0,
+            author: "t".into(),
+            contents: String::new(),
+            modified: String::new(),
+        };
+        d.apply(
+            Edit::AnnotAdd {
+                page: p1,
+                annot: a.clone(),
+            },
+            "add",
+        )
+        .unwrap();
+        let stored = d.state().annots_on(p1).unwrap()[0].clone();
+        assert_ne!(stored.id, AnnotId(0), "id assigned by the document");
+        let mut upd = stored.clone();
+        upd.color = [0, 0, 255];
+        d.apply(
+            Edit::AnnotUpdate {
+                page: p1,
+                annot: upd,
+            },
+            "upd",
+        )
+        .unwrap();
+        assert_eq!(d.state().annots_on(p1).unwrap()[0].color, [0, 0, 255]);
+        assert_eq!(d.snapshot().annots_dirty.len(), 1);
+        d.apply(Edit::DuplicatePages { ids: vec![p1] }, "dup")
+            .unwrap();
+        let p1_copy = id_at(&d, 2);
+        assert_ne!(d.state().annots_on(p1_copy).unwrap()[0].id, stored.id);
+        d.apply(Edit::DeletePages { ids: vec![p1_copy] }, "del")
+            .unwrap();
+        assert!(d.state().annots_on(p1_copy).is_none());
+        d.apply(
+            Edit::AnnotDelete {
+                page: p1,
+                id: stored.id,
+            },
+            "rm",
+        )
+        .unwrap();
+        assert!(d.state().annots_on(p1).is_none());
+        d.undo();
+        assert_eq!(d.state().annots_on(p1).unwrap().len(), 1);
     }
 
     #[test]
