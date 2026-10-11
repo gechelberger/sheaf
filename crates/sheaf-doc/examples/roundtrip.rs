@@ -45,11 +45,49 @@ fn synth_pdf(path: &std::path::Path) -> Result<()> {
     doc.objects.insert(
         pages_id,
         Object::Dictionary(dictionary! {
-            "Type" => "Pages", "Kids" => kids, "Count" => 3, "Resources" => resources_id,
+            "Type" => "Pages", "Kids" => kids.clone(), "Count" => 3, "Resources" => resources_id,
             "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
         }),
     );
-    let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    // A small bookmark tree: Part 1 (-> p1) with two children, Part 2 (-> p3).
+    let outlines_id = doc.new_object_id();
+    let (part1, part2, ch1, ch2) = (
+        doc.new_object_id(),
+        doc.new_object_id(),
+        doc.new_object_id(),
+        doc.new_object_id(),
+    );
+    let dest = |i: usize| {
+        vec![
+            kids[i].clone(),
+            "XYZ".into(),
+            Object::Null,
+            Object::Null,
+            Object::Null,
+        ]
+    };
+    doc.objects.insert(part1, Object::Dictionary(dictionary! {
+        "Title" => Object::string_literal("Part 1 — Opening"), "Parent" => outlines_id, "Next" => part2,
+        "First" => ch1, "Last" => ch2, "Count" => 2, "Dest" => dest(0),
+    }));
+    doc.objects.insert(ch1, Object::Dictionary(dictionary! {
+        "Title" => Object::string_literal("Section 1.1"), "Parent" => part1, "Next" => ch2, "Dest" => dest(0),
+    }));
+    doc.objects.insert(ch2, Object::Dictionary(dictionary! {
+        "Title" => Object::string_literal("Section 1.2 (rotated page)"), "Parent" => part1, "Prev" => ch1, "Dest" => dest(1),
+    }));
+    doc.objects.insert(part2, Object::Dictionary(dictionary! {
+        "Title" => Object::string_literal("Part 2 — Closing"), "Parent" => outlines_id, "Prev" => part1, "Dest" => dest(2),
+    }));
+    doc.objects.insert(
+        outlines_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Outlines", "First" => part1, "Last" => part2, "Count" => 4,
+        }),
+    );
+    let catalog_id = doc.add_object(dictionary! {
+        "Type" => "Catalog", "Pages" => pages_id, "Outlines" => outlines_id, "PageMode" => "UseOutlines",
+    });
     doc.trailer.set("Root", catalog_id);
     doc.compress();
     doc.save(path)?;

@@ -54,11 +54,23 @@ pub enum Job {
     },
 }
 
+/// One bookmark, in pre-order with its depth, so a tree can be stored flat.
+#[derive(Debug, Clone)]
+pub struct OutlineItem {
+    pub id: u32,
+    pub title: String,
+    pub page: Option<u32>,
+    pub depth: u16,
+    pub has_children: bool,
+}
+
 /// Synchronous engine interface. Implementations may block.
 pub trait Renderer {
     fn page_count(&self) -> u32;
     fn page_size(&self, page: PageIndex) -> Result<PageSize>;
     fn page_sizes(&self) -> Result<Vec<PageSize>>;
+    /// The bookmark tree, flattened in pre-order.
+    fn outline(&self) -> Result<Vec<OutlineItem>>;
     /// Render a whole page scaled so its width is `target_width` device pixels.
     fn render(&self, page: PageIndex, job: Job, format: PixelFormat) -> Result<Raster>;
 
@@ -176,6 +188,52 @@ pub mod pdfium {
                 .collect())
         }
 
+        fn outline(&self) -> Result<Vec<OutlineItem>> {
+            const MAX_DEPTH: u16 = 32;
+            const MAX_ITEMS: usize = 200_000;
+
+            fn page_of(b: &PdfBookmark<'_>) -> Option<u32> {
+                if let Some(d) = b.destination()
+                    && let Ok(i) = d.page_index()
+                {
+                    return Some(i as u32);
+                }
+                let action = b.action()?;
+                let local = action.as_local_destination_action()?;
+                local
+                    .destination()
+                    .ok()?
+                    .page_index()
+                    .ok()
+                    .map(|i| i as u32)
+            }
+
+            fn walk(first: Option<PdfBookmark<'_>>, depth: u16, out: &mut Vec<OutlineItem>) {
+                let mut node = first;
+                while let Some(b) = node {
+                    if out.len() >= MAX_ITEMS {
+                        return;
+                    }
+                    let child = b.first_child();
+                    out.push(OutlineItem {
+                        id: out.len() as u32,
+                        title: b.title().unwrap_or_default(),
+                        page: page_of(&b),
+                        depth,
+                        has_children: child.is_some(),
+                    });
+                    if depth < MAX_DEPTH {
+                        walk(child, depth + 1, out);
+                    }
+                    node = b.next_sibling();
+                }
+            }
+
+            let mut out = Vec::new();
+            walk(self.doc.bookmarks().root(), 0, &mut out);
+            Ok(out)
+        }
+
         fn render(&self, page: PageIndex, job: Job, format: PixelFormat) -> Result<Raster> {
             let p = self.doc.pages().get(page.0 as i32)?;
             let bmp = match job {
@@ -255,6 +313,7 @@ pub struct Rendered {
 enum Msg {
     Render(RenderRequest, oneshot::Sender<Result<Rendered>>),
     PageSizes(oneshot::Sender<Result<Vec<PageSize>>>),
+    Outline(oneshot::Sender<Result<Vec<OutlineItem>>>),
 }
 
 /// Handle to a render worker thread. Cheap to clone; the thread exits when the
@@ -326,6 +385,13 @@ impl RenderHandle {
         rx
     }
 
+    /// Fetch the bookmark tree.
+    pub fn outline(&self) -> oneshot::Receiver<Result<Vec<OutlineItem>>> {
+        let (tx, rx) = oneshot::channel();
+        self.send(Msg::Outline(tx));
+        rx
+    }
+
     fn send(&self, msg: Msg) {
         if self.tx.send(msg).is_err() {
             log::error!("render thread is gone");
@@ -381,6 +447,9 @@ fn worker_loop(engine: impl Renderer, rx: mpsc::Receiver<Msg>) {
                     } else {
                         latest.push((req, reply));
                     }
+                }
+                Msg::Outline(reply) => {
+                    let _ = reply.send(engine.outline());
                 }
                 Msg::PageSizes(reply) => {
                     walk = Some(SizeWalk {

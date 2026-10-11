@@ -1,25 +1,27 @@
-//! The document view: continuous vertical scroll of pages at a shared zoom,
+//! One open document: continuous vertical scroll of pages at a shared zoom,
 //! rendered as tiles so only what's on screen is rasterized, with a cheap
-//! low-res preview under the tiles so something appears immediately.
+//! low-res preview under the tiles so something appears immediately. Also
+//! owns the per-document sidebar content (thumbnails, outline), since those
+//! share its render handle and caches.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
 use gpui::{
-    App, Context, FocusHandle, Focusable, ObjectFit, RenderImage, ScrollHandle, ScrollWheelEvent,
-    SharedString, Task, Window, div, img, point, prelude::*, px, rgb,
+    AnyElement, App, Context, FocusHandle, Focusable, ObjectFit, RenderImage, ScrollHandle,
+    ScrollWheelEvent, SharedString, Task, Window, div, img, point, prelude::*, px, rgb,
 };
 use sheaf_core::{PageIndex, PageSize};
-use sheaf_render::{Job, PixelFormat, RenderHandle, RenderRequest, Rendered};
+use sheaf_render::{Job, OutlineItem, PixelFormat, RenderHandle, RenderRequest, Rendered};
 
 use crate::{
-    FirstPage, LastPage, LineDown, LineUp, NextPage, PrevPage, Quit, ScreenDown, ScreenUp,
-    ZoomActual, ZoomFitPage, ZoomFitWidth, ZoomIn, ZoomOut,
+    FirstPage, LastPage, LineDown, LineUp, NextPage, PrevPage, ScreenDown, ScreenUp, ZoomActual,
+    ZoomFitPage, ZoomFitWidth, ZoomIn, ZoomOut,
 };
 
-pub const KEY_CONTEXT: &str = "Viewer";
+pub const KEY_CONTEXT: &str = "DocView";
 
 /// Space around the page column and between pages, in logical px.
 const MARGIN: f32 = 16.0;
@@ -32,7 +34,7 @@ const KEEP: u32 = 3;
 const LINE_STEP: f32 = 80.0;
 /// Tile edge in device pixels. 1024² BGRA = 4 MB per tile.
 const TILE: u32 = 1024;
-/// Width of the low-res whole-page preview, device px.
+/// Width of the low-res whole-page preview, device px. Also used for thumbnails.
 const PREVIEW_W: u32 = 320;
 /// Vertical overdraw for tile prefetch, as a fraction of the viewport.
 const TILE_OVERDRAW: f32 = 0.5;
@@ -42,10 +44,12 @@ const ZOOM_STEP: f32 = 1.25;
 const ZOOM_MIN: f32 = 0.1;
 const ZOOM_MAX: f32 = 16.0;
 
-pub struct Cli {
-    pub path: Option<PathBuf>,
-    pub timing: bool,
-}
+/// Thumbnail panel geometry, logical px.
+const THUMB_W: f32 = 150.0;
+const THUMB_PAD: f32 = 10.0;
+const THUMB_LABEL_H: f32 = 18.0;
+const OUTLINE_ROW_H: f32 = 24.0;
+const OUTLINE_INDENT: f32 = 14.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Zoom {
@@ -56,7 +60,6 @@ pub enum Zoom {
 }
 
 enum State {
-    Idle,
     Loading,
     Failed(String),
     Ready(Box<Doc>),
@@ -166,6 +169,15 @@ struct Doc {
     current_page: u32,
     pending_scroll: Option<ScrollTo>,
     first_paint: Option<Instant>,
+    // Sidebar state.
+    thumb_scroll: ScrollHandle,
+    /// Pages whose previews the thumbnail panel is showing; kept cached.
+    thumb_keep: Option<std::ops::RangeInclusive<u32>>,
+    /// Last page the thumbnail panel auto-scrolled to follow.
+    thumb_followed: Option<u32>,
+    outline: Option<Arc<Vec<OutlineItem>>>,
+    outline_expanded: HashSet<u32>,
+    outline_scroll: ScrollHandle,
 }
 
 #[derive(Clone, Copy)]
@@ -184,31 +196,38 @@ enum ScrollTo {
     },
 }
 
-pub struct Viewer {
+pub struct DocView {
     focus_handle: FocusHandle,
-    path: Option<PathBuf>,
+    path: PathBuf,
     timing: bool,
     launched: Instant,
     state: State,
 }
 
-impl Viewer {
-    pub fn new(cli: Cli, launched: Instant, cx: &mut Context<Self>) -> Self {
+impl DocView {
+    pub fn new(path: PathBuf, timing: bool, launched: Instant, cx: &mut Context<Self>) -> Self {
         let mut this = Self {
             focus_handle: cx.focus_handle(),
-            path: cli.path,
-            timing: cli.timing,
+            path,
+            timing,
             launched,
-            state: State::Idle,
+            state: State::Loading,
         };
         this.open(cx);
         this
     }
 
+    pub fn title(&self) -> SharedString {
+        self.path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("?")
+            .to_string()
+            .into()
+    }
+
     fn open(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = self.path.clone() else {
-            return;
-        };
+        let path = self.path.clone();
         self.state = State::Loading;
         let timing = self.timing;
         let launched = self.launched;
@@ -242,8 +261,15 @@ impl Viewer {
                             current_page: 0,
                             pending_scroll: None,
                             first_paint: None,
+                            thumb_scroll: ScrollHandle::new(),
+                            thumb_keep: None,
+                            thumb_followed: None,
+                            outline: None,
+                            outline_expanded: HashSet::new(),
+                            outline_scroll: ScrollHandle::new(),
                         }));
                         viewer.fetch_page_sizes(cx);
+                        viewer.fetch_outline(cx);
                     }
                     Err(e) => viewer.state = State::Failed(format!("{e:#}")),
                 }
@@ -286,6 +312,49 @@ impl Viewer {
             .ok();
         })
         .detach();
+    }
+
+    fn fetch_outline(&mut self, cx: &mut Context<Self>) {
+        let State::Ready(doc) = &self.state else {
+            return;
+        };
+        let rx = doc.handle.outline();
+        let timing = self.timing;
+        let t = Instant::now();
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = rx.await else { return };
+            this.update(cx, |viewer, cx| {
+                let State::Ready(doc) = &mut viewer.state else {
+                    return;
+                };
+                match result {
+                    Ok(items) => {
+                        if timing {
+                            eprintln!(
+                                "[timing] outline: {} items in {:?}",
+                                items.len(),
+                                t.elapsed()
+                            );
+                        }
+                        // Start with the top level expanded.
+                        doc.outline_expanded = items
+                            .iter()
+                            .filter(|i| i.depth == 0)
+                            .map(|i| i.id)
+                            .collect();
+                        doc.outline = Some(Arc::new(items));
+                        cx.notify();
+                    }
+                    Err(e) => log::error!("outline: {e:#}"),
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub fn go_to_page(&mut self, page: u32, cx: &mut Context<Self>) {
+        self.scroll(ScrollTo::Page(page), cx);
     }
 
     fn page_size(doc: &Doc, page: u32) -> PageSize {
@@ -445,7 +514,7 @@ impl Viewer {
         }
     }
 
-    fn current_page(&self) -> u32 {
+    pub fn current_page(&self) -> u32 {
         match &self.state {
             State::Ready(doc) => doc.current_page,
             _ => 0,
@@ -462,7 +531,7 @@ fn to_render_image(raster: sheaf_render::Raster) -> RenderImage {
     RenderImage::new(smallvec::smallvec![image::Frame::new(buf)])
 }
 
-impl Focusable for Viewer {
+impl Focusable for DocView {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
     }
@@ -481,7 +550,7 @@ struct PagePlan {
     tiles: Vec<(Job, u8)>,
 }
 
-impl Render for Viewer {
+impl Render for DocView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let viewport = window.viewport_size();
         let scale = window.scale_factor();
@@ -498,7 +567,6 @@ impl Render for Viewer {
         let mut body = None;
         let mut wants: Vec<RenderRequest> = Vec::new();
         let status: SharedString = match &mut self.state {
-            State::Idle => "sheaf — no file. Usage: sheaf [--timing] <file.pdf>".into(),
             State::Loading => "Opening…".into(),
             State::Failed(e) => format!("Failed: {e}").into(),
             State::Ready(doc) => {
@@ -509,7 +577,8 @@ impl Render for Viewer {
                 // The scroll container's bounds lag a frame behind on first
                 // layout; fall back to the window size until we have them.
                 let bounds = doc.scroll.bounds();
-                let (view_w, view_h) = if f32::from(bounds.size.width) > 0.0 {
+                let bounds_known = f32::from(bounds.size.width) > 0.0;
+                let (view_w, view_h) = if bounds_known {
                     (f32::from(bounds.size.width), f32::from(bounds.size.height))
                 } else {
                     (
@@ -598,9 +667,7 @@ impl Render for Viewer {
                     let on_screen_page = visible.contains(&p);
                     wants.push(RenderRequest {
                         page: PageIndex(p),
-                        job: Job::Page {
-                            width: PREVIEW_W.min(dev_w),
-                        },
+                        job: Job::Page { width: PREVIEW_W },
                         format: PixelFormat::Bgra,
                         priority: if on_screen_page { 0 } else { 2 },
                     });
@@ -612,7 +679,9 @@ impl Render for Viewer {
                     let strict_y0 = ((scroll_y - top) * scale).max(0.0);
                     let strict_y1 = ((scroll_y + view_h - top) * scale).min(dev_h as f32);
                     let mut tiles = Vec::new();
-                    if vis_x1 > vis_x0 && vis_y1 > vis_y0 {
+                    // Until the container has been laid out once, the width
+                    // is a guess; don't rasterize tiles at the wrong zoom.
+                    if bounds_known && vis_x1 > vis_x0 && vis_y1 > vis_y0 {
                         let (c0, c1) = (
                             (vis_x0 / TILE as f32) as u32,
                             ((vis_x1 / TILE as f32).ceil() as u32).max(1),
@@ -688,11 +757,14 @@ impl Render for Viewer {
                         doc.retired.push(im);
                     }
                 }
+                let thumb_keep = doc.thumb_keep.clone();
                 let evict: Vec<u32> = doc
                     .previews
                     .keys()
                     .copied()
-                    .filter(|p| !keep.contains(p))
+                    .filter(|p| {
+                        !keep.contains(p) && !thumb_keep.as_ref().is_some_and(|r| r.contains(p))
+                    })
                     .collect();
                 for p in evict {
                     if let Some(im) = doc.previews.remove(&p) {
@@ -700,7 +772,10 @@ impl Render for Viewer {
                     }
                 }
                 doc.inflight.retain(|k, _| {
-                    wanted.contains(k) || matches!(k.1, Job::Page { .. }) && keep.contains(&k.0)
+                    wanted.contains(k)
+                        || matches!(k.1, Job::Page { .. })
+                            && (keep.contains(&k.0)
+                                || thumb_keep.as_ref().is_some_and(|r| r.contains(&k.0)))
                 });
 
                 // Build elements: preview underneath, then any tiles we have
@@ -787,10 +862,7 @@ impl Render for Viewer {
                 };
                 format!(
                     "{}  —  page {} / {}  —  {:.0}×{:.0} pt  —  {:.0}% ({mode})  —  {} tiles",
-                    self.path
-                        .as_ref()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_default(),
+                    self.path.display(),
                     doc.current_page + 1,
                     count,
                     ps.width,
@@ -835,7 +907,6 @@ impl Render for Viewer {
                 cx.listener(|v, _: &ZoomFitWidth, _, cx| v.set_zoom(Zoom::FitWidth, None, cx)),
             )
             .on_action(cx.listener(|v, _: &ZoomFitPage, _, cx| v.set_zoom(Zoom::FitPage, None, cx)))
-            .on_action(|_: &Quit, _, cx| cx.quit())
             .flex()
             .flex_col()
             .size_full()
@@ -853,5 +924,264 @@ impl Render for Viewer {
                     .text_sm()
                     .child(status),
             )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sidebar panels. Rendered on behalf of the workspace via `update`, so they
+// can share this view's caches and render handle.
+
+impl DocView {
+    /// Thumbnail strip: virtualized, follows the current page.
+    pub fn render_thumbnails(
+        &mut self,
+        panel_w: f32,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let State::Ready(doc) = &mut self.state else {
+            return div().p_2().text_sm().child("…").into_any_element();
+        };
+        let info = doc.handle.info();
+        let count = info.page_count;
+        let last = count.saturating_sub(1);
+        let thumb_w = (panel_w - 2.0 * THUMB_PAD).clamp(40.0, THUMB_W);
+
+        // Item geometry.
+        let sizes = doc.sizes.clone();
+        let first = info.first_page;
+        let size_of = |i: u32| {
+            sizes
+                .as_ref()
+                .and_then(|s| s.get(i as usize).copied())
+                .unwrap_or(first)
+        };
+        let item_h = |i: u32| {
+            let s = size_of(i);
+            thumb_w * s.height / s.width.max(1.0) + THUMB_LABEL_H + THUMB_PAD
+        };
+        // Cumulative tops; cheap enough per frame for the page counts we care about.
+        let mut tops = Vec::with_capacity(count as usize);
+        let mut y = THUMB_PAD;
+        for i in 0..count {
+            tops.push(y);
+            y += item_h(i);
+        }
+        let total_h = y;
+
+        let bounds = doc.thumb_scroll.bounds();
+        let view_h = f32::from(bounds.size.height).max(1.0);
+        let max_y = (total_h - view_h).max(0.0);
+        let mut scroll_y = (-f32::from(doc.thumb_scroll.offset().y)).clamp(0.0, max_y);
+
+        // Follow the main view: when the current page changes, make sure its
+        // thumbnail is visible.
+        let cur = doc.current_page;
+        if doc.thumb_followed != Some(cur) && count > 0 {
+            let top = tops[cur as usize];
+            let bottom = top + item_h(cur);
+            if top < scroll_y {
+                scroll_y = (top - THUMB_PAD).clamp(0.0, max_y);
+            } else if bottom > scroll_y + view_h {
+                scroll_y = (bottom - view_h + THUMB_PAD).clamp(0.0, max_y);
+            }
+            doc.thumb_scroll.set_offset(point(px(0.0), px(-scroll_y)));
+            doc.thumb_followed = Some(cur);
+        }
+
+        let page_at = |y: f32| tops.partition_point(|&t| t <= y).saturating_sub(1) as u32;
+        let (v0, v1) = (
+            page_at(scroll_y).min(last),
+            page_at(scroll_y + view_h).min(last),
+        );
+        let keep = v0.saturating_sub(2)..=(v1 + 2).min(last);
+        doc.thumb_keep = Some(keep.clone());
+
+        let mut wants = Vec::new();
+        let mut items = Vec::new();
+        for p in v0..=v1 {
+            wants.push(RenderRequest {
+                page: PageIndex(p),
+                job: Job::Page { width: PREVIEW_W },
+                format: PixelFormat::Bgra,
+                priority: 2,
+            });
+            let s = size_of(p);
+            let h = thumb_w * s.height / s.width.max(1.0);
+            let image = doc.previews.get(&p).cloned();
+            let selected = p == cur;
+            items.push(
+                div()
+                    .id(("thumb", p as usize))
+                    .absolute()
+                    .top(px(tops[p as usize]))
+                    .left(px(THUMB_PAD))
+                    .w(px(thumb_w))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |v, _, _, cx| v.go_to_page(p, cx)))
+                    .child(
+                        div()
+                            .w(px(thumb_w))
+                            .h(px(h))
+                            .bg(rgb(0xffffff))
+                            .border_2()
+                            .border_color(if selected {
+                                rgb(0x4a9eff)
+                            } else {
+                                rgb(0x3a3a3a)
+                            })
+                            .when_some(image, |d, im| {
+                                d.child(img(im).size_full().object_fit(ObjectFit::Fill))
+                            }),
+                    )
+                    .child(
+                        div()
+                            .h(px(THUMB_LABEL_H))
+                            .text_xs()
+                            .text_color(if selected {
+                                rgb(0xffffff)
+                            } else {
+                                rgb(0x9a9a9a)
+                            })
+                            .child(format!("{}", p + 1)),
+                    ),
+            );
+        }
+        let el = div()
+            .id("thumbs")
+            .track_scroll(&doc.thumb_scroll)
+            .overflow_y_scroll()
+            .size_full()
+            .child(div().relative().w_full().h(px(total_h)).children(items))
+            .into_any_element();
+        for want in wants {
+            self.ensure_rendered(want, cx);
+        }
+        el
+    }
+
+    /// Bookmark tree: virtualized rows over the expanded subset.
+    pub fn render_outline(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let State::Ready(doc) = &mut self.state else {
+            return div().p_2().text_sm().child("…").into_any_element();
+        };
+        let Some(outline) = doc.outline.clone() else {
+            return div()
+                .p_2()
+                .text_sm()
+                .text_color(rgb(0x9a9a9a))
+                .child("Loading bookmarks…")
+                .into_any_element();
+        };
+        if outline.is_empty() {
+            return div()
+                .p_2()
+                .text_sm()
+                .text_color(rgb(0x9a9a9a))
+                .child("No bookmarks")
+                .into_any_element();
+        }
+
+        // Flatten to the visible rows: skip descendants of collapsed nodes.
+        let mut rows: Vec<usize> = Vec::new();
+        let mut hide_below: Option<u16> = None;
+        for (ix, item) in outline.iter().enumerate() {
+            if let Some(d) = hide_below {
+                if item.depth > d {
+                    continue;
+                }
+                hide_below = None;
+            }
+            rows.push(ix);
+            if item.has_children && !doc.outline_expanded.contains(&item.id) {
+                hide_below = Some(item.depth);
+            }
+        }
+        let total_h = rows.len() as f32 * OUTLINE_ROW_H + THUMB_PAD;
+        let bounds = doc.outline_scroll.bounds();
+        let view_h = f32::from(bounds.size.height).max(1.0);
+        let scroll_y = (-f32::from(doc.outline_scroll.offset().y)).max(0.0);
+        let r0 = ((scroll_y / OUTLINE_ROW_H) as usize).min(rows.len());
+        let r1 = (((scroll_y + view_h) / OUTLINE_ROW_H) as usize + 1).min(rows.len());
+
+        let cur = doc.current_page;
+        let mut els = Vec::new();
+        for r in r0..r1 {
+            let item = &outline[rows[r]];
+            let id = item.id;
+            let page = item.page;
+            let expanded = doc.outline_expanded.contains(&id);
+            let active = page == Some(cur);
+            let chevron = if !item.has_children {
+                " "
+            } else if expanded {
+                "▾"
+            } else {
+                "▸"
+            };
+            els.push(
+                div()
+                    .id(("outline", id as usize))
+                    .absolute()
+                    .top(px(r as f32 * OUTLINE_ROW_H))
+                    .left(px(0.0))
+                    .w_full()
+                    .h(px(OUTLINE_ROW_H))
+                    .pl(px(6.0 + item.depth as f32 * OUTLINE_INDENT))
+                    .pr_2()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .text_sm()
+                    .cursor_pointer()
+                    .when(active, |d| d.bg(rgb(0x3a4a60)))
+                    .hover(|s| s.bg(rgb(0x3a3a3a)))
+                    .on_click(cx.listener(move |v, _, _, cx| {
+                        if let Some(p) = page {
+                            v.go_to_page(p, cx);
+                        }
+                    }))
+                    .child(
+                        div()
+                            .id(("outline-toggle", id as usize))
+                            .w(px(14.0))
+                            .text_color(rgb(0x9a9a9a))
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |v, _, _, cx| {
+                                if let State::Ready(doc) = &mut v.state {
+                                    if !doc.outline_expanded.remove(&id) {
+                                        doc.outline_expanded.insert(id);
+                                    }
+                                    cx.notify();
+                                }
+                                cx.stop_propagation();
+                            }))
+                            .child(chevron),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_color(if page.is_some() {
+                                rgb(0xd0d0d0)
+                            } else {
+                                rgb(0x8a8a8a)
+                            })
+                            .child(item.title.clone()),
+                    ),
+            );
+        }
+        div()
+            .id("outline")
+            .track_scroll(&doc.outline_scroll)
+            .overflow_y_scroll()
+            .size_full()
+            .child(div().relative().w_full().h(px(total_h)).children(els))
+            .into_any_element()
     }
 }

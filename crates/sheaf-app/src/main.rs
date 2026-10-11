@@ -1,21 +1,23 @@
 //! sheaf — a fast PDF editor. Currently: a fast PDF viewer.
 //!
-//!     sheaf [--timing] <file.pdf>
+//!     sheaf [--timing] [file.pdf ...]
 
-mod viewer;
+mod docview;
+mod workspace;
 
+use std::path::PathBuf;
 use std::time::Instant;
 
 use gpui::{
-    App, Bounds, Focusable, KeyBinding, SharedString, TitlebarOptions, WindowBounds, WindowOptions,
-    actions, prelude::*, px, size,
+    App, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, actions, prelude::*, px,
+    size,
 };
 use gpui_platform::application;
 
-use viewer::{Cli, KEY_CONTEXT, Viewer};
+use workspace::Workspace;
 
 actions!(
-    viewer,
+    docview,
     [
         NextPage,
         PrevPage,
@@ -29,21 +31,38 @@ actions!(
         ZoomOut,
         ZoomActual,
         ZoomFitWidth,
-        ZoomFitPage,
+        ZoomFitPage
+    ]
+);
+actions!(
+    workspace,
+    [
+        ToggleSidebar,
+        ShowThumbnails,
+        ShowOutline,
+        NextTab,
+        PrevTab,
+        CloseTab,
+        OpenFile,
         Quit
     ]
 );
 
+struct Cli {
+    paths: Vec<PathBuf>,
+    timing: bool,
+}
+
 fn parse_cli() -> Cli {
     let mut cli = Cli {
-        path: None,
+        paths: Vec::new(),
         timing: false,
     };
     for arg in std::env::args_os().skip(1) {
         match arg.to_str() {
             Some("--timing") => cli.timing = true,
             Some(s) if s.starts_with("--") => eprintln!("unknown flag {s}"),
-            _ => cli.path = Some(arg.into()),
+            _ => cli.paths.push(arg.into()),
         }
     }
     cli
@@ -55,50 +74,51 @@ fn main() {
     let cli = parse_cli();
 
     application().run(move |cx: &mut App| {
-        let ctx = Some(KEY_CONTEXT);
+        let doc = Some(docview::KEY_CONTEXT);
+        let ws = Some(workspace::KEY_CONTEXT);
         cx.bind_keys([
-            KeyBinding::new("right", NextPage, ctx),
-            KeyBinding::new("left", PrevPage, ctx),
-            KeyBinding::new("down", LineDown, ctx),
-            KeyBinding::new("up", LineUp, ctx),
-            KeyBinding::new("pagedown", ScreenDown, ctx),
-            KeyBinding::new("space", ScreenDown, ctx),
-            KeyBinding::new("pageup", ScreenUp, ctx),
-            KeyBinding::new("shift-space", ScreenUp, ctx),
-            KeyBinding::new("home", FirstPage, ctx),
-            KeyBinding::new("end", LastPage, ctx),
-            KeyBinding::new("ctrl-=", ZoomIn, ctx),
-            KeyBinding::new("ctrl-+", ZoomIn, ctx),
-            KeyBinding::new("ctrl--", ZoomOut, ctx),
-            KeyBinding::new("ctrl-0", ZoomFitWidth, ctx),
-            KeyBinding::new("ctrl-9", ZoomFitPage, ctx),
-            KeyBinding::new("ctrl-1", ZoomActual, ctx),
+            KeyBinding::new("right", NextPage, doc),
+            KeyBinding::new("left", PrevPage, doc),
+            KeyBinding::new("down", LineDown, doc),
+            KeyBinding::new("up", LineUp, doc),
+            KeyBinding::new("pagedown", ScreenDown, doc),
+            KeyBinding::new("space", ScreenDown, doc),
+            KeyBinding::new("pageup", ScreenUp, doc),
+            KeyBinding::new("shift-space", ScreenUp, doc),
+            KeyBinding::new("home", FirstPage, doc),
+            KeyBinding::new("end", LastPage, doc),
+            KeyBinding::new("ctrl-=", ZoomIn, doc),
+            KeyBinding::new("ctrl-+", ZoomIn, doc),
+            KeyBinding::new("ctrl--", ZoomOut, doc),
+            KeyBinding::new("ctrl-0", ZoomFitWidth, doc),
+            KeyBinding::new("ctrl-9", ZoomFitPage, doc),
+            KeyBinding::new("ctrl-1", ZoomActual, doc),
+            KeyBinding::new("f4", ToggleSidebar, ws),
+            KeyBinding::new("ctrl-shift-p", ShowThumbnails, ws),
+            KeyBinding::new("ctrl-shift-b", ShowOutline, ws),
+            KeyBinding::new("ctrl-tab", NextTab, ws),
+            KeyBinding::new("ctrl-shift-tab", PrevTab, ws),
+            KeyBinding::new("ctrl-pagedown", NextTab, ws),
+            KeyBinding::new("ctrl-pageup", PrevTab, ws),
+            KeyBinding::new("ctrl-w", CloseTab, ws),
+            KeyBinding::new("ctrl-o", OpenFile, ws),
             KeyBinding::new("ctrl-q", Quit, None),
-            KeyBinding::new("ctrl-w", Quit, None),
         ]);
 
-        let title: SharedString = match &cli.path {
-            Some(p) => format!(
-                "{} — sheaf",
-                p.file_name().and_then(|s| s.to_str()).unwrap_or("?")
-            )
-            .into(),
-            None => "sheaf".into(),
-        };
-        let bounds = Bounds::centered(None, size(px(1000.0), px(800.0)), cx);
+        let bounds = Bounds::centered(None, size(px(1200.0), px(850.0)), cx);
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {
-                    title: Some(title),
+                    title: Some("sheaf".into()),
                     ..Default::default()
                 }),
                 ..Default::default()
             },
-            |window, cx| {
-                let viewer = cx.new(|cx| Viewer::new(cli, launched, cx));
-                viewer.read(cx).focus_handle(cx).focus(window, cx);
-                viewer
+            move |window, cx| {
+                let ws = cx.new(|cx| Workspace::new(cli.paths, cli.timing, launched, cx));
+                ws.update(cx, |ws, cx| ws.focus_active(window, cx));
+                ws
             },
         )
         .expect("open window");
