@@ -20,7 +20,7 @@ use anyhow::{Context, Result};
 use futures::channel::oneshot;
 use sheaf_core::{PageIndex, PageSize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PixelFormat {
     /// Straight RGBA8, what the `image` crate and most encoders want.
     Rgba,
@@ -36,18 +36,47 @@ pub struct Raster {
     pub data: Vec<u8>,
 }
 
+/// What to rasterize. Sizes are device pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Job {
+    /// The whole page, scaled to `width` wide.
+    Page { width: u32 },
+    /// The `w`×`h` region at (`x`, `y`) of the page scaled to
+    /// `page_width`×`page_height`. Lets a zoomed-in page be rendered a
+    /// viewport's worth at a time instead of as one huge bitmap.
+    Tile {
+        page_width: u32,
+        page_height: u32,
+        x: u32,
+        y: u32,
+        w: u32,
+        h: u32,
+    },
+}
+
 /// Synchronous engine interface. Implementations may block.
 pub trait Renderer {
     fn page_count(&self) -> u32;
     fn page_size(&self, page: PageIndex) -> Result<PageSize>;
     fn page_sizes(&self) -> Result<Vec<PageSize>>;
     /// Render a whole page scaled so its width is `target_width` device pixels.
+    fn render(&self, page: PageIndex, job: Job, format: PixelFormat) -> Result<Raster>;
+
+    /// Render a whole page scaled so its width is `target_width` device pixels.
     fn render_page(
         &self,
         page: PageIndex,
         target_width: u32,
         format: PixelFormat,
-    ) -> Result<Raster>;
+    ) -> Result<Raster> {
+        self.render(
+            page,
+            Job::Page {
+                width: target_width,
+            },
+            format,
+        )
+    }
 }
 
 pub mod pdfium {
@@ -147,18 +176,39 @@ pub mod pdfium {
                 .collect())
         }
 
-        fn render_page(
-            &self,
-            page: PageIndex,
-            target_width: u32,
-            format: PixelFormat,
-        ) -> Result<Raster> {
+        fn render(&self, page: PageIndex, job: Job, format: PixelFormat) -> Result<Raster> {
             let p = self.doc.pages().get(page.0 as i32)?;
-            let cfg = PdfRenderConfig::new()
-                .set_target_width(target_width.max(1) as i32)
-                .set_format(PdfBitmapFormat::BGRA)
-                .render_form_data(true);
-            let bmp = p.render_with_config(&cfg)?;
+            let bmp = match job {
+                Job::Page { width } => {
+                    let cfg = PdfRenderConfig::new()
+                        .set_target_width(width.max(1) as i32)
+                        .set_format(PdfBitmapFormat::BGRA)
+                        .render_form_data(true);
+                    p.render_with_config(&cfg)?
+                }
+                Job::Tile {
+                    page_width,
+                    page_height,
+                    x,
+                    y,
+                    w,
+                    h,
+                } => {
+                    // Scale the page to its full size but draw into a
+                    // tile-sized bitmap offset so only our region lands.
+                    // Unlike a matrix/clip render, this path keeps form-field
+                    // drawing (FPDF_FFLDraw) working.
+                    let mut bmp =
+                        PdfBitmap::empty(w.max(1) as i32, h.max(1) as i32, PdfBitmapFormat::BGRA)?;
+                    let cfg = PdfRenderConfig::new()
+                        .set_fixed_size(page_width.max(1) as i32, page_height.max(1) as i32)
+                        .set_origin(-(x as i32), -(y as i32))
+                        .set_format(PdfBitmapFormat::BGRA)
+                        .render_form_data(true);
+                    p.render_into_bitmap_with_config(&mut bmp, &cfg)?;
+                    bmp
+                }
+            };
             let data = match format {
                 PixelFormat::Bgra => bmp.as_raw_bytes(),
                 PixelFormat::Rgba => bmp.as_rgba_bytes(),
@@ -185,11 +235,14 @@ pub struct DocInfo {
     pub open_time: std::time::Duration,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RenderRequest {
     pub page: PageIndex,
-    pub target_width: u32,
+    pub job: Job,
     pub format: PixelFormat,
+    /// Lower runs sooner within a batch (0 = previews, then visible tiles,
+    /// then prefetch).
+    pub priority: u8,
 }
 
 /// A finished render plus how long the engine took.
@@ -319,7 +372,10 @@ fn worker_loop(engine: impl Renderer, rx: mpsc::Receiver<Msg>) {
         for msg in batch {
             match msg {
                 Msg::Render(req, reply) => {
-                    if let Some(pos) = latest.iter().position(|(r, _)| r.page == req.page) {
+                    if let Some(pos) = latest
+                        .iter()
+                        .position(|(r, _)| r.page == req.page && r.job == req.job)
+                    {
                         // Dropping the older sender cancels its receiver.
                         latest[pos] = (req, reply);
                     } else {
@@ -335,6 +391,7 @@ fn worker_loop(engine: impl Renderer, rx: mpsc::Receiver<Msg>) {
             }
         }
 
+        latest.sort_by_key(|(r, _)| r.priority);
         for (req, reply) in latest {
             // The viewer drops receivers for pages that scrolled out of view;
             // don't waste the worker on them.
@@ -343,7 +400,7 @@ fn worker_loop(engine: impl Renderer, rx: mpsc::Receiver<Msg>) {
             }
             let t = Instant::now();
             let result = engine
-                .render_page(req.page, req.target_width, req.format)
+                .render(req.page, req.job, req.format)
                 .map(|raster| Rendered {
                     request: req,
                     raster,

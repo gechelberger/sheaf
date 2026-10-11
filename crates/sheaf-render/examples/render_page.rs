@@ -56,5 +56,32 @@ fn main() -> Result<()> {
             path.display()
         );
     }
+
+    // Tile check: page 0 at 2400px wide, the tile one step down and right.
+    let job = sheaf_render::Job::Tile {
+        page_width: 2400,
+        page_height: 3106,
+        x: 1024,
+        y: 1024,
+        w: 1024,
+        h: 1024,
+    };
+    let t = Instant::now();
+    let tile = r.render(PageIndex(0), job, PixelFormat::Rgba)?;
+    let path = out_dir.join("tile-0-1024-1024.png");
+    image::save_buffer(
+        &path,
+        &tile.data,
+        tile.width,
+        tile.height,
+        image::ColorType::Rgba8,
+    )?;
+    println!(
+        "  tile {}x{} rendered in {:?} -> {}",
+        tile.width,
+        tile.height,
+        t.elapsed(),
+        path.display()
+    );
     Ok(())
 }

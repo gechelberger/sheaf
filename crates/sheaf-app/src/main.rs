@@ -17,7 +17,20 @@ use viewer::{Cli, KEY_CONTEXT, Viewer};
 actions!(
     viewer,
     [
-        NextPage, PrevPage, FirstPage, LastPage, LineDown, LineUp, ScreenDown, ScreenUp, Quit
+        NextPage,
+        PrevPage,
+        FirstPage,
+        LastPage,
+        LineDown,
+        LineUp,
+        ScreenDown,
+        ScreenUp,
+        ZoomIn,
+        ZoomOut,
+        ZoomActual,
+        ZoomFitWidth,
+        ZoomFitPage,
+        Quit
     ]
 );
 
@@ -54,6 +67,12 @@ fn main() {
             KeyBinding::new("shift-space", ScreenUp, ctx),
             KeyBinding::new("home", FirstPage, ctx),
             KeyBinding::new("end", LastPage, ctx),
+            KeyBinding::new("ctrl-=", ZoomIn, ctx),
+            KeyBinding::new("ctrl-+", ZoomIn, ctx),
+            KeyBinding::new("ctrl--", ZoomOut, ctx),
+            KeyBinding::new("ctrl-0", ZoomFitWidth, ctx),
+            KeyBinding::new("ctrl-9", ZoomFitPage, ctx),
+            KeyBinding::new("ctrl-1", ZoomActual, ctx),
             KeyBinding::new("ctrl-q", Quit, None),
             KeyBinding::new("ctrl-w", Quit, None),
         ]);
