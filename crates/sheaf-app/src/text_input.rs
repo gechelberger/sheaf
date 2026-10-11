@@ -28,9 +28,20 @@ actions!(
         Paste,
         Cut,
         Copy,
-        InsertSpace
+        InsertSpace,
+        Confirm,
+        Cancel
     ]
 );
+
+/// Emitted when the user presses Enter or Escape in the field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextInputEvent {
+    Confirm,
+    Cancel,
+}
+
+impl gpui::EventEmitter<TextInputEvent> for TextInput {}
 
 pub const KEY_CONTEXT: &str = "TextInput";
 
@@ -63,6 +74,23 @@ impl TextInput {
 
     pub fn text(&self) -> &str {
         &self.content
+    }
+
+    /// Replace the content and select all of it.
+    pub fn set_text(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.content = text.into();
+        self.marked_range = None;
+        self.selected_range = 0..self.content.len();
+        self.selection_reversed = false;
+        cx.notify();
+    }
+
+    fn confirm(&mut self, _: &Confirm, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(TextInputEvent::Confirm);
+    }
+
+    fn cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(TextInputEvent::Cancel);
     }
 
     pub fn select_all(&mut self, cx: &mut Context<Self>) {
@@ -595,6 +623,8 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
             .on_action(cx.listener(Self::insert_space))
+            .on_action(cx.listener(Self::confirm))
+            .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::copy))

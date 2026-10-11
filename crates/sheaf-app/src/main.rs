@@ -3,6 +3,7 @@
 //!     sheaf [--timing] [file.pdf ...]
 
 mod docview;
+mod outline_panel;
 mod text_input;
 mod workspace;
 
@@ -15,7 +16,7 @@ use gpui::{
 };
 use gpui_platform::application;
 
-use workspace::Workspace;
+use workspace::{Launch, Workspace};
 
 actions!(
     docview,
@@ -45,7 +46,20 @@ actions!(
         DuplicatePages,
         SelectAllPages,
         Save,
-        SaveAs
+        SaveAs,
+        InsertPdf,
+        NewBookmark
+    ]
+);
+actions!(
+    outline,
+    [
+        RenameBookmark,
+        DeleteBookmark,
+        SetBookmarkDestination,
+        DeselectBookmark,
+        ExpandAllBookmarks,
+        CollapseAllBookmarks
     ]
 );
 actions!(
@@ -69,6 +83,10 @@ struct Cli {
     find: Option<String>,
     /// Dev: rotate page 1 of the first document and save it here.
     selftest_save: Option<PathBuf>,
+    /// Dev: insert this PDF after page 1 of the first document.
+    selftest_insert: Option<PathBuf>,
+    /// Sidebar panel to open with: "pages" (default) or "bookmarks".
+    panel: Option<String>,
 }
 
 fn parse_cli() -> Cli {
@@ -77,6 +95,8 @@ fn parse_cli() -> Cli {
         timing: false,
         find: None,
         selftest_save: None,
+        selftest_insert: None,
+        panel: None,
     };
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {
@@ -84,6 +104,8 @@ fn parse_cli() -> Cli {
             Some("--timing") => cli.timing = true,
             Some("--find") => cli.find = args.next().and_then(|q| q.to_str().map(String::from)),
             Some("--selftest-save") => cli.selftest_save = args.next().map(PathBuf::from),
+            Some("--selftest-insert") => cli.selftest_insert = args.next().map(PathBuf::from),
+            Some("--panel") => cli.panel = args.next().and_then(|p| p.to_str().map(String::from)),
             Some(s) if s.starts_with("--") => eprintln!("unknown flag {s}"),
             _ => cli.paths.push(arg.into()),
         }
@@ -100,6 +122,8 @@ fn main() {
         let doc = Some(docview::KEY_CONTEXT);
         let ws = Some(workspace::KEY_CONTEXT);
         let ti = Some(text_input::KEY_CONTEXT);
+        let outline = Some(outline_panel::KEY_CONTEXT);
+        let either = Some("DocView || Outline");
         cx.bind_keys([
             KeyBinding::new("right", NextPage, doc),
             KeyBinding::new("left", PrevPage, doc),
@@ -122,11 +146,17 @@ fn main() {
             KeyBinding::new("delete", DeletePage, doc),
             KeyBinding::new("ctrl-d", DuplicatePages, doc),
             KeyBinding::new("ctrl-a", SelectAllPages, doc),
-            KeyBinding::new("ctrl-z", Undo, doc),
-            KeyBinding::new("ctrl-shift-z", Redo, doc),
-            KeyBinding::new("ctrl-y", Redo, doc),
-            KeyBinding::new("ctrl-s", Save, doc),
-            KeyBinding::new("ctrl-shift-s", SaveAs, doc),
+            KeyBinding::new("ctrl-z", Undo, either),
+            KeyBinding::new("ctrl-shift-z", Redo, either),
+            KeyBinding::new("ctrl-y", Redo, either),
+            KeyBinding::new("ctrl-s", Save, either),
+            KeyBinding::new("ctrl-shift-s", SaveAs, either),
+            KeyBinding::new("ctrl-shift-i", InsertPdf, doc),
+            KeyBinding::new("ctrl-b", NewBookmark, either),
+            // Bookmarks panel (when it has focus).
+            KeyBinding::new("f2", RenameBookmark, outline),
+            KeyBinding::new("delete", DeleteBookmark, outline),
+            KeyBinding::new("escape", DeselectBookmark, outline),
             KeyBinding::new("ctrl-f", Find, doc),
             KeyBinding::new("escape", CloseSearch, doc),
             KeyBinding::new("f3", SearchNext, doc),
@@ -148,6 +178,8 @@ fn main() {
             KeyBinding::new("ctrl-x", text_input::Cut, ti),
             KeyBinding::new("space", text_input::InsertSpace, ti),
             KeyBinding::new("shift-space", text_input::InsertSpace, ti),
+            KeyBinding::new("enter", text_input::Confirm, ti),
+            KeyBinding::new("escape", text_input::Cancel, ti),
             KeyBinding::new("f4", ToggleSidebar, ws),
             KeyBinding::new("ctrl-shift-p", ShowThumbnails, ws),
             KeyBinding::new("ctrl-shift-b", ShowOutline, ws),
@@ -173,11 +205,15 @@ fn main() {
             move |window, cx| {
                 let ws = cx.new(|cx| {
                     Workspace::new(
-                        cli.paths,
-                        cli.timing,
-                        cli.find,
-                        cli.selftest_save,
-                        launched,
+                        Launch {
+                            paths: cli.paths,
+                            timing: cli.timing,
+                            find: cli.find,
+                            selftest_save: cli.selftest_save,
+                            selftest_insert: cli.selftest_insert,
+                            start_with_bookmarks: cli.panel.as_deref() == Some("bookmarks"),
+                            launched,
+                        },
                         cx,
                     )
                 });

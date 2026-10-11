@@ -21,4 +21,5 @@ log.workspace = true
 image.workspace = true
 smallvec.workspace = true
 futures.workspace = true
+im.workspace = true
 unicode-segmentation.workspace = true

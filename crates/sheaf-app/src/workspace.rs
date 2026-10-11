@@ -16,6 +16,20 @@ use crate::{
 
 pub const KEY_CONTEXT: &str = "Workspace";
 
+/// What the command line asked for at startup.
+pub struct Launch {
+    pub paths: Vec<PathBuf>,
+    pub timing: bool,
+    /// Open the search bar with this query once the first document loads.
+    pub find: Option<String>,
+    /// Dev: rotate page 1 of the first document and save it here.
+    pub selftest_save: Option<PathBuf>,
+    /// Dev: insert this PDF after page 1 of the first document.
+    pub selftest_insert: Option<PathBuf>,
+    pub start_with_bookmarks: bool,
+    pub launched: Instant,
+}
+
 const TAB_H: f32 = 32.0;
 const SIDEBAR_W: f32 = 220.0;
 
@@ -35,19 +49,25 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    pub fn new(
-        paths: Vec<PathBuf>,
-        timing: bool,
-        find: Option<String>,
-        selftest_save: Option<PathBuf>,
-        launched: Instant,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(launch: Launch, cx: &mut Context<Self>) -> Self {
+        let Launch {
+            paths,
+            timing,
+            find,
+            selftest_save,
+            selftest_insert,
+            start_with_bookmarks,
+            launched,
+        } = launch;
         let mut this = Self {
             docs: Vec::new(),
             active: 0,
             sidebar_open: true,
-            panel: Panel::Thumbnails,
+            panel: if start_with_bookmarks {
+                Panel::Outline
+            } else {
+                Panel::Thumbnails
+            },
             timing,
             launched,
         };
@@ -59,6 +79,9 @@ impl Workspace {
         }
         if let (Some(p), Some(doc)) = (selftest_save, this.docs.first().cloned()) {
             doc.update(cx, |d, _| d.set_selftest_save(p));
+        }
+        if let (Some(p), Some(doc)) = (selftest_insert, this.docs.first().cloned()) {
+            doc.update(cx, |d, _| d.set_selftest_insert(p));
         }
         this
     }

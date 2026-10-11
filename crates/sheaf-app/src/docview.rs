@@ -30,11 +30,12 @@ use sheaf_render::{
     SearchHit,
 };
 
-use crate::text_input::TextInput;
+use crate::text_input::{TextInput, TextInputEvent};
 use crate::{
-    CloseSearch, DeletePage, DuplicatePages, Find, FirstPage, LastPage, LineDown, LineUp, NextPage,
-    PrevPage, Redo, RotatePageCcw, RotatePageCw, Save, SaveAs, ScreenDown, ScreenUp, SearchNext,
-    SearchPrev, SelectAllPages, Undo, ZoomActual, ZoomFitPage, ZoomFitWidth, ZoomIn, ZoomOut,
+    CloseSearch, DeletePage, DuplicatePages, Find, FirstPage, InsertPdf, LastPage, LineDown,
+    LineUp, NewBookmark, NextPage, PrevPage, Redo, RotatePageCcw, RotatePageCw, Save, SaveAs,
+    ScreenDown, ScreenUp, SearchNext, SearchPrev, SelectAllPages, Undo, ZoomActual, ZoomFitPage,
+    ZoomFitWidth, ZoomIn, ZoomOut,
 };
 
 pub const KEY_CONTEXT: &str = "DocView";
@@ -64,8 +65,6 @@ const ZOOM_MAX: f32 = 16.0;
 const THUMB_W: f32 = 150.0;
 const THUMB_PAD: f32 = 10.0;
 const THUMB_LABEL_H: f32 = 18.0;
-const OUTLINE_ROW_H: f32 = 24.0;
-const OUTLINE_INDENT: f32 = 14.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Zoom {
@@ -75,7 +74,7 @@ pub enum Zoom {
     Custom(f32),
 }
 
-enum State {
+pub(crate) enum State {
     Loading,
     Failed(String),
     Ready(Box<Doc>),
@@ -83,7 +82,7 @@ enum State {
 
 /// Page geometry in logical px at the current zoom, for one snapshot of the
 /// page sequence.
-struct Layout {
+pub(crate) struct Layout {
     zoom: Zoom,
     view_w: f32,
     view_h: f32,
@@ -177,44 +176,52 @@ impl Layout {
 
 type TileKey = (PageId, Job);
 
-struct Doc {
-    model: Document,
-    handles: HashMap<SourceId, RenderHandle>,
+pub(crate) struct Doc {
+    pub(crate) model: Document,
+    pub(crate) handles: HashMap<SourceId, RenderHandle>,
     /// Bumped on every model change so layouts and lookups can tell.
-    version: u64,
-    zoom: Zoom,
-    scroll: ScrollHandle,
-    layout: Option<Layout>,
-    previews: HashMap<PageId, (Rotation, Arc<RenderImage>)>,
-    tiles: HashMap<TileKey, Arc<RenderImage>>,
+    pub(crate) version: u64,
+    pub(crate) zoom: Zoom,
+    pub(crate) scroll: ScrollHandle,
+    pub(crate) layout: Option<Layout>,
+    pub(crate) previews: HashMap<PageId, (Rotation, Arc<RenderImage>)>,
+    pub(crate) tiles: HashMap<TileKey, Arc<RenderImage>>,
     /// Dropping the task drops the oneshot receiver, which tells the worker
     /// to skip the render if it hasn't started.
-    inflight: HashMap<TileKey, Task<()>>,
+    pub(crate) inflight: HashMap<TileKey, Task<()>>,
     /// Images we've stopped showing; GPU textures are released in `render`,
     /// the only place we have a `Window`.
-    retired: Vec<Arc<RenderImage>>,
-    current_page: usize,
-    pending_scroll: Option<ScrollTo>,
-    first_paint: Option<Instant>,
+    pub(crate) retired: Vec<Arc<RenderImage>>,
+    pub(crate) current_page: usize,
+    pub(crate) pending_scroll: Option<ScrollTo>,
+    pub(crate) first_paint: Option<Instant>,
     /// Last edit notice, shown in the status bar.
-    notice: Option<String>,
+    pub(crate) notice: Option<String>,
     // Sidebar state.
-    thumb_scroll: ScrollHandle,
+    pub(crate) thumb_scroll: ScrollHandle,
     /// Pages whose previews the thumbnail panel is showing; kept cached.
-    thumb_keep: HashSet<PageId>,
+    pub(crate) thumb_keep: HashSet<PageId>,
     /// Last page the thumbnail panel auto-scrolled to follow.
-    thumb_followed: Option<PageId>,
-    outline_loaded: bool,
-    outline_expanded: HashSet<OutlineId>,
-    outline_scroll: ScrollHandle,
+    pub(crate) thumb_followed: Option<PageId>,
+    pub(crate) outline_loaded: bool,
+    pub(crate) outline_expanded: HashSet<OutlineId>,
+    pub(crate) outline_scroll: ScrollHandle,
     // Selection and drag state for the thumbnail panel.
-    selection: HashSet<PageId>,
+    pub(crate) selection: HashSet<PageId>,
     /// Index the last plain/ctrl click landed on; shift-click extends from it.
-    sel_anchor: Option<usize>,
+    pub(crate) sel_anchor: Option<usize>,
     /// Insert index under the cursor while pages are being dragged.
-    drop_target: Option<usize>,
+    pub(crate) drop_target: Option<usize>,
     /// A save is running on a background thread.
-    saving: bool,
+    pub(crate) saving: bool,
+    // Outline panel editing state (see outline_panel.rs).
+    pub(crate) outline_focus: FocusHandle,
+    pub(crate) outline_selected: Option<OutlineId>,
+    pub(crate) outline_drop: Option<crate::outline_panel::OutlineDrop>,
+    pub(crate) outline_rename: Option<crate::outline_panel::Rename>,
+    pub(crate) outline_menu: Option<(OutlineId, gpui::Point<gpui::Pixels>)>,
+    /// Rows as last rendered: (id, depth, display index of target).
+    pub(crate) outline_rows: Vec<(OutlineId, u16, Option<usize>)>,
 }
 
 impl Doc {
@@ -222,7 +229,7 @@ impl Doc {
         &self.handles[&self.model.primary()]
     }
 
-    fn page_ref(&self, index: usize) -> Option<PageRef> {
+    pub(crate) fn page_ref(&self, index: usize) -> Option<PageRef> {
         self.model.page(index).copied()
     }
 
@@ -244,7 +251,7 @@ impl Doc {
 }
 
 #[derive(Clone, Copy)]
-enum ScrollTo {
+pub(crate) enum ScrollTo {
     Page(usize),
     By(f32),
     End,
@@ -267,21 +274,27 @@ enum ScrollTo {
 }
 
 pub struct DocView {
-    focus_handle: FocusHandle,
-    path: PathBuf,
-    timing: bool,
-    launched: Instant,
-    state: State,
-    search: Option<Search>,
-    initial_query: Option<String>,
-    search_started: Option<Instant>,
-    selftest_save: Option<PathBuf>,
+    pub(crate) focus_handle: FocusHandle,
+    pub(crate) path: PathBuf,
+    pub(crate) timing: bool,
+    pub(crate) launched: Instant,
+    pub(crate) state: State,
+    pub(crate) search: Option<Search>,
+    pub(crate) initial_query: Option<String>,
+    pub(crate) search_started: Option<Instant>,
+    pub(crate) selftest_save: Option<PathBuf>,
+    /// Re-focus the document on the next frame (after a text field closes).
+    pub(crate) pending_focus: bool,
+    /// Re-focus the Bookmarks panel on its next render (after a rename field closes).
+    pub(crate) pending_outline_focus: bool,
+    pub(crate) selftest_insert: Option<PathBuf>,
 }
 
 /// An open search bar and the running / finished query behind it.
-struct Search {
+pub(crate) struct Search {
     input: Entity<TextInput>,
     _input_sub: Subscription,
+    _events_sub: Subscription,
     /// Query the current results are for.
     query: String,
     /// Hits in primary-source page order (the worker scans pages in order).
@@ -305,6 +318,9 @@ impl DocView {
             initial_query: None,
             search_started: None,
             selftest_save: None,
+            pending_focus: false,
+            pending_outline_focus: false,
+            selftest_insert: None,
         };
         this.open(cx);
         this
@@ -387,23 +403,23 @@ impl DocView {
                             sel_anchor: None,
                             drop_target: None,
                             saving: false,
+                            outline_focus: cx.focus_handle(),
+                            outline_selected: None,
+                            outline_drop: None,
+                            outline_rename: None,
+                            outline_menu: None,
+                            outline_rows: Vec::new(),
                         }));
                         viewer.fetch_page_sizes(cx);
                         viewer.fetch_outline(cx);
                         if let Some(p) = viewer.selftest_save.take() {
                             viewer.selftest_save(p, cx);
                         }
+                        if let Some(p) = viewer.selftest_insert.take() {
+                            viewer.insert_pdf(p, cx);
+                        }
                         if let Some(q) = viewer.initial_query.take() {
-                            viewer.search = Some(Search {
-                                input: cx.new(|cx| TextInput::new("Find in document", cx)),
-                                _input_sub: Subscription::new(|| {}),
-                                query: String::new(),
-                                hits: Vec::new(),
-                                current: None,
-                                scanned: 0,
-                                done: true,
-                                _task: None,
-                            });
+                            viewer.new_search(cx);
                             viewer.start_search(q, cx);
                         }
                     }
@@ -417,10 +433,22 @@ impl DocView {
     }
 
     fn fetch_page_sizes(&mut self, cx: &mut Context<Self>) {
+        let primary = match &self.state {
+            State::Ready(doc) => doc.model.primary(),
+            _ => return,
+        };
+        self.fetch_source_sizes(primary, cx);
+    }
+
+    /// Enumerate a source's page sizes on its worker and feed them to the model.
+    fn fetch_source_sizes(&mut self, sid: SourceId, cx: &mut Context<Self>) {
         let State::Ready(doc) = &self.state else {
             return;
         };
-        let rx = doc.primary().page_sizes();
+        let Some(handle) = doc.handles.get(&sid) else {
+            return;
+        };
+        let rx = handle.page_sizes();
         let timing = self.timing;
         let t = Instant::now();
         cx.spawn(async move |this, cx| {
@@ -438,8 +466,7 @@ impl DocView {
                                 t.elapsed()
                             );
                         }
-                        let primary = doc.model.primary();
-                        doc.model.set_source_sizes(primary, sizes);
+                        doc.model.set_source_sizes(sid, sizes);
                         doc.touched();
                         cx.notify();
                     }
@@ -500,7 +527,7 @@ impl DocView {
 
     // ----- edits ------------------------------------------------------------
 
-    fn apply(&mut self, edit: Edit, label: &str, cx: &mut Context<Self>) {
+    pub(crate) fn apply(&mut self, edit: Edit, label: &str, cx: &mut Context<Self>) {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
@@ -538,7 +565,7 @@ impl DocView {
     }
 
     /// Pages an operation applies to: the selection, or the current page.
-    fn target_ids(&self) -> Vec<PageId> {
+    pub(crate) fn target_ids(&self) -> Vec<PageId> {
         let State::Ready(doc) = &self.state else {
             return Vec::new();
         };
@@ -678,7 +705,7 @@ impl DocView {
         }
     }
 
-    fn undo(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn undo(&mut self, cx: &mut Context<Self>) {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
@@ -691,7 +718,7 @@ impl DocView {
         cx.notify();
     }
 
-    fn redo(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn redo(&mut self, cx: &mut Context<Self>) {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
@@ -830,22 +857,182 @@ impl DocView {
         self.selftest_save = Some(path);
     }
 
+    // ----- insert pdf ---------------------------------------------------------
+
+    fn insert_pdf_prompt(&mut self, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("Insert".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = rx.await {
+                this.update(cx, |view, cx| {
+                    for p in paths {
+                        view.insert_pdf(p, cx);
+                    }
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    /// Insert every page of `path` after the current page (or after the
+    /// selection), merging its bookmarks PDFlyer-style.
+    pub fn insert_pdf(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let targets = self.target_ids();
+        let State::Ready(doc) = &mut self.state else {
+            return;
+        };
+        // Insert after the last targeted page: "before" is the one after it.
+        let last_target = targets.last().and_then(|id| doc.model.index_of(*id));
+        let before = last_target.and_then(|i| doc.page_ref(i + 1)).map(|p| p.id);
+        doc.notice = Some(format!("Inserting {}…", path.display()));
+        cx.notify();
+        let timing = self.timing;
+        cx.spawn(async move |this, cx| {
+            let t = Instant::now();
+            let opened = cx
+                .background_executor()
+                .spawn({
+                    let path = path.clone();
+                    async move {
+                        let bytes = std::fs::metadata(&path)
+                            .map(|m| m.len() as usize)
+                            .unwrap_or(0);
+                        let handle = RenderHandle::open(path, None)?;
+                        anyhow::Ok((handle, bytes))
+                    }
+                })
+                .await;
+            let (handle, bytes) = match opened {
+                Ok(v) => v,
+                Err(e) => {
+                    this.update(cx, |view, cx| {
+                        if let State::Ready(doc) = &mut view.state {
+                            doc.notice = Some(format!("Insert failed: {e:#}"));
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+            };
+            // Bookmarks come from the worker before we apply the edit, so the
+            // insert and its merge are one undo step.
+            let outline = handle
+                .outline()
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+                .unwrap_or_default();
+            let sizes_rx = handle.page_sizes();
+            this.update(cx, |view, cx| {
+                let State::Ready(doc) = &mut view.state else {
+                    return;
+                };
+                let (page_count, first_page) = (handle.info().page_count, handle.info().first_page);
+                let sid = doc.model.add_source(SourceInfo {
+                    path: path.clone(),
+                    page_count,
+                    first_page,
+                    page_sizes: None,
+                    bytes,
+                });
+                doc.handles.insert(sid, handle);
+                let flat: Vec<FlatOutlineItem> = outline.iter().map(flat_item).collect();
+                let name = path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("file")
+                    .to_string();
+                let label = format!("Insert {name}");
+                match doc.model.apply(
+                    Edit::InsertPages {
+                        source: sid,
+                        range: 0..page_count,
+                        before,
+                        outline: Some(flat),
+                    },
+                    &label,
+                ) {
+                    Ok(out) => {
+                        doc.notice = Some(format!(
+                            "Inserted {} page{} from {name}; {} bookmark{} merged",
+                            out.pages_added,
+                            if out.pages_added == 1 { "" } else { "s" },
+                            out.bookmarks_added,
+                            if out.bookmarks_added == 1 { "" } else { "s" }
+                        ));
+                        if timing {
+                            eprintln!(
+                                "[timing] inserted {name} ({page_count} pages) in {:?}",
+                                t.elapsed()
+                            );
+                        }
+                    }
+                    Err(e) => doc.notice = Some(format!("Insert failed: {e:#}")),
+                }
+                doc.touched();
+                view.prune_selection();
+                cx.notify();
+                // Sizes for the new source arrive on their own.
+                cx.spawn(async move |this, cx| {
+                    if let Ok(Ok(sizes)) = sizes_rx.await {
+                        this.update(cx, |view, cx| {
+                            if let State::Ready(doc) = &mut view.state {
+                                doc.model.set_source_sizes(sid, sizes);
+                                doc.touched();
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                    }
+                })
+                .detach();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub fn set_selftest_insert(&mut self, path: PathBuf) {
+        self.selftest_insert = Some(path);
+    }
+
     // ----- search -----------------------------------------------------------
+
+    fn new_search(&mut self, cx: &mut Context<Self>) {
+        let input = cx.new(|cx| TextInput::new("Find in document", cx));
+        let sub = cx.observe(&input, |this, _, cx| this.on_search_input_changed(cx));
+        let events = cx.subscribe(&input, |this, _, ev: &TextInputEvent, cx| match ev {
+            TextInputEvent::Confirm => this.search_step(1, cx),
+            TextInputEvent::Cancel => this.close_search_keep_focus(cx),
+        });
+        self.search = Some(Search {
+            input,
+            _input_sub: sub,
+            _events_sub: events,
+            query: String::new(),
+            hits: Vec::new(),
+            current: None,
+            scanned: 0,
+            done: true,
+            _task: None,
+        });
+    }
+
+    fn close_search_keep_focus(&mut self, cx: &mut Context<Self>) {
+        self.search = None;
+        self.pending_focus = true;
+        cx.notify();
+    }
 
     fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.search.is_none() {
-            let input = cx.new(|cx| TextInput::new("Find in document", cx));
-            let sub = cx.observe(&input, |this, _, cx| this.on_search_input_changed(cx));
-            self.search = Some(Search {
-                input,
-                _input_sub: sub,
-                query: String::new(),
-                hits: Vec::new(),
-                current: None,
-                scanned: 0,
-                done: true,
-                _task: None,
-            });
+            self.new_search(cx);
         }
         let input = self.search.as_ref().unwrap().input.clone();
         input.update(cx, |i, cx| i.select_all(cx));
@@ -1293,6 +1480,9 @@ struct PagePlan {
 impl Render for DocView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let viewport = window.viewport_size();
+        if std::mem::take(&mut self.pending_focus) {
+            window.focus(&self.focus_handle, cx);
+        }
         let scale = window.scale_factor();
 
         // Release textures for images we've replaced or evicted since last frame.
@@ -1748,6 +1938,8 @@ impl Render for DocView {
                 v.save_to(path, cx)
             }))
             .on_action(cx.listener(|v, _: &SaveAs, _, cx| v.save_as(cx)))
+            .on_action(cx.listener(|v, _: &InsertPdf, _, cx| v.insert_pdf_prompt(cx)))
+            .on_action(cx.listener(|v, _: &NewBookmark, window, cx| v.new_bookmark(window, cx)))
             .on_action(cx.listener(|v, _: &Undo, _, cx| v.undo(cx)))
             .on_action(cx.listener(|v, _: &Redo, _, cx| v.redo(cx)))
             .flex()
@@ -2009,140 +2201,6 @@ impl DocView {
             self.ensure_rendered(pref, want, cx);
         }
         el
-    }
-
-    /// Bookmark tree: virtualized rows over the expanded subset.
-    pub fn render_outline(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let State::Ready(doc) = &mut self.state else {
-            return div().p_2().text_sm().child("…").into_any_element();
-        };
-        if !doc.outline_loaded {
-            return div()
-                .p_2()
-                .text_sm()
-                .text_color(rgb(0x9a9a9a))
-                .child("Loading bookmarks…")
-                .into_any_element();
-        }
-        let flat = doc.model.state().outline_flat();
-        if flat.is_empty() {
-            return div()
-                .p_2()
-                .text_sm()
-                .text_color(rgb(0x9a9a9a))
-                .child("No bookmarks")
-                .into_any_element();
-        }
-
-        // Flatten to the visible rows: skip descendants of collapsed nodes.
-        let mut rows: Vec<usize> = Vec::new();
-        let mut hide_below: Option<u16> = None;
-        for (ix, (depth, node)) in flat.iter().enumerate() {
-            if let Some(d) = hide_below {
-                if *depth > d {
-                    continue;
-                }
-                hide_below = None;
-            }
-            rows.push(ix);
-            if !node.children.is_empty() && !doc.outline_expanded.contains(&node.id) {
-                hide_below = Some(*depth);
-            }
-        }
-        let total_h = rows.len() as f32 * OUTLINE_ROW_H + THUMB_PAD;
-        let bounds = doc.outline_scroll.bounds();
-        let view_h = f32::from(bounds.size.height).max(1.0);
-        let scroll_y = (-f32::from(doc.outline_scroll.offset().y)).max(0.0);
-        let r0 = ((scroll_y / OUTLINE_ROW_H) as usize).min(rows.len());
-        let r1 = (((scroll_y + view_h) / OUTLINE_ROW_H) as usize + 1).min(rows.len());
-
-        let cur_id = doc.page_ref(doc.current_page).map(|p| p.id);
-        let positions: HashMap<PageId, usize> = doc
-            .model
-            .state()
-            .pages
-            .iter()
-            .enumerate()
-            .map(|(i, p)| (p.id, i))
-            .collect();
-        let mut els = Vec::new();
-        for r in r0..r1 {
-            let (depth, node) = &flat[rows[r]];
-            let id = node.id;
-            let target = node.target.and_then(|t| positions.get(&t).copied());
-            let orphan = node.target.is_some() && target.is_none();
-            let expanded = doc.outline_expanded.contains(&id);
-            let active = node.target.is_some() && node.target == cur_id;
-            let chevron = if node.children.is_empty() {
-                " "
-            } else if expanded {
-                "▾"
-            } else {
-                "▸"
-            };
-            els.push(
-                div()
-                    .id(("outline", id.0 as usize))
-                    .absolute()
-                    .top(px(r as f32 * OUTLINE_ROW_H))
-                    .left(px(0.0))
-                    .w_full()
-                    .h(px(OUTLINE_ROW_H))
-                    .pl(px(6.0 + *depth as f32 * OUTLINE_INDENT))
-                    .pr_2()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .text_sm()
-                    .cursor_pointer()
-                    .when(active, |d| d.bg(rgb(0x3a4a60)))
-                    .hover(|s| s.bg(rgb(0x3a3a3a)))
-                    .on_click(cx.listener(move |v, _, _, cx| {
-                        if let Some(p) = target {
-                            v.go_to_page(p, cx);
-                        }
-                    }))
-                    .child(
-                        div()
-                            .id(("outline-toggle", id.0 as usize))
-                            .w(px(14.0))
-                            .text_color(rgb(0x9a9a9a))
-                            .cursor_pointer()
-                            .on_click(cx.listener(move |v, _, _, cx| {
-                                if let State::Ready(doc) = &mut v.state {
-                                    if !doc.outline_expanded.remove(&id) {
-                                        doc.outline_expanded.insert(id);
-                                    }
-                                    cx.notify();
-                                }
-                                cx.stop_propagation();
-                            }))
-                            .child(chevron),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .text_color(if target.is_some() {
-                                rgb(0xd0d0d0)
-                            } else if orphan {
-                                rgb(0x8a6a6a)
-                            } else {
-                                rgb(0x8a8a8a)
-                            })
-                            .child(node.title.clone()),
-                    ),
-            );
-        }
-        div()
-            .id("outline")
-            .track_scroll(&doc.outline_scroll)
-            .overflow_y_scroll()
-            .size_full()
-            .child(div().relative().w_full().h(px(total_h)).children(els))
-            .into_any_element()
     }
 }
 
