@@ -236,7 +236,7 @@ decide on accuracy for scanned tax forms, not on purity.
 
 | # | Milestone | Proves |
 |---|---|---|
-| M0 | **Spikes**: GPUI window on Windows and Linux (both tier 1); pdfium-render renders a page; lopdf round-trips a PDF. *Linux: all three pass (2026-10-11). Windows: pending.* | The stack is viable |
+| M0 | **Spikes**: GPUI window on Windows and Linux (both tier 1); pdfium-render renders a page; lopdf round-trips a PDF. *All three pass on Linux and Windows (2026-10-11).* | The stack is viable |
 | M1 | **Viewer**: tiled async rendering, continuous scroll, zoom, thumbnails, outline, tabs, search. *Done 2026-10-11 (Linux).* | The performance thesis |
 | M2 | **Organizer**: page reorder/rotate/delete/insert, bookmark tree editing, incremental save, undo; pattern (regex) search as its own tool. *Done 2026-10-11 (Linux).* | The document model |
 | M3 | **Markup**: standard annotations, stamps, tickmarks, connectors, calc tape, clean copy export | The PDFlyer workflow |
@@ -246,8 +246,10 @@ decide on accuracy for scanned tax forms, not on purity.
 
 - **GPUI risk.** Pre-1.0, API churn, and we'd be an early non-Zed user on Linux.
   The Linux spike passed first try (wgpu backend, Wayland via WSLg on
-  llvmpipe). Remaining risk is Windows and API churn across rev bumps; fallback
-  is still `iced` or `egui` if that bites. Decide after the Windows spike.
+  llvmpipe), and Windows built and ran unmodified (DirectX 11, Intel UHD 620).
+  Remaining risk is API churn across rev bumps; fallback is still `iced` or
+  `egui` if that bites. Open item: launch-to-first-pixels is 1.2–2 s on
+  Windows (PDF open itself is ~10 ms) — investigate platform init.
 - **One parser or two?** PDFium for rendering + lopdf for editing means two
   parsers of the same bytes. Alternative: do everything through PDFium's
   (limited) write API, or write our own object layer. Spike in M0.
@@ -266,6 +268,16 @@ sudo apt install build-essential clang lld cmake pkg-config libfontconfig-dev \
 
 scripts/fetch-pdfium.sh          # prebuilt libpdfium → vendor/pdfium/<os>-<arch>/
 cargo run -p sheaf-app           # the GPUI window
+```
+
+On Windows, install Visual Studio 2022 (or the Build Tools) with the
+"Desktop development with C++" workload and a Windows 10/11 SDK, plus rustup
+with the default `x86_64-pc-windows-msvc` host. No other system deps. Run the
+fetch script from Git Bash; it detects the host and installs `pdfium.dll`:
+
+```sh
+bash scripts/fetch-pdfium.sh     # → vendor/pdfium/windows-x86_64/pdfium.dll
+cargo run -p sheaf-app
 ```
 
 The toolchain is pinned in `rust-toolchain.toml` (tracks Zed's requirement,

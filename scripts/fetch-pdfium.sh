@@ -15,6 +15,7 @@ case "${1:-}" in
       Linux-aarch64) target=linux-arm64; dir=linux-aarch64 ;;
       Darwin-arm64)  target=mac-arm64;  dir=macos-aarch64 ;;
       Darwin-x86_64) target=mac-x64;    dir=macos-x86_64 ;;
+      MINGW64*-x86_64|MSYS*-x86_64|CYGWIN*-x86_64) target=win-x64; dir=windows-x86_64 ;;
       *) echo "unknown host; pass a target explicitly" >&2; exit 1 ;;
     esac ;;
   linux-x64)  target=linux-x64;  dir=linux-x86_64 ;;
