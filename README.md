@@ -106,13 +106,13 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 ### Viewing & navigation
 | Feature | Status |
 |---|---|
-| Open / render PDF (incl. encrypted, forms, large scans) | 🎯 |
-| Continuous / single / facing page modes | 🎯 |
-| Zoom (fit page / fit width / custom), rotate view | 🎯 |
-| Thumbnails sidebar (lazy, virtualized) | 🎯 |
-| Bookmarks (outline) sidebar | 🎯 |
-| Text search (find in document) | 🎯 |
-| Tabs / multiple documents | 🎯 |
+| Open / render PDF (incl. encrypted, forms, large scans) | ✅ (password prompt pending) |
+| Continuous / single / facing page modes | ✅ continuous; single/facing 📋 |
+| Zoom (fit page / fit width / custom), rotate view | ✅ zoom; rotate view 📋 |
+| Thumbnails sidebar (lazy, virtualized) | ✅ |
+| Bookmarks (outline) sidebar | ✅ |
+| Text search (find in document) | ✅ progressive; ~6 ms/page |
+| Tabs / multiple documents | ✅ |
 | Split view (same doc, two positions) | 📋 |
 | Attachments panel | 📋 |
 | Layers (OCG) panel | 📋 |
@@ -236,7 +236,7 @@ decide on accuracy for scanned tax forms, not on purity.
 | # | Milestone | Proves |
 |---|---|---|
 | M0 | **Spikes**: GPUI window on Windows and Linux (both tier 1); pdfium-render renders a page; lopdf round-trips a PDF. *Linux: all three pass (2026-10-11). Windows: pending.* | The stack is viable |
-| M1 | **Viewer**: tiled async rendering, continuous scroll, zoom, thumbnails, outline, tabs, search | The performance thesis |
+| M1 | **Viewer**: tiled async rendering, continuous scroll, zoom, thumbnails, outline, tabs, search. *Done 2026-10-11 (Linux).* | The performance thesis |
 | M2 | **Organizer**: page reorder/rotate/delete/insert, bookmark tree editing, incremental save, undo | The document model |
 | M3 | **Markup**: standard annotations, stamps, tickmarks, connectors, calc tape, clean copy export | The PDFlyer workflow |
 | M4 | **Polish → v0.1**: keybindings, command palette, settings, crash-safe autosave, packaging | Daily-driver readiness |

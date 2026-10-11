@@ -5004,6 +5004,7 @@ dependencies = [
  "sheaf-render",
  "sheaf-ui",
  "smallvec",
+ "unicode-segmentation",
 ]
 
 [[package]]

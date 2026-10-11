@@ -3,6 +3,7 @@
 //!     sheaf [--timing] [file.pdf ...]
 
 mod docview;
+mod text_input;
 mod workspace;
 
 use std::path::PathBuf;
@@ -31,7 +32,11 @@ actions!(
         ZoomOut,
         ZoomActual,
         ZoomFitWidth,
-        ZoomFitPage
+        ZoomFitPage,
+        Find,
+        CloseSearch,
+        SearchNext,
+        SearchPrev
     ]
 );
 actions!(
@@ -51,16 +56,21 @@ actions!(
 struct Cli {
     paths: Vec<PathBuf>,
     timing: bool,
+    /// Open the search bar with this query once the first document loads.
+    find: Option<String>,
 }
 
 fn parse_cli() -> Cli {
     let mut cli = Cli {
         paths: Vec::new(),
         timing: false,
+        find: None,
     };
-    for arg in std::env::args_os().skip(1) {
+    let mut args = std::env::args_os().skip(1);
+    while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--timing") => cli.timing = true,
+            Some("--find") => cli.find = args.next().and_then(|q| q.to_str().map(String::from)),
             Some(s) if s.starts_with("--") => eprintln!("unknown flag {s}"),
             _ => cli.paths.push(arg.into()),
         }
@@ -76,6 +86,7 @@ fn main() {
     application().run(move |cx: &mut App| {
         let doc = Some(docview::KEY_CONTEXT);
         let ws = Some(workspace::KEY_CONTEXT);
+        let ti = Some(text_input::KEY_CONTEXT);
         cx.bind_keys([
             KeyBinding::new("right", NextPage, doc),
             KeyBinding::new("left", PrevPage, doc),
@@ -93,6 +104,27 @@ fn main() {
             KeyBinding::new("ctrl-0", ZoomFitWidth, doc),
             KeyBinding::new("ctrl-9", ZoomFitPage, doc),
             KeyBinding::new("ctrl-1", ZoomActual, doc),
+            KeyBinding::new("ctrl-f", Find, doc),
+            KeyBinding::new("escape", CloseSearch, doc),
+            KeyBinding::new("f3", SearchNext, doc),
+            KeyBinding::new("shift-f3", SearchPrev, doc),
+            KeyBinding::new("enter", SearchNext, doc),
+            KeyBinding::new("shift-enter", SearchPrev, doc),
+            // Text input (deeper context wins over DocView for shared keys).
+            KeyBinding::new("backspace", text_input::Backspace, ti),
+            KeyBinding::new("delete", text_input::Delete, ti),
+            KeyBinding::new("left", text_input::Left, ti),
+            KeyBinding::new("right", text_input::Right, ti),
+            KeyBinding::new("shift-left", text_input::SelectLeft, ti),
+            KeyBinding::new("shift-right", text_input::SelectRight, ti),
+            KeyBinding::new("home", text_input::Home, ti),
+            KeyBinding::new("end", text_input::End, ti),
+            KeyBinding::new("ctrl-a", text_input::SelectAll, ti),
+            KeyBinding::new("ctrl-v", text_input::Paste, ti),
+            KeyBinding::new("ctrl-c", text_input::Copy, ti),
+            KeyBinding::new("ctrl-x", text_input::Cut, ti),
+            KeyBinding::new("space", text_input::InsertSpace, ti),
+            KeyBinding::new("shift-space", text_input::InsertSpace, ti),
             KeyBinding::new("f4", ToggleSidebar, ws),
             KeyBinding::new("ctrl-shift-p", ShowThumbnails, ws),
             KeyBinding::new("ctrl-shift-b", ShowOutline, ws),
@@ -116,7 +148,7 @@ fn main() {
                 ..Default::default()
             },
             move |window, cx| {
-                let ws = cx.new(|cx| Workspace::new(cli.paths, cli.timing, launched, cx));
+                let ws = cx.new(|cx| Workspace::new(cli.paths, cli.timing, cli.find, launched, cx));
                 ws.update(cx, |ws, cx| ws.focus_active(window, cx));
                 ws
             },

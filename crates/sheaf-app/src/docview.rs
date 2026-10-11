@@ -9,16 +9,21 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use futures::StreamExt;
 use gpui::{
-    AnyElement, App, Context, FocusHandle, Focusable, ObjectFit, RenderImage, ScrollHandle,
-    ScrollWheelEvent, SharedString, Task, Window, div, img, point, prelude::*, px, rgb,
+    AnyElement, App, Context, Entity, FocusHandle, Focusable, ObjectFit, RenderImage, ScrollHandle,
+    ScrollWheelEvent, SharedString, Subscription, Task, Window, div, img, point, prelude::*, px,
+    rgb, rgba,
 };
 use sheaf_core::{PageIndex, PageSize};
-use sheaf_render::{Job, OutlineItem, PixelFormat, RenderHandle, RenderRequest, Rendered};
+use sheaf_render::{
+    Job, OutlineItem, PixelFormat, RenderHandle, RenderRequest, Rendered, SearchEvent, SearchHit,
+};
 
+use crate::text_input::TextInput;
 use crate::{
-    FirstPage, LastPage, LineDown, LineUp, NextPage, PrevPage, ScreenDown, ScreenUp, ZoomActual,
-    ZoomFitPage, ZoomFitWidth, ZoomIn, ZoomOut,
+    CloseSearch, Find, FirstPage, LastPage, LineDown, LineUp, NextPage, PrevPage, ScreenDown,
+    ScreenUp, SearchNext, SearchPrev, ZoomActual, ZoomFitPage, ZoomFitWidth, ZoomIn, ZoomOut,
 };
 
 pub const KEY_CONTEXT: &str = "DocView";
@@ -185,6 +190,13 @@ enum ScrollTo {
     Page(u32),
     By(f32),
     End,
+    /// Bring a page-relative point (fractions) into view if it isn't already,
+    /// landing it a third of the way down the viewport.
+    Reveal {
+        page: u32,
+        fx: f32,
+        fy: f32,
+    },
     /// Keep the document point (`page`, `fx`, `fy` as fractions of the page)
     /// under viewport-local point (`vx`, `vy`). Used to anchor zooms.
     Anchor {
@@ -202,6 +214,24 @@ pub struct DocView {
     timing: bool,
     launched: Instant,
     state: State,
+    search: Option<Search>,
+    initial_query: Option<String>,
+    search_started: Option<Instant>,
+}
+
+/// An open search bar and the running / finished query behind it.
+struct Search {
+    input: Entity<TextInput>,
+    _input_sub: Subscription,
+    /// Query the current results are for.
+    query: String,
+    /// Hits in page order (the worker scans pages in order).
+    hits: Vec<SearchHit>,
+    current: Option<usize>,
+    scanned: u32,
+    done: bool,
+    /// Dropping this cancels the worker-side search.
+    _task: Option<Task<()>>,
 }
 
 impl DocView {
@@ -212,6 +242,9 @@ impl DocView {
             timing,
             launched,
             state: State::Loading,
+            search: None,
+            initial_query: None,
+            search_started: None,
         };
         this.open(cx);
         this
@@ -270,6 +303,19 @@ impl DocView {
                         }));
                         viewer.fetch_page_sizes(cx);
                         viewer.fetch_outline(cx);
+                        if let Some(q) = viewer.initial_query.take() {
+                            viewer.search = Some(Search {
+                                input: cx.new(|cx| TextInput::new("Find in document", cx)),
+                                _input_sub: Subscription::new(|| {}),
+                                query: String::new(),
+                                hits: Vec::new(),
+                                current: None,
+                                scanned: 0,
+                                done: true,
+                                _task: None,
+                            });
+                            viewer.start_search(q, cx);
+                        }
                     }
                     Err(e) => viewer.state = State::Failed(format!("{e:#}")),
                 }
@@ -355,6 +401,224 @@ impl DocView {
 
     pub fn go_to_page(&mut self, page: u32, cx: &mut Context<Self>) {
         self.scroll(ScrollTo::Page(page), cx);
+    }
+
+    // ----- search -----------------------------------------------------------
+
+    fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search.is_none() {
+            let input = cx.new(|cx| TextInput::new("Find in document", cx));
+            let sub = cx.observe(&input, |this, _, cx| this.on_search_input_changed(cx));
+            self.search = Some(Search {
+                input,
+                _input_sub: sub,
+                query: String::new(),
+                hits: Vec::new(),
+                current: None,
+                scanned: 0,
+                done: true,
+                _task: None,
+            });
+        }
+        let input = self.search.as_ref().unwrap().input.clone();
+        input.update(cx, |i, cx| i.select_all(cx));
+        window.focus(&input.read(cx).focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    /// `--find`: run a query as soon as the document is ready, with the bar open.
+    pub fn set_initial_query(&mut self, query: String, cx: &mut Context<Self>) {
+        self.initial_query = Some(query);
+        cx.notify();
+    }
+
+    fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search = None;
+        window.focus(&self.focus_handle, cx);
+        cx.notify();
+    }
+
+    fn on_search_input_changed(&mut self, cx: &mut Context<Self>) {
+        let Some(search) = &self.search else { return };
+        let query = search.input.read(cx).text().to_string();
+        if query == search.query {
+            return;
+        }
+        self.start_search(query, cx);
+    }
+
+    fn start_search(&mut self, query: String, cx: &mut Context<Self>) {
+        let State::Ready(doc) = &self.state else {
+            return;
+        };
+        let handle = doc.handle.clone();
+        let Some(search) = &mut self.search else {
+            return;
+        };
+        search.query = query.clone();
+        search.hits.clear();
+        search.current = None;
+        search.scanned = 0;
+        search._task = None; // cancels the previous search
+        if query.trim().is_empty() {
+            search.done = true;
+            cx.notify();
+            return;
+        }
+        search.done = false;
+        self.search_started = Some(Instant::now());
+        let Some(search) = &mut self.search else {
+            return;
+        };
+        let mut rx = handle.search(query, false);
+        search._task = Some(cx.spawn(async move |this, cx| {
+            while let Some(ev) = rx.next().await {
+                let stop = this
+                    .update(cx, |view, cx| {
+                        let Some(search) = &mut view.search else {
+                            return true;
+                        };
+                        match ev {
+                            SearchEvent::Hits(mut hits) => {
+                                let first = search.hits.is_empty();
+                                search.hits.append(&mut hits);
+                                if first {
+                                    view.go_to_hit(0, cx);
+                                }
+                            }
+                            SearchEvent::Progress(n) => search.scanned = n,
+                            SearchEvent::Done => {
+                                search.done = true;
+                                if view.timing
+                                    && let Some(t) = view.search_started.take()
+                                {
+                                    eprintln!(
+                                        "[timing] search {:?}: {} hits across {} pages in {:?}",
+                                        search.query,
+                                        search.hits.len(),
+                                        search.scanned,
+                                        t.elapsed()
+                                    );
+                                }
+                            }
+                        }
+                        cx.notify();
+                        false
+                    })
+                    .unwrap_or(true);
+                if stop {
+                    break;
+                }
+            }
+        }));
+        cx.notify();
+    }
+
+    fn go_to_hit(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let State::Ready(doc) = &mut self.state else {
+            return;
+        };
+        let Some(search) = &mut self.search else {
+            return;
+        };
+        if search.hits.is_empty() {
+            return;
+        }
+        let ix = ix % search.hits.len();
+        search.current = Some(ix);
+        let hit = &search.hits[ix];
+        let ps = match &doc.sizes {
+            Some(s) => s
+                .get(hit.page as usize)
+                .copied()
+                .unwrap_or(doc.handle.info().first_page),
+            None => doc.handle.info().first_page,
+        };
+        if let Some(r) = hit.rects.first() {
+            doc.pending_scroll = Some(ScrollTo::Reveal {
+                page: hit.page,
+                fx: (r.x + r.w / 2.0) / ps.width.max(1.0),
+                fy: (r.y + r.h / 2.0) / ps.height.max(1.0),
+            });
+        }
+        cx.notify();
+    }
+
+    fn search_step(&mut self, delta: i64, cx: &mut Context<Self>) {
+        let Some(search) = &self.search else { return };
+        let n = search.hits.len();
+        if n == 0 {
+            return;
+        }
+        let cur = search.current.unwrap_or(0) as i64;
+        let next = (cur + delta).rem_euclid(n as i64) as usize;
+        self.go_to_hit(next, cx);
+    }
+
+    fn render_search_bar(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let search = self.search.as_ref()?;
+        let total = search.hits.len();
+        let status = if search.query.trim().is_empty() {
+            String::new()
+        } else if total == 0 {
+            if search.done {
+                "No matches".to_string()
+            } else {
+                format!("Searching… {}", search.scanned)
+            }
+        } else {
+            let cur = search.current.map(|c| c + 1).unwrap_or(0);
+            if search.done {
+                format!("{cur} of {total}")
+            } else {
+                format!("{cur} of {total}+ (searching…)")
+            }
+        };
+        let btn = |id: &'static str, label: &'static str| {
+            div()
+                .id(id)
+                .px_2()
+                .py_1()
+                .rounded_sm()
+                .text_sm()
+                .cursor_pointer()
+                .bg(rgb(0x3a3a3a))
+                .hover(|s| s.bg(rgb(0x4a4a4a)))
+                .child(label)
+        };
+        Some(
+            div()
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_2()
+                .py_1()
+                .bg(rgb(0x252525))
+                .border_b_1()
+                .border_color(rgb(0x111111))
+                .child(div().w(px(320.0)).child(search.input.clone()))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(0x9a9a9a))
+                        .min_w(px(140.0))
+                        .child(status),
+                )
+                .child(
+                    btn("search-prev", "▲")
+                        .on_click(cx.listener(|v, _, _, cx| v.search_step(-1, cx))),
+                )
+                .child(
+                    btn("search-next", "▼")
+                        .on_click(cx.listener(|v, _, _, cx| v.search_step(1, cx))),
+                )
+                .child(
+                    btn("search-close", "×")
+                        .on_click(cx.listener(|v, _, window, cx| v.close_search(window, cx))),
+                )
+                .into_any_element(),
+        )
     }
 
     fn page_size(doc: &Doc, page: u32) -> PageSize {
@@ -564,6 +828,7 @@ impl Render for DocView {
             }
         }
 
+        let search_bar = self.render_search_bar(cx);
         let mut body = None;
         let mut wants: Vec<RenderRequest> = Vec::new();
         let status: SharedString = match &mut self.state {
@@ -625,6 +890,19 @@ impl Render for DocView {
                         ScrollTo::Page(p) => scroll_y = layout.tops[p.min(last) as usize] - MARGIN,
                         ScrollTo::By(dy) => scroll_y += dy,
                         ScrollTo::End => scroll_y = max_y,
+                        ScrollTo::Reveal { page, fx, fy } => {
+                            let p = page.min(last) as usize;
+                            let (x, y) = (
+                                layout.lefts[p] + fx * layout.widths[p],
+                                layout.tops[p] + fy * layout.heights[p],
+                            );
+                            if y < scroll_y + 8.0 || y > scroll_y + view_h - 8.0 {
+                                scroll_y = y - view_h / 3.0;
+                            }
+                            if x < scroll_x || x > scroll_x + view_w {
+                                scroll_x = x - view_w / 2.0;
+                            }
+                        }
                         ScrollTo::Anchor {
                             page,
                             fx,
@@ -832,6 +1110,34 @@ impl Render for DocView {
                                     .child(img(im.clone()).size_full().object_fit(ObjectFit::Fill)),
                             );
                         }
+                        // Search highlights on top of everything.
+                        if let Some(search) = &self.search
+                            && !search.hits.is_empty()
+                        {
+                            let k = pl.w / Self::page_size(doc, pl.page).width.max(1.0);
+                            let start = search.hits.partition_point(|h| h.page < pl.page);
+                            for (ix, hit) in search.hits.iter().enumerate().skip(start) {
+                                if hit.page != pl.page {
+                                    break;
+                                }
+                                let current = search.current == Some(ix);
+                                for r in &hit.rects {
+                                    page_div = page_div.child(
+                                        div()
+                                            .absolute()
+                                            .left(px(r.x * k))
+                                            .top(px(r.y * k))
+                                            .w(px(r.w * k))
+                                            .h(px(r.h * k))
+                                            .bg(if current {
+                                                rgba(0xff9800a0)
+                                            } else {
+                                                rgba(0xffe60070)
+                                            }),
+                                    );
+                                }
+                            }
+                        }
                         page_div
                     })
                     .collect();
@@ -907,11 +1213,16 @@ impl Render for DocView {
                 cx.listener(|v, _: &ZoomFitWidth, _, cx| v.set_zoom(Zoom::FitWidth, None, cx)),
             )
             .on_action(cx.listener(|v, _: &ZoomFitPage, _, cx| v.set_zoom(Zoom::FitPage, None, cx)))
+            .on_action(cx.listener(|v, _: &Find, window, cx| v.open_search(window, cx)))
+            .on_action(cx.listener(|v, _: &CloseSearch, window, cx| v.close_search(window, cx)))
+            .on_action(cx.listener(|v, _: &SearchNext, _, cx| v.search_step(1, cx)))
+            .on_action(cx.listener(|v, _: &SearchPrev, _, cx| v.search_step(-1, cx)))
             .flex()
             .flex_col()
             .size_full()
             .bg(rgb(0x2b2b2b))
             .text_color(rgb(0xd0d0d0))
+            .children(search_bar)
             .child(div().flex_grow(1.0).min_h(px(0.0)).children(body))
             .child(
                 div()

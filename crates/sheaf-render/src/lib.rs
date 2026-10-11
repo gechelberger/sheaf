@@ -64,6 +64,34 @@ pub struct OutlineItem {
     pub has_children: bool,
 }
 
+/// Axis-aligned rectangle in page points, top-left origin, in the page's
+/// *displayed* orientation (i.e. after /Rotate).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rect {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+/// One search match: the page it's on and the glyph boxes that make it up
+/// (usually one, more if the match wraps a line).
+#[derive(Debug, Clone)]
+pub struct SearchHit {
+    pub page: u32,
+    pub rects: Vec<Rect>,
+}
+
+/// Progress of a document-wide search, streamed as pages are scanned.
+#[derive(Debug)]
+pub enum SearchEvent {
+    /// Hits found on one page (only sent when non-empty).
+    Hits(Vec<SearchHit>),
+    /// Pages scanned so far.
+    Progress(u32),
+    Done,
+}
+
 /// Synchronous engine interface. Implementations may block.
 pub trait Renderer {
     fn page_count(&self) -> u32;
@@ -71,6 +99,9 @@ pub trait Renderer {
     fn page_sizes(&self) -> Result<Vec<PageSize>>;
     /// The bookmark tree, flattened in pre-order.
     fn outline(&self) -> Result<Vec<OutlineItem>>;
+    /// All matches of `query` on one page.
+    fn search_page(&self, page: PageIndex, query: &str, match_case: bool)
+    -> Result<Vec<SearchHit>>;
     /// Render a whole page scaled so its width is `target_width` device pixels.
     fn render(&self, page: PageIndex, job: Job, format: PixelFormat) -> Result<Raster>;
 
@@ -234,6 +265,62 @@ pub mod pdfium {
             Ok(out)
         }
 
+        fn search_page(
+            &self,
+            page: PageIndex,
+            query: &str,
+            match_case: bool,
+        ) -> Result<Vec<SearchHit>> {
+            if query.is_empty() {
+                return Ok(Vec::new());
+            }
+            let p = self.doc.pages().get(page.0 as i32)?;
+            let text = p.text()?;
+            let opts = PdfSearchOptions::new().match_case(match_case);
+            let search = text.search(query, &opts)?;
+
+            // Map page-space boxes to the displayed orientation via
+            // FPDF_PageToDevice, with a scaled "device" so the integer
+            // output keeps sub-point precision.
+            const SCALE: f32 = 16.0;
+            let (pw, ph) = (p.width().value, p.height().value);
+            let cfg =
+                PdfRenderConfig::new().set_fixed_size((pw * SCALE) as i32, (ph * SCALE) as i32);
+            let to_display = |x: f32, y: f32| -> Option<(f32, f32)> {
+                let (dx, dy) = p
+                    .points_to_pixels(PdfPoints::new(x), PdfPoints::new(y), &cfg)
+                    .ok()?;
+                Some((dx as f32 / SCALE, dy as f32 / SCALE))
+            };
+
+            let mut hits = Vec::new();
+            for segments in search.iter(PdfSearchDirection::SearchForward) {
+                let mut rects = Vec::new();
+                for seg in segments.iter() {
+                    let b = seg.bounds();
+                    let (Some((x0, y0)), Some((x1, y1))) = (
+                        to_display(b.left().value, b.bottom().value),
+                        to_display(b.right().value, b.top().value),
+                    ) else {
+                        continue;
+                    };
+                    rects.push(Rect {
+                        x: x0.min(x1),
+                        y: y0.min(y1),
+                        w: (x1 - x0).abs(),
+                        h: (y1 - y0).abs(),
+                    });
+                }
+                if !rects.is_empty() {
+                    hits.push(SearchHit {
+                        page: page.0,
+                        rects,
+                    });
+                }
+            }
+            Ok(hits)
+        }
+
         fn render(&self, page: PageIndex, job: Job, format: PixelFormat) -> Result<Raster> {
             let p = self.doc.pages().get(page.0 as i32)?;
             let bmp = match job {
@@ -314,6 +401,11 @@ enum Msg {
     Render(RenderRequest, oneshot::Sender<Result<Rendered>>),
     PageSizes(oneshot::Sender<Result<Vec<PageSize>>>),
     Outline(oneshot::Sender<Result<Vec<OutlineItem>>>),
+    Search {
+        query: String,
+        match_case: bool,
+        tx: futures::channel::mpsc::UnboundedSender<SearchEvent>,
+    },
 }
 
 /// Handle to a render worker thread. Cheap to clone; the thread exits when the
@@ -392,6 +484,22 @@ impl RenderHandle {
         rx
     }
 
+    /// Start a document-wide search. Events stream until `Done`; dropping
+    /// the receiver cancels the search. A new search replaces a running one.
+    pub fn search(
+        &self,
+        query: String,
+        match_case: bool,
+    ) -> futures::channel::mpsc::UnboundedReceiver<SearchEvent> {
+        let (tx, rx) = futures::channel::mpsc::unbounded();
+        self.send(Msg::Search {
+            query,
+            match_case,
+            tx,
+        });
+        rx
+    }
+
     fn send(&self, msg: Msg) {
         if self.tx.send(msg).is_err() {
             log::error!("render thread is gone");
@@ -409,13 +517,25 @@ struct SizeWalk {
     sizes: Vec<PageSize>,
 }
 
+/// Pages searched per chunk before checking for render requests.
+const SEARCH_CHUNK: u32 = 4;
+
+/// A document search in progress, likewise resumed between renders.
+struct SearchWalk {
+    query: String,
+    match_case: bool,
+    next: u32,
+    tx: futures::channel::mpsc::UnboundedSender<SearchEvent>,
+}
+
 fn worker_loop(engine: impl Renderer, rx: mpsc::Receiver<Msg>) {
     let page_count = engine.page_count();
     let mut walk: Option<SizeWalk> = None;
+    let mut search: Option<SearchWalk> = None;
 
     loop {
         // Block only when there's no background work to resume.
-        let first = if walk.is_some() {
+        let first = if walk.is_some() || search.is_some() {
             match rx.try_recv() {
                 Ok(m) => Some(m),
                 Err(mpsc::TryRecvError::Empty) => None,
@@ -451,6 +571,18 @@ fn worker_loop(engine: impl Renderer, rx: mpsc::Receiver<Msg>) {
                 Msg::Outline(reply) => {
                     let _ = reply.send(engine.outline());
                 }
+                Msg::Search {
+                    query,
+                    match_case,
+                    tx,
+                } => {
+                    search = Some(SearchWalk {
+                        query,
+                        match_case,
+                        next: 0,
+                        tx,
+                    });
+                }
                 Msg::PageSizes(reply) => {
                     walk = Some(SizeWalk {
                         reply,
@@ -478,7 +610,31 @@ fn worker_loop(engine: impl Renderer, rx: mpsc::Receiver<Msg>) {
             let _ = reply.send(result);
         }
 
-        // Renders done; advance the size walk by one chunk.
+        // Renders done; advance the search by one chunk.
+        if let Some(sw) = &mut search {
+            if sw.tx.is_closed() {
+                search = None;
+            } else {
+                let to = (sw.next + SEARCH_CHUNK).min(page_count);
+                for i in sw.next..to {
+                    match engine.search_page(PageIndex(i), &sw.query, sw.match_case) {
+                        Ok(hits) if !hits.is_empty() => {
+                            let _ = sw.tx.unbounded_send(SearchEvent::Hits(hits));
+                        }
+                        Ok(_) => {}
+                        Err(e) => log::warn!("search page {i}: {e:#}"),
+                    }
+                }
+                sw.next = to;
+                let _ = sw.tx.unbounded_send(SearchEvent::Progress(to));
+                if to >= page_count {
+                    let _ = sw.tx.unbounded_send(SearchEvent::Done);
+                    search = None;
+                }
+            }
+        }
+
+        // Then the size walk by one chunk.
         if let Some(w) = &mut walk {
             if w.reply.is_canceled() {
                 walk = None;

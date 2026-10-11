@@ -38,6 +38,7 @@ impl Workspace {
     pub fn new(
         paths: Vec<PathBuf>,
         timing: bool,
+        find: Option<String>,
         launched: Instant,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -51,6 +52,9 @@ impl Workspace {
         };
         for p in paths {
             this.open_path(p, cx);
+        }
+        if let (Some(q), Some(doc)) = (find, this.docs.first().cloned()) {
+            doc.update(cx, |d, cx| d.set_initial_query(q, cx));
         }
         this
     }
