@@ -22,6 +22,27 @@ const INHERITED: [&[u8]; 4] = [b"Resources", b"MediaBox", b"CropBox", b"Rotate"]
 
 /// Serialize a snapshot as a complete new PDF.
 pub fn rewrite(model: &Snapshot) -> Result<Vec<u8>> {
+    rewrite_with(model, false)
+}
+
+/// PDFlyer's "Export Clean Copy": the document as it stands, with every
+/// markup annotation removed, ours and anyone else's. Links, form fields
+/// and bookmarks stay. Refuses to overwrite the open file.
+pub fn export_clean_copy(model: &Snapshot, path: &Path) -> Result<()> {
+    let primary = model
+        .source(model.primary)
+        .context("primary source missing")?;
+    if path.exists()
+        && std::fs::canonicalize(path).ok() == std::fs::canonicalize(&primary.path).ok()
+    {
+        bail!("a clean copy can't replace the open file; choose another name");
+    }
+    let bytes = rewrite_with(model, true)?;
+    write_atomic(path, &bytes)
+}
+
+/// `clean`: strip all markup instead of writing our annotations.
+fn rewrite_with(model: &Snapshot, clean: bool) -> Result<Vec<u8>> {
     let primary_id = model.primary;
     let primary_info = model.source(primary_id).context("primary source missing")?;
     let mut pdf = Pdf::load(&primary_info.path)
@@ -76,7 +97,9 @@ pub fn rewrite(model: &Snapshot) -> Result<Vec<u8>> {
             .ok()
             .and_then(|o| o.as_i64().ok())
             .unwrap_or(0);
-        if let Some(list) = state.annots.get(&pref.id) {
+        if clean {
+            strip_markup_annots(&pdf, &mut dict);
+        } else if let Some(list) = state.annots.get(&pref.id) {
             let geom = geom_of(&dict, original as i32);
             connectors.extend(write_page_annots(&mut pdf, &mut dict, list.iter(), &geom));
         } else {
@@ -1089,6 +1112,207 @@ mod tests {
         check(&rewrite(&model.snapshot()).unwrap());
     }
 
+    /// A clean copy keeps pages, bookmarks, links and form fields, and drops
+    /// every markup annotation — ours and third-party — along with their
+    /// now-unreferenced objects.
+    #[test]
+    fn clean_copy_strips_markup_only() {
+        use crate::annot::{AnnotKind, Box2};
+        let dir = tempdir();
+        let a_path = make_pdf(&dir, "m.pdf", "M", 2, &[("Top", 0, 0), ("Second", 1, 0)]);
+        // Plant third-party annotations on page 1: a note with its popup, a
+        // link and a form field.
+        {
+            let mut pdf = Pdf::load(&a_path).unwrap();
+            let page0 = pdf.get_pages()[&1];
+            let rect = |a: f32, b: f32, c: f32, d: f32| {
+                Object::Array(vec![a.into(), b.into(), c.into(), d.into()])
+            };
+            let note = pdf.new_object_id();
+            let popup = pdf.add_object(dictionary! {
+                "Type" => "Annot", "Subtype" => "Popup", "Rect" => rect(0.0, 0.0, 100.0, 100.0), "Parent" => note,
+            });
+            pdf.objects.insert(
+                note,
+                Object::Dictionary(dictionary! {
+                    "Type" => "Annot", "Subtype" => "Text", "Rect" => rect(10.0, 700.0, 30.0, 720.0),
+                    "Contents" => Object::String(b"reviewer note".to_vec(), StringFormat::Literal),
+                    "Popup" => popup,
+                }),
+            );
+            let link = pdf.add_object(dictionary! {
+                "Type" => "Annot", "Subtype" => "Link", "Rect" => rect(0.0, 0.0, 50.0, 20.0),
+                "Dest" => Object::Array(vec![page0.into(), Object::Name(b"Fit".to_vec())]),
+            });
+            let field = pdf.add_object(dictionary! {
+                "Type" => "Annot", "Subtype" => "Widget", "FT" => "Tx", "T" => Object::String(b"name".to_vec(), StringFormat::Literal),
+                "Rect" => rect(100.0, 100.0, 300.0, 120.0),
+            });
+            pdf.get_dictionary_mut(page0).unwrap().set(
+                "Annots",
+                Object::Array(vec![note.into(), popup.into(), link.into(), field.into()]),
+            );
+            pdf.save(&a_path).unwrap();
+        }
+        let original = std::fs::read(&a_path).unwrap();
+        let mut model = Document::new(
+            {
+                let mut i = info(&a_path, 2);
+                i.bytes = original.len();
+                i
+            },
+            &[
+                FlatOutlineItem {
+                    title: "Top".into(),
+                    page: Some(0),
+                    depth: 0,
+                },
+                FlatOutlineItem {
+                    title: "Second".into(),
+                    page: Some(1),
+                    depth: 0,
+                },
+            ],
+            Box::new(FixedCount(10)),
+        );
+        let p0 = model.page(0).unwrap().id;
+        model
+            .apply(
+                Edit::AnnotAdd {
+                    page: p0,
+                    annot: Annot {
+                        id: crate::annot::AnnotId(0),
+                        kind: AnnotKind::Stamp {
+                            rect: Box2 {
+                                x: 400.0,
+                                y: 80.0,
+                                w: 24.0,
+                                h: 24.0,
+                            },
+                            glyph: "✓".into(),
+                        },
+                        color: [0, 150, 0],
+                        opacity: 1.0,
+                        stroke: 1.0,
+                        author: "greg".into(),
+                        contents: String::new(),
+                        modified: "D:20261011000000".into(),
+                    },
+                },
+                "tick",
+            )
+            .unwrap();
+        // A connector pair: links in the file, but ours, so they go too.
+        let p1 = model.page(1).unwrap().id;
+        let conn = || Annot {
+            id: crate::annot::AnnotId(0),
+            kind: AnnotKind::Connector {
+                rect: Box2 {
+                    x: 50.0,
+                    y: 50.0,
+                    w: 22.0,
+                    h: 22.0,
+                },
+                label: "1".into(),
+                partner: None,
+            },
+            color: [220, 40, 40],
+            opacity: 1.0,
+            stroke: 1.0,
+            author: "greg".into(),
+            contents: String::new(),
+            modified: "D:20261011000000".into(),
+        };
+        model
+            .apply(
+                Edit::ConnectorAdd {
+                    a: (p0, conn()),
+                    b: (p1, conn()),
+                },
+                "conn",
+            )
+            .unwrap();
+        // Also rotate page 2 so the copy reflects edits, not just the file.
+        model
+            .apply(
+                Edit::RotatePages {
+                    ids: vec![p1],
+                    by: Rotation::R90,
+                },
+                "rot",
+            )
+            .unwrap();
+
+        let out = dir.join("clean.pdf");
+        export_clean_copy(&model.snapshot(), &out).unwrap();
+        let pdf = Pdf::load(&out).unwrap();
+        let pages = pdf.get_pages();
+        assert_eq!(pages.len(), 2);
+        let annots = pdf
+            .dereference(
+                pdf.get_dictionary(pages[&1])
+                    .unwrap()
+                    .get(b"Annots")
+                    .unwrap(),
+            )
+            .unwrap()
+            .1
+            .as_array()
+            .unwrap()
+            .clone();
+        let mut subtypes: Vec<String> = annots
+            .iter()
+            .map(|a| {
+                String::from_utf8_lossy(
+                    pdf.get_dictionary(a.as_reference().unwrap())
+                        .unwrap()
+                        .get(b"Subtype")
+                        .unwrap()
+                        .as_name()
+                        .unwrap(),
+                )
+                .into_owned()
+            })
+            .collect();
+        subtypes.sort();
+        assert_eq!(subtypes, ["Link", "Widget"]);
+        assert!(!pdf.get_dictionary(pages[&2]).unwrap().has(b"Annots"));
+        assert_eq!(
+            pdf.get_dictionary(pages[&2])
+                .unwrap()
+                .get(b"Rotate")
+                .unwrap()
+                .as_i64()
+                .unwrap(),
+            90
+        );
+        // Nothing markup-shaped survives anywhere in the file.
+        for (_, obj) in pdf.objects.iter() {
+            if let Ok(d) = obj.as_dict()
+                && let Ok(s) = d.get(b"Subtype").and_then(|s| s.as_name())
+            {
+                assert!(
+                    !matches!(s, b"Text" | b"Popup" | b"Stamp"),
+                    "leftover {}",
+                    String::from_utf8_lossy(s)
+                );
+            }
+            if let Ok(d) = obj.as_dict() {
+                assert!(!d.has(b"SheafAnnot"));
+            }
+        }
+        assert!(crate::file::read_sheaf_annots(&out).unwrap().is_empty());
+        // Bookmarks kept.
+        assert!(
+            pdf.get_dictionary(pdf.trailer.get(b"Root").unwrap().as_reference().unwrap())
+                .unwrap()
+                .has(b"Outlines")
+        );
+        // The open file itself can't be the target.
+        assert!(export_clean_copy(&model.snapshot(), &a_path).is_err());
+        assert_eq!(std::fs::read(&a_path).unwrap(), original);
+    }
+
     fn tempdir() -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!(
             "sheaf-save-{}-{}",
@@ -1139,6 +1363,39 @@ fn is_sheaf_annot(pdf: &Pdf, entry: &Object) -> bool {
         .ok()
         .and_then(|(_, o)| o.as_dict().ok().map(|d| d.has(b"SheafAnnot")))
         .unwrap_or(false)
+}
+
+/// Is this /Annots entry navigation or a form field rather than markup?
+/// Our connectors are links too, but they're markup.
+fn is_link_or_field(pdf: &Pdf, entry: &Object) -> bool {
+    pdf.dereference(entry)
+        .ok()
+        .and_then(|(_, o)| o.as_dict().ok())
+        .filter(|d| !d.has(b"SheafAnnot"))
+        .and_then(|d| d.get(b"Subtype").ok())
+        .and_then(|s| s.as_name().ok())
+        .is_some_and(|n| n == b"Link" || n == b"Widget")
+}
+
+/// Drop every markup annotation from a page, keeping links and form fields.
+pub(crate) fn strip_markup_annots(pdf: &Pdf, page: &mut Dictionary) {
+    let Some(existing) = page
+        .get(b"Annots")
+        .ok()
+        .and_then(|a| pdf.dereference(a).ok())
+        .and_then(|(_, o)| o.as_array().ok().cloned())
+    else {
+        return;
+    };
+    let kept: Vec<Object> = existing
+        .into_iter()
+        .filter(|e| is_link_or_field(pdf, e))
+        .collect();
+    if kept.is_empty() {
+        page.remove(b"Annots");
+    } else {
+        page.set("Annots", Object::Array(kept));
+    }
 }
 
 /// Drop sheaf-written entries from a page's /Annots, keeping third-party ones.

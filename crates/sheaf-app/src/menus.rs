@@ -27,6 +27,7 @@ pub fn app_menus() -> Vec<Menu> {
                 sep(),
                 item("&Save", Save),
                 item("Save &As…", SaveAs),
+                item("&Export Clean Copy…", ExportCleanCopy),
                 sep(),
                 item("&Close", CloseTab),
                 sep(),

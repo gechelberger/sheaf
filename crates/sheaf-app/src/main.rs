@@ -55,7 +55,8 @@ actions!(
         Save,
         SaveAs,
         InsertPdf,
-        NewBookmark
+        NewBookmark,
+        ExportCleanCopy
     ]
 );
 actions!(
@@ -119,6 +120,8 @@ struct Cli {
     selftest_insert: Option<PathBuf>,
     /// Dev: add one of each mark to page 1 and save here.
     selftest_annot: Option<PathBuf>,
+    /// Add a couple of marks, then export a clean copy here.
+    selftest_clean: Option<PathBuf>,
     /// Panel to open with: "pages" (default), "bookmarks", "patterns", "calc"
     /// or "comments".
     panel: Option<String>,
@@ -136,6 +139,7 @@ fn parse_cli() -> Cli {
         selftest_save: None,
         selftest_insert: None,
         selftest_annot: None,
+        selftest_clean: None,
         panel: None,
         pattern: None,
         menu: None,
@@ -148,6 +152,7 @@ fn parse_cli() -> Cli {
             Some("--selftest-save") => cli.selftest_save = args.next().map(PathBuf::from),
             Some("--selftest-insert") => cli.selftest_insert = args.next().map(PathBuf::from),
             Some("--selftest-annot") => cli.selftest_annot = args.next().map(PathBuf::from),
+            Some("--selftest-clean") => cli.selftest_clean = args.next().map(PathBuf::from),
             Some("--panel") => cli.panel = args.next().and_then(|p| p.to_str().map(String::from)),
             Some("--pattern") => {
                 cli.pattern = args.next().and_then(|p| p.to_str().map(String::from))
@@ -310,6 +315,7 @@ fn main() {
                             selftest_save: cli.selftest_save,
                             selftest_insert: cli.selftest_insert,
                             selftest_annot: cli.selftest_annot,
+                            selftest_clean: cli.selftest_clean,
                             start_panel: cli.panel.take(),
                             pattern: cli.pattern.take(),
                             launched,

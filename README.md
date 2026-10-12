@@ -154,7 +154,7 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 | **Calculator tape** (PDFlyer): 10-key calc, tape placed as annotation | ✅ Calculator panel (Ctrl+Alt+4) |
 | Comments list / review panel, status, replies | ✅ Comments panel (Ctrl+Alt+5) lists ours and third-party; status/replies 📋 |
 | Flatten annotations | 📋 |
-| Export Clean Copy (strip annots, notes, tapes, stamps, attachments) | 🎯 |
+| Export Clean Copy (strip annots, notes, tapes, stamps, attachments) | ✅ File > Export Clean Copy; keeps links, form fields, bookmarks |
 | Measurement tools (distance, area, perimeter, scale) | 📋 |
 
 ### Content editing
@@ -239,7 +239,7 @@ decide on accuracy for scanned tax forms, not on purity.
 | M0 | **Spikes**: GPUI window on Windows and Linux (both tier 1); pdfium-render renders a page; lopdf round-trips a PDF. *All three pass on Linux and Windows (2026-10-11).* | The stack is viable |
 | M1 | **Viewer**: tiled async rendering, continuous scroll, zoom, thumbnails, outline, tabs, search. *Done 2026-10-11 (Linux).* | The performance thesis |
 | M2 | **Organizer**: page reorder/rotate/delete/insert, bookmark tree editing, incremental save, undo; pattern (regex) search as its own tool. *Done 2026-10-11 (Linux).* | The document model |
-| M3 | **Markup**: standard annotations, stamps, tickmarks, connectors, calc tape, clean copy export | The PDFlyer workflow |
+| M3 | **Markup**: standard annotations, stamps, tickmarks, connectors, calc tape, comments panel, clean copy export. *Done 2026-10-11 (Linux).* | The PDFlyer workflow |
 | M4 | **Polish → v0.1**: keybindings, command palette, settings, crash-safe autosave, packaging | Daily-driver readiness |
 
 ## Open questions

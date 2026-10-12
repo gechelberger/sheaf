@@ -35,9 +35,9 @@ use sheaf_render::{
 
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::{
-    CloseSearch, DeletePage, DuplicatePages, Find, FirstPage, InsertPdf, LastPage, LineDown,
-    LineUp, NewBookmark, NextPage, PrevPage, Redo, RotatePageCcw, RotatePageCw, Save, SaveAs,
-    ScreenDown, ScreenUp, SearchNext, SearchPrev, SelectAllPages, ToolArrow, ToolConnector,
+    CloseSearch, DeletePage, DuplicatePages, ExportCleanCopy, Find, FirstPage, InsertPdf, LastPage,
+    LineDown, LineUp, NewBookmark, NextPage, PrevPage, Redo, RotatePageCcw, RotatePageCw, Save,
+    SaveAs, ScreenDown, ScreenUp, SearchNext, SearchPrev, SelectAllPages, ToolArrow, ToolConnector,
     ToolEllipse, ToolFreeText, ToolHighlight, ToolInk, ToolLine, ToolNote, ToolSelect, ToolSquare,
     ToolTick, Undo, ZoomActual, ZoomFitPage, ZoomFitWidth, ZoomIn, ZoomOut,
 };
@@ -327,6 +327,7 @@ pub struct DocView {
     pub(crate) pending_outline_focus: bool,
     pub(crate) selftest_insert: Option<PathBuf>,
     pub(crate) selftest_annot: Option<PathBuf>,
+    pub(crate) selftest_clean: Option<PathBuf>,
     pub(crate) tool: Tool,
     pub(crate) tool_color: [u8; 3],
     pub(crate) tick_glyph: String,
@@ -369,6 +370,7 @@ impl DocView {
             pending_outline_focus: false,
             selftest_insert: None,
             selftest_annot: None,
+            selftest_clean: None,
             tool: Tool::Select,
             tool_color: [255, 230, 0],
             tick_glyph: "✓".into(),
@@ -478,6 +480,9 @@ impl DocView {
                         }
                         if let Some(p) = viewer.selftest_annot.take() {
                             viewer.selftest_annot(p, cx);
+                        }
+                        if let Some(p) = viewer.selftest_clean.take() {
+                            viewer.selftest_clean(p, cx);
                         }
                         if let Some(src) = viewer.initial_pattern.take() {
                             viewer.run_initial_pattern(src, cx);
@@ -1206,6 +1211,108 @@ impl DocView {
 
     pub fn set_selftest_annot(&mut self, path: PathBuf) {
         self.selftest_annot = Some(path);
+    }
+
+    pub fn set_selftest_clean(&mut self, path: PathBuf) {
+        self.selftest_clean = Some(path);
+    }
+
+    /// Dev hook: drop a couple of marks, then export a clean copy to `path`
+    /// (the document itself is left dirty, as the real command would).
+    pub fn selftest_clean(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let State::Ready(doc) = &self.state else {
+            return;
+        };
+        let Some(p0) = doc.page_ref(0).map(|p| p.id) else {
+            return;
+        };
+        let mut note = self.new_annot(
+            AnnotKind::Note {
+                pos: Pt { x: 400.0, y: 60.0 },
+            },
+            [255, 200, 0],
+        );
+        note.contents = "should not survive".into();
+        self.add_annot(p0, note, "Note", cx);
+        let tick = self.new_annot(
+            AnnotKind::Stamp {
+                rect: Box2 {
+                    x: 500.0,
+                    y: 120.0,
+                    w: 28.0,
+                    h: 28.0,
+                },
+                glyph: "✓".into(),
+            },
+            [0, 150, 0],
+        );
+        self.add_annot(p0, tick, "Tickmark", cx);
+        self.export_clean_to(path, cx);
+    }
+
+    // ----- export clean copy ---------------------------------------------------
+
+    /// File > Export Clean Copy: ask for a path, then write the document
+    /// there with all markup removed.
+    fn export_clean_copy_prompt(&mut self, cx: &mut Context<Self>) {
+        let dir = self
+            .path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default();
+        let suggested = self
+            .path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| format!("{s} - clean.pdf"));
+        let rx = cx.prompt_for_new_path(&dir, suggested.as_deref());
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(path))) = rx.await {
+                this.update(cx, |view, cx| view.export_clean_to(path, cx))
+                    .ok();
+            }
+        })
+        .detach();
+    }
+
+    pub fn export_clean_to(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let State::Ready(doc) = &mut self.state else {
+            return;
+        };
+        doc.notice = Some(format!("Exporting clean copy to {}…", path.display()));
+        let snapshot = doc.model.snapshot();
+        let timing = self.timing;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let t = Instant::now();
+            let result = cx
+                .background_executor()
+                .spawn({
+                    let path = path.clone();
+                    async move { save::export_clean_copy(&snapshot, &path) }
+                })
+                .await;
+            this.update(cx, |view, cx| {
+                if let State::Ready(doc) = &mut view.state {
+                    doc.notice = Some(match &result {
+                        Ok(()) => {
+                            if timing {
+                                eprintln!(
+                                    "[timing] exported clean copy {} in {:?}",
+                                    path.display(),
+                                    t.elapsed()
+                                );
+                            }
+                            format!("Exported clean copy to {}", path.display())
+                        }
+                        Err(e) => format!("Export failed: {e:#}"),
+                    });
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Open an inline text field for the contents of the most recently
@@ -2560,6 +2667,7 @@ impl Render for DocView {
                 v.save_to(path, cx)
             }))
             .on_action(cx.listener(|v, _: &SaveAs, _, cx| v.save_as(cx)))
+            .on_action(cx.listener(|v, _: &ExportCleanCopy, _, cx| v.export_clean_copy_prompt(cx)))
             .on_action(cx.listener(|v, _: &InsertPdf, _, cx| v.insert_pdf_prompt(cx)))
             .on_action(cx.listener(|v, _: &ToolSelect, _, cx| v.set_tool(Tool::Select, cx)))
             .on_action(cx.listener(|v, _: &ToolNote, _, cx| v.set_tool(Tool::Note, cx)))

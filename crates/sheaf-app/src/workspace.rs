@@ -34,6 +34,7 @@ pub struct Launch {
     /// Dev: insert this PDF after page 1 of the first document.
     pub selftest_insert: Option<PathBuf>,
     pub selftest_annot: Option<PathBuf>,
+    pub selftest_clean: Option<PathBuf>,
     pub start_panel: Option<String>,
     /// Run this regex in the Patterns panel of the first document.
     pub pattern: Option<String>,
@@ -145,6 +146,7 @@ impl Workspace {
             selftest_save,
             selftest_insert,
             selftest_annot,
+            selftest_clean,
             start_panel,
             pattern,
             launched,
@@ -186,6 +188,9 @@ impl Workspace {
         }
         if let (Some(p), Some(doc)) = (selftest_annot, this.docs.first().cloned()) {
             doc.update(cx, |d, _| d.set_selftest_annot(p));
+        }
+        if let (Some(p), Some(doc)) = (selftest_clean, this.docs.first().cloned()) {
+            doc.update(cx, |d, _| d.set_selftest_clean(p));
         }
         if let (Some(p), Some(doc)) = (pattern, this.docs.first().cloned()) {
             doc.update(cx, |d, _| d.set_initial_pattern(p));
