@@ -15,6 +15,7 @@ use gpui::{
 use crate::docview::DocView;
 use crate::frame;
 use crate::menu_bar::MenuBar;
+use crate::settings::{DockLayout, DockState, Settings, WindowPlacement};
 use crate::{
     About, ActivateMenuBar, CloseTab, NextTab, OpenFile, PrevTab, Quit, ShowCalc, ShowComments,
     ShowOutline, ShowPatterns, ShowThumbnails, ToggleBottomDock, ToggleLeftDock, ToggleRightDock,
@@ -39,6 +40,7 @@ pub struct Launch {
     /// Run this regex in the Patterns panel of the first document.
     pub pattern: Option<String>,
     pub launched: Instant,
+    pub settings: Settings,
 }
 
 const TAB_H: f32 = 32.0;
@@ -57,6 +59,29 @@ pub enum Panel {
 }
 
 impl Panel {
+    const ALL: [Panel; 5] = [
+        Panel::Thumbnails,
+        Panel::Outline,
+        Panel::Patterns,
+        Panel::Calc,
+        Panel::Comments,
+    ];
+
+    /// Stable id for settings and the `--panel` flag.
+    fn id(self) -> &'static str {
+        match self {
+            Panel::Thumbnails => "pages",
+            Panel::Outline => "bookmarks",
+            Panel::Patterns => "patterns",
+            Panel::Calc => "calc",
+            Panel::Comments => "comments",
+        }
+    }
+
+    fn from_id(id: &str) -> Option<Panel> {
+        Panel::ALL.into_iter().find(|p| p.id() == id)
+    }
+
     fn label(self) -> &'static str {
         match self {
             Panel::Thumbnails => "Pages",
@@ -101,15 +126,6 @@ pub struct Dock {
 }
 
 impl Dock {
-    fn new(panels: Vec<Panel>, open: bool, size: f32) -> Self {
-        Self {
-            panels,
-            active: 0,
-            open,
-            size,
-        }
-    }
-
     fn active_panel(&self) -> Option<Panel> {
         self.panels.get(self.active).copied()
     }
@@ -117,6 +133,83 @@ impl Dock {
     fn shows(&self) -> bool {
         self.open && !self.panels.is_empty()
     }
+
+    fn to_state(&self) -> DockState {
+        DockState {
+            panels: self.panels.iter().map(|p| p.id().to_string()).collect(),
+            active: self.active,
+            open: self.open,
+            size: self.size,
+        }
+    }
+}
+
+/// Docks from a saved layout, made consistent: unknown panel ids are
+/// dropped, each panel appears once, panels that can't sit on a side go
+/// back to their default dock, and any panel the file doesn't mention is
+/// added where the defaults put it.
+fn docks_from_layout(layout: &DockLayout) -> ([Dock; 3], bool) {
+    let defaults = DockLayout::default();
+    let mut docks: Vec<Dock> = Vec::new();
+    let mut seen: Vec<Panel> = Vec::new();
+    for (side, st) in [
+        (Side::Left, &layout.left),
+        (Side::Right, &layout.right),
+        (Side::Bottom, &layout.bottom),
+    ] {
+        let mut panels: Vec<Panel> = Vec::new();
+        for p in st.panels.iter().filter_map(|id| Panel::from_id(id)) {
+            if p.can_dock(side) && !seen.contains(&p) {
+                seen.push(p);
+                panels.push(p);
+            }
+        }
+        docks.push(Dock {
+            panels,
+            active: st.active,
+            open: st.open,
+            size: st.size.clamp(MIN_DOCK, 2000.0),
+        });
+    }
+    for (i, st) in [&defaults.left, &defaults.right, &defaults.bottom]
+        .into_iter()
+        .enumerate()
+    {
+        for id in &st.panels {
+            if let Some(p) = Panel::from_id(id)
+                && !seen.contains(&p)
+            {
+                seen.push(p);
+                docks[i].panels.push(p);
+            }
+        }
+    }
+    for d in &mut docks {
+        d.active = d.active.min(d.panels.len().saturating_sub(1));
+    }
+    let docks: [Dock; 3] = docks.try_into().ok().expect("three docks");
+    (docks, layout.all_hidden)
+}
+
+/// A saved window placement, if it still lands on a connected display.
+pub fn restore_window_bounds(w: &WindowPlacement, cx: &App) -> Option<gpui::WindowBounds> {
+    if !(w.w >= 400.0 && w.h >= 300.0 && w.w.is_finite() && w.h.is_finite()) {
+        return None;
+    }
+    let origin = gpui::point(px(w.x), px(w.y));
+    let on_screen = cx.displays().iter().any(|d| {
+        d.bounds()
+            .contains(&gpui::point(px(w.x + 50.0), px(w.y + 20.0)))
+    });
+    if !on_screen {
+        return None;
+    }
+    let bounds = gpui::Bounds::new(origin, gpui::size(px(w.w), px(w.h)));
+    Some(if w.maximized {
+        gpui::WindowBounds::Maximized(bounds)
+    } else {
+        gpui::WindowBounds::Windowed(bounds)
+    })
 }
 
 pub struct Workspace {
@@ -135,6 +228,7 @@ pub struct Workspace {
     area: gpui::Bounds<Pixels>,
     timing: bool,
     launched: Instant,
+    settings: Settings,
 }
 
 impl Workspace {
@@ -150,22 +244,22 @@ impl Workspace {
             start_panel,
             pattern,
             launched,
+            settings,
         } = launch;
+        let (docks, all_hidden) =
+            docks_from_layout(settings.docks.as_ref().unwrap_or(&DockLayout::default()));
         let mut this = Self {
             docs: Vec::new(),
             active: 0,
-            docks: [
-                Dock::new(vec![Panel::Thumbnails, Panel::Outline], true, 220.0),
-                Dock::new(vec![Panel::Comments], false, 300.0),
-                Dock::new(vec![Panel::Patterns, Panel::Calc], false, 240.0),
-            ],
-            all_hidden: false,
+            docks,
+            all_hidden,
             resizing: None,
             dock_menu: None,
             menu_bar: frame::draws_menu_bar().then(|| cx.new(|cx| MenuBar::new(window, cx))),
             area: gpui::Bounds::default(),
             timing,
             launched,
+            settings,
         };
         match start_panel.as_deref() {
             Some("bookmarks") => this.show_panel(Panel::Outline),
@@ -226,6 +320,37 @@ impl Workspace {
         dock.active = dock.panels.iter().position(|p| *p == panel).unwrap_or(0);
         dock.open = true;
         self.all_hidden = false;
+        self.persist_layout();
+    }
+
+    /// Write the dock layout to the settings file.
+    fn persist_layout(&mut self) {
+        self.settings.docks = Some(DockLayout {
+            left: self.dock(Side::Left).to_state(),
+            right: self.dock(Side::Right).to_state(),
+            bottom: self.dock(Side::Bottom).to_state(),
+            all_hidden: self.all_hidden,
+        });
+        if let Err(e) = self.settings.save() {
+            log::warn!("saving settings: {e:#}");
+        }
+    }
+
+    /// Remember where the window is, then write everything.
+    fn persist_window(&mut self, window: &Window) {
+        let (bounds, maximized) = match window.window_bounds() {
+            gpui::WindowBounds::Windowed(b) => (b, false),
+            gpui::WindowBounds::Maximized(b) => (b, true),
+            gpui::WindowBounds::Fullscreen(b) => (b, false),
+        };
+        self.settings.window = Some(WindowPlacement {
+            x: f32::from(bounds.origin.x),
+            y: f32::from(bounds.origin.y),
+            w: f32::from(bounds.size.width),
+            h: f32::from(bounds.size.height),
+            maximized,
+        });
+        self.persist_layout();
     }
 
     fn move_panel(&mut self, panel: Panel, to: Side) {
@@ -242,6 +367,7 @@ impl Workspace {
         dock.active = dock.panels.len() - 1;
         dock.open = true;
         self.all_hidden = false;
+        self.persist_layout();
     }
 
     fn toggle_dock(&mut self, side: Side, cx: &mut Context<Self>) {
@@ -255,6 +381,7 @@ impl Workspace {
             let d = self.dock_mut(side);
             d.open = !d.open;
         }
+        self.persist_layout();
         cx.notify();
     }
 
@@ -354,6 +481,7 @@ impl Workspace {
     /// Quit, asking about each document with unsaved changes in turn.
     pub fn request_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(dirty) = self.docs.iter().find(|d| d.read(cx).is_dirty()).cloned() else {
+            self.persist_window(window);
             cx.quit();
             return;
         };
@@ -376,6 +504,7 @@ impl Workspace {
     /// unsaved, otherwise run the prompts and quit from there.
     pub fn window_should_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if self.docs.iter().all(|d| !d.read(cx).is_dirty()) {
+            self.persist_window(window);
             return true;
         }
         self.request_quit(window, cx);
@@ -411,6 +540,7 @@ impl Workspace {
         let Some(side) = self.resizing else { return };
         if ev.pressed_button != Some(MouseButton::Left) {
             self.resizing = None;
+            self.persist_layout();
             cx.notify();
             return;
         }
@@ -708,6 +838,7 @@ impl Render for Workspace {
             .key_context(KEY_CONTEXT)
             .on_action(cx.listener(|ws, _: &ToggleSidebar, _, cx| {
                 ws.all_hidden = !ws.all_hidden;
+                ws.persist_layout();
                 cx.notify();
             }))
             .on_action(cx.listener(|ws, _: &ToggleLeftDock, _, cx| ws.toggle_dock(Side::Left, cx)))

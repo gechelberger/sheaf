@@ -5034,6 +5034,8 @@ dependencies = [
  "image",
  "log",
  "regex",
+ "serde",
+ "serde_json",
  "sheaf-core",
  "sheaf-doc",
  "sheaf-render",

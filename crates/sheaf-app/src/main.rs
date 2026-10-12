@@ -11,6 +11,7 @@ mod menu_bar;
 mod menus;
 mod outline_panel;
 mod pattern_panel;
+mod settings;
 mod text_input;
 mod workspace;
 
@@ -284,10 +285,17 @@ fn main() {
         ]);
         cx.set_menus(menus::app_menus());
 
-        let bounds = Bounds::centered(None, size(px(1200.0), px(850.0)), cx);
+        let settings = settings::Settings::load();
+        let window_bounds = settings
+            .window
+            .as_ref()
+            .and_then(|w| workspace::restore_window_bounds(w, cx))
+            .unwrap_or_else(|| {
+                WindowBounds::Windowed(Bounds::centered(None, size(px(1200.0), px(850.0)), cx))
+            });
         cx.open_window(
             WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_bounds: Some(window_bounds),
                 titlebar: Some(TitlebarOptions {
                     title: Some("sheaf".into()),
                     // We draw the title bar ourselves (see frame.rs).
@@ -319,6 +327,7 @@ fn main() {
                             start_panel: cli.panel.take(),
                             pattern: cli.pattern.take(),
                             launched,
+                            settings,
                         },
                         cx,
                     )
