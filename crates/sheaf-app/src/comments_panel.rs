@@ -366,10 +366,7 @@ impl DocView {
             }))
             .on_action(cx.listener(|v, _: &Undo, _, cx| v.undo(cx)))
             .on_action(cx.listener(|v, _: &Redo, _, cx| v.redo(cx)))
-            .on_action(cx.listener(|v, _: &Save, _, cx| {
-                let path = v.path.clone();
-                v.save_to(path, cx)
-            }))
+            .on_action(cx.listener(|v, _: &Save, _, cx| v.save(cx).detach()))
             .child(
                 div()
                     .flex_shrink_0()

@@ -329,10 +329,23 @@ fn main() {
                         ws.open_menu(ch, window, cx);
                     }
                 });
+                // Alt+F4 / the compositor's close: prompt for unsaved work.
+                window.on_window_should_close(cx, {
+                    let ws = ws.clone();
+                    move |window, cx| ws.update(cx, |ws, cx| ws.window_should_close(window, cx))
+                });
                 ws
             },
         )
         .expect("open window");
+        // No windows means nothing to do (macOS keeps apps alive without
+        // windows, but sheaf has no dock-menu life yet).
+        cx.on_window_closed(|cx, _| {
+            if cx.windows().is_empty() {
+                cx.quit();
+            }
+        })
+        .detach();
         cx.activate(true);
     });
 }

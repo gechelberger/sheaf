@@ -71,7 +71,11 @@ pub fn title_bar(
                     .on_click(|_, window, _| window.zoom_window()),
             );
         }
-        buttons = buttons.child(button("win-close", "✕", true).on_click(|_, _, cx| cx.quit()));
+        // Through the Quit action so unsaved changes get their prompt.
+        buttons = buttons.child(
+            button("win-close", "✕", true)
+                .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::Quit), cx)),
+        );
     }
     let _ = cx;
     div()

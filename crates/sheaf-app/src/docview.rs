@@ -379,6 +379,15 @@ impl DocView {
         this
     }
 
+    /// The file's name, without the dirty marker.
+    pub fn file_name(&self) -> String {
+        self.path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("?")
+            .to_string()
+    }
+
     pub fn title(&self) -> SharedString {
         let name = self
             .path
@@ -826,23 +835,36 @@ impl DocView {
         let rx = cx.prompt_for_new_path(&dir, suggested.as_deref());
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(path))) = rx.await {
-                this.update(cx, |view, cx| view.save_to(path, cx)).ok();
+                this.update(cx, |view, cx| view.save_to(path, cx).detach())
+                    .ok();
             }
         })
         .detach();
     }
 
+    /// Unsaved changes, or a save still in flight.
+    pub fn is_dirty(&self) -> bool {
+        matches!(&self.state, State::Ready(d) if d.model.is_dirty() || d.saving)
+    }
+
+    /// Plain Save: to the document's own path.
+    pub fn save(&mut self, cx: &mut Context<Self>) -> Task<bool> {
+        let path = self.path.clone();
+        self.save_to(path, cx)
+    }
+
     /// Save to `path` (the document's own path for plain Save). Runs the
     /// rewrite on a background thread from a snapshot, then reopens the saved
     /// file as the new primary source without disturbing undo history.
-    pub fn save_to(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+    /// Resolves to whether the save succeeded.
+    pub fn save_to(&mut self, path: PathBuf, cx: &mut Context<Self>) -> Task<bool> {
         let State::Ready(doc) = &mut self.state else {
-            return;
+            return Task::ready(false);
         };
         if doc.saving {
             doc.notice = Some("Already saving…".into());
             cx.notify();
-            return;
+            return Task::ready(false);
         }
         doc.saving = true;
         doc.notice = Some(format!("Saving {}…", path.display()));
@@ -867,10 +889,10 @@ impl DocView {
                 .await;
             this.update(cx, |view, cx| {
                 let State::Ready(doc) = &mut view.state else {
-                    return;
+                    return false;
                 };
                 doc.saving = false;
-                match result {
+                let ok = match result {
                     Ok((handle, bytes, strategy)) => {
                         let (page_count, first_page) =
                             (handle.info().page_count, handle.info().first_page);
@@ -923,17 +945,19 @@ impl DocView {
                         }
                         doc.touched();
                         view.fetch_page_sizes(cx);
+                        true
                     }
                     Err(e) => {
                         doc.notice = Some(format!("Save failed: {e:#}"));
                         log::error!("save: {e:#}");
+                        false
                     }
-                }
+                };
                 cx.notify();
+                ok
             })
-            .ok();
+            .unwrap_or(false)
         })
-        .detach();
     }
 
     /// Dev hook: rotate the first page and save to `path`, so the save path
@@ -952,7 +976,7 @@ impl DocView {
                 cx,
             );
         }
-        self.save_to(path, cx);
+        self.save_to(path, cx).detach();
     }
 
     pub fn set_selftest_save(&mut self, path: PathBuf) {
@@ -1206,7 +1230,7 @@ impl DocView {
         );
         tape.contents = "1,234.50 +\n250.00 +\n84.50 -\n1,400.00 T".into();
         self.add_annot(p0, tape, "Place tape", cx);
-        self.save_to(path, cx);
+        self.save_to(path, cx).detach();
     }
 
     pub fn set_selftest_annot(&mut self, path: PathBuf) {
@@ -2662,10 +2686,7 @@ impl Render for DocView {
             }))
             .on_action(cx.listener(|v, _: &DuplicatePages, _, cx| v.duplicate_current(cx)))
             .on_action(cx.listener(|v, _: &SelectAllPages, _, cx| v.select_all(cx)))
-            .on_action(cx.listener(|v, _: &Save, _, cx| {
-                let path = v.path.clone();
-                v.save_to(path, cx)
-            }))
+            .on_action(cx.listener(|v, _: &Save, _, cx| v.save(cx).detach()))
             .on_action(cx.listener(|v, _: &SaveAs, _, cx| v.save_as(cx)))
             .on_action(cx.listener(|v, _: &ExportCleanCopy, _, cx| v.export_clean_copy_prompt(cx)))
             .on_action(cx.listener(|v, _: &InsertPdf, _, cx| v.insert_pdf_prompt(cx)))

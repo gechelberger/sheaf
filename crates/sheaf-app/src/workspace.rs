@@ -8,8 +8,8 @@ use std::time::Instant;
 
 use gpui::{
     AnchoredPositionMode, AnyElement, App, Context, Entity, Focusable, KeyDownEvent, MouseButton,
-    MouseMoveEvent, PathPromptOptions, Pixels, Point, PromptLevel, SharedString, Window, anchored,
-    deferred, div, prelude::*, px, rgb,
+    MouseMoveEvent, PathPromptOptions, Pixels, Point, PromptButton, PromptLevel, SharedString,
+    Task, Window, anchored, deferred, div, prelude::*, px, rgb,
 };
 
 use crate::docview::DocView;
@@ -289,7 +289,30 @@ impl Workspace {
         }
     }
 
+    /// Close a tab, asking about unsaved changes first.
     fn close(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(doc) = self.docs.get(ix).cloned() else {
+            return;
+        };
+        if !doc.read(cx).is_dirty() {
+            self.close_now(ix, window, cx);
+            return;
+        }
+        let may_close = self.confirm_close(doc.clone(), window, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            if may_close.await {
+                this.update_in(cx, |ws, window, cx| {
+                    if let Some(i) = ws.docs.iter().position(|d| *d == doc) {
+                        ws.close_now(i, window, cx);
+                    }
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    fn close_now(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         if ix >= self.docs.len() {
             return;
         }
@@ -298,6 +321,65 @@ impl Workspace {
             self.activate(self.active.min(self.docs.len() - 1), window, cx);
         }
         cx.notify();
+    }
+
+    /// Acrobat's "Save changes?" prompt for one document. Resolves to true
+    /// once the document may be closed: either it was saved, or the user
+    /// chose to discard the changes.
+    fn confirm_close(
+        &mut self,
+        doc: Entity<DocView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<bool> {
+        let name = doc.read(cx).file_name();
+        let rx = window.prompt(
+            PromptLevel::Warning,
+            &format!("Save changes to \"{name}\" before closing?"),
+            Some("Your changes will be lost if you don't save them."),
+            &[
+                PromptButton::ok("Save"),
+                PromptButton::new("Don't Save"),
+                PromptButton::cancel("Cancel"),
+            ],
+            cx,
+        );
+        cx.spawn(async move |_, cx| match rx.await {
+            Ok(0) => cx.update(|cx| doc.update(cx, |d, cx| d.save(cx))).await,
+            Ok(1) => true,
+            _ => false,
+        })
+    }
+
+    /// Quit, asking about each document with unsaved changes in turn.
+    pub fn request_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dirty) = self.docs.iter().find(|d| d.read(cx).is_dirty()).cloned() else {
+            cx.quit();
+            return;
+        };
+        let may_close = self.confirm_close(dirty.clone(), window, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            if may_close.await {
+                this.update_in(cx, |ws, window, cx| {
+                    if let Some(i) = ws.docs.iter().position(|d| *d == dirty) {
+                        ws.close_now(i, window, cx);
+                    }
+                    ws.request_quit(window, cx);
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    /// The window system asked to close the window: let it when nothing is
+    /// unsaved, otherwise run the prompts and quit from there.
+    pub fn window_should_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.docs.iter().all(|d| !d.read(cx).is_dirty()) {
+            return true;
+        }
+        self.request_quit(window, cx);
+        false
     }
 
     fn prompt_open(&mut self, cx: &mut Context<Self>) {
@@ -678,7 +760,7 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|ws, _: &CloseTab, window, cx| ws.close(ws.active, window, cx)))
             .on_action(cx.listener(|ws, _: &OpenFile, _, cx| ws.prompt_open(cx)))
-            .on_action(|_: &Quit, _, cx| cx.quit())
+            .on_action(cx.listener(|ws, _: &Quit, window, cx| ws.request_quit(window, cx)))
             .on_action(cx.listener(|ws, _: &ActivateMenuBar, window, cx| {
                 if let Some(bar) = &ws.menu_bar {
                     bar.update(cx, |bar, cx| bar.toggle(window, cx));

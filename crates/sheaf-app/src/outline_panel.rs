@@ -354,10 +354,7 @@ impl DocView {
             .on_action(cx.listener(|v, _: &NewBookmark, window, cx| v.new_bookmark(window, cx)))
             .on_action(cx.listener(|v, _: &Undo, _, cx| v.undo(cx)))
             .on_action(cx.listener(|v, _: &Redo, _, cx| v.redo(cx)))
-            .on_action(cx.listener(|v, _: &Save, _, cx| {
-                let path = v.path.clone();
-                v.save_to(path, cx)
-            }))
+            .on_action(cx.listener(|v, _: &Save, _, cx| v.save(cx).detach()))
             .on_action(cx.listener(|v, _: &DeselectBookmark, _, cx| {
                 if let State::Ready(doc) = &mut v.state {
                     doc.outline_selected = None;
