@@ -61,7 +61,9 @@ actions!(
         SaveAs,
         InsertPdf,
         NewBookmark,
-        ExportCleanCopy
+        ExportCleanCopy,
+        ExportFlattened,
+        ExtractPages
     ]
 );
 actions!(
@@ -134,6 +136,10 @@ struct Cli {
     selftest_clean: Option<PathBuf>,
     /// Open the files with this password (dev; prefer the prompt).
     password: Option<String>,
+    /// Extract the first two pages to this path.
+    selftest_extract: Option<PathBuf>,
+    /// Add marks, then export a flattened copy here.
+    selftest_flatten: Option<PathBuf>,
     /// Panel to open with: "pages" (default), "bookmarks", "patterns", "calc"
     /// or "comments".
     panel: Option<String>,
@@ -153,6 +159,8 @@ fn parse_cli() -> Cli {
         selftest_annot: None,
         selftest_clean: None,
         password: None,
+        selftest_extract: None,
+        selftest_flatten: None,
         panel: None,
         pattern: None,
         menu: None,
@@ -174,6 +182,8 @@ fn parse_cli() -> Cli {
             Some("--selftest-insert") => cli.selftest_insert = args.next().map(PathBuf::from),
             Some("--selftest-annot") => cli.selftest_annot = args.next().map(PathBuf::from),
             Some("--selftest-clean") => cli.selftest_clean = args.next().map(PathBuf::from),
+            Some("--selftest-extract") => cli.selftest_extract = args.next().map(PathBuf::from),
+            Some("--selftest-flatten") => cli.selftest_flatten = args.next().map(PathBuf::from),
             Some("--password") => {
                 cli.password = args.next().and_then(|p| p.to_str().map(String::from))
             }
@@ -385,6 +395,8 @@ fn main() {
                             launched,
                             settings,
                             password: cli.password.take(),
+                            selftest_extract: cli.selftest_extract,
+                            selftest_flatten: cli.selftest_flatten,
                         },
                         cx,
                     )

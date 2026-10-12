@@ -36,11 +36,12 @@ use sheaf_render::{
 use crate::text_area::{TextArea, TextAreaEvent};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::{
-    CloseSearch, DeletePage, DuplicatePages, ExportCleanCopy, Find, FirstPage, InsertPdf, LastPage,
-    LineDown, LineUp, NewBookmark, NextPage, PrevPage, Redo, RotatePageCcw, RotatePageCw, Save,
-    SaveAs, ScreenDown, ScreenUp, SearchNext, SearchPrev, SelectAllPages, ToolArrow, ToolConnector,
-    ToolEllipse, ToolFreeText, ToolHighlight, ToolInk, ToolLine, ToolNote, ToolSelect, ToolSquare,
-    ToolTick, Undo, ZoomActual, ZoomFitPage, ZoomFitWidth, ZoomIn, ZoomOut,
+    CloseSearch, DeletePage, DuplicatePages, ExportCleanCopy, ExportFlattened, ExtractPages, Find,
+    FirstPage, InsertPdf, LastPage, LineDown, LineUp, NewBookmark, NextPage, PrevPage, Redo,
+    RotatePageCcw, RotatePageCw, Save, SaveAs, ScreenDown, ScreenUp, SearchNext, SearchPrev,
+    SelectAllPages, ToolArrow, ToolConnector, ToolEllipse, ToolFreeText, ToolHighlight, ToolInk,
+    ToolLine, ToolNote, ToolSelect, ToolSquare, ToolTick, Undo, ZoomActual, ZoomFitPage,
+    ZoomFitWidth, ZoomIn, ZoomOut,
 };
 
 pub const KEY_CONTEXT: &str = "DocView";
@@ -340,6 +341,8 @@ pub struct DocView {
     pub(crate) selftest_insert: Option<PathBuf>,
     pub(crate) selftest_annot: Option<PathBuf>,
     pub(crate) selftest_clean: Option<PathBuf>,
+    pub(crate) selftest_extract: Option<PathBuf>,
+    pub(crate) selftest_flatten: Option<PathBuf>,
     /// Password the file needs, once known.
     password: Option<String>,
     /// Dev: open the inline editor on this page's last mark next frame.
@@ -399,6 +402,8 @@ impl DocView {
             selftest_insert: None,
             selftest_annot: None,
             selftest_clean: None,
+            selftest_extract: None,
+            selftest_flatten: None,
             pending_recovery: None,
             pending_edit_last: None,
             autosave: None,
@@ -572,6 +577,13 @@ impl DocView {
         }
         if let Some(p) = self.selftest_clean.take() {
             self.selftest_clean(p, cx);
+        }
+        if let Some(p) = self.selftest_extract.take() {
+            let ids: Vec<PageId> = (0..2).filter_map(|i| self.doc_page_id(i)).collect();
+            self.extract_to(ids, p, cx);
+        }
+        if let Some(p) = self.selftest_flatten.take() {
+            self.selftest_flatten(p, cx);
         }
         if let Some(src) = self.initial_pattern.take() {
             self.run_initial_pattern(src, cx);
@@ -1508,6 +1520,187 @@ impl DocView {
         );
         self.add_annot(p0, tick, "Tickmark", cx);
         self.export_clean_to(path, cx);
+    }
+
+    fn doc_page_id(&self, index: usize) -> Option<PageId> {
+        match &self.state {
+            State::Ready(doc) => doc.page_ref(index).map(|p| p.id),
+            _ => None,
+        }
+    }
+
+    /// Dev hook: a few marks, then a flattened export to `path`.
+    pub fn selftest_flatten(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let Some(p0) = self.doc_page_id(0) else {
+            return;
+        };
+        let mut text = self.new_annot(
+            AnnotKind::FreeText {
+                rect: Box2 {
+                    x: 72.0,
+                    y: 200.0,
+                    w: 240.0,
+                    h: 40.0,
+                },
+                size: 12.0,
+            },
+            [200, 0, 0],
+        );
+        text.contents = "Flattened free text".into();
+        self.add_annot(p0, text, "Text", cx);
+        let sq = self.new_annot(
+            AnnotKind::Square {
+                rect: Box2 {
+                    x: 350.0,
+                    y: 200.0,
+                    w: 120.0,
+                    h: 48.0,
+                },
+            },
+            [0, 120, 255],
+        );
+        self.add_annot(p0, sq, "Square", cx);
+        let tick = self.new_annot(
+            AnnotKind::Stamp {
+                rect: Box2 {
+                    x: 500.0,
+                    y: 200.0,
+                    w: 28.0,
+                    h: 28.0,
+                },
+                glyph: "✓".into(),
+            },
+            [0, 150, 0],
+        );
+        self.add_annot(p0, tick, "Tickmark", cx);
+        self.export_flattened_to(path, cx);
+    }
+
+    // ----- extract pages -------------------------------------------------------
+
+    /// Document > Extract Pages: the selection (or current page) to a new file.
+    fn extract_pages_prompt(&mut self, cx: &mut Context<Self>) {
+        let ids = self.target_ids();
+        if ids.is_empty() {
+            return;
+        }
+        let dir = self
+            .path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default();
+        let suggested = self
+            .path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| format!("{s} - pages.pdf"));
+        let rx = cx.prompt_for_new_path(&dir, suggested.as_deref());
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(path))) = rx.await {
+                this.update(cx, |view, cx| view.extract_to(ids, path, cx))
+                    .ok();
+            }
+        })
+        .detach();
+    }
+
+    pub fn extract_to(&mut self, ids: Vec<PageId>, path: PathBuf, cx: &mut Context<Self>) {
+        let State::Ready(doc) = &mut self.state else {
+            return;
+        };
+        doc.notice = Some(format!("Extracting to {}…", path.display()));
+        let snapshot = doc.model.snapshot();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn({
+                    let path = path.clone();
+                    async move { save::extract_pages(&snapshot, &ids, &path) }
+                })
+                .await;
+            this.update(cx, |view, cx| {
+                if let State::Ready(doc) = &mut view.state {
+                    doc.notice = Some(match result {
+                        Ok(n) => format!(
+                            "Extracted {n} page{} to {}",
+                            if n == 1 { "" } else { "s" },
+                            path.display()
+                        ),
+                        Err(e) => format!("Extract failed: {e:#}"),
+                    });
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    // ----- export flattened copy ----------------------------------------------
+
+    fn export_flattened_prompt(&mut self, cx: &mut Context<Self>) {
+        let dir = self
+            .path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default();
+        let suggested = self
+            .path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| format!("{s} - flattened.pdf"));
+        let rx = cx.prompt_for_new_path(&dir, suggested.as_deref());
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(path))) = rx.await {
+                this.update(cx, |view, cx| view.export_flattened_to(path, cx))
+                    .ok();
+            }
+        })
+        .detach();
+    }
+
+    pub fn export_flattened_to(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let State::Ready(doc) = &mut self.state else {
+            return;
+        };
+        doc.notice = Some(format!("Exporting flattened copy to {}…", path.display()));
+        let snapshot = doc.model.snapshot();
+        let timing = self.timing;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let t = Instant::now();
+            let result = cx
+                .background_executor()
+                .spawn({
+                    let path = path.clone();
+                    async move { save::export_flattened(&snapshot, &path) }
+                })
+                .await;
+            this.update(cx, |view, cx| {
+                if let State::Ready(doc) = &mut view.state {
+                    doc.notice = Some(match result {
+                        Ok(n) => {
+                            if timing {
+                                eprintln!(
+                                    "[timing] exported flattened copy ({n} marks) in {:?}",
+                                    t.elapsed()
+                                );
+                            }
+                            format!(
+                                "Exported flattened copy to {} ({n} mark{})",
+                                path.display(),
+                                if n == 1 { "" } else { "s" }
+                            )
+                        }
+                        Err(e) => format!("Export failed: {e:#}"),
+                    });
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     // ----- export clean copy ---------------------------------------------------
@@ -2966,6 +3159,8 @@ impl Render for DocView {
             .on_action(cx.listener(|v, _: &Save, _, cx| v.save(cx).detach()))
             .on_action(cx.listener(|v, _: &SaveAs, _, cx| v.save_as(cx)))
             .on_action(cx.listener(|v, _: &ExportCleanCopy, _, cx| v.export_clean_copy_prompt(cx)))
+            .on_action(cx.listener(|v, _: &ExportFlattened, _, cx| v.export_flattened_prompt(cx)))
+            .on_action(cx.listener(|v, _: &ExtractPages, _, cx| v.extract_pages_prompt(cx)))
             .on_action(cx.listener(|v, _: &InsertPdf, _, cx| v.insert_pdf_prompt(cx)))
             .on_action(cx.listener(|v, _: &ToolSelect, _, cx| v.set_tool(Tool::Select, cx)))
             .on_action(cx.listener(|v, _: &ToolNote, _, cx| v.set_tool(Tool::Note, cx)))

@@ -44,6 +44,8 @@ pub struct Launch {
     pub settings: Settings,
     /// Dev: open the command-line files with this password.
     pub password: Option<String>,
+    pub selftest_extract: Option<PathBuf>,
+    pub selftest_flatten: Option<PathBuf>,
 }
 
 const TAB_H: f32 = 32.0;
@@ -253,6 +255,8 @@ impl Workspace {
             launched,
             settings,
             password,
+            selftest_extract,
+            selftest_flatten,
         } = launch;
         let (docks, all_hidden) =
             docks_from_layout(settings.docks.as_ref().unwrap_or(&DockLayout::default()));
@@ -296,6 +300,12 @@ impl Workspace {
         }
         if let (Some(p), Some(doc)) = (selftest_clean, this.docs.first().cloned()) {
             doc.update(cx, |d, _| d.set_selftest_clean(p));
+        }
+        if let (Some(p), Some(doc)) = (selftest_extract, this.docs.first().cloned()) {
+            doc.update(cx, |d, _| d.selftest_extract = Some(p));
+        }
+        if let (Some(p), Some(doc)) = (selftest_flatten, this.docs.first().cloned()) {
+            doc.update(cx, |d, _| d.selftest_flatten = Some(p));
         }
         if let (Some(p), Some(doc)) = (pattern, this.docs.first().cloned()) {
             doc.update(cx, |d, _| d.set_initial_pattern(p));

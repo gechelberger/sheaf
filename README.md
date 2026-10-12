@@ -124,7 +124,7 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 |---|---|
 | Reorder pages (drag in thumbnails) | ✅ |
 | Rotate **individual** pages (PDFlyer-style, not whole doc) | ✅ |
-| Delete / extract / duplicate pages | ✅ delete, duplicate; extract 📋 |
+| Delete / extract / duplicate pages | ✅ Document > Extract Pages… keeps marks and relevant bookmarks |
 | Insert PDF at position (PDFlyer "Insert PDF") | ✅ |
 | Merge bookmarks on insert (parents merged, children appended) | ✅ |
 | Split document (by page range, by bookmark, by size) | 📋 |
@@ -154,7 +154,7 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 | **Connectors** (PDFlyer): linked markers that jump between pages | ✅ saved as Link annotations, so they jump in Acrobat too |
 | **Calculator tape** (PDFlyer): 10-key calc, tape placed as annotation | ✅ Calculator panel (Ctrl+Alt+4) |
 | Comments list / review panel, status, replies | ✅ Comments panel (Ctrl+Alt+5) lists ours and third-party; status/replies 📋 |
-| Flatten annotations | 📋 |
+| Flatten annotations | ✅ File > Export Flattened Copy… (links and form fields kept) |
 | Export Clean Copy (strip annots, notes, tapes, stamps, attachments) | ✅ File > Export Clean Copy; keeps links, form fields, bookmarks |
 | Measurement tools (distance, area, perimeter, scale) | 📋 |
 

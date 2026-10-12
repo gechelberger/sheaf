@@ -14,7 +14,7 @@ use im::Vector;
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, StringFormat, dictionary};
 
 use crate::annot::{Annot, AnnotId, AnnotKind, PageGeom, to_pdf};
-use crate::model::{DocState, OutlineNode, PageId, Snapshot, SourceId};
+use crate::model::{DocState, OutlineNode, PageId, PageRef, Snapshot, SourceId};
 
 /// Page-level keys a page may inherit from its ancestors in the page tree.
 /// We flatten the tree, so these must be copied onto each page.
@@ -43,6 +43,276 @@ pub fn export_clean_copy(model: &Snapshot, path: &Path) -> Result<()> {
 
 /// `clean`: strip all markup instead of writing our annotations.
 fn rewrite_with(model: &Snapshot, clean: bool) -> Result<Vec<u8>> {
+    finish(build_rewrite(model, clean)?)
+}
+
+/// Prune, renumber, compress and serialize a rewritten document.
+fn finish(mut pdf: Pdf) -> Result<Vec<u8>> {
+    pdf.prune_objects();
+    pdf.renumber_objects();
+    pdf.compress();
+    let mut out = Vec::new();
+    pdf.save_to(&mut out)?;
+    Ok(out)
+}
+
+/// Acrobat's Extract Pages: `ids` (kept in document order) become a new
+/// file at `path`, along with their markup and the bookmarks that point at
+/// them. Returns how many pages were written.
+pub fn extract_pages(model: &Snapshot, ids: &[PageId], path: &Path) -> Result<usize> {
+    let keep: HashSet<PageId> = ids.iter().copied().collect();
+    let pages: Vector<PageRef> = model
+        .state
+        .pages
+        .iter()
+        .filter(|p| keep.contains(&p.id))
+        .copied()
+        .collect();
+    if pages.is_empty() {
+        bail!("no pages to extract");
+    }
+    let mut annots = model.state.annots.clone();
+    annots.retain(|id, _| keep.contains(id));
+    let snap = Snapshot {
+        state: DocState {
+            pages,
+            outline: prune_outline(&model.state.outline, &keep),
+            annots,
+        },
+        primary: model.primary,
+        sources: model.sources.clone(),
+        outline_dirty: true,
+        annots_dirty: HashSet::new(),
+    };
+    let n = snap.state.pages.len();
+    let bytes = rewrite_with(&snap, false)?;
+    write_atomic(path, &bytes)?;
+    Ok(n)
+}
+
+/// Bookmarks that still point somewhere: a node survives if its target is
+/// kept or any descendant survives (then it becomes a plain heading).
+fn prune_outline(nodes: &Vector<OutlineNode>, keep: &HashSet<PageId>) -> Vector<OutlineNode> {
+    nodes
+        .iter()
+        .filter_map(|n| {
+            let children = prune_outline(&n.children, keep);
+            let target = n.target.filter(|t| keep.contains(t));
+            if target.is_none() && children.is_empty() {
+                return None;
+            }
+            Some(OutlineNode {
+                id: n.id,
+                title: n.title.clone(),
+                target,
+                color: n.color,
+                children,
+            })
+        })
+        .collect()
+}
+
+/// Export with every markup annotation's appearance drawn into its page's
+/// content and the annotations themselves removed, so the marks show in
+/// any viewer and can't be edited. Links and form fields stay, as in the
+/// clean copy; popups and hidden annotations are dropped without drawing.
+pub fn export_flattened(model: &Snapshot, path: &Path) -> Result<usize> {
+    let primary = model
+        .source(model.primary)
+        .context("primary source missing")?;
+    if path.exists()
+        && std::fs::canonicalize(path).ok() == std::fs::canonicalize(&primary.path).ok()
+    {
+        bail!("a flattened copy can't replace the open file; choose another name");
+    }
+    let mut pdf = build_rewrite(model, false)?;
+    let n = flatten_annots(&mut pdf)?;
+    let bytes = finish(pdf)?;
+    write_atomic(path, &bytes)?;
+    Ok(n)
+}
+
+/// Draw annotation appearances into page content. Returns how many were
+/// flattened.
+fn flatten_annots(pdf: &mut Pdf) -> Result<usize> {
+    const HIDDEN: i64 = 1 << 1;
+    const NOVIEW: i64 = 1 << 5;
+    let mut flattened = 0usize;
+    let pages: Vec<ObjectId> = pdf.get_pages().into_values().collect();
+    for page_id in pages {
+        let page = pdf.get_dictionary(page_id)?.clone();
+        let Some(annots) = page
+            .get(b"Annots")
+            .ok()
+            .and_then(|a| pdf.dereference(a).ok())
+            .and_then(|(_, o)| o.as_array().ok().cloned())
+        else {
+            continue;
+        };
+        let mut kept: Vec<Object> = Vec::new();
+        let mut ops = String::new();
+        let mut xobjects: Vec<(String, ObjectId)> = Vec::new();
+        for entry in &annots {
+            let Ok((_, obj)) = pdf.dereference(entry) else {
+                continue;
+            };
+            let Ok(dict) = obj.as_dict() else { continue };
+            let subtype = dict
+                .get(b"Subtype")
+                .ok()
+                .and_then(|s| s.as_name().ok())
+                .unwrap_or(b"");
+            if (subtype == b"Link" || subtype == b"Widget") && !dict.has(b"SheafAnnot") {
+                kept.push(entry.clone());
+                continue;
+            }
+            if subtype == b"Popup" {
+                continue;
+            }
+            let flags = dict
+                .get(b"F")
+                .ok()
+                .and_then(|f| f.as_i64().ok())
+                .unwrap_or(0);
+            if flags & (HIDDEN | NOVIEW) != 0 {
+                continue;
+            }
+            let Some(stream_id) = normal_appearance(pdf, dict) else {
+                continue;
+            };
+            let Ok(stream) = pdf.get_object(stream_id).and_then(|o| o.as_stream()) else {
+                continue;
+            };
+            let rect: Vec<f32> = dict
+                .get(b"Rect")
+                .ok()
+                .and_then(|o| pdf.dereference(o).ok())
+                .and_then(|(_, o)| o.as_array().ok())
+                .map(|a| a.iter().map(|v| v.as_float().unwrap_or(0.0)).collect())
+                .unwrap_or_default();
+            if rect.len() != 4 {
+                continue;
+            }
+            let (llx, lly, urx, ury) = (
+                rect[0].min(rect[2]),
+                rect[1].min(rect[3]),
+                rect[0].max(rect[2]),
+                rect[1].max(rect[3]),
+            );
+            // PDF 32000 12.5.5: map the form's (Matrix-transformed) BBox onto Rect.
+            let bbox: Vec<f32> = stream
+                .dict
+                .get(b"BBox")
+                .ok()
+                .and_then(|o| o.as_array().ok())
+                .map(|a| a.iter().map(|v| v.as_float().unwrap_or(0.0)).collect())
+                .unwrap_or_else(|| vec![llx, lly, urx, ury]);
+            let m: Vec<f32> = stream
+                .dict
+                .get(b"Matrix")
+                .ok()
+                .and_then(|o| o.as_array().ok())
+                .map(|a| a.iter().map(|v| v.as_float().unwrap_or(0.0)).collect())
+                .filter(|m: &Vec<f32>| m.len() == 6)
+                .unwrap_or_else(|| vec![1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+            if bbox.len() != 4 {
+                continue;
+            }
+            let xf = |x: f32, y: f32| (m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]);
+            let corners = [
+                xf(bbox[0], bbox[1]),
+                xf(bbox[2], bbox[1]),
+                xf(bbox[2], bbox[3]),
+                xf(bbox[0], bbox[3]),
+            ];
+            let bx0 = corners.iter().map(|c| c.0).fold(f32::MAX, f32::min);
+            let bx1 = corners.iter().map(|c| c.0).fold(f32::MIN, f32::max);
+            let by0 = corners.iter().map(|c| c.1).fold(f32::MAX, f32::min);
+            let by1 = corners.iter().map(|c| c.1).fold(f32::MIN, f32::max);
+            let sx = if bx1 - bx0 > 1e-6 {
+                (urx - llx) / (bx1 - bx0)
+            } else {
+                1.0
+            };
+            let sy = if by1 - by0 > 1e-6 {
+                (ury - lly) / (by1 - by0)
+            } else {
+                1.0
+            };
+            let (tx, ty) = (llx - bx0 * sx, lly - by0 * sy);
+            let name = format!("SheafFlat{}", xobjects.len() + 1);
+            ops.push_str(&format!(
+                " q {sx:.4} 0 0 {sy:.4} {tx:.3} {ty:.3} cm /{name} Do Q"
+            ));
+            xobjects.push((name, stream_id));
+            flattened += 1;
+        }
+        if xobjects.is_empty() && kept.len() == annots.len() {
+            continue;
+        }
+        // Register the forms as page XObjects and append the draws after
+        // the existing content, which is wrapped so its state can't leak.
+        let mut resources = page
+            .get(b"Resources")
+            .ok()
+            .and_then(|r| pdf.dereference(r).ok())
+            .and_then(|(_, o)| o.as_dict().ok().cloned())
+            .unwrap_or_default();
+        let mut xo = resources
+            .get(b"XObject")
+            .ok()
+            .and_then(|r| pdf.dereference(r).ok())
+            .and_then(|(_, o)| o.as_dict().ok().cloned())
+            .unwrap_or_default();
+        for (name, id) in &xobjects {
+            xo.set(name.clone(), Object::Reference(*id));
+        }
+        resources.set("XObject", Object::Dictionary(xo));
+        let mut content = b"q\n".to_vec();
+        content.extend_from_slice(&pdf.get_page_content(page_id));
+        content.extend_from_slice(b"\nQ\n");
+        content.extend_from_slice(ops.as_bytes());
+        let content_id =
+            pdf.add_object(Object::Stream(lopdf::Stream::new(dictionary! {}, content)));
+        let page_mut = pdf.get_dictionary_mut(page_id)?;
+        page_mut.set("Contents", Object::Reference(content_id));
+        page_mut.set("Resources", Object::Dictionary(resources));
+        if kept.is_empty() {
+            page_mut.remove(b"Annots");
+        } else {
+            page_mut.set("Annots", Object::Array(kept));
+        }
+    }
+    Ok(flattened)
+}
+
+/// The annotation's normal appearance stream, resolving appearance
+/// sub-dictionaries through `/AS` (or a lone state).
+fn normal_appearance(pdf: &Pdf, annot: &Dictionary) -> Option<ObjectId> {
+    let ap = annot
+        .get(b"AP")
+        .ok()
+        .and_then(|o| pdf.dereference(o).ok())
+        .and_then(|(_, o)| o.as_dict().ok().cloned())?;
+    let n = ap.get(b"N").ok()?;
+    if let Ok(id) = n.as_reference()
+        && pdf.get_object(id).ok()?.as_stream().is_ok()
+    {
+        return Some(id);
+    }
+    let (_, states) = pdf.dereference(n).ok()?;
+    let states = states.as_dict().ok()?;
+    let state = annot
+        .get(b"AS")
+        .ok()
+        .and_then(|s| s.as_name().ok())
+        .map(|s| s.to_vec())
+        .or_else(|| states.iter().next().map(|(k, _)| k.clone()))?;
+    states.get(&state).ok()?.as_reference().ok()
+}
+
+/// The rewritten document, before serialization.
+fn build_rewrite(model: &Snapshot, clean: bool) -> Result<Pdf> {
     let primary_id = model.primary;
     let primary_info = model.source(primary_id).context("primary source missing")?;
     let mut pdf = crate::file::load_pdf(&primary_info.path, primary_info.password.as_deref())?;
@@ -135,6 +405,7 @@ fn rewrite_with(model: &Snapshot, clean: bool) -> Result<Vec<u8>> {
             "Count" => state.pages.len() as i64,
         }),
     );
+    // (serialization happens in `finish`)
 
     let catalog_id = pdf.trailer.get(b"Root")?.as_reference()?;
     let catalog = pdf.get_dictionary_mut(catalog_id)?;
@@ -150,12 +421,7 @@ fn rewrite_with(model: &Snapshot, clean: bool) -> Result<Vec<u8>> {
             .set("Outlines", outlines_id);
     }
 
-    pdf.prune_objects();
-    pdf.renumber_objects();
-    pdf.compress();
-    let mut out = Vec::new();
-    pdf.save_to(&mut out)?;
-    Ok(out)
+    Ok(pdf)
 }
 
 /// Which strategy a save used.
@@ -1564,6 +1830,189 @@ mod tests {
         // Outline came through too.
         let items = read_outline(&std::fs::read(&out).unwrap());
         assert_eq!(items[0].1, "Top");
+    }
+
+    /// Extract keeps the chosen pages in order, their marks, and the
+    /// bookmarks that point at them (parents of kept children become
+    /// headings).
+    #[test]
+    fn extract_pages_keeps_marks_and_relevant_bookmarks() {
+        use crate::annot::{AnnotKind, Box2};
+        let dir = tempdir();
+        let a = make_pdf(&dir, "x.pdf", "X", 4, &[]);
+        let mut model = Document::new(
+            info(&a, 4),
+            &[
+                FlatOutlineItem {
+                    title: "Part".into(),
+                    page: Some(0),
+                    depth: 0,
+                },
+                FlatOutlineItem {
+                    title: "Second".into(),
+                    page: Some(1),
+                    depth: 1,
+                },
+                FlatOutlineItem {
+                    title: "Fourth".into(),
+                    page: Some(3),
+                    depth: 1,
+                },
+                FlatOutlineItem {
+                    title: "Third".into(),
+                    page: Some(2),
+                    depth: 0,
+                },
+            ],
+            Box::new(FixedCount(10)),
+        );
+        let ids: Vec<PageId> = (0..4).map(|i| model.page(i).unwrap().id).collect();
+        for (i, kind) in [
+            (
+                1usize,
+                AnnotKind::Square {
+                    rect: Box2 {
+                        x: 10.0,
+                        y: 10.0,
+                        w: 50.0,
+                        h: 20.0,
+                    },
+                },
+            ),
+            (
+                2usize,
+                AnnotKind::Note {
+                    pos: crate::annot::Pt { x: 5.0, y: 5.0 },
+                },
+            ),
+        ] {
+            model
+                .apply(
+                    Edit::AnnotAdd {
+                        page: ids[i],
+                        annot: Annot {
+                            id: crate::annot::AnnotId(0),
+                            kind,
+                            color: [0, 0, 0],
+                            opacity: 1.0,
+                            stroke: 1.0,
+                            author: "t".into(),
+                            contents: String::new(),
+                            modified: String::new(),
+                        },
+                    },
+                    "a",
+                )
+                .unwrap();
+        }
+        let out = dir.join("extract.pdf");
+        // Pages 2 and 4 (ids given out of order: output keeps document order).
+        let n = extract_pages(&model.snapshot(), &[ids[3], ids[1]], &out).unwrap();
+        assert_eq!(n, 2);
+        let pdf = Pdf::load(&out).unwrap();
+        assert_eq!(pdf.get_pages().len(), 2);
+        let text = |i: u32| {
+            String::from_utf8_lossy(&pdf.get_page_content(pdf.get_pages()[&i])).into_owned()
+        };
+        assert!(text(1).contains("MARK X 1"), "{}", text(1));
+        assert!(text(2).contains("MARK X 3"), "{}", text(2));
+        // Only page 2's square came along.
+        let marks = crate::file::read_sheaf_annots(&out).unwrap();
+        assert_eq!(marks.len(), 1);
+        assert!(matches!(marks[&0][0].kind, AnnotKind::Square { .. }));
+        // Bookmarks: Part (now a heading) > Second, Fourth; Third dropped.
+        let items = read_outline(&std::fs::read(&out).unwrap());
+        let titles: Vec<(u16, String, Option<u32>)> = items;
+        assert_eq!(
+            titles,
+            vec![
+                (0, "Part".into(), None),
+                (1, "Second".into(), Some(1)),
+                (1, "Fourth".into(), Some(2)),
+            ]
+        );
+        assert!(extract_pages(&model.snapshot(), &[], &out).is_err());
+    }
+
+    /// Flattening draws each mark's appearance into the page content and
+    /// removes the annotation; links stay.
+    #[test]
+    fn flattened_copy_burns_marks_into_content() {
+        use crate::annot::{AnnotKind, Box2};
+        let dir = tempdir();
+        let a = make_pdf(&dir, "f.pdf", "F", 1, &[]);
+        {
+            let mut pdf = Pdf::load(&a).unwrap();
+            let page0 = pdf.get_pages()[&1];
+            let link = pdf.add_object(dictionary! {
+                "Type" => "Annot", "Subtype" => "Link",
+                "Rect" => Object::Array(vec![0.into(), 0.into(), 50.into(), 20.into()]),
+            });
+            pdf.get_dictionary_mut(page0)
+                .unwrap()
+                .set("Annots", Object::Array(vec![link.into()]));
+            pdf.save(&a).unwrap();
+        }
+        let mut model = Document::new(info(&a, 1), &[], Box::new(FixedCount(10)));
+        let p0 = model.page(0).unwrap().id;
+        model
+            .apply(
+                Edit::AnnotAdd {
+                    page: p0,
+                    annot: Annot {
+                        id: crate::annot::AnnotId(0),
+                        kind: AnnotKind::Square {
+                            rect: Box2 {
+                                x: 100.0,
+                                y: 100.0,
+                                w: 80.0,
+                                h: 40.0,
+                            },
+                        },
+                        color: [0, 120, 255],
+                        opacity: 1.0,
+                        stroke: 2.0,
+                        author: "t".into(),
+                        contents: String::new(),
+                        modified: String::new(),
+                    },
+                },
+                "sq",
+            )
+            .unwrap();
+        let out = dir.join("flat.pdf");
+        assert_eq!(export_flattened(&model.snapshot(), &out).unwrap(), 1);
+        let pdf = Pdf::load(&out).unwrap();
+        let page = pdf.get_pages()[&1];
+        let dict = pdf.get_dictionary(page).unwrap();
+        // Only the link remains as an annotation.
+        let annots = pdf
+            .dereference(dict.get(b"Annots").unwrap())
+            .unwrap()
+            .1
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(annots.len(), 1);
+        assert!(crate::file::read_sheaf_annots(&out).unwrap().is_empty());
+        // The content draws the form XObject, which is registered in Resources.
+        let content = String::from_utf8_lossy(&pdf.get_page_content(page)).into_owned();
+        assert!(content.contains("/SheafFlat1 Do"), "{content}");
+        assert!(content.starts_with("q\n"), "{content}");
+        let (res, _) = pdf.get_page_resources(page).unwrap();
+        let xo = res.unwrap().get(b"XObject").unwrap().as_dict().unwrap();
+        let form = pdf
+            .get_object(xo.get(b"SheafFlat1").unwrap().as_reference().unwrap())
+            .unwrap()
+            .as_stream()
+            .unwrap();
+        assert_eq!(
+            form.dict.get(b"Subtype").unwrap().as_name().unwrap(),
+            b"Form"
+        );
+        // The form content is the square's stroke.
+        let form_ops = String::from_utf8_lossy(&form.decompressed_content().unwrap()).into_owned();
+        assert!(form_ops.contains(" re S"), "{form_ops}");
     }
 
     fn tempdir() -> std::path::PathBuf {
