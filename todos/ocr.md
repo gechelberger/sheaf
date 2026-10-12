@@ -228,6 +228,7 @@ pub fn check_engine(kind, &OcrConfig) -> Result<(), EngineError>;     // cheap: 
 pub fn build_engine(kind, &OcrConfig) -> Result<Box<dyn OcrEngine>, EngineError>;  // one per worker thread
 ```
 `check_engine(Oar)` runs `is_x86_feature_detected!("avx2")` before anything touches ort.
+*(`NoAvx2` and the AVX2 check were later removed; see "Outcome of the AVX2 risk".)*
 
 **Tesseract** (`tesseract.rs`, verified 0.4.0 API): `TesseractAPI::new()`,
 `init(tessdata_dir, lang)`, `set_page_seg_mode` (default PSM 3 auto),
@@ -357,8 +358,9 @@ pub struct OarConfig { model_set: String /* "en" */, det/rec/dict/textline_ori/d
   `! ldd target/debug/sheaf | grep -E 'libc\+\+|libunwind|onnxruntime|tesseract|leptonica'`;
   Linux AVX2 gate: `qemu-x86_64 -cpu Nehalem target/debug/sheaf --version`
   (add `--version` to `parse_cli`, exits before any window) to prove ORT's
-  static initialisers don't SIGILL on pre-Haswell CPUs.
-- Build-time network: tesseract-rs fetches Tesseract/Leptonica sources (+ tessdata_best eng/tur, ignored); ort fetches pyke binaries. `--no-default-features` is the offline/fast path.
+  static initialisers don't SIGILL on pre-Haswell CPUs. *(It failed; ORT is now
+  loaded at run time and the gate keeps a static ORT from coming back.)*
+- Build-time network: tesseract-rs fetches Tesseract/Leptonica sources (+ tessdata_best eng/tur, ignored); ort fetched pyke binaries *(no longer: ORT now comes from `fetch-ocr-data.sh`)*. `--no-default-features` is the offline/fast path.
 
 ### B7. Docs and roadmap edits
 
@@ -368,7 +370,7 @@ pub struct OarConfig { model_set: String /* "en" */, det/rec/dict/textline_ori/d
   M6 → Plugins (link `todos/plugins.md`); fix the "plugins (M5) and OCR (M6)"
   paragraph and the "M6 onward" line; Building: fetch-ocr-data step, CMake +
   C++17 note (VS 2022 ships CMake), first build needs network,
-  `--no-default-features`, AVX2 requirement for the PaddleOCR engine;
+  `--no-default-features`, AVX2 requirement for the PaddleOCR engine *(superseded: no AVX2 requirement)*;
   Configuration: `ocr` block and `SHEAF_OCR_DATA_DIR`; contexts list gains
   `OcrDialog`; licenses list.
 - `ROADMAP.md`: swap M5/M6 rows and sections; drop the "Decide at kickoff"
@@ -434,19 +436,33 @@ is now the design: `sheaf-ocr` enables `ort/load-dynamic`, disables
 Microsoft's generic ONNX Runtime 1.28.0 (`ocr/lib/libonnxruntime.so` /
 `onnxruntime.dll`), loaded with `ort::init_from` the first time the
 PaddleOCR engine is built. Nothing ORT-related runs at startup, and the
-AVX2 check is gone.
+AVX2 check is gone. CI is green with it on Linux (ldd and qemu Nehalem
+gates) and Windows (`Expand-Archive` fetch path, engine smoke tests loading
+`onnxruntime.dll`).
+
+Rejected alternatives: keeping the static binary behind
+`is_x86_feature_detected!` cannot work (the crash is in static initialisers,
+before any Rust runs); building ORT from source for baseline x86-64 costs
+tens of minutes per CI run; `ort`'s tract backend is unverified with
+PP-OCRv5's operators and not wired by `oar-ocr`.
+
+Trade-offs: the bundle grows by the library (about 24 MB Linux, 12 MB
+Windows); deleting `ocr/lib` only disables PaddleOCR (the dialog shows the
+missing-file message, Tesseract keeps working); `ORT_DYLIB_PATH` may point
+at any ONNX Runtime ≥ 1.17 (`ort` targets API 17, as `oar-ocr-core` enables
+no `api-*` feature).
 
 ## Risks
 
-- **AVX2 / x86-64-v3 static ORT**: a SIGILL in static initialisers would
+- **AVX2 / x86-64-v3 static ORT** *(resolved: fallback taken, see above)*: a SIGILL in static initialisers would
   break the whole app on pre-Haswell CPUs (README targets older hardware).
   The qemu gate decides; fallback is `ort/load-dynamic` with Microsoft's
   generic `onnxruntime` shared lib fetched into `ocr/lib/` and loaded only
   when the engine is chosen (pdfium's dlopen model).
-- **Linux libc++** from pyke's Clang builds may be dynamic: the `ldd` gate decides; same fallback.
+- **Linux libc++** *(resolved: pyke's builds are no longer used)* from pyke's Clang builds may be dynamic: the `ldd` gate decides; same fallback.
 - **Build time/network**: Tesseract+Leptonica from source and ORT downloads
-  add 5–10 min cold; Windows NMake path is the least exercised (CI has not
-  yet run on Windows). `--no-default-features` must stay green.
+  add 5–10 min cold; Windows NMake path is the least exercised (green in
+  CI since 2026-10-12). `--no-default-features` must stay green.
 - **ort `=2.0.0-rc.13` pin** via oar-ocr; nothing else uses ort today.
 - **oar word boxes** per word vs per char unverified; grouping rule (a/b/c) handles both.
 - **PDFium glyph boxes for a glyphless font** rely on its font-size fallback (Tesseract PDFs search fine in Chrome); the sheaf-render test pins it.

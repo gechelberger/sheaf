@@ -71,8 +71,9 @@ jobs:
       - name: Build
         run: cargo build -p sheaf-app
 
-      # The engines must be linked statically: a packaged build has no
-      # libc++, ONNX Runtime or Tesseract to find at runtime.
+      # Tesseract and Leptonica must be linked statically: a packaged build
+      # has no libc++ or Tesseract to find at runtime. ONNX Runtime must not
+      # be a link-time dependency either; it is loaded from ocr/lib on demand.
       - name: No dynamic engine libraries (Linux)
         if: runner.os == 'Linux'
         run: |

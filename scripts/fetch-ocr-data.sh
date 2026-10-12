@@ -76,9 +76,10 @@ if [[ -n "$ort_pkg" && ! -s "$dest/lib/$ort_lib" ]]; then
   else
     tar -xzf "$tmp/$ort_pkg" -C "$tmp/x"
   fi
-  # The library is versioned (libonnxruntime.so.1.28.0 plus symlinks); keep
-  # one real file under the plain name.
-  found="$(find "$tmp/x" -type f \( -name "$ort_lib" -o -name "$ort_lib.*" \) | sort | head -1)"
+  # The library is versioned (libonnxruntime.so.1.28.0 or
+  # libonnxruntime.1.28.0.dylib, plus symlinks); keep one real file under
+  # the plain name.
+  found="$(find "$tmp/x" -type f \( -name "$ort_lib" -o -name "$ort_lib.*" -o -name "libonnxruntime.*.dylib" \) | sort | head -1)"
   [[ -n "$found" ]] || { echo "no $ort_lib in $ort_pkg" >&2; exit 1; }
   cp "$found" "$dest/lib/$ort_lib"
   lic="$(find "$tmp/x" -maxdepth 2 -name LICENSE | head -1)"

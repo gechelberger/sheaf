@@ -56,11 +56,7 @@ pub fn build(cfg: &OcrConfig) -> Result<Box<dyn OcrEngine>, EngineError> {
         ocr,
         info: EngineInfo {
             kind: EngineKind::Oar,
-            name: format!(
-                "oar-ocr {} PP-OCRv5 {}",
-                env!("CARGO_PKG_VERSION"),
-                models.set_label
-            ),
+            name: format!("oar-ocr PP-OCRv5 {}", models.set_label),
             languages: crate::data::oar_model_sets(&cfg.oar),
         },
     }))
