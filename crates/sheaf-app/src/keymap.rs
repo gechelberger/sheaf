@@ -2,11 +2,14 @@
 //! format: a list of `{ "context": "...", "bindings": { "keys": "action" } }`.
 //! Bindings load after the defaults, so they win. An action is its
 //! registered name (shown in the command palette), e.g. `tools::ToolTick`;
-//! `null` unbinds a key.
+//! `null` unbinds a key. Text fields (`TextInput`, `TextArea`) sit inside
+//! other contexts, so a key that types a character should exclude them or
+//! it will fire instead of typing.
 //!
 //! ```json
 //! [
 //!   { "context": "DocView", "bindings": { "ctrl-shift-k": "tools::ToolTick", "f9": null } },
+//!   { "context": "DocView && !TextInput && !TextArea", "bindings": { "x": "tools::ToolTick" } },
 //!   { "bindings": { "ctrl-shift-p": "workspace::CommandPalette" } }
 //! ]
 //! ```

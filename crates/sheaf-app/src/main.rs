@@ -212,6 +212,11 @@ fn main() {
     application().run(move |cx: &mut App| {
         let mut cli = cli;
         let doc = Some(docview::KEY_CONTEXT);
+        // Bare keys that a focused text field nested in these contexts must
+        // receive as typed text; otherwise the outer binding swallows them.
+        let doc_keys = Some("DocView && !TextInput && !TextArea");
+        let outline_keys = Some("Outline && !TextInput");
+        let comments_keys = Some("Comments && !TextInput && !TextArea");
         let ws = Some(workspace::KEY_CONTEXT);
         let ti = Some(text_input::KEY_CONTEXT);
         let ta = Some(text_area::KEY_CONTEXT);
@@ -221,25 +226,25 @@ fn main() {
         let mb = Some(menu_bar::KEY_CONTEXT);
         let pal = Some(palette::KEY_CONTEXT);
         cx.bind_keys([
-            KeyBinding::new("right", NextPage, doc),
-            KeyBinding::new("left", PrevPage, doc),
-            KeyBinding::new("down", LineDown, doc),
-            KeyBinding::new("up", LineUp, doc),
-            KeyBinding::new("pagedown", ScreenDown, doc),
-            KeyBinding::new("space", ScreenDown, doc),
-            KeyBinding::new("pageup", ScreenUp, doc),
-            KeyBinding::new("shift-space", ScreenUp, doc),
-            KeyBinding::new("home", FirstPage, doc),
-            KeyBinding::new("end", LastPage, doc),
+            KeyBinding::new("right", NextPage, doc_keys),
+            KeyBinding::new("left", PrevPage, doc_keys),
+            KeyBinding::new("down", LineDown, doc_keys),
+            KeyBinding::new("up", LineUp, doc_keys),
+            KeyBinding::new("pagedown", ScreenDown, doc_keys),
+            KeyBinding::new("space", ScreenDown, doc_keys),
+            KeyBinding::new("pageup", ScreenUp, doc_keys),
+            KeyBinding::new("shift-space", ScreenUp, doc_keys),
+            KeyBinding::new("home", FirstPage, doc_keys),
+            KeyBinding::new("end", LastPage, doc_keys),
             KeyBinding::new("ctrl-=", ZoomIn, doc),
             KeyBinding::new("ctrl-+", ZoomIn, doc),
             KeyBinding::new("ctrl--", ZoomOut, doc),
             KeyBinding::new("ctrl-0", ZoomFitPage, doc),
             KeyBinding::new("ctrl-1", ZoomActual, doc),
             KeyBinding::new("ctrl-2", ZoomFitWidth, doc),
-            KeyBinding::new("r", RotatePageCw, doc),
-            KeyBinding::new("shift-r", RotatePageCcw, doc),
-            KeyBinding::new("delete", DeletePage, doc),
+            KeyBinding::new("r", RotatePageCw, doc_keys),
+            KeyBinding::new("shift-r", RotatePageCcw, doc_keys),
+            KeyBinding::new("delete", DeletePage, doc_keys),
             KeyBinding::new("ctrl-d", DuplicatePages, doc),
             KeyBinding::new("ctrl-a", SelectAllPages, doc),
             KeyBinding::new("ctrl-z", Undo, either),
@@ -250,24 +255,24 @@ fn main() {
             KeyBinding::new("ctrl-shift-i", InsertPdf, doc),
             KeyBinding::new("ctrl-b", NewBookmark, either),
             // Bookmarks panel (when it has focus).
-            KeyBinding::new("f2", RenameBookmark, outline),
+            KeyBinding::new("f2", RenameBookmark, outline_keys),
             KeyBinding::new("delete", DeleteBookmark, outline),
             KeyBinding::new("escape", DeselectBookmark, outline),
             // Comments panel (when it has focus).
-            KeyBinding::new("f2", EditComment, comments),
+            KeyBinding::new("f2", EditComment, comments_keys),
             KeyBinding::new("delete", DeleteComment, comments),
             // Markup tools (Acrobat's single-key accelerators where it has them).
-            KeyBinding::new("v", ToolSelect, doc),
-            KeyBinding::new("s", ToolNote, doc),
-            KeyBinding::new("u", ToolHighlight, doc),
-            KeyBinding::new("t", ToolFreeText, doc),
-            KeyBinding::new("d", ToolSquare, doc),
-            KeyBinding::new("o", ToolEllipse, doc),
-            KeyBinding::new("l", ToolLine, doc),
-            KeyBinding::new("a", ToolArrow, doc),
-            KeyBinding::new("n", ToolInk, doc),
-            KeyBinding::new("k", ToolTick, doc),
-            KeyBinding::new("i", ToolConnector, doc),
+            KeyBinding::new("v", ToolSelect, doc_keys),
+            KeyBinding::new("s", ToolNote, doc_keys),
+            KeyBinding::new("u", ToolHighlight, doc_keys),
+            KeyBinding::new("t", ToolFreeText, doc_keys),
+            KeyBinding::new("d", ToolSquare, doc_keys),
+            KeyBinding::new("o", ToolEllipse, doc_keys),
+            KeyBinding::new("l", ToolLine, doc_keys),
+            KeyBinding::new("a", ToolArrow, doc_keys),
+            KeyBinding::new("n", ToolInk, doc_keys),
+            KeyBinding::new("k", ToolTick, doc_keys),
+            KeyBinding::new("i", ToolConnector, doc_keys),
             KeyBinding::new("ctrl-f", Find, doc),
             KeyBinding::new("escape", CloseSearch, doc),
             KeyBinding::new("f3", SearchNext, doc),
