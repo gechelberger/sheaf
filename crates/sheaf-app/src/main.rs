@@ -14,6 +14,7 @@ mod outline_panel;
 mod palette;
 mod pattern_panel;
 mod settings;
+mod text_area;
 mod text_input;
 mod workspace;
 
@@ -201,6 +202,7 @@ fn main() {
         let doc = Some(docview::KEY_CONTEXT);
         let ws = Some(workspace::KEY_CONTEXT);
         let ti = Some(text_input::KEY_CONTEXT);
+        let ta = Some(text_area::KEY_CONTEXT);
         let outline = Some(outline_panel::KEY_CONTEXT);
         let comments = Some(comments_panel::KEY_CONTEXT);
         let either = Some("DocView || Outline || Comments");
@@ -277,6 +279,27 @@ fn main() {
             KeyBinding::new("shift-space", text_input::InsertSpace, ti),
             KeyBinding::new("enter", text_input::Confirm, ti),
             KeyBinding::new("escape", text_input::Cancel, ti),
+            // Multi-line text area (annotation text).
+            KeyBinding::new("backspace", text_area::Backspace, ta),
+            KeyBinding::new("delete", text_area::Delete, ta),
+            KeyBinding::new("left", text_area::Left, ta),
+            KeyBinding::new("right", text_area::Right, ta),
+            KeyBinding::new("up", text_area::Up, ta),
+            KeyBinding::new("down", text_area::Down, ta),
+            KeyBinding::new("shift-left", text_area::SelectLeft, ta),
+            KeyBinding::new("shift-right", text_area::SelectRight, ta),
+            KeyBinding::new("home", text_area::Home, ta),
+            KeyBinding::new("end", text_area::End, ta),
+            KeyBinding::new("ctrl-a", text_area::SelectAll, ta),
+            KeyBinding::new("ctrl-v", text_area::Paste, ta),
+            KeyBinding::new("ctrl-c", text_area::Copy, ta),
+            KeyBinding::new("ctrl-x", text_area::Cut, ta),
+            KeyBinding::new("space", text_area::InsertSpace, ta),
+            KeyBinding::new("shift-space", text_area::InsertSpace, ta),
+            KeyBinding::new("enter", text_area::Newline, ta),
+            KeyBinding::new("shift-enter", text_area::Newline, ta),
+            KeyBinding::new("ctrl-enter", text_area::Confirm, ta),
+            KeyBinding::new("escape", text_area::Cancel, ta),
             KeyBinding::new("f4", ToggleSidebar, ws),
             KeyBinding::new("ctrl-alt-1", ShowThumbnails, ws),
             KeyBinding::new("ctrl-alt-2", ShowOutline, ws),

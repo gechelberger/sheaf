@@ -33,6 +33,7 @@ use sheaf_render::{
     SearchHit,
 };
 
+use crate::text_area::{TextArea, TextAreaEvent};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::{
     CloseSearch, DeletePage, DuplicatePages, ExportCleanCopy, Find, FirstPage, InsertPdf, LastPage,
@@ -312,8 +313,9 @@ pub(crate) enum ScrollTo {
 pub(crate) struct AnnotEditor {
     pub page: PageId,
     pub id: AnnotId,
-    pub input: Entity<TextInput>,
+    pub input: Entity<TextArea>,
     pub _sub: Subscription,
+    pub _blur: Subscription,
 }
 
 pub struct DocView {
@@ -340,6 +342,8 @@ pub struct DocView {
     pub(crate) selftest_clean: Option<PathBuf>,
     /// Password the file needs, once known.
     password: Option<String>,
+    /// Dev: open the inline editor on this page's last mark next frame.
+    pending_edit_last: Option<PageId>,
     /// Recovery data found when opening, until the user has been asked.
     pending_recovery: Option<sheaf_doc::recovery::Recovery>,
     autosave: Option<Task<()>>,
@@ -396,6 +400,7 @@ impl DocView {
             selftest_annot: None,
             selftest_clean: None,
             pending_recovery: None,
+            pending_edit_last: None,
             autosave: None,
             autosave_since: None,
             tool: Tool::Select,
@@ -1460,6 +1465,8 @@ impl DocView {
         tape.contents = "1,234.50 +\n250.00 +\n84.50 -\n1,400.00 T".into();
         self.add_annot(p0, tape, "Place tape", cx);
         self.save_to(path, cx).detach();
+        // Leave the multi-line editor open on the tape so it gets exercised.
+        self.pending_edit_last = Some(p0);
     }
 
     pub fn set_selftest_annot(&mut self, path: PathBuf) {
@@ -1609,40 +1616,61 @@ impl DocView {
             return;
         };
         let input = cx.new(|cx| {
-            let mut i = TextInput::new("Type, then Enter", cx);
+            let mut i =
+                TextArea::new("Type a note; Ctrl+Enter or click away when done", cx).rows(3, 10);
             i.set_text(annot.contents.clone(), cx);
             i
         });
-        let sub = cx.subscribe(&input, move |this, input, ev: &TextInputEvent, cx| {
-            let text = input.read(cx).text().to_string();
-            if *ev == TextInputEvent::Confirm
-                && let State::Ready(doc) = &this.state
-                && let Some(cur) = doc
-                    .model
-                    .state()
-                    .annots_on(page)
-                    .and_then(|l| l.iter().find(|a| a.id == id).cloned())
-                && cur.contents != text
-            {
-                let mut upd = cur;
-                upd.contents = text;
-                upd.modified = sheaf_doc::pdf_date_now();
-                this.apply(Edit::AnnotUpdate { page, annot: upd }, "Edit text", cx);
-            }
-            if let State::Ready(doc) = &mut this.state {
-                doc.annot_editor = None;
-            }
-            this.pending_focus = true;
-            cx.notify();
+        // Enter, Escape and clicking elsewhere all keep the text, as in
+        // Acrobat; there's no way to lose what was typed except Undo.
+        let sub = cx.subscribe(&input, move |this, _, _: &TextAreaEvent, cx| {
+            this.finish_annot_editor(cx);
         });
-        window.focus(&input.read(cx).focus_handle(cx), cx);
+        let focus = input.read(cx).focus_handle(cx);
+        let blur = cx.on_focus_out(&focus, window, move |this, _, _, cx| {
+            this.finish_annot_editor(cx);
+        });
+        window.focus(&focus, cx);
         doc.annot_editor = Some(AnnotEditor {
             page,
             id,
             input,
             _sub: sub,
+            _blur: blur,
         });
         doc.selected_annot = Some((page, id));
+        cx.notify();
+    }
+
+    /// Close the inline editor, saving its text if it changed.
+    fn finish_annot_editor(&mut self, cx: &mut Context<Self>) {
+        let State::Ready(doc) = &mut self.state else {
+            return;
+        };
+        let Some(ed) = doc.annot_editor.take() else {
+            return;
+        };
+        let text = ed.input.read(cx).text().to_string();
+        if let Some(cur) = doc
+            .model
+            .state()
+            .annots_on(ed.page)
+            .and_then(|l| l.iter().find(|a| a.id == ed.id).cloned())
+            && cur.contents != text
+        {
+            let mut upd = cur;
+            upd.contents = text;
+            upd.modified = sheaf_doc::pdf_date_now();
+            self.apply(
+                Edit::AnnotUpdate {
+                    page: ed.page,
+                    annot: upd,
+                },
+                "Edit text",
+                cx,
+            );
+        }
+        self.pending_focus = true;
         cx.notify();
     }
 
@@ -2274,6 +2302,9 @@ impl Render for DocView {
         if let Some(rec) = self.pending_recovery.take() {
             self.offer_recovery(rec, window, cx);
         }
+        if let Some(page) = self.pending_edit_last.take() {
+            self.start_annot_editor(page, window, cx);
+        }
         let viewport = window.viewport_size();
         if std::mem::take(&mut self.pending_focus) {
             window.focus(&self.focus_handle, cx);
@@ -2764,7 +2795,7 @@ impl Render for DocView {
                                         .absolute()
                                         .left(px(r.x * k))
                                         .top(px(r.y * k))
-                                        .w(px(240.0))
+                                        .w(px(300.0))
                                         .child(ed.input.clone()),
                                 );
                             }
