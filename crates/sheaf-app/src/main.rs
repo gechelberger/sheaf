@@ -155,6 +155,14 @@ fn parse_cli() -> Cli {
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {
         match arg.to_str() {
+            Some("--version") | Some("-V") => {
+                println!(
+                    "sheaf {} ({})",
+                    env!("CARGO_PKG_VERSION"),
+                    env!("SHEAF_GIT_COMMIT")
+                );
+                std::process::exit(0);
+            }
             Some("--timing") => cli.timing = true,
             Some("--find") => cli.find = args.next().and_then(|q| q.to_str().map(String::from)),
             Some("--selftest-save") => cli.selftest_save = args.next().map(PathBuf::from),

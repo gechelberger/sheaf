@@ -1,0 +1,49 @@
+name: Release
+
+# Tag v0.1.0 (matching Cargo.toml's version) to build bundles for Linux and
+# Windows and attach them to a GitHub release.
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Linux system deps (GPUI)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang lld cmake pkg-config \
+            libfontconfig-dev libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev \
+            libvulkan1 libasound2-dev libglib2.0-dev libssl-dev libzstd-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Fetch PDFium
+        shell: bash
+        run: scripts/fetch-pdfium.sh
+
+      - name: Package
+        shell: bash
+        run: scripts/package.sh
+
+      - name: Upload bundle
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/sheaf-*.tar.gz,dist/sheaf-*.zip
+          generate_release_notes: true

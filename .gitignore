@@ -3,3 +3,4 @@
 *.pdf
 !tests/fixtures/*.pdf
 *.png
+/dist

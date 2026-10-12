@@ -283,6 +283,19 @@ cargo run -p sheaf-app
 The toolchain is pinned in `rust-toolchain.toml` (tracks Zed's requirement,
 since GPUI is consumed as a git dependency at a pinned rev in `Cargo.toml`).
 
+### Packaging
+
+```sh
+scripts/package.sh               # → dist/sheaf-<version>-<os>-<arch>.tar.gz (zip on Windows)
+```
+
+The bundle is the release binary next to the PDFium library, the licenses,
+and (on Linux) a `.desktop` entry; unpack it anywhere and run `sheaf`. The
+binary looks for `libpdfium` beside itself first, so no install step is
+needed. Pushing a `v*` tag runs `.github/workflows/release.yml`, which builds
+the Linux and Windows bundles and attaches them to a GitHub release; `ci.yml`
+runs fmt, clippy, tests and a build on every push.
+
 ### M0 spikes
 
 ```sh

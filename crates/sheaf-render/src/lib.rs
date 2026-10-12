@@ -148,12 +148,21 @@ pub mod pdfium {
     use pdfium_render::prelude::*;
     use std::sync::OnceLock;
 
-    /// Locate and bind libpdfium. Search order: `$PDFIUM_LIB_DIR`,
-    /// `vendor/pdfium/<os>-<arch>/` relative to the cwd, then the system library.
+    /// Locate and bind libpdfium. Search order: `$PDFIUM_LIB_DIR`, next to
+    /// the executable (and its `lib/`, how packaged builds ship it),
+    /// `vendor/pdfium/<os>-<arch>/` relative to the cwd, then the system
+    /// library.
     fn bind() -> Result<Pdfium> {
         let mut dirs: Vec<PathBuf> = Vec::new();
         if let Ok(d) = std::env::var("PDFIUM_LIB_DIR") {
             dirs.push(d.into());
+        }
+        if let Some(exe_dir) = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        {
+            dirs.push(exe_dir.join("lib"));
+            dirs.push(exe_dir);
         }
         dirs.push(
             format!(

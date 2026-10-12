@@ -63,3 +63,6 @@ opt-level = 3
 [profile.release]
 lto = "thin"
 codegen-units = 1
+strip = "symbols"
+# Debug info for backtraces from users is worth more than the disk; keep
+# panics unwinding so the save path can report instead of abort.

@@ -447,6 +447,174 @@ pub fn validate(model: &Snapshot) -> Result<()> {
     Ok(())
 }
 
+/// Page geometry from a (flattened) page dictionary and its original rotation.
+pub(crate) fn geom_of(dict: &Dictionary, rotate: i32) -> PageGeom {
+    let media = dict
+        .get(b"MediaBox")
+        .ok()
+        .and_then(|o| o.as_array().ok())
+        .filter(|a| a.len() == 4)
+        .map(|a| {
+            let v: Vec<f32> = a.iter().map(|o| o.as_float().unwrap_or(0.0)).collect();
+            [
+                v[0].min(v[2]),
+                v[1].min(v[3]),
+                v[0].max(v[2]),
+                v[1].max(v[3]),
+            ]
+        })
+        .unwrap_or([0.0, 0.0, 612.0, 792.0]);
+    PageGeom {
+        media,
+        rotate: rotate.rem_euclid(360),
+    }
+}
+
+/// Is this /Annots entry one of ours?
+fn is_sheaf_annot(pdf: &Pdf, entry: &Object) -> bool {
+    pdf.dereference(entry)
+        .ok()
+        .and_then(|(_, o)| o.as_dict().ok().map(|d| d.has(b"SheafAnnot")))
+        .unwrap_or(false)
+}
+
+/// Is this /Annots entry navigation or a form field rather than markup?
+/// Our connectors are links too, but they're markup.
+fn is_link_or_field(pdf: &Pdf, entry: &Object) -> bool {
+    pdf.dereference(entry)
+        .ok()
+        .and_then(|(_, o)| o.as_dict().ok())
+        .filter(|d| !d.has(b"SheafAnnot"))
+        .and_then(|d| d.get(b"Subtype").ok())
+        .and_then(|s| s.as_name().ok())
+        .is_some_and(|n| n == b"Link" || n == b"Widget")
+}
+
+/// Drop every markup annotation from a page, keeping links and form fields.
+pub(crate) fn strip_markup_annots(pdf: &Pdf, page: &mut Dictionary) {
+    let Some(existing) = page
+        .get(b"Annots")
+        .ok()
+        .and_then(|a| pdf.dereference(a).ok())
+        .and_then(|(_, o)| o.as_array().ok().cloned())
+    else {
+        return;
+    };
+    let kept: Vec<Object> = existing
+        .into_iter()
+        .filter(|e| is_link_or_field(pdf, e))
+        .collect();
+    if kept.is_empty() {
+        page.remove(b"Annots");
+    } else {
+        page.set("Annots", Object::Array(kept));
+    }
+}
+
+/// Drop sheaf-written entries from a page's /Annots, keeping third-party ones.
+pub(crate) fn strip_sheaf_annots(pdf: &Pdf, page: &mut Dictionary) {
+    let Some(existing) = page
+        .get(b"Annots")
+        .ok()
+        .and_then(|a| pdf.dereference(a).ok())
+        .and_then(|(_, o)| o.as_array().ok().cloned())
+    else {
+        return;
+    };
+    let kept: Vec<Object> = existing
+        .into_iter()
+        .filter(|e| !is_sheaf_annot(pdf, e))
+        .collect();
+    if kept.is_empty() {
+        page.remove(b"Annots");
+    } else {
+        page.set("Annots", Object::Array(kept));
+    }
+}
+
+/// A connector written during a save, so its `/Dest` can be filled in once
+/// every page has an object id (see `link_connectors`).
+pub(crate) struct ConnectorRef {
+    pub obj: ObjectId,
+    pub id: AnnotId,
+    pub partner: Option<AnnotId>,
+    /// Top-left of the marker in its page's user space.
+    pub top_left: (f32, f32),
+}
+
+/// Replace the page's sheaf annotations with `annots`, as new objects with
+/// appearance streams. `/P` is left unset; PDFium and Acrobat don't need it.
+/// Returns the connectors written, for `link_connectors`.
+pub(crate) fn write_page_annots<'a>(
+    pdf: &mut Pdf,
+    page: &mut Dictionary,
+    annots: impl Iterator<Item = &'a Annot>,
+    geom: &PageGeom,
+) -> Vec<ConnectorRef> {
+    strip_sheaf_annots(pdf, page);
+    let mut list: Vec<Object> = page
+        .get(b"Annots")
+        .ok()
+        .and_then(|a| pdf.dereference(a).ok())
+        .and_then(|(_, o)| o.as_array().ok().cloned())
+        .unwrap_or_default();
+    let mut connectors = Vec::new();
+    for a in annots {
+        let (mut dict, stream) = to_pdf(a, geom);
+        let ap_id = pdf.add_object(Object::Stream(stream));
+        dict.set("AP", dictionary! { "N" => ap_id });
+        let id = pdf.add_object(Object::Dictionary(dict));
+        list.push(Object::Reference(id));
+        if let AnnotKind::Connector { rect, partner, .. } = &a.kind {
+            let [llx, _, _, ury] = geom.box_to_user(*rect);
+            connectors.push(ConnectorRef {
+                obj: id,
+                id: a.id,
+                partner: *partner,
+                top_left: (llx, ury),
+            });
+        }
+    }
+    if list.is_empty() {
+        page.remove(b"Annots");
+    } else {
+        page.set("Annots", Object::Array(list));
+    }
+    connectors
+}
+
+/// Point each written connector's `/Dest` at its partner: at the partner's
+/// position when it was written in this save, else just its page.
+pub(crate) fn link_connectors(
+    pdf: &mut Pdf,
+    connectors: &[ConnectorRef],
+    state: &DocState,
+    page_obj: &HashMap<PageId, ObjectId>,
+) {
+    for c in connectors {
+        let Some(pid) = c.partner else { continue };
+        let Some((ppage, _)) = state.find_annot(pid) else {
+            continue;
+        };
+        let Some(&page_ref) = page_obj.get(&ppage) else {
+            continue;
+        };
+        let mut dest = vec![Object::Reference(page_ref), Object::Name(b"XYZ".to_vec())];
+        match connectors.iter().find(|g| g.id == pid) {
+            // Land with the partner a little in from the top-left corner.
+            Some(g) => dest.extend([
+                Object::Real(g.top_left.0 - 36.0),
+                Object::Real(g.top_left.1 + 36.0),
+                Object::Null,
+            ]),
+            None => dest.extend([Object::Null, Object::Null, Object::Null]),
+        }
+        if let Ok(Object::Dictionary(d)) = pdf.get_object_mut(c.obj) {
+            d.set("Dest", Object::Array(dest));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1287,7 +1455,7 @@ mod tests {
             90
         );
         // Nothing markup-shaped survives anywhere in the file.
-        for (_, obj) in pdf.objects.iter() {
+        for obj in pdf.objects.values() {
             if let Ok(d) = obj.as_dict()
                 && let Ok(s) = d.get(b"Subtype").and_then(|s| s.as_name())
             {
@@ -1331,173 +1499,5 @@ mod tests {
             .unwrap()
             .as_nanos() as u64;
         t ^ N.fetch_add(1, Ordering::Relaxed)
-    }
-}
-
-/// Page geometry from a (flattened) page dictionary and its original rotation.
-pub(crate) fn geom_of(dict: &Dictionary, rotate: i32) -> PageGeom {
-    let media = dict
-        .get(b"MediaBox")
-        .ok()
-        .and_then(|o| o.as_array().ok())
-        .filter(|a| a.len() == 4)
-        .map(|a| {
-            let v: Vec<f32> = a.iter().map(|o| o.as_float().unwrap_or(0.0)).collect();
-            [
-                v[0].min(v[2]),
-                v[1].min(v[3]),
-                v[0].max(v[2]),
-                v[1].max(v[3]),
-            ]
-        })
-        .unwrap_or([0.0, 0.0, 612.0, 792.0]);
-    PageGeom {
-        media,
-        rotate: rotate.rem_euclid(360),
-    }
-}
-
-/// Is this /Annots entry one of ours?
-fn is_sheaf_annot(pdf: &Pdf, entry: &Object) -> bool {
-    pdf.dereference(entry)
-        .ok()
-        .and_then(|(_, o)| o.as_dict().ok().map(|d| d.has(b"SheafAnnot")))
-        .unwrap_or(false)
-}
-
-/// Is this /Annots entry navigation or a form field rather than markup?
-/// Our connectors are links too, but they're markup.
-fn is_link_or_field(pdf: &Pdf, entry: &Object) -> bool {
-    pdf.dereference(entry)
-        .ok()
-        .and_then(|(_, o)| o.as_dict().ok())
-        .filter(|d| !d.has(b"SheafAnnot"))
-        .and_then(|d| d.get(b"Subtype").ok())
-        .and_then(|s| s.as_name().ok())
-        .is_some_and(|n| n == b"Link" || n == b"Widget")
-}
-
-/// Drop every markup annotation from a page, keeping links and form fields.
-pub(crate) fn strip_markup_annots(pdf: &Pdf, page: &mut Dictionary) {
-    let Some(existing) = page
-        .get(b"Annots")
-        .ok()
-        .and_then(|a| pdf.dereference(a).ok())
-        .and_then(|(_, o)| o.as_array().ok().cloned())
-    else {
-        return;
-    };
-    let kept: Vec<Object> = existing
-        .into_iter()
-        .filter(|e| is_link_or_field(pdf, e))
-        .collect();
-    if kept.is_empty() {
-        page.remove(b"Annots");
-    } else {
-        page.set("Annots", Object::Array(kept));
-    }
-}
-
-/// Drop sheaf-written entries from a page's /Annots, keeping third-party ones.
-pub(crate) fn strip_sheaf_annots(pdf: &Pdf, page: &mut Dictionary) {
-    let Some(existing) = page
-        .get(b"Annots")
-        .ok()
-        .and_then(|a| pdf.dereference(a).ok())
-        .and_then(|(_, o)| o.as_array().ok().cloned())
-    else {
-        return;
-    };
-    let kept: Vec<Object> = existing
-        .into_iter()
-        .filter(|e| !is_sheaf_annot(pdf, e))
-        .collect();
-    if kept.is_empty() {
-        page.remove(b"Annots");
-    } else {
-        page.set("Annots", Object::Array(kept));
-    }
-}
-
-/// A connector written during a save, so its `/Dest` can be filled in once
-/// every page has an object id (see `link_connectors`).
-pub(crate) struct ConnectorRef {
-    pub obj: ObjectId,
-    pub id: AnnotId,
-    pub partner: Option<AnnotId>,
-    /// Top-left of the marker in its page's user space.
-    pub top_left: (f32, f32),
-}
-
-/// Replace the page's sheaf annotations with `annots`, as new objects with
-/// appearance streams. `/P` is left unset; PDFium and Acrobat don't need it.
-/// Returns the connectors written, for `link_connectors`.
-pub(crate) fn write_page_annots<'a>(
-    pdf: &mut Pdf,
-    page: &mut Dictionary,
-    annots: impl Iterator<Item = &'a Annot>,
-    geom: &PageGeom,
-) -> Vec<ConnectorRef> {
-    strip_sheaf_annots(pdf, page);
-    let mut list: Vec<Object> = page
-        .get(b"Annots")
-        .ok()
-        .and_then(|a| pdf.dereference(a).ok())
-        .and_then(|(_, o)| o.as_array().ok().cloned())
-        .unwrap_or_default();
-    let mut connectors = Vec::new();
-    for a in annots {
-        let (mut dict, stream) = to_pdf(a, geom);
-        let ap_id = pdf.add_object(Object::Stream(stream));
-        dict.set("AP", dictionary! { "N" => ap_id });
-        let id = pdf.add_object(Object::Dictionary(dict));
-        list.push(Object::Reference(id));
-        if let AnnotKind::Connector { rect, partner, .. } = &a.kind {
-            let [llx, _, _, ury] = geom.box_to_user(*rect);
-            connectors.push(ConnectorRef {
-                obj: id,
-                id: a.id,
-                partner: *partner,
-                top_left: (llx, ury),
-            });
-        }
-    }
-    if list.is_empty() {
-        page.remove(b"Annots");
-    } else {
-        page.set("Annots", Object::Array(list));
-    }
-    connectors
-}
-
-/// Point each written connector's `/Dest` at its partner: at the partner's
-/// position when it was written in this save, else just its page.
-pub(crate) fn link_connectors(
-    pdf: &mut Pdf,
-    connectors: &[ConnectorRef],
-    state: &DocState,
-    page_obj: &HashMap<PageId, ObjectId>,
-) {
-    for c in connectors {
-        let Some(pid) = c.partner else { continue };
-        let Some((ppage, _)) = state.find_annot(pid) else {
-            continue;
-        };
-        let Some(&page_ref) = page_obj.get(&ppage) else {
-            continue;
-        };
-        let mut dest = vec![Object::Reference(page_ref), Object::Name(b"XYZ".to_vec())];
-        match connectors.iter().find(|g| g.id == pid) {
-            // Land with the partner a little in from the top-left corner.
-            Some(g) => dest.extend([
-                Object::Real(g.top_left.0 - 36.0),
-                Object::Real(g.top_left.1 + 36.0),
-                Object::Null,
-            ]),
-            None => dest.extend([Object::Null, Object::Null, Object::Null]),
-        }
-        if let Ok(Object::Dictionary(d)) = pdf.get_object_mut(c.obj) {
-            d.set("Dest", Object::Array(dest));
-        }
     }
 }

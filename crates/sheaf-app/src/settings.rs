@@ -149,18 +149,19 @@ mod tests {
         // and this one sets it before any of them read it.
         unsafe { std::env::set_var("SHEAF_CONFIG_DIR", &dir) };
         assert_eq!(Settings::load(), Settings::default());
-        let mut s = Settings::default();
-        s.window = Some(WindowPlacement {
-            x: 10.0,
-            y: 20.0,
-            w: 1000.0,
-            h: 700.0,
-            maximized: false,
-        });
         let mut layout = DockLayout::default();
         layout.bottom.open = true;
         layout.bottom.active = 1;
-        s.docks = Some(layout);
+        let s = Settings {
+            window: Some(WindowPlacement {
+                x: 10.0,
+                y: 20.0,
+                w: 1000.0,
+                h: 700.0,
+                maximized: false,
+            }),
+            docks: Some(layout),
+        };
         s.save().unwrap();
         assert_eq!(Settings::load(), s);
         // A malformed file is ignored rather than fatal.
