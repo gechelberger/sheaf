@@ -5,6 +5,8 @@
 mod docview;
 mod frame;
 mod markup_tools;
+mod menu_bar;
+mod menus;
 mod outline_panel;
 mod pattern_panel;
 mod text_input;
@@ -94,7 +96,9 @@ actions!(
         PrevTab,
         CloseTab,
         OpenFile,
-        Quit
+        Quit,
+        ActivateMenuBar,
+        About
     ]
 );
 
@@ -113,6 +117,8 @@ struct Cli {
     panel: Option<String>,
     /// Run this regex in the Patterns panel once the first document loads.
     pattern: Option<String>,
+    /// Dev: open the menu with this mnemonic letter at startup.
+    menu: Option<char>,
 }
 
 fn parse_cli() -> Cli {
@@ -125,6 +131,7 @@ fn parse_cli() -> Cli {
         selftest_annot: None,
         panel: None,
         pattern: None,
+        menu: None,
     };
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {
@@ -137,6 +144,11 @@ fn parse_cli() -> Cli {
             Some("--panel") => cli.panel = args.next().and_then(|p| p.to_str().map(String::from)),
             Some("--pattern") => {
                 cli.pattern = args.next().and_then(|p| p.to_str().map(String::from))
+            }
+            Some("--menu") => {
+                cli.menu = args
+                    .next()
+                    .and_then(|m| m.to_str().and_then(|m| m.chars().next()))
             }
             Some(s) if s.starts_with("--") => eprintln!("unknown flag {s}"),
             _ => cli.paths.push(arg.into()),
@@ -157,6 +169,7 @@ fn main() {
         let ti = Some(text_input::KEY_CONTEXT);
         let outline = Some(outline_panel::KEY_CONTEXT);
         let either = Some("DocView || Outline");
+        let mb = Some(menu_bar::KEY_CONTEXT);
         cx.bind_keys([
             KeyBinding::new("right", NextPage, doc),
             KeyBinding::new("left", PrevPage, doc),
@@ -239,7 +252,18 @@ fn main() {
             KeyBinding::new("ctrl-w", CloseTab, ws),
             KeyBinding::new("ctrl-o", OpenFile, ws),
             KeyBinding::new("ctrl-q", Quit, None),
+            // Menu bar: Alt tapped alone or F10 highlights it, as on Windows.
+            KeyBinding::new("alt", ActivateMenuBar, ws),
+            KeyBinding::new("f10", ActivateMenuBar, ws),
+            KeyBinding::new("left", menu_bar::MenuLeft, mb),
+            KeyBinding::new("right", menu_bar::MenuRight, mb),
+            KeyBinding::new("up", menu_bar::MenuUp, mb),
+            KeyBinding::new("down", menu_bar::MenuDown, mb),
+            KeyBinding::new("enter", menu_bar::MenuConfirm, mb),
+            KeyBinding::new("space", menu_bar::MenuConfirm, mb),
+            KeyBinding::new("escape", menu_bar::MenuCancel, mb),
         ]);
+        cx.set_menus(menus::app_menus());
 
         let bounds = Bounds::centered(None, size(px(1200.0), px(850.0)), cx);
         cx.open_window(
@@ -264,6 +288,7 @@ fn main() {
             move |window, cx| {
                 let ws = cx.new(|cx| {
                     Workspace::new(
+                        window,
                         Launch {
                             paths: cli.paths,
                             timing: cli.timing,
@@ -278,7 +303,12 @@ fn main() {
                         cx,
                     )
                 });
-                ws.update(cx, |ws, cx| ws.focus_active(window, cx));
+                ws.update(cx, |ws, cx| {
+                    ws.focus_active(window, cx);
+                    if let Some(ch) = cli.menu {
+                        ws.open_menu(ch, window, cx);
+                    }
+                });
                 ws
             },
         )

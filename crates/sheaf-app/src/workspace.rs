@@ -7,16 +7,17 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use gpui::{
-    AnchoredPositionMode, AnyElement, App, Context, Entity, Focusable, MouseButton, MouseMoveEvent,
-    PathPromptOptions, Pixels, Point, SharedString, Window, anchored, deferred, div, prelude::*,
-    px, rgb,
+    AnchoredPositionMode, AnyElement, App, Context, Entity, Focusable, KeyDownEvent, MouseButton,
+    MouseMoveEvent, PathPromptOptions, Pixels, Point, PromptLevel, SharedString, Window, anchored,
+    deferred, div, prelude::*, px, rgb,
 };
 
 use crate::docview::DocView;
 use crate::frame;
+use crate::menu_bar::MenuBar;
 use crate::{
-    CloseTab, NextTab, OpenFile, PrevTab, Quit, ShowOutline, ShowPatterns, ShowThumbnails,
-    ToggleBottomDock, ToggleLeftDock, ToggleRightDock, ToggleSidebar,
+    About, ActivateMenuBar, CloseTab, NextTab, OpenFile, PrevTab, Quit, ShowOutline, ShowPatterns,
+    ShowThumbnails, ToggleBottomDock, ToggleLeftDock, ToggleRightDock, ToggleSidebar,
 };
 
 pub const KEY_CONTEXT: &str = "Workspace";
@@ -122,6 +123,8 @@ pub struct Workspace {
     resizing: Option<Side>,
     /// Right-click menu on a dock tab: (panel, where).
     dock_menu: Option<(Panel, Point<Pixels>)>,
+    /// File/Edit/View… in the title bar; None where the OS draws menus.
+    menu_bar: Option<Entity<MenuBar>>,
     /// Bounds of the dock area from the last frame, for splitter math.
     area: gpui::Bounds<Pixels>,
     timing: bool,
@@ -129,7 +132,7 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    pub fn new(launch: Launch, cx: &mut Context<Self>) -> Self {
+    pub fn new(window: &mut Window, launch: Launch, cx: &mut Context<Self>) -> Self {
         let Launch {
             paths,
             timing,
@@ -152,6 +155,7 @@ impl Workspace {
             all_hidden: false,
             resizing: None,
             dock_menu: None,
+            menu_bar: frame::draws_menu_bar().then(|| cx.new(|cx| MenuBar::new(window, cx))),
             area: gpui::Bounds::default(),
             timing,
             launched,
@@ -263,6 +267,13 @@ impl Workspace {
         if let Some(doc) = self.active_doc() {
             let handle = doc.read(cx).focus_handle(cx);
             window.focus(&handle, cx);
+        }
+    }
+
+    /// Open the title-bar menu with this mnemonic letter, if there is one.
+    pub fn open_menu(&self, ch: char, window: &mut Window, cx: &mut App) {
+        if let Some(bar) = &self.menu_bar {
+            bar.update(cx, |bar, cx| bar.open_mnemonic(ch, window, cx));
         }
     }
 
@@ -594,7 +605,8 @@ impl Render for Workspace {
             Some(doc) => doc.read(cx).title(),
             None => "".into(),
         };
-        let title_bar = frame::title_bar(title, window, cx);
+        let menu_bar = self.menu_bar.clone().map(|m| m.into_any_element());
+        let title_bar = frame::title_bar(title, menu_bar, window, cx);
 
         let content = div()
             .key_context(KEY_CONTEXT)
@@ -639,6 +651,41 @@ impl Render for Workspace {
             .on_action(cx.listener(|ws, _: &CloseTab, window, cx| ws.close(ws.active, window, cx)))
             .on_action(cx.listener(|ws, _: &OpenFile, _, cx| ws.prompt_open(cx)))
             .on_action(|_: &Quit, _, cx| cx.quit())
+            .on_action(cx.listener(|ws, _: &ActivateMenuBar, window, cx| {
+                if let Some(bar) = &ws.menu_bar {
+                    bar.update(cx, |bar, cx| bar.toggle(window, cx));
+                }
+            }))
+            .on_action(|_: &About, window, cx| {
+                let detail = format!(
+                    "Version {} ({})\n\nA fast, native PDF editor.",
+                    env!("CARGO_PKG_VERSION"),
+                    env!("SHEAF_GIT_COMMIT")
+                );
+                drop(window.prompt(PromptLevel::Info, "sheaf", Some(&detail), &["OK"], cx));
+            })
+            // Alt+letter opens the menu with that mnemonic.
+            .on_key_down(cx.listener(|ws, e: &KeyDownEvent, window, cx| {
+                let m = &e.keystroke.modifiers;
+                if !m.alt || m.control || m.shift || m.platform {
+                    return;
+                }
+                let mut chars = e.keystroke.key.chars();
+                let (Some(ch), None) = (chars.next(), chars.next()) else {
+                    return;
+                };
+                if let Some(bar) = &ws.menu_bar
+                    && bar.update(cx, |bar, cx| bar.open_mnemonic(ch, window, cx))
+                {
+                    cx.stop_propagation();
+                }
+            }))
+            // Repaint the bar so mnemonics underline while Alt is held.
+            .on_modifiers_changed(cx.listener(|ws, _, _, cx| {
+                if let Some(bar) = &ws.menu_bar {
+                    bar.update(cx, |_, cx| cx.notify());
+                }
+            }))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(
                 MouseButton::Left,

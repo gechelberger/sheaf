@@ -21,9 +21,19 @@ pub fn draws_controls() -> bool {
     !cfg!(target_os = "macos")
 }
 
-/// The title bar. `title` is shown centered; the whole bar moves the
+/// Where there's no system menu bar, we draw one in the title bar.
+pub fn draws_menu_bar() -> bool {
+    !cfg!(target_os = "macos")
+}
+
+/// The title bar. `menu_bar` follows the app name; `title` is shown centered; the whole bar moves the
 /// window, double-click toggles maximize, right-click opens the window menu.
-pub fn title_bar(title: SharedString, window: &Window, cx: &mut App) -> AnyElement {
+pub fn title_bar(
+    title: SharedString,
+    menu_bar: Option<AnyElement>,
+    window: &Window,
+    cx: &mut App,
+) -> AnyElement {
     let controls = window.window_controls();
     let maximized = window.is_maximized();
     let button = |id: &'static str, label: &'static str, danger: bool| {
@@ -95,6 +105,7 @@ pub fn title_bar(title: SharedString, window: &Window, cx: &mut App) -> AnyEleme
                 .text_color(rgb(0xe0e0e0))
                 .child("sheaf"),
         )
+        .children(menu_bar.map(|m| div().h_full().pl_2().child(m)))
         .child(
             div()
                 .flex_1()
