@@ -1,0 +1,19 @@
+sheaf's OCR feature bundles or links the following third-party components.
+Their license texts are alongside this file.
+
+- Tesseract OCR 5.5.2 (https://github.com/tesseract-ocr/tesseract), linked
+  statically via the tesseract-rs crate. Apache License 2.0: LICENSE-tesseract.
+- Leptonica 1.87.0 (https://github.com/DanBloomberg/leptonica), linked
+  statically as Tesseract's image library. BSD-2-Clause: LICENSE-leptonica.
+- tessdata_fast English model (eng.traineddata,
+  https://github.com/tesseract-ocr/tessdata_fast), shipped in ocr/tessdata.
+  Apache License 2.0: LICENSE-tessdata.
+- pdf.ttf, Tesseract's glyphless font, embedded in PDFs sheaf writes an
+  OCR text layer into. Apache License 2.0: LICENSE-tesseract.
+- ONNX Runtime (https://github.com/microsoft/onnxruntime), prebuilt static
+  binaries from pyke.io via the ort crate. MIT: LICENSE-onnxruntime.
+- PaddleOCR PP-OCRv5 models converted to ONNX (https://github.com/PaddlePaddle/PaddleOCR,
+  https://github.com/GreatV/oar-ocr), shipped in ocr/models. Apache License 2.0:
+  LICENSE-paddleocr.
+- oar-ocr (https://github.com/GreatV/oar-ocr), the Rust PaddleOCR pipeline.
+  Apache License 2.0.

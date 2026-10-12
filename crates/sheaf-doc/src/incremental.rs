@@ -16,6 +16,7 @@ use crate::save::{
     LoadedSource, copy_page_dict, geom_of, is_identity, link_connectors, strip_sheaf_annots,
     write_outline, write_page_annots,
 };
+use crate::text_layer;
 
 /// Produce the full new file (original bytes + update section).
 pub fn incremental(snap: &Snapshot) -> Result<Vec<u8>> {
@@ -69,6 +70,7 @@ fn build(snap: &Snapshot) -> Result<(usize, Vec<u8>)> {
         std::collections::HashMap::new();
 
     let mut connectors = Vec::new();
+    let mut ocr_objects = None;
     if tree_changed {
         let pages_id = pdf.new_object_id();
         let mut kids = Vec::with_capacity(snap.state.pages.len());
@@ -114,6 +116,10 @@ fn build(snap: &Snapshot) -> Result<(usize, Vec<u8>)> {
             } else {
                 strip_sheaf_annots(&pdf, &mut dict);
             }
+            if let Some(layer) = snap.state.text_layers.get(&pref.id) {
+                let geom = geom_of(&dict, original_rot);
+                text_layer::install(&mut pdf, &mut dict, layer, &geom, &mut ocr_objects);
+            }
             apply_rotation(&mut dict, pref.rotation.degrees());
             dict.set("Parent", pages_id);
             dict.set("Type", Object::Name(b"Page".to_vec()));
@@ -140,15 +146,25 @@ fn build(snap: &Snapshot) -> Result<(usize, Vec<u8>)> {
         for pref in &snap.state.pages {
             let id = primary.pages[pref.index as usize];
             page_obj.insert(pref.id, id);
-            if pref.rotation.degrees() != 0 || snap.annots_dirty.contains(&pref.id) {
+            let layer = snap.state.text_layers.get(&pref.id);
+            if pref.rotation.degrees() != 0
+                || snap.annots_dirty.contains(&pref.id)
+                || layer.is_some()
+            {
                 let mut dict = pdf.get_dictionary(id)?.clone();
-                if !dict.has(b"Rotate")
-                    && let Some((_, v)) = primary
-                        .inherited
-                        .get(&id)
-                        .and_then(|a| a.iter().find(|(k, _)| k == b"Rotate"))
-                {
-                    dict.set("Rotate", v.clone());
+                // The rewritten dict stands alone: pull down what it
+                // inherited (a layer inlines Resources, which would
+                // otherwise hide the inherited ones).
+                if let Some(attrs) = primary.inherited.get(&id) {
+                    for (k, v) in attrs {
+                        if !dict.has(k) {
+                            dict.set(k.clone(), v.clone());
+                        }
+                    }
+                }
+                if let Some(layer) = layer {
+                    let geom = crate::file::page_geom(&pdf, id);
+                    text_layer::install(&mut pdf, &mut dict, layer, &geom, &mut ocr_objects);
                 }
                 if snap.annots_dirty.contains(&pref.id) {
                     let geom = crate::file::page_geom(&pdf, id);

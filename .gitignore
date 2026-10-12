@@ -1,5 +1,6 @@
 /target
 /vendor/pdfium
+/vendor/ocr
 *.pdf
 !tests/fixtures/*.pdf
 *.png

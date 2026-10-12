@@ -12,9 +12,9 @@ use gpui::{
     AnchoredPositionMode, AnyElement, Context, Entity, Focusable, MouseButton, Pixels, Point,
     Subscription, Task, Window, anchored, deferred, div, prelude::*, px, rgb,
 };
-use sheaf_render::{SearchEvent, SearchHit};
+use sheaf_render::SearchEvent;
 
-use crate::docview::{DocView, ScrollTo, State};
+use crate::docview::{DocView, Hit, ScrollTo, State};
 use crate::patterns::{self, Preset};
 use crate::text_input::{TextInput, TextInputEvent};
 
@@ -41,8 +41,8 @@ pub struct PatternSearch {
     /// Source of the pattern the current results are for.
     pub source: String,
     pub error: Option<String>,
-    /// Hits in primary-source page order.
-    pub hits: Vec<SearchHit>,
+    /// Hits in document order.
+    pub hits: Vec<Hit>,
     pub current: Option<usize>,
     pub scanned: u32,
     pub done: bool,
@@ -52,7 +52,11 @@ pub struct PatternSearch {
 }
 
 enum Row {
-    Header { page: u32, count: usize },
+    /// `page` is a display index.
+    Header {
+        page: usize,
+        count: usize,
+    },
     Hit(usize),
 }
 
@@ -139,6 +143,10 @@ impl DocView {
             }
         };
         ps.done = false;
+        // Unsaved OCR layers are invisible to PDFium; search them here.
+        let seeded = doc.layer_hits(|l| sheaf_doc::text_layer::pattern_search(l, &re));
+        let has_seed = !seeded.is_empty();
+        ps.hits = seeded;
         ps.started = Some(Instant::now());
         let mut rx = handle.pattern_search(re);
         let timing = self.timing;
@@ -150,10 +158,12 @@ impl DocView {
                     .update(cx, |view, cx| {
                         let Some(ps) = &mut view.pattern else { return true };
                         match ev {
-                            SearchEvent::Hits(mut hits) => {
+                            SearchEvent::Hits(hits) => {
                                 let first = ps.hits.is_empty();
-                                ps.hits.append(&mut hits);
-                                if first {
+                                if let State::Ready(doc) = &view.state {
+                                    doc.merge_source_hits(&mut ps.hits, hits);
+                                }
+                                if first && !ps.hits.is_empty() {
                                     view.go_to_pattern_hit(0, cx);
                                 }
                             }
@@ -180,6 +190,9 @@ impl DocView {
                     }
                 }
             }));
+        if has_seed {
+            self.go_to_pattern_hit(0, cx);
+        }
         cx.notify();
     }
 
@@ -293,7 +306,7 @@ impl DocView {
         let ix = ix % ps.hits.len();
         ps.current = Some(ix);
         let hit = &ps.hits[ix];
-        let Some(index) = doc.index_of_source_page(hit.page) else {
+        let Some(index) = doc.model.index_of(hit.page) else {
             return;
         };
         let Some(pref) = doc.page_ref(index) else {
@@ -438,7 +451,7 @@ impl DocView {
         } else if ps.source.trim().is_empty() {
             "Enter a pattern and press Enter, or pick a preset".to_string()
         } else {
-            let pages: std::collections::HashSet<u32> = ps.hits.iter().map(|h| h.page).collect();
+            let pages: std::collections::HashSet<_> = ps.hits.iter().map(|h| h.page).collect();
             let n = ps.hits.len();
             if ps.done {
                 format!(
@@ -462,7 +475,7 @@ impl DocView {
                 i += 1;
             }
             rows.push(Row::Header {
-                page,
+                page: ps.hits[start].order,
                 count: i - start,
             });
             for k in start..i {

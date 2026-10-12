@@ -6,7 +6,8 @@
 #        scripts/package.sh --no-build # reuse target/release/sheaf
 #
 # Runs on Linux, macOS, and Windows under Git Bash. Expects the PDFium
-# library in vendor/pdfium/<os>-<arch>/ (scripts/fetch-pdfium.sh).
+# library in vendor/pdfium/<os>-<arch>/ (scripts/fetch-pdfium.sh) and the
+# OCR data in vendor/ocr/ (scripts/fetch-ocr-data.sh).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -25,6 +26,7 @@ esac
 
 vendor="vendor/pdfium/${os}-${arch}"
 [[ -f "$vendor/$lib" ]] || { echo "missing $vendor/$lib — run scripts/fetch-pdfium.sh" >&2; exit 1; }
+[[ -f vendor/ocr/tessdata/eng.traineddata ]] || { echo "missing vendor/ocr — run scripts/fetch-ocr-data.sh" >&2; exit 1; }
 
 if (( build )); then
   cargo build --release -p sheaf-app
@@ -40,6 +42,12 @@ cp "target/release/$exe" "$stage/"
 cp "$vendor/$lib" "$stage/"
 [[ -f "$vendor/LICENSE" ]] && cp "$vendor/LICENSE" "$stage/licenses/LICENSE-pdfium"
 cp LICENSE-MIT LICENSE-APACHE "$stage/licenses/"
+# OCR data goes in ocr/ beside the binary (sheaf-ocr looks there first),
+# with the engines' and models' licenses.
+mkdir -p "$stage/ocr/tessdata" "$stage/ocr/models"
+cp vendor/ocr/tessdata/*.traineddata "$stage/ocr/tessdata/"
+cp vendor/ocr/models/*.onnx vendor/ocr/models/*.txt "$stage/ocr/models/"
+cp packaging/licenses/* "$stage/licenses/"
 cp README.md "$stage/"
 if [[ "$os" == linux ]]; then
   cp packaging/sheaf.desktop "$stage/"

@@ -12,6 +12,8 @@ mod keymap;
 mod markup_tools;
 mod menu_bar;
 mod menus;
+mod ocr_dialog;
+mod ocr_run;
 mod outline_panel;
 mod palette;
 mod pattern_panel;
@@ -65,7 +67,8 @@ actions!(
         NewBookmark,
         ExportCleanCopy,
         ExportFlattened,
-        ExtractPages
+        ExtractPages,
+        CancelOcr
     ]
 );
 actions!(
@@ -123,7 +126,19 @@ actions!(
         Quit,
         ActivateMenuBar,
         About,
-        CommandPalette
+        CommandPalette,
+        RecognizeText
+    ]
+);
+actions!(
+    ocr_dialog,
+    [
+        DialogNext,
+        DialogPrev,
+        DialogLeft,
+        DialogRight,
+        DialogRun,
+        DialogCancel
     ]
 );
 
@@ -147,6 +162,9 @@ struct Cli {
     selftest_extract: Option<PathBuf>,
     /// Add marks, then export a flattened copy here.
     selftest_flatten: Option<PathBuf>,
+    /// Dev: OCR every page of the first file with the default engine, then
+    /// save to this path.
+    selftest_ocr: Option<PathBuf>,
     /// Panel to open with: "pages" (default), "bookmarks", "patterns", "calc"
     /// or "comments".
     panel: Option<String>,
@@ -169,6 +187,7 @@ fn parse_cli() -> Cli {
         password: None,
         selftest_extract: None,
         selftest_flatten: None,
+        selftest_ocr: None,
         panel: None,
         pattern: None,
         menu: None,
@@ -193,6 +212,7 @@ fn parse_cli() -> Cli {
             Some("--selftest-clean") => cli.selftest_clean = args.next().map(PathBuf::from),
             Some("--selftest-extract") => cli.selftest_extract = args.next().map(PathBuf::from),
             Some("--selftest-flatten") => cli.selftest_flatten = args.next().map(PathBuf::from),
+            Some("--selftest-ocr") => cli.selftest_ocr = args.next().map(PathBuf::from),
             Some("--password") => {
                 cli.password = args.next().and_then(|p| p.to_str().map(String::from))
             }
@@ -233,6 +253,8 @@ fn main() {
         let either = Some("DocView || Outline || Comments");
         let mb = Some(menu_bar::KEY_CONTEXT);
         let pal = Some(palette::KEY_CONTEXT);
+        let od = Some(ocr_dialog::KEY_CONTEXT);
+        let od_keys = Some("OcrDialog && !TextInput");
         cx.bind_keys([
             KeyBinding::new("right", NextPage, doc_keys),
             KeyBinding::new("left", PrevPage, doc_keys),
@@ -351,6 +373,17 @@ fn main() {
             KeyBinding::new("down", PaletteDown, pal),
             KeyBinding::new("pageup", PalettePageUp, pal),
             KeyBinding::new("pagedown", PalettePageDown, pal),
+            // Recognize Text (OCR). Acrobat has no default shortcut for it.
+            KeyBinding::new("ctrl-shift-t", RecognizeText, ws),
+            KeyBinding::new("tab", DialogNext, od),
+            KeyBinding::new("shift-tab", DialogPrev, od),
+            KeyBinding::new("down", DialogNext, od_keys),
+            KeyBinding::new("up", DialogPrev, od_keys),
+            KeyBinding::new("left", DialogLeft, od_keys),
+            KeyBinding::new("right", DialogRight, od_keys),
+            KeyBinding::new("space", DialogRight, od_keys),
+            KeyBinding::new("enter", DialogRun, od_keys),
+            KeyBinding::new("escape", DialogCancel, od_keys),
             // Menu bar: Alt tapped alone or F10 highlights it, as on Windows.
             KeyBinding::new("alt", ActivateMenuBar, ws),
             KeyBinding::new("f10", ActivateMenuBar, ws),
@@ -386,6 +419,7 @@ fn main() {
                 password: cli.password.take(),
                 selftest_extract: cli.selftest_extract,
                 selftest_flatten: cli.selftest_flatten,
+                selftest_ocr: cli.selftest_ocr,
             },
             cli.menu,
             cx,

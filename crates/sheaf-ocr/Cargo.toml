@@ -1,0 +1,32 @@
+[package]
+name = "sheaf-ocr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "OCR for sheaf: an engine trait with Tesseract and PaddleOCR (oar-ocr) implementations, and the batch job that drives them"
+
+[features]
+default = []
+# Tesseract 5 built from source and linked statically (needs CMake, a C++17
+# compiler and network access on the first build).
+tesseract = ["dep:tesseract-rs"]
+# PaddleOCR models on ONNX Runtime (static prebuilt binaries, x86-64-v3/AVX2).
+oar = ["dep:oar-ocr"]
+
+[dependencies]
+sheaf-core.workspace = true
+sheaf-doc.workspace = true
+sheaf-render.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+log.workspace = true
+serde.workspace = true
+futures.workspace = true
+image.workspace = true
+tesseract-rs = { version = "0.4.0", optional = true }
+oar-ocr = { version = "0.10.0", optional = true }
+
+[dev-dependencies]
+env_logger.workspace = true
+lopdf.workspace = true
+serde_json.workspace = true

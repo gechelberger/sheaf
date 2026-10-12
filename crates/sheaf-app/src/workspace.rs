@@ -15,12 +15,14 @@ use gpui::{
 use crate::docview::DocView;
 use crate::frame;
 use crate::menu_bar::MenuBar;
+use crate::ocr_dialog::{OcrDialog, OcrDialogContext, OcrDialogEvent, OcrSpec};
 use crate::palette::{Palette, PaletteEvent};
 use crate::settings::{DockLayout, DockState, Settings, WindowPlacement};
 use crate::{
     About, ActivateMenuBar, CloseTab, CloseWindow, CommandPalette, MoveTabToNewWindow, NewWindow,
-    NextTab, OpenFile, OpenInWindows, PrevTab, Quit, ShowCalc, ShowComments, ShowOutline,
-    ShowPatterns, ShowThumbnails, ToggleBottomDock, ToggleLeftDock, ToggleRightDock, ToggleSidebar,
+    NextTab, OpenFile, OpenInWindows, PrevTab, Quit, RecognizeText, ShowCalc, ShowComments,
+    ShowOutline, ShowPatterns, ShowThumbnails, ToggleBottomDock, ToggleLeftDock, ToggleRightDock,
+    ToggleSidebar,
 };
 
 pub const KEY_CONTEXT: &str = "Workspace";
@@ -46,6 +48,7 @@ pub struct Launch {
     pub password: Option<String>,
     pub selftest_extract: Option<PathBuf>,
     pub selftest_flatten: Option<PathBuf>,
+    pub selftest_ocr: Option<PathBuf>,
 }
 
 impl Launch {
@@ -65,6 +68,7 @@ impl Launch {
             password: None,
             selftest_extract: None,
             selftest_flatten: None,
+            selftest_ocr: None,
         }
     }
 }
@@ -255,6 +259,8 @@ pub struct Workspace {
     tab_menu: Option<(Entity<DocView>, Point<Pixels>)>,
     /// The command palette, while open.
     palette: Option<(Entity<Palette>, Subscription)>,
+    /// Document > Recognize Text (OCR)…, while open.
+    ocr_dialog: Option<(Entity<OcrDialog>, Subscription)>,
     /// File/Edit/View… in the title bar; None where the OS draws menus.
     menu_bar: Option<Entity<MenuBar>>,
     /// Bounds of the dock area from the last frame, for splitter math.
@@ -283,6 +289,7 @@ impl Workspace {
             password,
             selftest_extract,
             selftest_flatten,
+            selftest_ocr,
         } = launch;
         let (docks, all_hidden) =
             docks_from_layout(settings.docks.as_ref().unwrap_or(&DockLayout::default()));
@@ -298,6 +305,7 @@ impl Workspace {
             dock_menu: None,
             tab_menu: None,
             palette: None,
+            ocr_dialog: None,
             menu_bar: frame::draws_menu_bar().then(|| cx.new(|cx| MenuBar::new(window, cx))),
             area: gpui::Bounds::default(),
             timing,
@@ -336,6 +344,9 @@ impl Workspace {
         }
         if let (Some(p), Some(doc)) = (selftest_flatten, this.docs.first().cloned()) {
             doc.update(cx, |d, _| d.selftest_flatten = Some(p));
+        }
+        if let (Some(p), Some(doc)) = (selftest_ocr, this.docs.first().cloned()) {
+            doc.update(cx, |d, _| d.selftest_ocr = Some(p));
         }
         if let (Some(p), Some(doc)) = (pattern, this.docs.first().cloned()) {
             doc.update(cx, |d, _| d.set_initial_pattern(p));
@@ -567,6 +578,78 @@ impl Workspace {
         });
         self.palette = Some((palette, sub));
         cx.notify();
+    }
+
+    /// Document > Recognize Text (OCR)…: open the options card for the
+    /// active document (or close it if it's open).
+    fn toggle_ocr_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.ocr_dialog.take().is_some() {
+            self.focus_active(window, cx);
+            cx.notify();
+            return;
+        }
+        let Some(doc) = self.active_doc().cloned() else {
+            return;
+        };
+        let Some((page_count, current_page, selected)) = doc.read(cx).ocr_context() else {
+            return;
+        };
+        let config = self.settings.ocr.clone();
+        let engines = sheaf_ocr::EngineKind::ALL
+            .into_iter()
+            .map(|k| {
+                (
+                    k,
+                    sheaf_ocr::check_engine(k, &config)
+                        .err()
+                        .map(|e| e.to_string()),
+                )
+            })
+            .collect();
+        let languages = sheaf_ocr::EngineKind::ALL
+            .into_iter()
+            .map(|k| (k, sheaf_ocr::language_options(k, &config)))
+            .collect();
+        let ctx = OcrDialogContext {
+            page_count,
+            current_page,
+            selected,
+            config,
+            engines,
+            languages,
+        };
+        let dialog = cx.new(|cx| OcrDialog::new(ctx, window, cx));
+        let sub = cx.subscribe_in(
+            &dialog,
+            window,
+            move |ws, _, ev: &OcrDialogEvent, window, cx| {
+                ws.ocr_dialog = None;
+                ws.focus_active(window, cx);
+                if let OcrDialogEvent::Run(spec) = ev {
+                    ws.run_ocr(spec.clone(), cx);
+                }
+                cx.notify();
+            },
+        );
+        self.ocr_dialog = Some((dialog, sub));
+        cx.notify();
+    }
+
+    /// Remember the dialog's choices and start the run on the active document.
+    fn run_ocr(&mut self, spec: OcrSpec, cx: &mut Context<Self>) {
+        let cfg = &mut self.settings.ocr;
+        cfg.engine = spec.engine;
+        cfg.dpi = spec.dpi;
+        cfg.skip_pages_with_text = spec.skip_pages_with_text;
+        cfg.last_scope = spec.scope.id().to_string();
+        sheaf_ocr::set_language(spec.engine, cfg, &spec.language);
+        let config = cfg.clone();
+        if let Err(e) = self.settings.save() {
+            log::warn!("saving settings: {e:#}");
+        }
+        if let Some(doc) = self.active_doc().cloned() {
+            doc.update(cx, |d, cx| d.start_ocr(spec, config, cx));
+        }
     }
 
     /// Close only this window, checking each edited document in turn.
@@ -1160,6 +1243,9 @@ impl Render for Workspace {
             .on_action(
                 cx.listener(|ws, _: &CommandPalette, window, cx| ws.toggle_palette(window, cx)),
             )
+            .on_action(
+                cx.listener(|ws, _: &RecognizeText, window, cx| ws.toggle_ocr_dialog(window, cx)),
+            )
             .on_action(cx.listener(|ws, _: &ActivateMenuBar, window, cx| {
                 if let Some(bar) = &ws.menu_bar {
                     bar.update(cx, |bar, cx| bar.toggle(window, cx));
@@ -1231,6 +1317,11 @@ impl Render for Workspace {
                 self.palette
                     .as_ref()
                     .map(|(p, _)| deferred(p.clone()).with_priority(2)),
+            )
+            .children(
+                self.ocr_dialog
+                    .as_ref()
+                    .map(|(d, _)| deferred(d.clone()).with_priority(2)),
             );
         frame::client_side_decorations(content, window, cx)
     }

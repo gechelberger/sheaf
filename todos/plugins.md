@@ -1,10 +1,10 @@
-# M5: Plugin system (WASM components + declarative host API)
+# M6: Plugin system (WASM components + declarative host API)
 
 ## Context
 Plugins that extend behavior almost arbitrarily have been a goal from the start, but no groundwork exists yet. Today:
-- Commands are GPUI `actions!` structs fixed at compile time (`main.rs:31-118`).
+- Commands are GPUI `actions!` structs fixed at compile time (`main.rs:35-135`).
 - Menus come from a static `app_menus()` (`menus.rs`), and the palette walks those menus (`palette.rs:44-74`).
-- Panels are a closed `enum Panel` (`workspace.rs:56-100`).
+- Panels are a closed `enum Panel` (`workspace.rs:78-125`).
 - Pattern presets and tickmarks are `const` arrays.
 - Nothing announces document changes.
 
@@ -18,7 +18,7 @@ Decisions (from Greg, 2026-10-11):
 - **Authors:** in-house and third-party developers, so plugins need a sandbox and a stable API.
 - **UI:** declarative. Plugins describe UI as data and the host draws it.
 - **Runtime:** WASM components, built with wasmtime and WIT interface files (the same approach as Zed's extensions).
-- **Timing:** this is M5, before OCR.
+- **Timing:** M6, after Scan & OCR (M5). OCR is a core feature (`sheaf-ocr`), not a plugin: Tesseract and ONNX Runtime are native code and can't run in wasmtime. Plugins get OCR as a host capability instead.
 
 Why WASM: one `.wasm` file runs unchanged on Windows and Linux, with no Rust ABI or DLL problems. A plugin crash becomes a caught error instead of a dead app. Plugins can be written in Rust, C, Go and other languages.
 
@@ -32,6 +32,7 @@ Why WASM: one `.wasm` file runs unchanged on Windows and Linux, with no Rust ABI
     - `edits`: submit `list<edit>`, applied as one undo step. The WIT `edit` variant mirrors `sheaf_doc::Edit`.
     - `ui`: notices, `show-form(form) -> result`, and panel model updates.
     - `storage`: a per-plugin key/value store plus a settings blob.
+    - `ocr`: `recognize(page, options) -> text-layer` and `page-text-layer(page)`, proxied to `sheaf_ocr::job`, so plugins never link an engine.
     - `log`.
   - Plugin-provided exports (what the host calls):
     - `activate`
@@ -79,13 +80,13 @@ Why WASM: one `.wasm` file runs unchanged on Windows and Linux, with no Rust ABI
 - WIT covering the `document`, `edits`, `log` and `run-command` interfaces.
 - Plugin discovery at startup.
 - Commands contributed by plugins appear in menus and the palette.
-- First example plugin, `examples/plugins/bookmark-from-pattern`: it creates bookmarks from regex hits. It targets `wasm32-wasip2`.
+- First plugin, `examples/plugins/tax-form-bookmarks` (chosen 2026-10-11): scans page text (including OCR layers) for form headers such as "Form 1040", "Schedule C", "W-2", "1099-INT" and inserts bookmarks named like "1099-INT — Chase". It targets `wasm32-wasip2` and exercises `text` plus batch edits.
 
 ### Slice 3: declarative UI
 - `ui.show-form`: a modal with text, number, choice, checkbox, file-picker and page-range fields. The host draws it with the existing `text_input.rs`.
 - Notices.
 - Panel contribution: a plugin supplies a tree/list model (rows with label, icon, badge and actions). The host draws it in the dock and saves its layout by string ID.
-- Second example plugin: a "Workpaper index" panel.
+- Second plugin, `examples/plugins/amount-crossref` (chosen 2026-10-11): finds the same dollar amount on different pages (a K-1 total and the 1040 line it flows to) via pattern search, lists the candidate pairs in a panel, and places `ConnectorAdd` pairs for the ones the user accepts. Exercises text boxes, a review panel and connector edits.
 
 ### Slice 4: events, storage, permissions, manager
 - `on-event` subscriptions, declared in the manifest.
@@ -99,14 +100,13 @@ Why WASM: one `.wasm` file runs unchanged on Windows and Linux, with no Rust ABI
 - `docs/plugins.md`: authoring guide, API versioning policy (semver on the WIT package; the host keeps N-1 worlds), and the trust model.
 - CI builds the example plugins on ubuntu and windows and runs host integration tests against them on both.
 - `package.sh` ships the example plugins.
-- README milestone table: add M5; OCR becomes M6/v0.2.
+- README milestone table: M6 row.
 
 ## Explicitly out of scope
 - Plugins drawing their own content on the canvas or in panels.
 - Native dylibs.
 - A plugin marketplace or code signing (noted as future work).
 - Rhai macros. A later slice can expose the same host API to Rhai.
-- OCR as a WASM plugin. Tesseract-class engines are native; if OCR becomes pluggable it should be an out-of-process engine and be decided in M6.
 
 ## Critical files
 - `crates/sheaf-app/src/{main.rs, menus.rs, palette.rs, keymap.rs, workspace.rs, docview.rs, settings.rs, pattern_panel.rs, markup_tools.rs}`

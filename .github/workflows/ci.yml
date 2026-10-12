@@ -35,9 +35,23 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # tesseract-rs builds Tesseract and Leptonica from source into this
+      # directory; keep it between runs.
+      - name: Cache Tesseract build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.tesseract-rs
+            ~/AppData/Roaming/tesseract-rs
+          key: tesseract-rs-0.4.0-${{ runner.os }}
+
       - name: Fetch PDFium
         shell: bash
         run: scripts/fetch-pdfium.sh
+
+      - name: Fetch OCR data
+        shell: bash
+        run: scripts/fetch-ocr-data.sh
 
       - name: Format
         run: cargo fmt --all -- --check
@@ -48,5 +62,27 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+      - name: OCR engine smoke tests
+        run: cargo test -p sheaf-ocr --features tesseract,oar -- --ignored
+
+      - name: Check without OCR engines
+        run: cargo check -p sheaf-app --no-default-features
+
       - name: Build
         run: cargo build -p sheaf-app
+
+      # The engines must be linked statically: a packaged build has no
+      # libc++, ONNX Runtime or Tesseract to find at runtime.
+      - name: No dynamic engine libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          ldd target/debug/sheaf
+          ! ldd target/debug/sheaf | grep -E 'libc\+\+|libunwind|onnxruntime|tesseract|leptonica'
+
+      # The prebuilt ONNX Runtime is x86-64-v3; make sure its static
+      # initialisers don't take the whole app down on a pre-AVX2 CPU.
+      - name: Starts on a CPU without AVX2 (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y qemu-user
+          qemu-x86_64 -cpu Nehalem target/debug/sheaf --version

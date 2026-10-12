@@ -122,6 +122,10 @@ pub trait Renderer {
     /// Glyph boxes (merged per line) of text intersecting `rect`, in the
     /// page's displayed space. Used to turn a drag into a text highlight.
     fn text_boxes_in_rect(&self, page: PageIndex, rect: Rect) -> Result<Vec<Rect>>;
+    /// How many real characters of text the page has: glyphs the engine
+    /// synthesizes (spaces, line breaks) and whitespace don't count. Zero
+    /// means an image-only page, an OCR candidate.
+    fn page_text_len(&self, page: PageIndex) -> Result<usize>;
     /// Render a whole page scaled so its width is `target_width` device pixels.
     fn render(&self, page: PageIndex, job: Job, format: PixelFormat) -> Result<Raster>;
 
@@ -166,8 +170,9 @@ pub mod pdfium {
 
     /// Locate and bind libpdfium. Search order: `$PDFIUM_LIB_DIR`, next to
     /// the executable (and its `lib/`, how packaged builds ship it),
-    /// `vendor/pdfium/<os>-<arch>/` relative to the cwd, then the system
-    /// library.
+    /// `vendor/pdfium/<os>-<arch>/` relative to the cwd (and to this
+    /// source tree, for `cargo test` run from a crate directory), then the
+    /// system library.
     fn bind() -> Result<Pdfium> {
         let mut dirs: Vec<PathBuf> = Vec::new();
         if let Ok(d) = std::env::var("PDFIUM_LIB_DIR") {
@@ -180,13 +185,16 @@ pub mod pdfium {
             dirs.push(exe_dir.join("lib"));
             dirs.push(exe_dir);
         }
+        let vendored = format!(
+            "vendor/pdfium/{}-{}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        );
+        dirs.push(vendored.clone().into());
         dirs.push(
-            format!(
-                "vendor/pdfium/{}-{}",
-                std::env::consts::OS,
-                std::env::consts::ARCH
-            )
-            .into(),
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(vendored),
         );
 
         let mut last_err = None;
@@ -377,6 +385,17 @@ pub mod pdfium {
                 }
             }
             Ok(hits)
+        }
+
+        fn page_text_len(&self, page: PageIndex) -> Result<usize> {
+            let p = self.doc.pages().get(page.0 as i32)?;
+            let text = p.text()?;
+            Ok(text
+                .chars()
+                .iter()
+                .filter(|c| !c.is_generated().unwrap_or(false))
+                .filter(|c| c.unicode_char().is_some_and(|ch| !ch.is_whitespace()))
+                .count())
         }
 
         fn text_boxes_in_rect(&self, page: PageIndex, rect: Rect) -> Result<Vec<Rect>> {
@@ -649,6 +668,14 @@ enum Msg {
         rect: Rect,
         reply: oneshot::Sender<Result<Vec<Rect>>>,
     },
+    TextLen {
+        page: u32,
+        reply: oneshot::Sender<Result<usize>>,
+    },
+    PageSize {
+        page: u32,
+        reply: oneshot::Sender<Result<PageSize>>,
+    },
     HideAnnots {
         pages: Vec<u32>,
         reply: oneshot::Sender<Result<usize>>,
@@ -748,6 +775,23 @@ impl RenderHandle {
             rect,
             reply: tx,
         });
+        rx
+    }
+
+    /// The size of one page as the engine renders it (after its own
+    /// `/Rotate`). Unlike [`page_sizes`](Self::page_sizes) this answers
+    /// right away, for callers that can't wait for the whole walk.
+    pub fn page_size(&self, page: u32) -> oneshot::Receiver<Result<PageSize>> {
+        let (tx, rx) = oneshot::channel();
+        self.send(Msg::PageSize { page, reply: tx });
+        rx
+    }
+
+    /// How many real characters of text a page has (see
+    /// [`Renderer::page_text_len`]). Zero means an OCR candidate.
+    pub fn page_text_len(&self, page: u32) -> oneshot::Receiver<Result<usize>> {
+        let (tx, rx) = oneshot::channel();
+        self.send(Msg::TextLen { page, reply: tx });
         rx
     }
 
@@ -857,6 +901,12 @@ fn worker_loop(engine: impl Renderer, rx: mpsc::Receiver<Msg>) {
                 }
                 Msg::TextBoxes { page, rect, reply } => {
                     let _ = reply.send(engine.text_boxes_in_rect(PageIndex(page), rect));
+                }
+                Msg::TextLen { page, reply } => {
+                    let _ = reply.send(engine.page_text_len(PageIndex(page)));
+                }
+                Msg::PageSize { page, reply } => {
+                    let _ = reply.send(engine.page_size(PageIndex(page)));
                 }
                 Msg::HideAnnots { pages, reply } => {
                     let mut n = 0;

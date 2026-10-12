@@ -15,6 +15,8 @@ use serde::{Deserialize, Serialize};
 pub struct Settings {
     pub window: Option<WindowPlacement>,
     pub docks: Option<DockLayout>,
+    /// OCR engine, resolution and last-used options (see `sheaf_ocr`).
+    pub ocr: sheaf_ocr::OcrConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -161,6 +163,11 @@ mod tests {
                 maximized: false,
             }),
             docks: Some(layout),
+            ocr: sheaf_ocr::OcrConfig {
+                engine: sheaf_ocr::EngineKind::Oar,
+                dpi: 200,
+                ..Default::default()
+            },
         };
         s.save().unwrap();
         assert_eq!(Settings::load(), s);
