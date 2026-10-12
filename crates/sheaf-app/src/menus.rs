@@ -66,6 +66,8 @@ pub fn app_menus() -> Vec<Menu> {
                 item("&Calculator", ShowCalc),
                 item("Co&mments", ShowComments),
                 sep(),
+                item("Command &Palette…", CommandPalette),
+                sep(),
                 item("Navigation Pan&es", ToggleSidebar),
                 item("Left &Dock", ToggleLeftDock),
                 item("Ri&ght Dock", ToggleRightDock),

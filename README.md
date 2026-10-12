@@ -348,6 +348,29 @@ Notes:
 - On Windows, mold doesn't apply; `lld-link` (bundled with the MSVC toolchain
   via `rust-lld`) is the equivalent lever. sccache works unchanged.
 
+## Configuration
+
+sheaf keeps its files in the platform config directory: `~/.config/sheaf`
+on Linux, `%APPDATA%\sheaf` on Windows, `~/Library/Application Support/sheaf`
+on macOS (`SHEAF_CONFIG_DIR` overrides).
+
+- `settings.json` — written by the app: dock layout (which panels sit where,
+  tab order, sizes, open state) and window placement.
+- `keymap.json` — your key bindings, loaded after the defaults so they win.
+  Zed's format: a list of `{ "context", "bindings" }` entries. Actions are
+  named as the command palette (Ctrl+Shift+K) shows them; `null` unbinds.
+
+```json
+[
+  { "context": "DocView", "bindings": { "ctrl-shift-k": "tools::ToolTick", "f9": null } },
+  { "bindings": { "ctrl-shift-p": "workspace::CommandPalette" } }
+]
+```
+
+Contexts: `DocView` (the page view), `Outline`, `Comments`, `Palette`,
+`TextInput`, `Workspace` (anywhere in the window), or none for global.
+Bad entries are reported on stderr at startup and skipped.
+
 ## Name
 
 A *sheaf* is a bundle of papers. It's also short, unclaimed on crates.io

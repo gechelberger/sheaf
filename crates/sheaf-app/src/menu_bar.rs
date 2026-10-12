@@ -454,7 +454,7 @@ fn label(name: &str, underline: bool) -> StyledText {
 
 /// The action's first key binding, Windows-style ("Ctrl+Shift+S"). The
 /// first binding is the canonical one; later ones are alternates.
-fn shortcut(action: &dyn Action, cx: &App) -> Option<SharedString> {
+pub fn shortcut(action: &dyn Action, cx: &App) -> Option<SharedString> {
     let keymap = cx.key_bindings();
     let keymap = keymap.borrow();
     let binding = keymap.bindings_for_action(action).next()?;

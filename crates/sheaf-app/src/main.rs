@@ -6,10 +6,12 @@ mod calc_panel;
 mod comments_panel;
 mod docview;
 mod frame;
+mod keymap;
 mod markup_tools;
 mod menu_bar;
 mod menus;
 mod outline_panel;
+mod palette;
 mod pattern_panel;
 mod settings;
 mod text_input;
@@ -78,6 +80,10 @@ actions!(
 );
 actions!(comments, [EditComment, DeleteComment]);
 actions!(
+    palette,
+    [PaletteUp, PaletteDown, PalettePageUp, PalettePageDown]
+);
+actions!(
     outline,
     [
         RenameBookmark,
@@ -106,7 +112,8 @@ actions!(
         OpenFile,
         Quit,
         ActivateMenuBar,
-        About
+        About,
+        CommandPalette
     ]
 );
 
@@ -184,6 +191,7 @@ fn main() {
         let comments = Some(comments_panel::KEY_CONTEXT);
         let either = Some("DocView || Outline || Comments");
         let mb = Some(menu_bar::KEY_CONTEXT);
+        let pal = Some(palette::KEY_CONTEXT);
         cx.bind_keys([
             KeyBinding::new("right", NextPage, doc),
             KeyBinding::new("left", PrevPage, doc),
@@ -272,6 +280,12 @@ fn main() {
             KeyBinding::new("ctrl-w", CloseTab, ws),
             KeyBinding::new("ctrl-o", OpenFile, ws),
             KeyBinding::new("ctrl-q", Quit, None),
+            // Acrobat has no palette; Ctrl+Shift+P is its Page Setup, so not that.
+            KeyBinding::new("ctrl-shift-k", CommandPalette, None),
+            KeyBinding::new("up", PaletteUp, pal),
+            KeyBinding::new("down", PaletteDown, pal),
+            KeyBinding::new("pageup", PalettePageUp, pal),
+            KeyBinding::new("pagedown", PalettePageDown, pal),
             // Menu bar: Alt tapped alone or F10 highlights it, as on Windows.
             KeyBinding::new("alt", ActivateMenuBar, ws),
             KeyBinding::new("f10", ActivateMenuBar, ws),
@@ -283,6 +297,10 @@ fn main() {
             KeyBinding::new("space", menu_bar::MenuConfirm, mb),
             KeyBinding::new("escape", menu_bar::MenuCancel, mb),
         ]);
+        for e in keymap::load(cx) {
+            log::warn!("keymap.json: {e}");
+            eprintln!("keymap.json: {e}");
+        }
         cx.set_menus(menus::app_menus());
 
         let settings = settings::Settings::load();

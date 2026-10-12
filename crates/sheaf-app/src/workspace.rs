@@ -9,17 +9,18 @@ use std::time::Instant;
 use gpui::{
     AnchoredPositionMode, AnyElement, App, Context, Entity, Focusable, KeyDownEvent, MouseButton,
     MouseMoveEvent, PathPromptOptions, Pixels, Point, PromptButton, PromptLevel, SharedString,
-    Task, Window, anchored, deferred, div, prelude::*, px, rgb,
+    Subscription, Task, Window, anchored, deferred, div, prelude::*, px, rgb,
 };
 
 use crate::docview::DocView;
 use crate::frame;
 use crate::menu_bar::MenuBar;
+use crate::palette::{Palette, PaletteEvent};
 use crate::settings::{DockLayout, DockState, Settings, WindowPlacement};
 use crate::{
-    About, ActivateMenuBar, CloseTab, NextTab, OpenFile, PrevTab, Quit, ShowCalc, ShowComments,
-    ShowOutline, ShowPatterns, ShowThumbnails, ToggleBottomDock, ToggleLeftDock, ToggleRightDock,
-    ToggleSidebar,
+    About, ActivateMenuBar, CloseTab, CommandPalette, NextTab, OpenFile, PrevTab, Quit, ShowCalc,
+    ShowComments, ShowOutline, ShowPatterns, ShowThumbnails, ToggleBottomDock, ToggleLeftDock,
+    ToggleRightDock, ToggleSidebar,
 };
 
 pub const KEY_CONTEXT: &str = "Workspace";
@@ -222,6 +223,8 @@ pub struct Workspace {
     resizing: Option<Side>,
     /// Right-click menu on a dock tab: (panel, where).
     dock_menu: Option<(Panel, Point<Pixels>)>,
+    /// The command palette, while open.
+    palette: Option<(Entity<Palette>, Subscription)>,
     /// File/Edit/View… in the title bar; None where the OS draws menus.
     menu_bar: Option<Entity<MenuBar>>,
     /// Bounds of the dock area from the last frame, for splitter math.
@@ -255,6 +258,7 @@ impl Workspace {
             all_hidden,
             resizing: None,
             dock_menu: None,
+            palette: None,
             menu_bar: frame::draws_menu_bar().then(|| cx.new(|cx| MenuBar::new(window, cx))),
             area: gpui::Bounds::default(),
             timing,
@@ -476,6 +480,26 @@ impl Workspace {
             Ok(1) => true,
             _ => false,
         })
+    }
+
+    /// Ctrl+Shift+K: open the command palette (or close it if it's open).
+    fn toggle_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.take().is_some() {
+            self.focus_active(window, cx);
+            cx.notify();
+            return;
+        }
+        let palette = cx.new(|cx| Palette::new(window, cx));
+        let sub = cx.subscribe_in(&palette, window, |ws, _, ev: &PaletteEvent, window, cx| {
+            ws.palette = None;
+            ws.focus_active(window, cx);
+            if let PaletteEvent::Run(action) = ev {
+                window.dispatch_action(action.boxed_clone(), cx);
+            }
+            cx.notify();
+        });
+        self.palette = Some((palette, sub));
+        cx.notify();
     }
 
     /// Quit, asking about each document with unsaved changes in turn.
@@ -892,6 +916,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|ws, _: &CloseTab, window, cx| ws.close(ws.active, window, cx)))
             .on_action(cx.listener(|ws, _: &OpenFile, _, cx| ws.prompt_open(cx)))
             .on_action(cx.listener(|ws, _: &Quit, window, cx| ws.request_quit(window, cx)))
+            .on_action(
+                cx.listener(|ws, _: &CommandPalette, window, cx| ws.toggle_palette(window, cx)),
+            )
             .on_action(cx.listener(|ws, _: &ActivateMenuBar, window, cx| {
                 if let Some(bar) = &ws.menu_bar {
                     bar.update(cx, |bar, cx| bar.toggle(window, cx));
@@ -932,6 +959,7 @@ impl Render for Workspace {
                 MouseButton::Left,
                 cx.listener(|ws, _, _, cx| {
                     if ws.resizing.take().is_some() {
+                        ws.persist_layout();
                         cx.notify();
                     }
                 }),
@@ -956,7 +984,12 @@ impl Render for Workspace {
                         d.child(self.splitter(Side::Right, cx)).child(r)
                     }),
             )
-            .children(menu);
+            .children(menu)
+            .children(
+                self.palette
+                    .as_ref()
+                    .map(|(p, _)| deferred(p.clone()).with_priority(2)),
+            );
         frame::client_side_decorations(content, window, cx)
     }
 }
