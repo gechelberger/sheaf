@@ -37,9 +37,9 @@ use crate::text_input::{TextInput, TextInputEvent};
 use crate::{
     CloseSearch, DeletePage, DuplicatePages, Find, FirstPage, InsertPdf, LastPage, LineDown,
     LineUp, NewBookmark, NextPage, PrevPage, Redo, RotatePageCcw, RotatePageCw, Save, SaveAs,
-    ScreenDown, ScreenUp, SearchNext, SearchPrev, SelectAllPages, ToolArrow, ToolEllipse,
-    ToolFreeText, ToolHighlight, ToolInk, ToolLine, ToolNote, ToolSelect, ToolSquare, ToolTick,
-    Undo, ZoomActual, ZoomFitPage, ZoomFitWidth, ZoomIn, ZoomOut,
+    ScreenDown, ScreenUp, SearchNext, SearchPrev, SelectAllPages, ToolArrow, ToolConnector,
+    ToolEllipse, ToolFreeText, ToolHighlight, ToolInk, ToolLine, ToolNote, ToolSelect, ToolSquare,
+    ToolTick, Undo, ZoomActual, ZoomFitPage, ZoomFitWidth, ZoomIn, ZoomOut,
 };
 
 pub const KEY_CONTEXT: &str = "DocView";
@@ -230,6 +230,7 @@ pub(crate) struct Doc {
     pub(crate) drag: Option<Drag>,
     pub(crate) selected_annot: Option<(PageId, AnnotId)>,
     pub(crate) annot_editor: Option<AnnotEditor>,
+    pub(crate) pending_connector: Option<crate::markup_tools::PendingConnector>,
 }
 
 impl Doc {
@@ -453,6 +454,7 @@ impl DocView {
                             drag: None,
                             selected_annot: None,
                             annot_editor: None,
+                            pending_connector: None,
                         }));
                         viewer.fetch_page_sizes(cx);
                         viewer.fetch_outline(cx);
@@ -1129,6 +1131,40 @@ impl DocView {
         );
         ink.stroke = 2.5;
         self.add_annot(p0, ink, "Pencil", cx);
+        let State::Ready(doc) = &self.state else {
+            return;
+        };
+        let p1 = doc.page_ref(1).map(|p| p.id).unwrap_or(p0);
+        let mk = |rect: Box2| {
+            self.new_annot(
+                AnnotKind::Connector {
+                    rect,
+                    label: "1".into(),
+                    partner: None,
+                },
+                [220, 40, 40],
+            )
+        };
+        let a = mk(Box2 {
+            x: 500.0,
+            y: 220.0,
+            w: 22.0,
+            h: 22.0,
+        });
+        let b = mk(Box2 {
+            x: 100.0,
+            y: 100.0,
+            w: 22.0,
+            h: 22.0,
+        });
+        self.apply(
+            Edit::ConnectorAdd {
+                a: (p0, a),
+                b: (p1, b),
+            },
+            "Connector 1",
+            cx,
+        );
         self.save_to(path, cx);
     }
 
@@ -2310,6 +2346,16 @@ impl Render for DocView {
                             ) {
                                 page_div = page_div.child(preview);
                             }
+                            if let Some(preview) = DocView::pending_connector_preview(
+                                doc,
+                                tool_color,
+                                pl.pref.id,
+                                src,
+                                pl.pref.rotation,
+                                k,
+                            ) {
+                                page_div = page_div.child(preview);
+                            }
                         }
                         page_div
                     })
@@ -2412,6 +2458,8 @@ impl Render for DocView {
             .on_action(cx.listener(|v, _: &CloseSearch, window, cx| {
                 if v.search.is_some() {
                     v.close_search(window, cx)
+                } else if v.cancel_pending_connector(cx) {
+                    // Esc with a half-placed connector just drops it.
                 } else {
                     if let State::Ready(doc) = &mut v.state {
                         doc.selected_annot = None;
@@ -2454,6 +2502,7 @@ impl Render for DocView {
             .on_action(cx.listener(|v, _: &ToolArrow, _, cx| v.set_tool(Tool::Arrow, cx)))
             .on_action(cx.listener(|v, _: &ToolInk, _, cx| v.set_tool(Tool::Ink, cx)))
             .on_action(cx.listener(|v, _: &ToolTick, _, cx| v.set_tool(Tool::Tick, cx)))
+            .on_action(cx.listener(|v, _: &ToolConnector, _, cx| v.set_tool(Tool::Connector, cx)))
             .on_action(cx.listener(|v, _: &NewBookmark, window, cx| v.new_bookmark(window, cx)))
             .on_action(cx.listener(|v, _: &Undo, _, cx| v.undo(cx)))
             .on_action(cx.listener(|v, _: &Redo, _, cx| v.redo(cx)))
@@ -2842,6 +2891,21 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
                     .text_size(px(rect.h * 0.8 * k))
                     .font_weight(gpui::FontWeight::BOLD)
                     .child(glyph.clone())
+                    .into_any_element(),
+            );
+        }
+        AnnotKind::Connector { rect, label, .. } => {
+            out.push(
+                place(*rect)
+                    .rounded_full()
+                    .bg(fill)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(rgb(0xffffff))
+                    .text_size(px(rect.h * 0.55 * k))
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .child(label.clone())
                     .into_any_element(),
             );
         }

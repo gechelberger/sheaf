@@ -13,8 +13,8 @@ use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, StringFormat,
 
 use crate::model::Snapshot;
 use crate::save::{
-    LoadedSource, copy_page_dict, geom_of, is_identity, strip_sheaf_annots, write_outline,
-    write_page_annots,
+    LoadedSource, copy_page_dict, geom_of, is_identity, link_connectors, strip_sheaf_annots,
+    write_outline, write_page_annots,
 };
 
 /// Produce the full new file (original bytes + update section).
@@ -55,6 +55,7 @@ pub fn incremental(snap: &Snapshot) -> Result<Vec<u8>> {
     let mut copy_maps: std::collections::HashMap<_, std::collections::HashMap<ObjectId, ObjectId>> =
         std::collections::HashMap::new();
 
+    let mut connectors = Vec::new();
     if tree_changed {
         let pages_id = pdf.new_object_id();
         let mut kids = Vec::with_capacity(snap.state.pages.len());
@@ -96,7 +97,7 @@ pub fn incremental(snap: &Snapshot) -> Result<Vec<u8>> {
                 .unwrap_or(0) as i32;
             if let Some(list) = snap.state.annots.get(&pref.id) {
                 let geom = geom_of(&dict, original_rot);
-                write_page_annots(&mut pdf, &mut dict, list.iter(), &geom);
+                connectors.extend(write_page_annots(&mut pdf, &mut dict, list.iter(), &geom));
             } else {
                 strip_sheaf_annots(&pdf, &mut dict);
             }
@@ -139,7 +140,12 @@ pub fn incremental(snap: &Snapshot) -> Result<Vec<u8>> {
                 if snap.annots_dirty.contains(&pref.id) {
                     let geom = crate::file::page_geom(&pdf, id);
                     match snap.state.annots.get(&pref.id) {
-                        Some(list) => write_page_annots(&mut pdf, &mut dict, list.iter(), &geom),
+                        Some(list) => connectors.extend(write_page_annots(
+                            &mut pdf,
+                            &mut dict,
+                            list.iter(),
+                            &geom,
+                        )),
                         None => strip_sheaf_annots(&pdf, &mut dict),
                     }
                 }
@@ -160,6 +166,7 @@ pub fn incremental(snap: &Snapshot) -> Result<Vec<u8>> {
     if catalog_changed {
         changed.insert(catalog_id, Object::Dictionary(catalog));
     }
+    link_connectors(&mut pdf, &connectors, &snap.state, &page_obj);
     // Everything allocated above the original max id is new and must be written.
     for (&id, obj) in pdf.objects.range((orig_max_id + 1, 0)..) {
         changed.entry(id).or_insert_with(|| obj.clone());

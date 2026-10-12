@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use im::Vector;
 use sheaf_core::{PageSize, Rotation};
 
-use crate::annot::{Annot, AnnotId};
+use crate::annot::{Annot, AnnotId, AnnotKind};
 use crate::history::{HistoryPolicy, HistoryStats};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -84,6 +84,29 @@ pub struct DocState {
 impl DocState {
     pub fn annots_on(&self, page: PageId) -> Option<&Vector<Annot>> {
         self.annots.get(&page)
+    }
+
+    /// Locate an annotation by id on any page.
+    pub fn find_annot(&self, id: AnnotId) -> Option<(PageId, &Annot)> {
+        self.annots
+            .iter()
+            .find_map(|(page, list)| list.iter().find(|a| a.id == id).map(|a| (*page, a)))
+    }
+
+    /// The label for the next connector pair: one past the highest numeric
+    /// label in use.
+    pub fn next_connector_label(&self) -> String {
+        let max = self
+            .annots
+            .values()
+            .flatten()
+            .filter_map(|a| match &a.kind {
+                AnnotKind::Connector { label, .. } => label.trim().parse::<u32>().ok(),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
+        (max + 1).to_string()
     }
 
     pub fn index_of(&self, id: PageId) -> Option<usize> {
@@ -188,9 +211,17 @@ pub enum Edit {
         page: PageId,
         annot: Annot,
     },
+    /// Delete an annotation. Deleting one end of a connector pair deletes
+    /// the other end too.
     AnnotDelete {
         page: PageId,
         id: AnnotId,
+    },
+    /// Add both ends of a connector pair in one step. Ids are assigned by the
+    /// document and each end's `partner` is pointed at the other.
+    ConnectorAdd {
+        a: (PageId, Annot),
+        b: (PageId, Annot),
     },
 }
 
@@ -930,10 +961,43 @@ impl Document {
                     .iter()
                     .position(|a| a.id == id)
                     .context("annotation not found")?;
-                list.remove(i);
+                let removed = list.remove(i);
                 if list.is_empty() {
                     st.annots.remove(&page);
                 } else {
+                    st.annots.insert(page, list);
+                }
+                // The other end of a connector is meaningless alone.
+                if let Some(pid) = removed.partner()
+                    && let Some((ppage, _)) = st.find_annot(pid)
+                {
+                    let mut plist = st.annots.get(&ppage).cloned().unwrap_or_default();
+                    plist.retain(|a| a.id != pid);
+                    if plist.is_empty() {
+                        st.annots.remove(&ppage);
+                    } else {
+                        st.annots.insert(ppage, plist);
+                    }
+                }
+            }
+            Edit::ConnectorAdd {
+                a: (page_a, mut a),
+                b: (page_b, mut b),
+            } => {
+                if st.index_of(page_a).is_none() || st.index_of(page_b).is_none() {
+                    bail!("page not found");
+                }
+                a.id = self.fresh_annot_id();
+                b.id = self.fresh_annot_id();
+                if let AnnotKind::Connector { partner, .. } = &mut a.kind {
+                    *partner = Some(b.id);
+                }
+                if let AnnotKind::Connector { partner, .. } = &mut b.kind {
+                    *partner = Some(a.id);
+                }
+                for (page, annot) in [(page_a, a), (page_b, b)] {
+                    let mut list = st.annots.get(&page).cloned().unwrap_or_default();
+                    list.push_back(annot);
                     st.annots.insert(page, list);
                 }
             }
@@ -1571,6 +1635,55 @@ mod tests {
         assert_eq!(d.page(0).unwrap().source, old_primary);
         assert_eq!(d.page(0).unwrap().index, 5);
         assert!(d.is_dirty());
+    }
+
+    #[test]
+    fn connector_pair_links_and_deletes_together() {
+        use crate::annot::{AnnotKind, Box2};
+        let mut d = doc();
+        let (p0, p2) = (id_at(&d, 0), id_at(&d, 2));
+        let mk = |label: &str| Annot {
+            id: AnnotId(0),
+            kind: AnnotKind::Connector {
+                rect: Box2 {
+                    x: 10.0,
+                    y: 10.0,
+                    w: 22.0,
+                    h: 22.0,
+                },
+                label: label.into(),
+                partner: None,
+            },
+            color: [255, 0, 0],
+            opacity: 1.0,
+            stroke: 1.0,
+            author: "t".into(),
+            contents: String::new(),
+            modified: String::new(),
+        };
+        assert_eq!(d.state().next_connector_label(), "1");
+        d.apply(
+            Edit::ConnectorAdd {
+                a: (p0, mk("1")),
+                b: (p2, mk("1")),
+            },
+            "c",
+        )
+        .unwrap();
+        let a = d.state().annots_on(p0).unwrap()[0].clone();
+        let b = d.state().annots_on(p2).unwrap()[0].clone();
+        assert_eq!(a.partner(), Some(b.id));
+        assert_eq!(b.partner(), Some(a.id));
+        assert_eq!(d.state().find_annot(b.id).map(|(p, _)| p), Some(p2));
+        assert_eq!(d.state().next_connector_label(), "2");
+        // Deleting one end removes the other.
+        d.apply(Edit::AnnotDelete { page: p2, id: b.id }, "rm")
+            .unwrap();
+        assert!(d.state().annots_on(p0).is_none());
+        assert!(d.state().annots_on(p2).is_none());
+        d.undo();
+        assert_eq!(d.state().annots_on(p0).unwrap().len(), 1);
+        assert_eq!(d.state().annots_on(p2).unwrap().len(), 1);
     }
 
     #[test]

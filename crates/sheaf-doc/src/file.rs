@@ -83,6 +83,16 @@ use crate::annot::{Annot, PageGeom, from_json};
 /// Annotations sheaf wrote into `path` earlier, keyed by page index.
 pub fn read_sheaf_annots(path: impl AsRef<Path>) -> Result<HashMap<u32, Vec<Annot>>> {
     let pdf = lopdf::Document::load(path.as_ref())?;
+    Ok(sheaf_annots_in(&pdf))
+}
+
+/// Same as `read_sheaf_annots`, from bytes already in memory.
+pub fn read_sheaf_annots_mem(bytes: &[u8]) -> Result<HashMap<u32, Vec<Annot>>> {
+    let pdf = lopdf::Document::load_mem(bytes)?;
+    Ok(sheaf_annots_in(&pdf))
+}
+
+fn sheaf_annots_in(pdf: &lopdf::Document) -> HashMap<u32, Vec<Annot>> {
     let mut out: HashMap<u32, Vec<Annot>> = HashMap::new();
     for (i, page_id) in pdf.get_pages().into_values().enumerate() {
         let Ok(page) = pdf.get_dictionary(page_id) else {
@@ -119,7 +129,7 @@ pub fn read_sheaf_annots(path: impl AsRef<Path>) -> Result<HashMap<u32, Vec<Anno
             }
         }
     }
-    Ok(out)
+    out
 }
 
 /// MediaBox and /Rotate of a page (inherited attributes resolved).

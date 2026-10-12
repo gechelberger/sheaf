@@ -95,6 +95,15 @@ pub enum AnnotKind {
         rect: Box2,
         glyph: String,
     },
+    /// PDFlyer-style connector: one end of a linked pair. `label` is the
+    /// pair's number; `partner` is the other end, on any page. Written as a
+    /// Link annotation whose `/Dest` is the partner's page, so it jumps in
+    /// other viewers too.
+    Connector {
+        rect: Box2,
+        label: String,
+        partner: Option<AnnotId>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -135,7 +144,7 @@ impl Annot {
             AnnotKind::FreeText { rect, .. }
             | AnnotKind::Square { rect }
             | AnnotKind::Ellipse { rect } => *rect,
-            AnnotKind::Stamp { rect, .. } => *rect,
+            AnnotKind::Stamp { rect, .. } | AnnotKind::Connector { rect, .. } => *rect,
             AnnotKind::Line { a, b, .. } => Box2::from_corners(*a, *b),
             AnnotKind::Ink { paths } => paths
                 .iter()
@@ -162,6 +171,18 @@ impl Annot {
 }
 
 pub const NOTE_SIZE: f32 = 20.0;
+/// Diameter of a connector marker, in points.
+pub const CONNECTOR_SIZE: f32 = 22.0;
+
+impl Annot {
+    /// The other end of a connector, if this is one and it's linked.
+    pub fn partner(&self) -> Option<AnnotId> {
+        match &self.kind {
+            AnnotKind::Connector { partner, .. } => *partner,
+            _ => None,
+        }
+    }
+}
 
 /// Current time as a PDF date string (`D:YYYYMMDDHHmmSS`, UTC).
 pub fn pdf_date_now() -> String {
@@ -261,6 +282,56 @@ impl PageGeom {
 
 fn pdf_rect(r: [f32; 4]) -> Object {
     Object::Array(r.iter().map(|v| Object::Real(*v)).collect())
+}
+
+/// Path operators for an ellipse inscribed in the user-space box (no
+/// painting operator).
+fn ellipse_path([x0, y0, x1, y1]: [f32; 4]) -> String {
+    let (cx, cy, rx, ry) = (
+        (x0 + x1) / 2.0,
+        (y0 + y1) / 2.0,
+        (x1 - x0) / 2.0,
+        (y1 - y0) / 2.0,
+    );
+    let k = 0.5523;
+    let mut s = format!(" {:.2} {:.2} m", cx + rx, cy);
+    s.push_str(&format!(
+        " {:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c",
+        cx + rx,
+        cy + ry * k,
+        cx + rx * k,
+        cy + ry,
+        cx,
+        cy + ry
+    ));
+    s.push_str(&format!(
+        " {:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c",
+        cx - rx * k,
+        cy + ry,
+        cx - rx,
+        cy + ry * k,
+        cx - rx,
+        cy
+    ));
+    s.push_str(&format!(
+        " {:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c",
+        cx - rx,
+        cy - ry * k,
+        cx - rx * k,
+        cy - ry,
+        cx,
+        cy - ry
+    ));
+    s.push_str(&format!(
+        " {:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c",
+        cx + rx * k,
+        cy - ry,
+        cx + rx,
+        cy - ry * k,
+        cx + rx,
+        cy
+    ));
+    s
 }
 
 fn color_ops(c: [u8; 3], fill: bool) -> String {
@@ -483,51 +554,33 @@ pub fn to_pdf(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
             dict.set("Subtype", Object::Name(b"Circle".to_vec()));
             dict.set("C", color_arr);
             dict.set("BS", dictionary! { "W" => a.stroke });
-            let [x0, y0, x1, y1] = geom.box_to_user(*rect);
-            let (cx, cy, rx, ry) = (
-                (x0 + x1) / 2.0,
-                (y0 + y1) / 2.0,
-                (x1 - x0) / 2.0,
-                (y1 - y0) / 2.0,
-            );
-            let k = 0.5523;
             content.push_str(&format!(" {} {:.2} w", color_ops(c, false), a.stroke));
-            content.push_str(&format!(" {:.2} {:.2} m", cx + rx, cy));
+            content.push_str(&ellipse_path(geom.box_to_user(*rect)));
+            content.push_str(" S");
+        }
+        AnnotKind::Connector { rect, label, .. } => {
+            // A Link so other viewers jump too; the writer fills in /Dest once
+            // the partner's page object is known.
+            dict.set("Subtype", Object::Name(b"Link".to_vec()));
+            dict.set(
+                "Border",
+                Object::Array(vec![0i64.into(), 0i64.into(), 0i64.into()]),
+            );
+            dict.set("H", Object::Name(b"I".to_vec()));
+            // Filled disc in the mark's color, label in white.
+            content.push_str(&format!(" {}", color_ops(c, true)));
+            content.push_str(&ellipse_path(geom.box_to_user(*rect)));
+            content.push_str(" f");
+            let size = rect.h * 0.55;
+            let chars = label.chars().count().max(1) as f32;
+            let origin = Pt {
+                x: rect.x + rect.w / 2.0 - size * 0.3 * chars,
+                y: rect.y + rect.h / 2.0 + size * 0.36,
+            };
             content.push_str(&format!(
-                " {:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c",
-                cx + rx,
-                cy + ry * k,
-                cx + rx * k,
-                cy + ry,
-                cx,
-                cy + ry
-            ));
-            content.push_str(&format!(
-                " {:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c",
-                cx - rx * k,
-                cy + ry,
-                cx - rx,
-                cy + ry * k,
-                cx - rx,
-                cy
-            ));
-            content.push_str(&format!(
-                " {:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c",
-                cx - rx,
-                cy - ry * k,
-                cx - rx * k,
-                cy - ry,
-                cx,
-                cy - ry
-            ));
-            content.push_str(&format!(
-                " {:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c S",
-                cx + rx * k,
-                cy - ry,
-                cx + rx,
-                cy - ry * k,
-                cx + rx,
-                cy
+                " BT {HELV_BOLD} {size:.2} Tf 1 1 1 rg {} {} Tj ET",
+                text_matrix(origin),
+                content_literal(label)
             ));
         }
         AnnotKind::Line {

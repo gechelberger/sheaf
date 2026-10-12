@@ -68,7 +68,8 @@ actions!(
         ToolLine,
         ToolArrow,
         ToolInk,
-        ToolTick
+        ToolTick,
+        ToolConnector
     ]
 );
 actions!(
@@ -214,6 +215,7 @@ fn main() {
             KeyBinding::new("a", ToolArrow, doc),
             KeyBinding::new("n", ToolInk, doc),
             KeyBinding::new("k", ToolTick, doc),
+            KeyBinding::new("i", ToolConnector, doc),
             KeyBinding::new("ctrl-f", Find, doc),
             KeyBinding::new("escape", CloseSearch, doc),
             KeyBinding::new("f3", SearchNext, doc),

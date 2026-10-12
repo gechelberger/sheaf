@@ -11,7 +11,7 @@ use gpui::{
     PathBuilder, Pixels, Point, Window, canvas, div, prelude::*, px, rgb, rgba,
 };
 use sheaf_core::{PageSize, Rotation};
-use sheaf_doc::{Annot, AnnotKind, Box2, Edit, PageId, Pt};
+use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, Edit, PageId, Pt, annot::CONNECTOR_SIZE};
 use sheaf_render::Rect;
 
 use crate::docview::{DocView, State, rotate_rect};
@@ -28,6 +28,8 @@ pub enum Tool {
     Arrow,
     Ink,
     Tick,
+    /// PDFlyer connector: two clicks place a linked pair of markers.
+    Connector,
 }
 
 impl Tool {
@@ -43,6 +45,7 @@ impl Tool {
             Tool::Arrow => "Arrow",
             Tool::Ink => "Pencil",
             Tool::Tick => "Tick",
+            Tool::Connector => "Connector",
         }
     }
 
@@ -58,10 +61,11 @@ impl Tool {
             Tool::Arrow => "A",
             Tool::Ink => "N",
             Tool::Tick => "K",
+            Tool::Connector => "I",
         }
     }
 
-    pub const ALL: [Tool; 10] = [
+    pub const ALL: [Tool; 11] = [
         Tool::Select,
         Tool::Note,
         Tool::Highlight,
@@ -72,6 +76,7 @@ impl Tool {
         Tool::Arrow,
         Tool::Ink,
         Tool::Tick,
+        Tool::Connector,
     ];
 }
 
@@ -101,6 +106,15 @@ pub struct Drag {
     pub path: Vec<Pt>,
     /// Select tool: the annotation being moved, as it was.
     pub moving: Option<Annot>,
+}
+
+/// First end of a connector pair, placed but not yet committed; the pair is
+/// added as one edit when the second end lands.
+#[derive(Debug, Clone)]
+pub struct PendingConnector {
+    pub page_id: PageId,
+    pub rect: Box2,
+    pub label: String,
 }
 
 /// Map a point in the page's displayed (rotated) space back to the source
@@ -175,6 +189,24 @@ fn translate(kind: &AnnotKind, dx: f32, dy: f32) -> AnnotKind {
             rect: mb(rect),
             glyph: glyph.clone(),
         },
+        AnnotKind::Connector {
+            rect,
+            label,
+            partner,
+        } => AnnotKind::Connector {
+            rect: mb(rect),
+            label: label.clone(),
+            partner: *partner,
+        },
+    }
+}
+
+fn connector_rect(center: Pt) -> Box2 {
+    Box2 {
+        x: center.x - CONNECTOR_SIZE / 2.0,
+        y: center.y - CONNECTOR_SIZE / 2.0,
+        w: CONNECTOR_SIZE,
+        h: CONNECTOR_SIZE,
     }
 }
 
@@ -186,7 +218,69 @@ impl DocView {
             if tool != Tool::Select {
                 doc.selected_annot = None;
             }
+            if tool != Tool::Connector && doc.pending_connector.take().is_some() {
+                doc.notice = Some("Connector cancelled".into());
+            }
         }
+        cx.notify();
+    }
+
+    /// Drop a half-placed connector. Returns whether there was one.
+    pub(crate) fn cancel_pending_connector(&mut self, cx: &mut Context<Self>) -> bool {
+        let State::Ready(doc) = &mut self.state else {
+            return false;
+        };
+        if doc.pending_connector.take().is_some() {
+            doc.notice = Some("Connector cancelled".into());
+            cx.notify();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Scroll to an annotation anywhere in the document and select it.
+    pub(crate) fn jump_to_annot(&mut self, id: AnnotId, cx: &mut Context<Self>) {
+        let State::Ready(doc) = &mut self.state else {
+            return;
+        };
+        let Some((page_id, a)) = doc.model.state().find_annot(id) else {
+            doc.notice = Some("The other end of this connector is gone".into());
+            cx.notify();
+            return;
+        };
+        let b = a.bounds();
+        let Some(index) = doc.model.state().index_of(page_id) else {
+            return;
+        };
+        let Some(pref) = doc.page_ref(index) else {
+            return;
+        };
+        let Some(src) = doc
+            .model
+            .source(pref.source)
+            .map(|s| s.page_size(pref.index))
+        else {
+            return;
+        };
+        let r = rotate_rect(
+            Rect {
+                x: b.x,
+                y: b.y,
+                w: b.w,
+                h: b.h,
+            },
+            src,
+            pref.rotation,
+        );
+        let ps = src.rotated(pref.rotation);
+        doc.pending_scroll = Some(crate::docview::ScrollTo::Reveal {
+            page: index,
+            fx: (r.x + r.w / 2.0) / ps.width.max(1.0),
+            fy: (r.y + r.h / 2.0) / ps.height.max(1.0),
+        });
+        doc.selected_annot = Some((page_id, id));
+        doc.notice = Some(format!("Page {}", index + 1));
         cx.notify();
     }
 
@@ -293,6 +387,45 @@ impl DocView {
                 );
                 self.add_annot(page_id, a, "Tickmark", cx);
             }
+            Tool::Connector => {
+                let rect = connector_rect(p);
+                match doc.pending_connector.take() {
+                    None => {
+                        let label = doc.model.state().next_connector_label();
+                        doc.notice = Some(format!(
+                            "Connector {label}: click where its other end goes (Esc cancels)"
+                        ));
+                        doc.pending_connector = Some(PendingConnector {
+                            page_id,
+                            rect,
+                            label,
+                        });
+                        cx.notify();
+                    }
+                    Some(first) => {
+                        let mk = |rect: Box2, label: String| {
+                            self.new_annot(
+                                AnnotKind::Connector {
+                                    rect,
+                                    label,
+                                    partner: None,
+                                },
+                                color,
+                            )
+                        };
+                        let a = mk(first.rect, first.label.clone());
+                        let b = mk(rect, first.label.clone());
+                        self.apply(
+                            Edit::ConnectorAdd {
+                                a: (first.page_id, a),
+                                b: (page_id, b),
+                            },
+                            &format!("Connector {}", first.label),
+                            cx,
+                        );
+                    }
+                }
+            }
             _ => {
                 doc.drag = Some(Drag {
                     page,
@@ -357,7 +490,11 @@ impl DocView {
             Tool::Select => {
                 if let Some(orig) = drag.moving {
                     let (dx, dy) = (b.x - a.x, b.y - a.y);
-                    if dx.abs() >= 0.5 || dy.abs() >= 0.5 {
+                    if dx.abs() < 0.5 && dy.abs() < 0.5 {
+                        if let Some(partner) = orig.partner() {
+                            self.jump_to_annot(partner, cx);
+                        }
+                    } else {
                         let mut moved = orig.clone();
                         moved.kind = translate(&orig.kind, dx, dy);
                         moved.modified = sheaf_doc::pdf_date_now();
@@ -437,7 +574,7 @@ impl DocView {
                 an.stroke = 2.0;
                 self.add_annot(page_id, an, "Pencil", cx);
             }
-            Tool::Note | Tool::Tick => {}
+            Tool::Note | Tool::Tick | Tool::Connector => {}
         }
     }
 
@@ -501,7 +638,11 @@ impl DocView {
         let Some((page, id)) = doc.selected_annot.take() else {
             return false;
         };
-        self.apply(Edit::AnnotDelete { page, id }, "Delete annotation", cx);
+        let label = match doc.model.state().find_annot(id) {
+            Some((_, a)) if a.partner().is_some() => "Delete connector pair",
+            _ => "Delete annotation",
+        };
+        self.apply(Edit::AnnotDelete { page, id }, label, cx);
         true
     }
 
@@ -681,8 +822,45 @@ impl DocView {
                     _ => el.border_1().border_color(c).into_any_element(),
                 })
             }
-            Tool::Note | Tool::Tick => None,
+            Tool::Note | Tool::Tick | Tool::Connector => None,
         }
+    }
+
+    /// The half-placed connector, drawn where it will land.
+    pub(crate) fn pending_connector_preview(
+        doc: &crate::docview::Doc,
+        color: [u8; 3],
+        page_id: PageId,
+        src: PageSize,
+        rot: Rotation,
+        k: f32,
+    ) -> Option<AnyElement> {
+        let pending = doc.pending_connector.as_ref()?;
+        if pending.page_id != page_id {
+            return None;
+        }
+        let mut ghost = Annot {
+            id: AnnotId(0),
+            kind: AnnotKind::Connector {
+                rect: pending.rect,
+                label: pending.label.clone(),
+                partner: None,
+            },
+            color,
+            opacity: 0.6,
+            stroke: 1.0,
+            author: String::new(),
+            contents: String::new(),
+            modified: String::new(),
+        };
+        ghost.opacity = 0.6;
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .children(crate::docview::annot_elements(&ghost, src, rot, k))
+                .into_any_element(),
+        )
     }
 }
 

@@ -145,12 +145,12 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 ### Markup & annotation
 | Feature | Status |
 |---|---|
-| Sticky notes, highlight, underline, strikethrough | 🎯 |
-| Free text, shapes (rect, ellipse, line, arrow, polygon) | 🎯 |
-| Ink / freehand | 📋 |
-| Stamps (built-in + custom) | 🎯 |
-| **Tickmarks** (PDFlyer): quick-stamp library, keyboard-driven | 🎯 |
-| **Connectors** (PDFlyer): linked markers that jump between pages | 🎯 |
+| Sticky notes, highlight, underline, strikethrough | ✅ notes, highlight; underline/strikethrough 📋 |
+| Free text, shapes (rect, ellipse, line, arrow, polygon) | ✅ polygon 📋 |
+| Ink / freehand | ✅ |
+| Stamps (built-in + custom) | ✅ tickmark library; custom 📋 |
+| **Tickmarks** (PDFlyer): quick-stamp library, keyboard-driven | ✅ |
+| **Connectors** (PDFlyer): linked markers that jump between pages | ✅ saved as Link annotations, so they jump in Acrobat too |
 | **Calculator tape** (PDFlyer): 10-key calc, tape placed as annotation | 🎯 |
 | Comments list / review panel, status, replies | 📋 |
 | Flatten annotations | 📋 |
