@@ -16,3 +16,5 @@ regex.workspace = true
 
 [dev-dependencies]
 env_logger.workspace = true
+sheaf-doc.workspace = true
+lopdf.workspace = true

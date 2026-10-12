@@ -203,6 +203,36 @@ truncated).
 - `im` is MPL-2.0 (file-scoped copyleft); fine as an unmodified dependency
   of an MIT/Apache project.
 
+## Text layers (OCR)
+
+Added in M5. An OCR run produces, per page, a `TextLayer`: words with boxes
+in the source page's displayed space (the same space annotations use), the
+frame the text reads upright in (`upright`, the page's extra rotation at
+recognition time) and the engine's name. It lives in
+`DocState.text_layers: im::HashMap<PageId, Arc<TextLayer>>`.
+
+- **Presence means unsaved.** A save writes every layer into its page as an
+  invisible text layer (text render mode 3 with Tesseract's glyphless
+  embedded font, `/Contents` turned into `[q, original…, layer]`), and
+  `rebase_to_saved` drops them, exactly as it resets rotation deltas. The
+  model never reads layers back: once in the file, PDFium owns the text.
+  Older versions keep their layers, so undo across a save still works.
+- **Edits**: `SetTextLayers` and `ClearTextLayers`. Delete removes a page's
+  layer, Duplicate shares it (same `Arc`), Replace drops it (the page shows
+  other content), Move and Rotate leave it alone.
+- **Coalesced undo.** Results arrive in batches over minutes, but a run is
+  one undo step: `Document::begin_job` returns a `JobId`, and
+  `apply_in_job` amends the newest version in place when that version
+  belongs to the job and isn't the saved one; otherwise it pushes and tags
+  the new version. A save or an unrelated edit mid-run splits the run into
+  two steps. `job_is_undone` tells the runner to stop rather than put undone
+  results back.
+- **Search.** PDFium can't see unsaved layers, so Find and Patterns run the
+  same literal/regex search over the model's layers
+  (`text_layer::search`, `pattern_search`) and merge the hits with PDFium's,
+  dropping PDFium's for any page that has a layer. Hits are addressed by
+  `PageId`, so inserted pages and reordered pages work too.
+
 ## Open questions
 
 - None blocking slice 1.

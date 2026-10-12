@@ -12,10 +12,12 @@ pub mod incremental;
 pub mod model;
 pub mod recovery;
 pub mod save;
+pub mod text_layer;
 
 pub use annot::{Annot, AnnotId, AnnotKind, Box2, PageGeom, Pt, default_author, pdf_date_now};
 pub use history::{AllOf, FixedCount, HistoryPolicy, HistoryStats, MemoryBudget};
 pub use model::{
-    DocState, Document, Edit, EditOutcome, FlatOutlineItem, OutlineId, OutlineNode, PageId,
+    DocState, Document, Edit, EditOutcome, FlatOutlineItem, JobId, OutlineId, OutlineNode, PageId,
     PageRef, SourceId, SourceInfo,
 };
+pub use text_layer::{OcrWord, TextHit, TextLayer};

@@ -18,7 +18,7 @@ use futures::StreamExt;
 use gpui::{
     AnyElement, App, Context, DragMoveEvent, Entity, FocusHandle, Focusable, ObjectFit,
     RenderImage, ScrollHandle, ScrollWheelEvent, SharedString, Subscription, Task, Window, div,
-    img, point, prelude::*, px, rgb, rgba,
+    img, point, prelude::*, px, relative, rgb, rgba,
 };
 use sheaf_core::{PageIndex, PageSize, Rotation};
 use sheaf_doc::save;
@@ -36,11 +36,11 @@ use sheaf_render::{
 use crate::text_area::{TextArea, TextAreaEvent};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::{
-    CloseSearch, DeletePage, DuplicatePages, ExportCleanCopy, ExportFlattened, ExtractPages, Find,
-    FirstPage, InsertPdf, LastPage, LineDown, LineUp, NewBookmark, NextPage, PrevPage, Redo,
-    RotatePageCcw, RotatePageCw, Save, SaveAs, ScreenDown, ScreenUp, SearchNext, SearchPrev,
-    SelectAllPages, ToolArrow, ToolConnector, ToolEllipse, ToolFreeText, ToolHighlight, ToolInk,
-    ToolLine, ToolNote, ToolSelect, ToolSquare, ToolTick, Undo, ZoomActual, ZoomFitPage,
+    CancelOcr, CloseSearch, DeletePage, DuplicatePages, ExportCleanCopy, ExportFlattened,
+    ExtractPages, Find, FirstPage, InsertPdf, LastPage, LineDown, LineUp, NewBookmark, NextPage,
+    PrevPage, Redo, RotatePageCcw, RotatePageCw, Save, SaveAs, ScreenDown, ScreenUp, SearchNext,
+    SearchPrev, SelectAllPages, ToolArrow, ToolConnector, ToolEllipse, ToolFreeText, ToolHighlight,
+    ToolInk, ToolLine, ToolNote, ToolSelect, ToolSquare, ToolTick, Undo, ZoomActual, ZoomFitPage,
     ZoomFitWidth, ZoomIn, ZoomOut,
 };
 
@@ -268,7 +268,67 @@ impl Doc {
             .position(|p| p.source == primary && p.index == index)
     }
 
-    fn touched(&mut self) {
+    /// Matches in unsaved OCR layers, which PDFium can't see, in document
+    /// order. `find` runs the query over one layer.
+    pub(crate) fn layer_hits(
+        &self,
+        find: impl Fn(&sheaf_doc::TextLayer) -> Vec<sheaf_doc::TextHit>,
+    ) -> Vec<Hit> {
+        let state = self.model.state();
+        let mut out = Vec::new();
+        for (order, p) in state.pages.iter().enumerate() {
+            let Some(layer) = state.text_layer(p.id) else {
+                continue;
+            };
+            for h in find(layer) {
+                out.push(Hit {
+                    page: p.id,
+                    order,
+                    rects: h
+                        .rects
+                        .into_iter()
+                        .map(|b| Rect {
+                            x: b.x,
+                            y: b.y,
+                            w: b.w,
+                            h: b.h,
+                        })
+                        .collect(),
+                    text: h.text,
+                });
+            }
+        }
+        out
+    }
+
+    /// Merge hits from the primary file's own text into `hits`, keeping
+    /// document order. A page with an unsaved OCR layer is skipped: the
+    /// layer's hits stand in for it (after a save the layer is in the file
+    /// and gone from the model, so nothing is counted twice).
+    pub(crate) fn merge_source_hits(&self, hits: &mut Vec<Hit>, incoming: Vec<SearchHit>) {
+        let state = self.model.state();
+        for h in incoming {
+            let Some(order) = self.index_of_source_page(h.page) else {
+                continue;
+            };
+            let page = state.pages[order].id;
+            if state.has_text_layer(page) {
+                continue;
+            }
+            let at = hits.partition_point(|x| x.order <= order);
+            hits.insert(
+                at,
+                Hit {
+                    page,
+                    order,
+                    rects: h.rects,
+                    text: h.text,
+                },
+            );
+        }
+    }
+
+    pub(crate) fn touched(&mut self) {
         self.version += 1;
         self.layout = None;
     }
@@ -330,6 +390,8 @@ pub struct DocView {
     pub(crate) initial_pattern: Option<String>,
     pub(crate) calc: Option<crate::calc_panel::CalcTape>,
     pub(crate) comments: Option<crate::comments_panel::Comments>,
+    /// A Recognize Text run in progress (see ocr_run.rs).
+    pub(crate) ocr: Option<crate::ocr_run::OcrRun>,
     pub(crate) pending_comments_focus: bool,
     pub(crate) initial_query: Option<String>,
     pub(crate) search_started: Option<Instant>,
@@ -343,6 +405,8 @@ pub struct DocView {
     pub(crate) selftest_clean: Option<PathBuf>,
     pub(crate) selftest_extract: Option<PathBuf>,
     pub(crate) selftest_flatten: Option<PathBuf>,
+    /// Dev: OCR every page, then save to this path (see ocr_run.rs).
+    pub(crate) selftest_ocr: Option<PathBuf>,
     /// Password the file needs, once known.
     password: Option<String>,
     /// Dev: open the inline editor on this page's last mark next frame.
@@ -357,6 +421,17 @@ pub struct DocView {
     pub(crate) tick_glyph: String,
 }
 
+/// A search match, addressed by page id so it survives reordering and so
+/// unsaved OCR layers (which PDFium can't see) can contribute.
+#[derive(Debug, Clone)]
+pub(crate) struct Hit {
+    pub page: PageId,
+    /// Display index when the hit was recorded; keeps hits in document order.
+    pub order: usize,
+    pub rects: Vec<Rect>,
+    pub text: String,
+}
+
 /// An open search bar and the running / finished query behind it.
 pub(crate) struct Search {
     input: Entity<TextInput>,
@@ -364,8 +439,8 @@ pub(crate) struct Search {
     _events_sub: Subscription,
     /// Query the current results are for.
     query: String,
-    /// Hits in primary-source page order (the worker scans pages in order).
-    hits: Vec<SearchHit>,
+    /// Hits in document order.
+    hits: Vec<Hit>,
     current: Option<usize>,
     scanned: u32,
     done: bool,
@@ -393,6 +468,7 @@ impl DocView {
             initial_pattern: None,
             calc: None,
             comments: None,
+            ocr: None,
             pending_comments_focus: false,
             initial_query: None,
             search_started: None,
@@ -404,6 +480,7 @@ impl DocView {
             selftest_clean: None,
             selftest_extract: None,
             selftest_flatten: None,
+            selftest_ocr: None,
             pending_recovery: None,
             pending_edit_last: None,
             autosave: None,
@@ -585,6 +662,9 @@ impl DocView {
         if let Some(p) = self.selftest_flatten.take() {
             self.selftest_flatten(p, cx);
         }
+        if let Some(p) = self.selftest_ocr.take() {
+            self.selftest_ocr(p, cx);
+        }
         if let Some(src) = self.initial_pattern.take() {
             self.run_initial_pattern(src, cx);
         }
@@ -681,7 +761,7 @@ impl DocView {
 
     /// Write the recovery sidecar a few seconds after the last edit, and at
     /// least every half minute while edits keep coming.
-    fn schedule_autosave(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn schedule_autosave(&mut self, cx: &mut Context<Self>) {
         let first = *self.autosave_since.get_or_insert_with(Instant::now);
         let delay = if first.elapsed() >= std::time::Duration::from_secs(30) {
             std::time::Duration::ZERO
@@ -2095,6 +2175,10 @@ impl DocView {
             return;
         }
         search.done = false;
+        // Unsaved OCR layers are invisible to PDFium; search them here.
+        let seeded = doc.layer_hits(|l| sheaf_doc::text_layer::search(l, &query, false));
+        let has_seed = !seeded.is_empty();
+        search.hits = seeded;
         self.search_started = Some(Instant::now());
         let Some(search) = &mut self.search else {
             return;
@@ -2108,10 +2192,12 @@ impl DocView {
                             return true;
                         };
                         match ev {
-                            SearchEvent::Hits(mut hits) => {
+                            SearchEvent::Hits(hits) => {
                                 let first = search.hits.is_empty();
-                                search.hits.append(&mut hits);
-                                if first {
+                                if let State::Ready(doc) = &view.state {
+                                    doc.merge_source_hits(&mut search.hits, hits);
+                                }
+                                if first && !search.hits.is_empty() {
                                     view.go_to_hit(0, cx);
                                 }
                             }
@@ -2140,6 +2226,9 @@ impl DocView {
                 }
             }
         }));
+        if has_seed {
+            self.go_to_hit(0, cx);
+        }
         cx.notify();
     }
 
@@ -2156,7 +2245,7 @@ impl DocView {
         let ix = ix % search.hits.len();
         search.current = Some(ix);
         let hit = &search.hits[ix];
-        let Some(index) = doc.index_of_source_page(hit.page) else {
+        let Some(index) = doc.model.index_of(hit.page) else {
             return;
         };
         let Some(pref) = doc.page_ref(index) else {
@@ -2776,7 +2865,6 @@ impl Render for DocView {
 
                 // Build elements: preview underneath, then any tiles we have
                 // for the page (stale-zoom ones scaled to fit, current on top).
-                let primary = doc.model.primary();
                 let pages: Vec<_> = plans
                     .iter()
                     .map(|pl| {
@@ -2832,25 +2920,23 @@ impl Render for DocView {
                                     .child(img(im.clone()).size_full().object_fit(ObjectFit::Fill)),
                             );
                         }
-                        // Search highlights on top of everything. Hits are in
-                        // the primary source's page coordinates.
+                        // Search highlights on top of everything. Hit rects
+                        // are in the source page's displayed space.
                         if let Some(search) = &self.search
                             && !search.hits.is_empty()
-                            && pl.pref.source == primary
                         {
                             let src = doc
                                 .model
-                                .source(primary)
+                                .source(pl.pref.source)
                                 .map(|s| s.page_size(pl.pref.index))
                                 .unwrap_or(PageSize {
                                     width: 612.0,
                                     height: 792.0,
                                 });
                             let k = pl.w / src.rotated(pl.pref.rotation).width.max(1.0);
-                            let start = search.hits.partition_point(|h| h.page < pl.pref.index);
-                            for (ix, hit) in search.hits.iter().enumerate().skip(start) {
-                                if hit.page != pl.pref.index {
-                                    break;
+                            for (ix, hit) in search.hits.iter().enumerate() {
+                                if hit.page != pl.pref.id {
+                                    continue;
                                 }
                                 let current = search.current == Some(ix);
                                 for r in &hit.rects {
@@ -2874,21 +2960,19 @@ impl Render for DocView {
                         // Pattern hits, in their own color.
                         if let Some(ps) = &self.pattern
                             && !ps.hits.is_empty()
-                            && pl.pref.source == primary
                         {
                             let src = doc
                                 .model
-                                .source(primary)
+                                .source(pl.pref.source)
                                 .map(|s| s.page_size(pl.pref.index))
                                 .unwrap_or(PageSize {
                                     width: 612.0,
                                     height: 792.0,
                                 });
                             let k = pl.w / src.rotated(pl.pref.rotation).width.max(1.0);
-                            let start = ps.hits.partition_point(|h| h.page < pl.pref.index);
-                            for (ix, hit) in ps.hits.iter().enumerate().skip(start) {
-                                if hit.page != pl.pref.index {
-                                    break;
+                            for (ix, hit) in ps.hits.iter().enumerate() {
+                                if hit.page != pl.pref.id {
+                                    continue;
                                 }
                                 let current = ps.current == Some(ix);
                                 for r in &hit.rects {
@@ -3095,6 +3179,7 @@ impl Render for DocView {
         for (pref, want) in wants {
             self.ensure_rendered(pref, want, cx);
         }
+        let ocr_progress = self.ocr_progress();
 
         div()
             .key_context(KEY_CONTEXT)
@@ -3130,6 +3215,8 @@ impl Render for DocView {
             .on_action(cx.listener(|v, _: &CloseSearch, window, cx| {
                 if v.search.is_some() {
                     v.close_search(window, cx)
+                } else if v.cancel_ocr(cx) {
+                    // Esc during a Recognize Text run stops it.
                 } else if v.cancel_tape_placing(cx) || v.cancel_pending_connector(cx) {
                     // Esc with a tape or connector half-placed just drops it.
                 } else {
@@ -3179,6 +3266,12 @@ impl Render for DocView {
             .on_action(cx.listener(|v, _: &NewBookmark, window, cx| v.new_bookmark(window, cx)))
             .on_action(cx.listener(|v, _: &Undo, _, cx| v.undo(cx)))
             .on_action(cx.listener(|v, _: &Redo, _, cx| v.redo(cx)))
+            // Only while a run exists, so the menu item greys out otherwise.
+            .when(self.ocr_running(), |d| {
+                d.on_action(cx.listener(|v, _: &CancelOcr, _, cx| {
+                    v.cancel_ocr(cx);
+                }))
+            })
             .flex()
             .flex_col()
             .size_full()
@@ -3187,6 +3280,15 @@ impl Render for DocView {
             .children(search_bar)
             .child(toolbar)
             .child(div().flex_grow(1.0).min_h(px(0.0)).children(body))
+            .when_some(ocr_progress, |d, frac| {
+                d.child(
+                    div()
+                        .h(px(3.0))
+                        .flex_shrink_0()
+                        .bg(rgb(0x1e1e1e))
+                        .child(div().h_full().w(relative(frac)).bg(rgb(0x4a9eff))),
+                )
+            })
             .child(
                 div()
                     .h(px(STATUS_H))

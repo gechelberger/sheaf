@@ -192,4 +192,79 @@ mod tests {
         discard(&pdf); // no-op without a sidecar
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn sidecar_carries_ocr_layers() {
+        use crate::annot::Box2;
+        use crate::text_layer::{OcrWord, TextLayer};
+        let dir = std::env::temp_dir().join(format!("sheaf-recovery-ocr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pdf = dir.join("doc.pdf");
+        two_page_pdf(&pdf);
+        let bytes = std::fs::metadata(&pdf).unwrap().len() as usize;
+        let mut model = Document::new(
+            SourceInfo {
+                path: pdf.clone(),
+                page_count: 2,
+                first_page: PageSize {
+                    width: 612.0,
+                    height: 792.0,
+                },
+                page_sizes: None,
+                bytes,
+                password: None,
+            },
+            &[],
+            Box::new(FixedCount(10)),
+        );
+        let p1 = model.page(1).unwrap().id;
+        let layer = TextLayer::from_engine(
+            vec![OcrWord {
+                text: "Hello".into(),
+                rect: Box2 {
+                    x: 72.0,
+                    y: 100.0,
+                    w: 100.0,
+                    h: 12.0,
+                },
+                confidence: 1.0,
+            }],
+            PageSize {
+                width: 612.0,
+                height: 792.0,
+            },
+            Rotation::R0,
+            "test",
+        );
+        model
+            .apply(
+                Edit::SetTextLayers {
+                    layers: vec![(p1, std::sync::Arc::new(layer))],
+                },
+                "ocr",
+            )
+            .unwrap();
+        assert!(write(&model.snapshot()).unwrap().is_some());
+        let rec = find(&pdf).expect("sidecar found");
+        let out = dir.join("recovered.pdf");
+        materialize(&pdf, &rec, &out).unwrap();
+        let recovered = Pdf::load(&out).unwrap();
+        let pages = recovered.get_pages();
+        let p2 = recovered.get_dictionary(pages[&2]).unwrap();
+        let contents = recovered
+            .dereference(p2.get(b"Contents").unwrap())
+            .unwrap()
+            .1
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(contents.len(), 3);
+        let text = String::from_utf8_lossy(&recovered.get_page_content(pages[&2])).into_owned();
+        assert!(
+            text.contains("3 Tr") && text.contains("<00480065006C006C006F>"),
+            "{text}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

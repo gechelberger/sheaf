@@ -8,11 +8,19 @@ license.workspace = true
 name = "sheaf"
 path = "src/main.rs"
 
+[features]
+# Both OCR engines are in by default. `cargo build --no-default-features`
+# skips them for a quick build that needs no CMake, C++ or network.
+default = ["ocr-tesseract", "ocr-oar"]
+ocr-tesseract = ["sheaf-ocr/tesseract"]
+ocr-oar = ["sheaf-ocr/oar"]
+
 [dependencies]
 sheaf-core.workspace = true
 sheaf-render.workspace = true
 sheaf-doc.workspace = true
 sheaf-ui.workspace = true
+sheaf-ocr.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
 anyhow.workspace = true

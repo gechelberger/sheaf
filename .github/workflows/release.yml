@@ -34,9 +34,21 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
+      - name: Cache Tesseract build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.tesseract-rs
+            ~/AppData/Roaming/tesseract-rs
+          key: tesseract-rs-0.4.0-${{ runner.os }}
+
       - name: Fetch PDFium
         shell: bash
         run: scripts/fetch-pdfium.sh
+
+      - name: Fetch OCR data
+        shell: bash
+        run: scripts/fetch-ocr-data.sh
 
       - name: Package
         shell: bash

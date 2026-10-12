@@ -104,7 +104,7 @@ Tier 1 platforms gate every release and run the perf budgets in CI.
 | Rasterizer | **PDFium** via `pdfium-render` | Chrome's engine: fast, BSD-licensed, handles encrypted files, forms, broken PDFs. Hidden behind a `Renderer` trait so a pure-Rust engine (hayro) can replace it once mature. |
 | Document edits | **lopdf** (or our own object layer) | PDFium's write API is limited (esp. outlines). Structural edits — page tree, bookmarks, annotations — are done on the raw object graph and saved incrementally. The renderer re-loads from the edited bytes. |
 | Rendering strategy | **Tiled, async, cached** | Viewport requests tiles at the current zoom; a worker pool renders them off the UI thread; LRU cache keyed by `(page, zoom, tile)`. Low-res preview tile first, then full-res. This is the single biggest "feels fast" lever. |
-| Text / OCR | PDFium text extraction; OCR via `ocrs` or Tesseract behind a feature flag | OCR is post-MVP. |
+| Text / OCR | PDFium text extraction. OCR is a **core feature** behind an `OcrEngine` trait with two engines compiled in by default: **Tesseract 5** (built from source, linked statically) and **PaddleOCR PP-OCRv5** on ONNX Runtime (`oar-ocr`, with Microsoft's runtime library loaded on demand from `ocr/lib`). | Both engines are native C/C++, so OCR can't live in a WASM plugin; the trait keeps engines swappable, and plugins get OCR as a host capability. Judged on scanned tax forms, not purity. |
 | Save model | Incremental update by default; "Save As (rewrite)" optional | Preserves originals, fast saves on large files. Clean rewrite available for size reduction / "Export Clean Copy". |
 | Undo | Command pattern over the document model | Every edit is a reversible `Edit` enum; undo stack is per-document. |
 
@@ -134,6 +134,7 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 | Tabs / multiple documents / multiple windows | ✅ |
 | Split view (same doc, two positions) | 📋 |
 | Attachments panel | 📋 |
+| Open PDF Portfolios (browse and extract embedded files) | 📋 |
 | Layers (OCG) panel | 📋 |
 
 ### Page organization
@@ -144,6 +145,7 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 | Delete / extract / duplicate pages | ✅ Document > Extract Pages… keeps marks and relevant bookmarks |
 | Insert PDF at position (PDFlyer "Insert PDF") | ✅ |
 | Merge bookmarks on insert (parents merged, children appended) | ✅ |
+| Combine Files: many PDFs and images into one, choosing pages from each | 📋 |
 | Split document (by page range, by bookmark, by size) | 📋 |
 | Insert blank page / from image / from scanner | 📋 |
 | Crop pages | 📋 |
@@ -198,7 +200,7 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 | Export pages to PNG / JPEG | 🎯 |
 | Export to multi-page TIFF (PDFlyer) | 📋 |
 | Create PDF from images | 📋 |
-| OCR (searchable text layer) | 📋 |
+| OCR (searchable text layer) | ✅ Document > Recognize Text (OCR)… (Ctrl+Shift+T): Tesseract or PaddleOCR, whole binder / current / selected / range, skips pages that already have text, progress + Esc to stop, one undo step; Find and Patterns see the text before the first save |
 | Export text | 📋 |
 | Print | 📋 |
 | PDF/A conversion | ❓ |
@@ -219,7 +221,7 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 | Optimize / reduce file size | 📋 |
 | Preflight / accessibility checker | ❓ |
 | Batch actions / scripting | 📋 (Lua or Rhai, not JS) |
-| Portfolios | ❌ not planned |
+| Create Portfolios | ❌ not planned (opening them is planned) |
 
 ## MVP (v0.1): "the fast workpaper binder"
 
@@ -246,9 +248,8 @@ Content (text/image) editing, OCR, forms, redaction, signatures, TIFF export,
 measurement, compare, batch. These are all real Acrobat parity items and all
 come after v0.1.
 
-**v0.2 is OCR** (searchable text layer on scanned pages, batch over a binder).
-Candidate engines: `ocrs` (pure Rust, ONNX models) vs Tesseract bindings;
-decide on accuracy for scanned tax forms, not on purity.
+After v0.1 come Scan & OCR (M5) and plugins (M6), which together make v0.2, then the
+rest of the path to parity in [ROADMAP.md](ROADMAP.md).
 
 ### Milestones
 
@@ -259,6 +260,10 @@ decide on accuracy for scanned tax forms, not on purity.
 | M2 | **Organizer**: page reorder/rotate/delete/insert, bookmark tree editing, incremental save, undo; pattern (regex) search as its own tool. *Done 2026-10-11 (Linux).* | The document model |
 | M3 | **Markup**: standard annotations, stamps, tickmarks, connectors, calc tape, comments panel, clean copy export. *Done 2026-10-11 (Linux).* | The PDFlyer workflow |
 | M4 | **Polish → v0.1**: unsaved-changes prompts, settings with persisted layout, command palette, user keymap, crash-recovery autosave, packaging + CI. *Done 2026-10-11 (Linux; Windows bundle and CI workflows not yet exercised).* | Daily-driver readiness |
+| M5 | **Scan & OCR**: `OcrEngine` trait with Tesseract and PaddleOCR engines, batch OCR over a binder with progress and cancel, invisible text layer written on save, search over OCR text. *OCR slices done 2026-10-12 (Linux; Windows build not yet exercised). Scan cleanup, image import, scanner intake and separator sheets still planned — see [`todos/ocr.md`](todos/ocr.md).* | Scanned binders become searchable |
+| M6 | **Plugins**: WASM components, declarative UI, command registry. *Planned — see [`todos/plugins.md`](todos/plugins.md).* | Extensibility without forking |
+
+M7 onward (viewing and output through v1.0 parity) is laid out in [ROADMAP.md](ROADMAP.md).
 
 ## Open questions
 
@@ -286,8 +291,20 @@ sudo apt install build-essential clang lld cmake pkg-config libfontconfig-dev \
 
 
 scripts/fetch-pdfium.sh          # prebuilt libpdfium → vendor/pdfium/<os>-<arch>/
+scripts/fetch-ocr-data.sh        # Tesseract language data + PaddleOCR models → vendor/ocr/
 cargo run -p sheaf-app           # the GPUI window
 ```
+
+**OCR engines and build time.** Both engines are on by default. The first
+build compiles Tesseract 5 and Leptonica from source (CMake and a C++17
+compiler; a few minutes, cached in `~/.tesseract-rs`) and needs network
+access once. `cargo build -p sheaf-app --no-default-features` skips the
+engines for a quick build (the Recognize Text dialog then says so). The
+PaddleOCR engine does not link ONNX Runtime: it loads Microsoft's generic
+build from `vendor/ocr/lib` (or `ocr/lib` beside a packaged binary) the
+first time it is used, so the app starts on any x86-64 CPU and the
+`ort` crate's AVX2-only static binaries are never involved. CI runs the
+binary under `qemu -cpu Nehalem` to keep it that way.
 
 On Linux, file dialogs use the desktop portal when available and fall back to
 Zenity if the portal fails. WSLg installations without a desktop portal need
@@ -300,8 +317,13 @@ fetch script from Git Bash; it detects the host and installs `pdfium.dll`:
 
 ```sh
 bash scripts/fetch-pdfium.sh     # → vendor/pdfium/windows-x86_64/pdfium.dll
+bash scripts/fetch-ocr-data.sh   # → vendor/ocr/
 cargo run -p sheaf-app
 ```
+
+Visual Studio ships the CMake the Tesseract build needs; run the first
+build from a Developer PowerShell (or with `VSINSTALLDIR` set) so it uses
+the NMake generator.
 
 The toolchain is pinned in `rust-toolchain.toml` (tracks Zed's requirement,
 since GPUI is consumed as a git dependency at a pinned rev in `Cargo.toml`).
@@ -312,10 +334,12 @@ since GPUI is consumed as a git dependency at a pinned rev in `Cargo.toml`).
 scripts/package.sh               # → dist/sheaf-<version>-<os>-<arch>.tar.gz (zip on Windows)
 ```
 
-The bundle is the release binary next to the PDFium library, the licenses,
-and (on Linux) a `.desktop` entry; unpack it anywhere and run `sheaf`. The
-binary looks for `libpdfium` beside itself first, so no install step is
-needed. Pushing a `v*` tag runs `.github/workflows/release.yml`, which builds
+The bundle is the release binary next to the PDFium library, the OCR data
+in `ocr/` (about 25 MB of language files and models, plus the ONNX Runtime
+library in `ocr/lib`), the licenses, and
+(on Linux) a `.desktop` entry; unpack it anywhere and run `sheaf`. The
+binary looks for `libpdfium` and `ocr/` beside itself first, so no install
+step is needed. Pushing a `v*` tag runs `.github/workflows/release.yml`, which builds
 the Linux and Windows bundles and attaches them to a GitHub release; `ci.yml`
 runs fmt, clippy, tests and a build on every push.
 
@@ -328,7 +352,10 @@ cargo run -p sheaf-app                                        # GPUI window
 ```
 
 `sheaf-render` finds libpdfium via `$PDFIUM_LIB_DIR`, then
-`vendor/pdfium/<os>-<arch>/`, then the system library.
+`vendor/pdfium/<os>-<arch>/`, then the system library. `sheaf-ocr` finds its
+data via `$SHEAF_OCR_DATA_DIR`, then `ocr/` beside the binary, then
+`vendor/ocr/`; `cargo test -p sheaf-ocr --features tesseract,oar -- --ignored`
+runs the engines on a PDFium-rendered page.
 
 `sheaf --timing <file.pdf>` prints open / first-render timings to stderr. On
 WSL, keep test PDFs on the Linux filesystem: `/mnt/c` goes through 9P, which
@@ -391,7 +418,13 @@ on Linux, `%APPDATA%\sheaf` on Windows, `~/Library/Application Support/sheaf`
 on macOS (`SHEAF_CONFIG_DIR` overrides).
 
 - `settings.json` — written by the app: dock layout (which panels sit where,
-  tab order, sizes, open state) and window placement.
+  tab order, sizes, open state), window placement, and the OCR options under
+  `"ocr"`: `engine` (`"tesseract"` or `"oar"`), `dpi` (150–600, default
+  300), `skip_pages_with_text`, `tesseract.lang` (e.g. `"eng+deu"`, each
+  needing a `.traineddata` file), `tesseract.tessdata_dir` and
+  `oar.{det,rec,dict,textline_ori,doc_ori}` to point at your own data or
+  models, `oar.model_set` (`"en"` or `"multi"`), and
+  `oar.use_doc_orientation`. The Recognize Text dialog edits the common ones.
 - `patterns.json` — the Patterns panel's presets, seeded from the built-ins on
   first run. Edit, delete, or add them from the panel (right-click a chip;
   "+ Save…" stores the current pattern) or by hand.
@@ -407,7 +440,7 @@ on macOS (`SHEAF_CONFIG_DIR` overrides).
 ```
 
 Contexts: `DocView` (the page view), `Outline`, `Comments`, `Palette`,
-`TextInput`, `Workspace` (anywhere in the window), or none for global.
+`OcrDialog`, `TextInput`, `Workspace` (anywhere in the window), or none for global.
 Bad entries are reported on stderr at startup and skipped.
 
 **Crash recovery.** A few seconds after each edit, sheaf writes the unsaved
@@ -424,4 +457,7 @@ and most package managers, and not an Adobe trademark.
 ## License
 
 Dual-licensed under MIT or Apache-2.0, at your option. Third-party engines:
-PDFium (BSD-3), hayro (Apache-2.0/MIT). MuPDF is deliberately not used (AGPL).
+PDFium (BSD-3), hayro (Apache-2.0/MIT), Tesseract and its glyphless `pdf.ttf`
+(Apache-2.0), Leptonica (BSD-2), ONNX Runtime (MIT), PaddleOCR models and
+`oar-ocr` (Apache-2.0); see `packaging/licenses/`. MuPDF is deliberately not
+used (AGPL).

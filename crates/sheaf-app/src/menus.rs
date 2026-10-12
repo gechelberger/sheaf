@@ -88,6 +88,9 @@ pub fn app_menus() -> Vec<Menu> {
                 item("E&xtract Pages…", ExtractPages),
                 item("&Delete Pages", DeletePage),
                 sep(),
+                item("Recognize &Text (OCR)…", RecognizeText),
+                item("Cancel OC&R", CancelOcr),
+                sep(),
                 item("New &Bookmark", NewBookmark),
             ],
         ),
@@ -117,6 +120,8 @@ pub fn app_menus() -> Vec<Menu> {
             vec![
                 item("&Next Tab", NextTab),
                 item("&Previous Tab", PrevTab),
+                sep(),
+                item("&Move Tab to New Window", MoveTabToNewWindow),
                 sep(),
                 item("&Close Tab", CloseTab),
                 item("Close &Window", CloseWindow),

@@ -11,6 +11,7 @@ use sheaf_core::{PageSize, Rotation};
 
 use crate::annot::{Annot, AnnotId, AnnotKind};
 use crate::history::{HistoryPolicy, HistoryStats};
+use crate::text_layer::TextLayer;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SourceId(pub u32);
@@ -82,11 +83,23 @@ pub struct DocState {
     /// Our markup, per page. Annotations already in a source file are not
     /// here unless they were written by sheaf (see `annot`).
     pub annots: im::HashMap<PageId, Vector<Annot>>,
+    /// OCR text not yet written to a file. A save bakes these into the
+    /// page content and `rebase_to_saved` drops them, so presence here
+    /// means unsaved (see `text_layer`).
+    pub text_layers: im::HashMap<PageId, Arc<TextLayer>>,
 }
 
 impl DocState {
     pub fn annots_on(&self, page: PageId) -> Option<&Vector<Annot>> {
         self.annots.get(&page)
+    }
+
+    pub fn text_layer(&self, page: PageId) -> Option<&Arc<TextLayer>> {
+        self.text_layers.get(&page)
+    }
+
+    pub fn has_text_layer(&self, page: PageId) -> bool {
+        self.text_layers.contains_key(&page)
     }
 
     /// Locate an annotation by id on any page.
@@ -226,7 +239,22 @@ pub enum Edit {
         a: (PageId, Annot),
         b: (PageId, Annot),
     },
+    /// Set (or replace) the OCR layer of each page. Unknown pages are an
+    /// error.
+    SetTextLayers {
+        layers: Vec<(PageId, Arc<TextLayer>)>,
+    },
+    /// Drop unsaved OCR layers. Pages without one are ignored; a layer
+    /// already written to the file can't be removed from the model.
+    ClearTextLayers {
+        ids: Vec<PageId>,
+    },
 }
+
+/// Identifies a long-running job whose results arrive in batches but
+/// should undo as one step. See [`Document::apply_in_job`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct JobId(u64);
 
 /// What an edit did, for user-facing notices.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -241,6 +269,8 @@ struct Version {
     label: String,
     state: DocState,
     marginal_bytes: usize,
+    /// The job that produced this version, if it may still amend it.
+    job: Option<JobId>,
 }
 
 /// Everything a save needs, detached from the document so it can run on
@@ -273,6 +303,7 @@ pub struct Document {
     next_source: u32,
     policy: Box<dyn HistoryPolicy>,
     next_annot: u64,
+    next_job: u64,
     /// Outline as it exists in the primary file on disk.
     saved_outline: Vector<OutlineNode>,
     /// Markup as it exists in the primary file on disk.
@@ -298,6 +329,7 @@ impl Document {
             next_source: 1,
             policy,
             next_annot: 1,
+            next_job: 1,
             saved_outline: Vector::new(),
             saved_annots: im::HashMap::new(),
         };
@@ -319,8 +351,10 @@ impl Document {
                 pages,
                 outline,
                 annots: im::HashMap::new(),
+                text_layers: im::HashMap::new(),
             },
             marginal_bytes: 0,
+            job: None,
         });
         doc
     }
@@ -426,12 +460,13 @@ impl Document {
     /// `saved`: register it as a new source and make the current version an
     /// identity mapping over it, keeping `PageId`s (and bookmarks) intact so
     /// the view doesn't flicker. Older versions still reference the old
-    /// sources, so undo across a save keeps working. Rotation deltas are now
-    /// baked into the file, so they reset to zero.
+    /// sources, so undo across a save keeps working. Rotation deltas and OCR
+    /// layers are now baked into the file, so they reset to nothing.
     pub fn rebase_to_saved(&mut self, saved: SourceInfo) -> SourceId {
         let id = self.add_source(saved);
         self.primary = id;
         let v = &mut self.history[self.cursor];
+        v.state.text_layers = im::HashMap::new();
         v.state.pages = v
             .state
             .pages
@@ -530,6 +565,68 @@ impl Document {
         if state == *self.state() {
             return Ok(outcome);
         }
+        self.push_version(state, label.into(), None);
+        Ok(outcome)
+    }
+
+    /// Start a job whose batches of edits should undo as one step.
+    pub fn begin_job(&mut self) -> JobId {
+        let id = JobId(self.next_job);
+        self.next_job += 1;
+        id
+    }
+
+    /// Like [`apply`](Self::apply), but when the current version is the
+    /// newest, was produced by `job`, and isn't the saved one, the edit
+    /// amends it in place instead of pushing a new version. The first batch
+    /// of a job pushes; later batches amend, so the whole job is one undo
+    /// step. A save or an unrelated edit in between ends the chain, and the
+    /// rest of the job becomes a second step.
+    pub fn apply_in_job(
+        &mut self,
+        job: JobId,
+        edit: Edit,
+        label: impl Into<String>,
+    ) -> Result<EditOutcome> {
+        let (state, outcome) = self.compute(self.state().clone(), edit)?;
+        let amend = self.history[self.cursor].job == Some(job)
+            && self.cursor + 1 == self.history.len()
+            && self.saved != Some(self.cursor);
+        if amend {
+            let marginal_bytes = match self.cursor.checked_sub(1) {
+                Some(prev) => Self::marginal(&self.history[prev].state, &state),
+                None => 0,
+            };
+            let v = &mut self.history[self.cursor];
+            v.state = state;
+            v.label = label.into();
+            v.marginal_bytes = marginal_bytes;
+            self.trim();
+        } else {
+            if state == *self.state() {
+                return Ok(outcome);
+            }
+            self.push_version(state, label.into(), Some(job));
+        }
+        Ok(outcome)
+    }
+
+    /// Whether the current version is the one `job` is building, i.e. the
+    /// user hasn't undone it or edited past it. Meaningful once the job has
+    /// applied its first batch.
+    pub fn job_is_current(&self, job: JobId) -> bool {
+        self.history[self.cursor].job == Some(job)
+    }
+
+    /// Whether the user has undone `job`'s version (it sits in the redo
+    /// branch). An unrelated edit after the job does not count.
+    pub fn job_is_undone(&self, job: JobId) -> bool {
+        self.history[self.cursor + 1..]
+            .iter()
+            .any(|v| v.job == Some(job))
+    }
+
+    fn push_version(&mut self, state: DocState, label: String, job: Option<JobId>) {
         self.history.truncate(self.cursor + 1);
         if let Some(s) = self.saved
             && s > self.cursor
@@ -538,13 +635,13 @@ impl Document {
         }
         let marginal_bytes = Self::marginal(&self.history[self.cursor].state, &state);
         self.history.push(Version {
-            label: label.into(),
+            label,
             state,
             marginal_bytes,
+            job,
         });
         self.cursor += 1;
         self.trim();
-        Ok(outcome)
     }
 
     fn trim(&mut self) {
@@ -590,6 +687,14 @@ impl Document {
         }
         if !old.annots.ptr_eq(&new.annots) {
             bytes += new.annots.values().map(|l| l.len() * 256).sum::<usize>();
+        }
+        if !old.text_layers.ptr_eq(&new.text_layers) {
+            bytes += new
+                .text_layers
+                .iter()
+                .filter(|(k, v)| old.text_layers.get(k).is_none_or(|o| !Arc::ptr_eq(o, v)))
+                .map(|(_, v)| v.byte_estimate())
+                .sum::<usize>();
         }
         bytes
     }
@@ -706,6 +811,7 @@ impl Document {
                 out.pages_removed = before - st.pages.len();
                 for id in &set {
                     st.annots.remove(id);
+                    st.text_layers.remove(id);
                 }
                 let (outline, removed) = cascade_delete(&st.outline, &set);
                 st.outline = outline;
@@ -770,6 +876,9 @@ impl Document {
                                 .collect();
                             st.annots.insert(copy, list);
                         }
+                        if let Some(layer) = st.text_layers.get(&p.id).cloned() {
+                            st.text_layers.insert(copy, layer);
+                        }
                         pages.push_back(PageRef { id: copy, ..*p });
                         out.pages_added += 1;
                     }
@@ -788,6 +897,8 @@ impl Document {
                 let mut pages = st.pages.clone();
                 for id in &ids {
                     let i = *pos.get(id).context("page to replace not found")?;
+                    // The page shows different content now; its OCR is stale.
+                    st.text_layers.remove(id);
                     match replacements.next() {
                         Some(index) => {
                             pages.set(
@@ -887,6 +998,7 @@ impl Document {
                                 pages: rest.clone(),
                                 outline: st.outline.clone(),
                                 annots: st.annots.clone(),
+                                text_layers: st.text_layers.clone(),
                             };
                             let prev_node = flat[..my_pos]
                                 .iter()
@@ -1008,6 +1120,20 @@ impl Document {
                     let mut list = st.annots.get(&page).cloned().unwrap_or_default();
                     list.push_back(annot);
                     st.annots.insert(page, list);
+                }
+            }
+            Edit::SetTextLayers { layers } => {
+                let pos = st.page_positions();
+                for (id, layer) in layers {
+                    if !pos.contains_key(&id) {
+                        bail!("page not found");
+                    }
+                    st.text_layers.insert(id, layer);
+                }
+            }
+            Edit::ClearTextLayers { ids } => {
+                for id in ids {
+                    st.text_layers.remove(&id);
                 }
             }
         }
@@ -1772,5 +1898,281 @@ mod tests {
         )
         .unwrap();
         assert!(!d.can_undo());
+    }
+
+    // ----- OCR text layers ---------------------------------------------------
+
+    fn tl(text: &str) -> Arc<TextLayer> {
+        Arc::new(TextLayer::from_engine(
+            vec![crate::text_layer::OcrWord {
+                text: text.into(),
+                rect: crate::annot::Box2 {
+                    x: 10.0,
+                    y: 10.0,
+                    w: 50.0,
+                    h: 10.0,
+                },
+                confidence: 1.0,
+            }],
+            PageSize {
+                width: 612.0,
+                height: 792.0,
+            },
+            Rotation::R0,
+            "test",
+        ))
+    }
+
+    fn set(d: &mut Document, pages: &[usize], text: &str) {
+        let layers = pages.iter().map(|&i| (id_at(d, i), tl(text))).collect();
+        d.apply(Edit::SetTextLayers { layers }, "ocr").unwrap();
+    }
+
+    fn layer_texts(d: &Document) -> Vec<(usize, String)> {
+        let mut v: Vec<(usize, String)> = d
+            .state()
+            .text_layers
+            .iter()
+            .map(|(id, l)| (d.index_of(*id).unwrap(), l.words[0].text.clone()))
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn set_text_layers_undo_redo() {
+        let mut d = doc();
+        set(&mut d, &[1, 3], "a");
+        assert_eq!(layer_texts(&d), vec![(1, "a".into()), (3, "a".into())]);
+        assert!(d.state().has_text_layer(id_at(&d, 1)));
+        assert!(d.is_dirty());
+        d.undo();
+        assert!(d.state().text_layers.is_empty());
+        d.redo();
+        assert_eq!(layer_texts(&d).len(), 2);
+        // Replacing a page's layer is a new version.
+        set(&mut d, &[1], "b");
+        assert_eq!(layer_texts(&d), vec![(1, "b".into()), (3, "a".into())]);
+        assert_eq!(d.undo_label(), Some("ocr"));
+    }
+
+    #[test]
+    fn clear_text_layers() {
+        let mut d = doc();
+        set(&mut d, &[0, 1], "a");
+        d.apply(
+            Edit::ClearTextLayers {
+                ids: vec![id_at(&d, 0), id_at(&d, 5)],
+            },
+            "clear",
+        )
+        .unwrap();
+        assert_eq!(layer_texts(&d), vec![(1, "a".into())]);
+        // Clearing nothing is a no-op version-wise.
+        let n = d.stats().versions;
+        d.apply(
+            Edit::ClearTextLayers {
+                ids: vec![id_at(&d, 5)],
+            },
+            "clear",
+        )
+        .unwrap();
+        assert_eq!(d.stats().versions, n);
+    }
+
+    #[test]
+    fn unknown_page_is_an_error() {
+        let mut d = doc();
+        assert!(
+            d.apply(
+                Edit::SetTextLayers {
+                    layers: vec![(PageId(999), tl("x"))]
+                },
+                "ocr"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn layers_follow_delete_duplicate_replace() {
+        let mut d = doc();
+        set(&mut d, &[1, 2, 3], "a");
+        d.apply(
+            Edit::DeletePages {
+                ids: vec![id_at(&d, 1)],
+            },
+            "del",
+        )
+        .unwrap();
+        // Former pages 2 and 3 are now 1 and 2.
+        assert_eq!(layer_texts(&d), vec![(1, "a".into()), (2, "a".into())]);
+        let dup = id_at(&d, 1);
+        d.apply(Edit::DuplicatePages { ids: vec![dup] }, "dup")
+            .unwrap();
+        assert_eq!(
+            layer_texts(&d),
+            vec![(1, "a".into()), (2, "a".into()), (3, "a".into())]
+        );
+        let copy = id_at(&d, 2);
+        assert!(Arc::ptr_eq(
+            d.state().text_layer(dup).unwrap(),
+            d.state().text_layer(copy).unwrap()
+        ));
+        // Replacing a page's content makes its OCR stale.
+        let other = d.add_source(src(2));
+        d.apply(
+            Edit::ReplacePages {
+                ids: vec![copy],
+                source: other,
+                range: 0..1,
+            },
+            "replace",
+        )
+        .unwrap();
+        assert_eq!(layer_texts(&d), vec![(1, "a".into()), (3, "a".into())]);
+    }
+
+    #[test]
+    fn job_batches_coalesce() {
+        let mut d = doc();
+        let before = d.stats().versions;
+        let job = d.begin_job();
+        for (i, page) in [0usize, 1, 2].iter().enumerate() {
+            d.apply_in_job(
+                job,
+                Edit::SetTextLayers {
+                    layers: vec![(id_at(&d, *page), tl("a"))],
+                },
+                format!("OCR batch {i}"),
+            )
+            .unwrap();
+            assert!(d.job_is_current(job));
+        }
+        assert_eq!(d.stats().versions, before + 1);
+        assert_eq!(layer_texts(&d).len(), 3);
+        assert_eq!(d.undo_label(), Some("OCR batch 2"));
+        d.undo();
+        assert!(d.state().text_layers.is_empty());
+        assert!(!d.job_is_current(job));
+        assert!(d.job_is_undone(job));
+        d.redo();
+        assert_eq!(layer_texts(&d).len(), 3);
+        assert!(!d.job_is_undone(job));
+    }
+
+    #[test]
+    fn job_never_amends_saved_version() {
+        let mut d = doc();
+        let job = d.begin_job();
+        d.apply_in_job(
+            job,
+            Edit::SetTextLayers {
+                layers: vec![(id_at(&d, 0), tl("a"))],
+            },
+            "ocr",
+        )
+        .unwrap();
+        let n = d.stats().versions;
+        d.mark_saved();
+        d.apply_in_job(
+            job,
+            Edit::SetTextLayers {
+                layers: vec![(id_at(&d, 1), tl("a"))],
+            },
+            "ocr",
+        )
+        .unwrap();
+        assert_eq!(d.stats().versions, n + 1, "pushed, not amended");
+        assert!(d.is_dirty());
+        d.undo();
+        assert!(!d.is_dirty(), "the saved version is intact");
+        assert_eq!(layer_texts(&d).len(), 1);
+    }
+
+    #[test]
+    fn job_breaks_after_foreign_edit() {
+        let mut d = doc();
+        let job = d.begin_job();
+        d.apply_in_job(
+            job,
+            Edit::SetTextLayers {
+                layers: vec![(id_at(&d, 0), tl("a"))],
+            },
+            "ocr",
+        )
+        .unwrap();
+        d.apply(
+            Edit::RotatePages {
+                ids: vec![id_at(&d, 5)],
+                by: Rotation::R90,
+            },
+            "rotate",
+        )
+        .unwrap();
+        assert!(!d.job_is_current(job));
+        assert!(!d.job_is_undone(job), "a later edit is not an undo");
+        let n = d.stats().versions;
+        d.apply_in_job(
+            job,
+            Edit::SetTextLayers {
+                layers: vec![(id_at(&d, 1), tl("a"))],
+            },
+            "ocr",
+        )
+        .unwrap();
+        assert_eq!(d.stats().versions, n + 1);
+        assert!(d.job_is_current(job));
+        // Undo peels the second batch, then the rotation, then the first.
+        d.undo();
+        assert_eq!(layer_texts(&d).len(), 1);
+        assert_eq!(d.page(5).unwrap().rotation, Rotation::R90);
+    }
+
+    #[test]
+    fn job_first_batch_noop_pushes_nothing() {
+        let mut d = doc();
+        let job = d.begin_job();
+        let n = d.stats().versions;
+        d.apply_in_job(
+            job,
+            Edit::ClearTextLayers {
+                ids: vec![id_at(&d, 0)],
+            },
+            "ocr",
+        )
+        .unwrap();
+        assert_eq!(d.stats().versions, n);
+        assert!(!d.job_is_current(job));
+    }
+
+    #[test]
+    fn rebase_clears_text_layers() {
+        let mut d = doc();
+        set(&mut d, &[0], "a");
+        d.rebase_to_saved(src(6));
+        assert!(d.state().text_layers.is_empty());
+        assert!(!d.is_dirty());
+        // The version before the save still carries its layer, so undoing
+        // across the save re-emits it against the old source.
+        d.undo();
+        assert!(d.state().text_layers.is_empty(), "pre-OCR version");
+        d.redo();
+        assert!(d.state().text_layers.is_empty(), "rebased version");
+    }
+
+    #[test]
+    fn marginal_counts_layer_bytes() {
+        let mut d = doc();
+        set(&mut d, &[0], "hello");
+        let m = d.stats().marginal_bytes;
+        assert!(*m.last().unwrap() > 0);
+        // A duplicate costs the page list plus (at most) one layer estimate.
+        let dup = id_at(&d, 0);
+        d.apply(Edit::DuplicatePages { ids: vec![dup] }, "dup")
+            .unwrap();
+        let m2 = d.stats().marginal_bytes;
+        let pages = d.page_count() * std::mem::size_of::<PageRef>();
+        assert!(*m2.last().unwrap() <= *m.last().unwrap() + pages);
     }
 }
