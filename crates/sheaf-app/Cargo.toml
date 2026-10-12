@@ -26,3 +26,11 @@ regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 unicode-segmentation.workspace = true
+
+[dev-dependencies]
+# examples/gen_icons.rs only; both are already in the tree via GPUI.
+resvg = { version = "0.46", default-features = false }
+image = { workspace = true, features = ["ico"] }
+
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3"

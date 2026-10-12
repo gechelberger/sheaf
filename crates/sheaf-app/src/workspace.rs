@@ -832,9 +832,12 @@ impl Render for Workspace {
             None => div()
                 .size_full()
                 .flex()
+                .flex_col()
+                .gap_4()
                 .items_center()
                 .justify_center()
                 .text_color(rgb(0x8a8a8a))
+                .child(crate::brand::logo(px(96.0)))
                 .child(SharedString::from(
                     "No document open — Ctrl+O to open a PDF",
                 ))

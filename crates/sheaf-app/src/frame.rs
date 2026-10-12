@@ -101,9 +101,10 @@ pub fn title_bar(
                 window.show_window_menu(pos);
             }
         })
+        .child(div().pl_3().child(crate::brand::mark(px(16.0), window)))
         .child(
             div()
-                .pl_3()
+                .pl_2()
                 .text_sm()
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(rgb(0xe0e0e0))

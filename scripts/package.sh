@@ -43,6 +43,9 @@ cp LICENSE-MIT LICENSE-APACHE "$stage/licenses/"
 cp README.md "$stage/"
 if [[ "$os" == linux ]]; then
   cp packaging/sheaf.desktop "$stage/"
+  # Icon=sheaf: install these as hicolor 256x256/apps/sheaf.png and scalable/apps/sheaf.svg.
+  cp crates/sheaf-app/resources/sheaf-256.png "$stage/sheaf.png"
+  cp crates/sheaf-app/resources/sheaf.svg "$stage/"
 fi
 
 mkdir -p dist

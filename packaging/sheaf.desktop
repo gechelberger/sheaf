@@ -4,6 +4,7 @@ Name=sheaf
 GenericName=PDF Editor
 Comment=Fast, native PDF editor for workpaper binders
 Exec=sheaf %F
+Icon=sheaf
 Terminal=false
 Categories=Office;Viewer;
 MimeType=application/pdf;

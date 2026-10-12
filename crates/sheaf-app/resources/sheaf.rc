@@ -1,0 +1,3 @@
+// Icon resource 1 is what GPUI's Windows backend loads for the window and
+// taskbar (gpui_windows load_icon); Explorer uses the first icon too.
+1 ICON "sheaf.ico"

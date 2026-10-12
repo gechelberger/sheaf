@@ -5026,6 +5026,7 @@ name = "sheaf-app"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "embed-resource",
  "env_logger",
  "futures",
  "gpui",
@@ -5034,6 +5035,7 @@ dependencies = [
  "image",
  "log",
  "regex",
+ "resvg",
  "serde",
  "serde_json",
  "sheaf-core",

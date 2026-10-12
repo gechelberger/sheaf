@@ -1,3 +1,5 @@
+<img src="assets/icons/sheaf-f2-transparent.svg" alt="" width="96" align="right">
+
 # sheaf
 
 A fast, native PDF editor. Rust + GPUI.

@@ -2,6 +2,7 @@
 //!
 //!     sheaf [--timing] [file.pdf ...]
 
+mod brand;
 mod calc_panel;
 mod comments_panel;
 mod docview;
@@ -376,6 +377,10 @@ fn main() {
                     None
                 },
                 window_background: gpui::WindowBackgroundAppearance::Opaque,
+                // Matches StartupWMClass in sheaf.desktop, which is how
+                // Wayland finds the icon.
+                app_id: Some("sheaf".into()),
+                icon: brand::window_icon(),
                 ..Default::default()
             },
             move |window, cx| {
