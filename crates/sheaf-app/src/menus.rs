@@ -118,6 +118,8 @@ pub fn app_menus() -> Vec<Menu> {
                 item("&Next Tab", NextTab),
                 item("&Previous Tab", PrevTab),
                 sep(),
+                item("&Move Tab to New Window", MoveTabToNewWindow),
+                sep(),
                 item("&Close Tab", CloseTab),
                 item("Close &Window", CloseWindow),
             ],

@@ -18,9 +18,9 @@ use crate::menu_bar::MenuBar;
 use crate::palette::{Palette, PaletteEvent};
 use crate::settings::{DockLayout, DockState, Settings, WindowPlacement};
 use crate::{
-    About, ActivateMenuBar, CloseTab, CloseWindow, CommandPalette, NewWindow, NextTab, OpenFile,
-    OpenInWindows, PrevTab, Quit, ShowCalc, ShowComments, ShowOutline, ShowPatterns,
-    ShowThumbnails, ToggleBottomDock, ToggleLeftDock, ToggleRightDock, ToggleSidebar,
+    About, ActivateMenuBar, CloseTab, CloseWindow, CommandPalette, MoveTabToNewWindow, NewWindow,
+    NextTab, OpenFile, OpenInWindows, PrevTab, Quit, ShowCalc, ShowComments, ShowOutline,
+    ShowPatterns, ShowThumbnails, ToggleBottomDock, ToggleLeftDock, ToggleRightDock, ToggleSidebar,
 };
 
 pub const KEY_CONTEXT: &str = "Workspace";
@@ -251,6 +251,8 @@ pub struct Workspace {
     resizing: Option<Side>,
     /// Right-click menu on a dock tab: (panel, where).
     dock_menu: Option<(Panel, Point<Pixels>)>,
+    /// The tab whose right-click menu is open, and where.
+    tab_menu: Option<(Entity<DocView>, Point<Pixels>)>,
     /// The command palette, while open.
     palette: Option<(Entity<Palette>, Subscription)>,
     /// File/Edit/View… in the title bar; None where the OS draws menus.
@@ -294,6 +296,7 @@ impl Workspace {
             all_hidden,
             resizing: None,
             dock_menu: None,
+            tab_menu: None,
             palette: None,
             menu_bar: frame::draws_menu_bar().then(|| cx.new(|cx| MenuBar::new(window, cx))),
             area: gpui::Bounds::default(),
@@ -611,6 +614,60 @@ impl Workspace {
         false
     }
 
+    /// Move a tab into a window of its own.
+    fn move_to_new_window(
+        &mut self,
+        doc: Entity<DocView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // A lone tab already has its window.
+        if self.closing || self.docs.len() < 2 {
+            return;
+        }
+        match crate::open_workspace(Launch::files(Vec::new()), None, cx) {
+            Ok(target) => self.move_to(doc, target, window, cx),
+            Err(e) => log::error!("opening window: {e:#}"),
+        }
+    }
+
+    /// Hand a tab, unsaved changes and all, to another window, which comes
+    /// forward. A window left with no tabs closes.
+    fn move_to(
+        &mut self,
+        doc: Entity<DocView>,
+        target: WindowHandle<Workspace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.closing {
+            return;
+        }
+        let Some(ix) = self.docs.iter().position(|d| *d == doc) else {
+            return;
+        };
+        let moved = target
+            .update(cx, |ws, window, cx| {
+                if ws.closing {
+                    return false;
+                }
+                ws.docs.push(doc);
+                ws.active = ws.docs.len() - 1;
+                ws.focus_active(window, cx);
+                window.activate_window();
+                cx.notify();
+                true
+            })
+            .unwrap_or(false);
+        if !moved {
+            return;
+        }
+        self.close_now(ix, window, cx);
+        if self.docs.is_empty() {
+            self.request_close(window, cx);
+        }
+    }
+
     fn new_window(paths: Vec<PathBuf>, cx: &mut App) {
         if let Err(e) = crate::open_workspace(Launch::files(paths), None, cx) {
             log::error!("opening window: {e:#}");
@@ -795,34 +852,93 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let current = self.side_of(panel);
-        let items = Side::ALL
+        let items: Vec<_> = Side::ALL
             .into_iter()
             .filter(|s| Some(*s) != current && panel.can_dock(*s))
             .map(|side| {
-                div()
-                    .id(("move-to", side as usize))
-                    .px_3()
-                    .py_1()
-                    .text_sm()
-                    .cursor_pointer()
-                    .hover(|s| s.bg(rgb(0x3a3a3a)))
-                    .on_click(cx.listener(move |ws, _, _, cx| {
-                        ws.move_panel(panel, side);
-                        ws.dock_menu = None;
-                        cx.notify();
-                    }))
-                    .child(format!("Move to {}", side.label()))
-            });
+                menu_item(
+                    ("move-to", side as usize),
+                    format!("Move to {}", side.label()),
+                    cx,
+                    move |ws, _, _| ws.move_panel(panel, side),
+                )
+            })
+            .collect();
+        self.popup_menu("dock-menu", pos, items, cx)
+    }
+
+    /// Right-click on a document tab: move it to a new or another window.
+    fn render_tab_menu(
+        &self,
+        doc: Entity<DocView>,
+        pos: Point<Pixels>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let here = window.window_handle().window_id();
+        let others: Vec<(WindowHandle<Workspace>, String)> = cx
+            .windows()
+            .into_iter()
+            .filter(|w| w.window_id() != here)
+            .filter_map(|w| w.downcast::<Workspace>())
+            .filter_map(|handle| {
+                let ws = handle.read(cx).ok()?;
+                let label = match ws.active_doc() {
+                    Some(d) if ws.docs.len() > 1 => {
+                        format!("{} (+{})", d.read(cx).file_name(), ws.docs.len() - 1)
+                    }
+                    Some(d) => d.read(cx).file_name(),
+                    None => "empty window".into(),
+                };
+                Some((handle, label))
+            })
+            .collect();
+        let mut items = Vec::new();
+        if self.docs.len() > 1 {
+            let doc = doc.clone();
+            items.push(menu_item(
+                "tab-move-new",
+                "Move to New Window",
+                cx,
+                move |ws, w, cx| ws.move_to_new_window(doc.clone(), w, cx),
+            ));
+        }
+        for (i, (target, label)) in others.into_iter().enumerate() {
+            let doc = doc.clone();
+            items.push(menu_item(
+                ("tab-move", i),
+                format!("Move to Window: {label}"),
+                cx,
+                move |ws, w, cx| ws.move_to(doc.clone(), target, w, cx),
+            ));
+        }
+        items.push(menu_item("tab-close", "Close Tab", cx, move |ws, w, cx| {
+            if let Some(i) = ws.docs.iter().position(|d| *d == doc) {
+                ws.close(i, w, cx);
+            }
+        }));
+        self.popup_menu("tab-menu", pos, items, cx)
+    }
+
+    /// A right-click menu at `pos`; clicking outside it dismisses it.
+    fn popup_menu(
+        &self,
+        id: &'static str,
+        pos: Point<Pixels>,
+        items: impl IntoIterator<Item = AnyElement>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         deferred(
             anchored()
                 .position(pos)
                 .position_mode(AnchoredPositionMode::Window)
                 .child(
                     div()
-                        .id("dock-menu")
+                        .id(id)
                         .occlude()
                         .on_mouse_down_out(cx.listener(|ws, _, _, cx| {
                             ws.dock_menu = None;
+                            ws.tab_menu = None;
                             cx.notify();
                         }))
                         .min_w(px(160.0))
@@ -858,6 +974,16 @@ impl Workspace {
                 .text_color(if active { rgb(0xffffff) } else { rgb(0x9a9a9a) })
                 .hover(|s| s.bg(rgb(0x333333)))
                 .on_click(cx.listener(move |ws, _, window, cx| ws.activate(i, window, cx)))
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener({
+                        let doc = doc.clone();
+                        move |ws, ev: &gpui::MouseDownEvent, _, cx| {
+                            ws.tab_menu = Some((doc.clone(), ev.position));
+                            cx.notify();
+                        }
+                    }),
+                )
                 .child(title)
                 .child(
                     div()
@@ -914,6 +1040,10 @@ impl Render for Workspace {
         let menu = self
             .dock_menu
             .map(|(panel, pos)| self.render_dock_menu(panel, pos, cx));
+        let tab_menu = self
+            .tab_menu
+            .clone()
+            .map(|(doc, pos)| self.render_tab_menu(doc, pos, window, cx));
 
         // Remember where the dock area is so splitter drags can be resolved
         // against it next frame.
@@ -1021,6 +1151,11 @@ impl Render for Workspace {
             )
             .on_action(|_: &NewWindow, _, cx| Self::new_window(Vec::new(), cx))
             .on_action(cx.listener(|ws, _: &CloseWindow, window, cx| ws.request_close(window, cx)))
+            .on_action(cx.listener(|ws, _: &MoveTabToNewWindow, window, cx| {
+                if let Some(doc) = ws.active_doc().cloned() {
+                    ws.move_to_new_window(doc, window, cx);
+                }
+            }))
             .on_action(|_: &Quit, _, cx| cx.defer(crate::request_quit))
             .on_action(
                 cx.listener(|ws, _: &CommandPalette, window, cx| ws.toggle_palette(window, cx)),
@@ -1091,6 +1226,7 @@ impl Render for Workspace {
                     }),
             )
             .children(menu)
+            .children(tab_menu)
             .children(
                 self.palette
                     .as_ref()
@@ -1136,6 +1272,30 @@ fn find_open(path: &Path, cx: &App) -> Option<(WindowHandle<Workspace>, usize)> 
         .into_iter()
         .filter_map(|w| w.downcast::<Workspace>())
         .find_map(|handle| Some((handle, handle.read(cx).ok()?.position_of(path, cx)?)))
+}
+
+/// One row of a right-click menu; clicking it closes the menu.
+fn menu_item(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<SharedString>,
+    cx: &mut Context<Workspace>,
+    on_click: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
+) -> AnyElement {
+    div()
+        .id(id)
+        .px_3()
+        .py_1()
+        .text_sm()
+        .cursor_pointer()
+        .hover(|s| s.bg(rgb(0x3a3a3a)))
+        .on_click(cx.listener(move |ws, _, window, cx| {
+            ws.tab_menu = None;
+            ws.dock_menu = None;
+            on_click(ws, window, cx);
+            cx.notify();
+        }))
+        .child(label.into())
+        .into_any_element()
 }
 
 pub fn same_file(a: &Path, b: &Path) -> bool {

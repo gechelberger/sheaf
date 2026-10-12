@@ -119,6 +119,7 @@ actions!(
         NewWindow,
         OpenInWindows,
         CloseWindow,
+        MoveTabToNewWindow,
         Quit,
         ActivateMenuBar,
         About,
