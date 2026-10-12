@@ -1,37 +1,41 @@
 //! The Patterns panel: regex search as its own tool, separate from the
 //! literal Find bar. Presets cover the things a workpaper preparer scans a
-//! binder for (SSNs, EINs, amounts, dates); results are listed by page and
-//! highlighted in a different color than Find's.
+//! binder for (SSNs, EINs, amounts, dates) and are editable (see
+//! `patterns.rs`); results are listed by page and highlighted in a
+//! different color than Find's.
 
 use std::sync::Arc;
 use std::time::Instant;
 
 use futures::StreamExt;
 use gpui::{
-    AnyElement, Context, Entity, Focusable, Subscription, Task, Window, div, prelude::*, px, rgb,
+    AnchoredPositionMode, AnyElement, Context, Entity, Focusable, MouseButton, Pixels, Point,
+    Subscription, Task, Window, anchored, deferred, div, prelude::*, px, rgb,
 };
 use sheaf_render::{SearchEvent, SearchHit};
 
 use crate::docview::{DocView, ScrollTo, State};
+use crate::patterns::{self, Preset};
 use crate::text_input::{TextInput, TextInputEvent};
 
 const ROW_H: f32 = 22.0;
 const PAD: f32 = 8.0;
 
-/// Named presets. Patterns are deliberately permissive: a scan should
-/// over-match slightly rather than miss a 9-digit SSN typed with spaces.
-pub const PRESETS: &[(&str, &str)] = &[
-    ("SSN", r"\b\d{3}[- ]?\d{2}[- ]?\d{4}\b"),
-    ("EIN", r"\b\d{2}-\d{7}\b"),
-    ("Phone", r"\(?\b\d{3}\)?[-. ]?\d{3}[-. ]\d{4}\b"),
-    (
-        "Amount",
-        r"\$\s?\d{1,3}(?:,\d{3})*(?:\.\d{2})?|\b\d{1,3}(?:,\d{3})+\.\d{2}\b",
-    ),
-    ("Date", r"\b\d{1,2}/\d{1,2}/\d{2,4}\b"),
-];
+/// Saving or editing a preset: a name field; the regex comes from the
+/// pattern field when Save is pressed.
+pub struct PresetEdit {
+    /// Which preset is being edited, or None for a new one.
+    pub index: Option<usize>,
+    pub name: Entity<TextInput>,
+    pub _sub: Subscription,
+}
 
 pub struct PatternSearch {
+    pub presets: Vec<Preset>,
+    /// Right-click menu on a preset chip: (index, where).
+    pub preset_menu: Option<(usize, Point<Pixels>)>,
+    pub editing: Option<PresetEdit>,
+    pub preset_error: Option<String>,
     pub input: Entity<TextInput>,
     pub _events: Subscription,
     /// Source of the pattern the current results are for.
@@ -66,6 +70,10 @@ impl DocView {
             TextInputEvent::Cancel => this.pending_focus = true,
         });
         self.pattern = Some(PatternSearch {
+            presets: patterns::load(),
+            preset_menu: None,
+            editing: None,
+            preset_error: None,
             input,
             _events: events,
             source: String::new(),
@@ -175,6 +183,105 @@ impl DocView {
         cx.notify();
     }
 
+    // ----- presets -------------------------------------------------------------
+
+    /// Start saving the current pattern as a new preset, or editing preset
+    /// `index` (its regex goes into the pattern field).
+    fn edit_preset(&mut self, index: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_pattern(cx);
+        let ps = self.pattern.as_mut().unwrap();
+        ps.preset_menu = None;
+        ps.preset_error = None;
+        let existing = index.and_then(|i| ps.presets.get(i).cloned());
+        if let Some(p) = &existing {
+            let input = ps.input.clone();
+            input.update(cx, |i, cx| i.set_text(p.regex.clone(), cx));
+        }
+        let name = cx.new(|cx| {
+            let mut i = TextInput::new("Preset name", cx);
+            if let Some(p) = &existing {
+                i.set_text(p.name.clone(), cx);
+            }
+            i
+        });
+        let sub = cx.subscribe(&name, |this, _, ev: &TextInputEvent, cx| match ev {
+            TextInputEvent::Confirm => this.save_preset(cx),
+            TextInputEvent::Cancel => {
+                if let Some(ps) = &mut this.pattern {
+                    ps.editing = None;
+                }
+                this.pending_focus = true;
+                cx.notify();
+            }
+        });
+        window.focus(&name.read(cx).focus_handle(cx), cx);
+        let ps = self.pattern.as_mut().unwrap();
+        ps.editing = Some(PresetEdit {
+            index,
+            name,
+            _sub: sub,
+        });
+        cx.notify();
+    }
+
+    /// Commit the preset being edited: name from its field, regex from the
+    /// pattern field, both validated.
+    fn save_preset(&mut self, cx: &mut Context<Self>) {
+        let Some(ps) = &mut self.pattern else { return };
+        let Some(edit) = &ps.editing else { return };
+        let name = edit.name.read(cx).text().trim().to_string();
+        let regex = ps.input.read(cx).text().trim().to_string();
+        if name.is_empty() {
+            ps.preset_error = Some("Give the preset a name".into());
+            cx.notify();
+            return;
+        }
+        if let Err(e) = regex::Regex::new(&regex) {
+            ps.preset_error = Some(format!("Invalid pattern: {e}"));
+            cx.notify();
+            return;
+        }
+        let preset = Preset { name, regex };
+        match edit.index {
+            Some(i) if i < ps.presets.len() => ps.presets[i] = preset,
+            _ => ps.presets.push(preset),
+        }
+        ps.editing = None;
+        ps.preset_error = patterns::save(&ps.presets)
+            .err()
+            .map(|e| format!("Couldn't save presets: {e:#}"));
+        self.pending_focus = true;
+        cx.notify();
+    }
+
+    fn delete_preset(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(ps) = &mut self.pattern else { return };
+        ps.preset_menu = None;
+        if index < ps.presets.len() {
+            ps.presets.remove(index);
+            ps.preset_error = patterns::save(&ps.presets)
+                .err()
+                .map(|e| format!("Couldn't save presets: {e:#}"));
+        }
+        cx.notify();
+    }
+
+    /// Put back any built-in preset that's missing (by name), keeping the
+    /// user's own and their edits to the rest.
+    fn restore_default_presets(&mut self, cx: &mut Context<Self>) {
+        let Some(ps) = &mut self.pattern else { return };
+        ps.preset_menu = None;
+        for d in patterns::defaults() {
+            if !ps.presets.iter().any(|p| p.name == d.name) {
+                ps.presets.push(d);
+            }
+        }
+        ps.preset_error = patterns::save(&ps.presets)
+            .err()
+            .map(|e| format!("Couldn't save presets: {e:#}"));
+        cx.notify();
+    }
+
     pub(crate) fn go_to_pattern_hit(&mut self, ix: usize, cx: &mut Context<Self>) {
         let State::Ready(doc) = &mut self.state else {
             return;
@@ -225,13 +332,15 @@ impl DocView {
         let ps = self.pattern.as_ref().unwrap();
         let input = ps.input.clone();
 
-        let chips: Vec<_> = PRESETS
+        let mut chips: Vec<AnyElement> = ps
+            .presets
             .iter()
-            .map(|(name, re)| {
-                let re = re.to_string();
+            .enumerate()
+            .map(|(i, p)| {
+                let re = p.regex.clone();
                 let input = input.clone();
                 div()
-                    .id(*name)
+                    .id(("preset", i))
                     .px_2()
                     .py_0p5()
                     .rounded_sm()
@@ -243,11 +352,88 @@ impl DocView {
                         input.update(cx, |i, cx| i.set_text(re.clone(), cx));
                         v.start_pattern_search(re.clone(), cx);
                     }))
-                    .child(*name)
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |v, ev: &gpui::MouseDownEvent, _, cx| {
+                            if let Some(ps) = &mut v.pattern {
+                                ps.preset_menu = Some((i, ev.position));
+                                cx.notify();
+                            }
+                        }),
+                    )
+                    .child(p.name.clone())
+                    .into_any_element()
             })
             .collect();
+        chips.push(
+            div()
+                .id("preset-save")
+                .px_2()
+                .py_0p5()
+                .rounded_sm()
+                .text_xs()
+                .cursor_pointer()
+                .text_color(rgb(0x9a9a9a))
+                .hover(|s| s.bg(rgb(0x4a4a4a)).text_color(rgb(0xe0e0e0)))
+                .on_click(cx.listener(|v, _, window, cx| v.edit_preset(None, window, cx)))
+                .child("+ Save…")
+                .into_any_element(),
+        );
+        let edit_row = ps.editing.as_ref().map(|e| {
+            let title = match e.index {
+                Some(i) => format!("Edit preset {}", i + 1),
+                None => "Save the pattern above as".to_string(),
+            };
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(div().text_xs().text_color(rgb(0x9a9a9a)).child(title))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(div().flex_1().child(e.name.clone()))
+                        .child(
+                            div()
+                                .id("preset-ok")
+                                .px_2()
+                                .py_0p5()
+                                .rounded_sm()
+                                .text_xs()
+                                .cursor_pointer()
+                                .bg(rgb(0x4a9eff))
+                                .text_color(rgb(0xffffff))
+                                .on_click(cx.listener(|v, _, _, cx| v.save_preset(cx)))
+                                .child("Save"),
+                        )
+                        .child(
+                            div()
+                                .id("preset-cancel")
+                                .px_2()
+                                .py_0p5()
+                                .rounded_sm()
+                                .text_xs()
+                                .cursor_pointer()
+                                .bg(rgb(0x3a3a3a))
+                                .on_click(cx.listener(|v, _, _, cx| {
+                                    if let Some(ps) = &mut v.pattern {
+                                        ps.editing = None;
+                                    }
+                                    cx.notify();
+                                }))
+                                .child("Cancel"),
+                        ),
+                )
+        });
+        let preset_error = ps.preset_error.clone();
+        let menu = ps.preset_menu.map(|(i, pos)| preset_menu(i, pos, cx));
 
-        let status = if let Some(e) = &ps.error {
+        let ps = self.pattern.as_ref().unwrap();
+        let status = if let Some(e) = preset_error {
+            e
+        } else if let Some(e) = &ps.error {
             format!("Invalid pattern: {e}")
         } else if ps.source.trim().is_empty() {
             "Enter a pattern and press Enter, or pick a preset".to_string()
@@ -340,6 +526,7 @@ impl DocView {
             .p_2()
             .child(input)
             .child(div().flex().flex_wrap().gap_1().children(chips))
+            .children(edit_row)
             .child(
                 div()
                     .text_xs()
@@ -369,6 +556,7 @@ impl DocView {
                         .border_color(rgb(0x111111)),
                 )
                 .child(results)
+                .children(menu)
                 .into_any_element()
         } else {
             div()
@@ -377,7 +565,66 @@ impl DocView {
                 .flex_col()
                 .child(controls.border_b_1().border_color(rgb(0x111111)))
                 .child(results)
+                .children(menu)
                 .into_any_element()
         }
     }
+}
+
+/// Right-click menu on a preset chip.
+fn preset_menu(index: usize, pos: Point<Pixels>, cx: &mut Context<DocView>) -> AnyElement {
+    let item = |id: &'static str,
+                label: &'static str,
+                cx: &mut Context<DocView>,
+                f: fn(&mut DocView, usize, &mut Window, &mut Context<DocView>)| {
+        div()
+            .id(id)
+            .px_3()
+            .py_1()
+            .text_sm()
+            .cursor_pointer()
+            .hover(|s| s.bg(rgb(0x3a3a3a)))
+            .on_click(cx.listener(move |v, _, window, cx| f(v, index, window, cx)))
+            .child(label)
+    };
+    deferred(
+        anchored()
+            .position(pos)
+            .position_mode(AnchoredPositionMode::Window)
+            .child(
+                div()
+                    .id("preset-menu")
+                    .occlude()
+                    .on_mouse_down_out(cx.listener(|v, _, _, cx| {
+                        if let Some(ps) = &mut v.pattern {
+                            ps.preset_menu = None;
+                            cx.notify();
+                        }
+                    }))
+                    .min_w(px(180.0))
+                    .py_1()
+                    .rounded_md()
+                    .bg(rgb(0x2a2a2a))
+                    .border_1()
+                    .border_color(rgb(0x111111))
+                    .shadow_lg()
+                    .flex()
+                    .flex_col()
+                    .child(item("preset-edit", "Edit…", cx, |v, i, w, cx| {
+                        v.edit_preset(Some(i), w, cx)
+                    }))
+                    .child(item("preset-delete", "Delete", cx, |v, i, _, cx| {
+                        v.delete_preset(i, cx)
+                    }))
+                    .child(div().h(px(1.0)).my_1().bg(rgb(0x111111)))
+                    .child(item(
+                        "preset-restore",
+                        "Restore default presets",
+                        cx,
+                        |v, _, _, cx| v.restore_default_presets(cx),
+                    )),
+            ),
+    )
+    .with_priority(1)
+    .into_any_element()
 }

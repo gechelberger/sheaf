@@ -13,6 +13,7 @@ mod menus;
 mod outline_panel;
 mod palette;
 mod pattern_panel;
+mod patterns;
 mod settings;
 mod text_area;
 mod text_input;

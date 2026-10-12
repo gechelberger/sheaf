@@ -113,7 +113,7 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 | Bookmarks (outline) sidebar | ✅ |
 | Text search (find in document) | ✅ progressive; ~6 ms/page |
 | Pattern search (regex: SSNs, EINs, amounts, dates) — separate tool from Find, shared engine with redaction | ✅ Patterns panel, Ctrl+Shift+F |
-| User-defined patterns: add, save, and delete presets (the built-in Date is US-only) | 📋 |
+| User-defined patterns: add, save, and delete presets; several date formats built in | ✅ `patterns.json`; right-click a preset |
 | Tabs / multiple documents | ✅ |
 | Split view (same doc, two positions) | 📋 |
 | Attachments panel | 📋 |
@@ -370,6 +370,9 @@ on macOS (`SHEAF_CONFIG_DIR` overrides).
 
 - `settings.json` — written by the app: dock layout (which panels sit where,
   tab order, sizes, open state) and window placement.
+- `patterns.json` — the Patterns panel's presets, seeded from the built-ins on
+  first run. Edit, delete, or add them from the panel (right-click a chip;
+  "+ Save…" stores the current pattern) or by hand.
 - `keymap.json` — your key bindings, loaded after the defaults so they win.
   Zed's format: a list of `{ "context", "bindings" }` entries. Actions are
   named as the command palette (Ctrl+Shift+K) shows them; `null` unbinds.
