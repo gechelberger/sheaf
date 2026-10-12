@@ -25,8 +25,8 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use gpui::{
-    App, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, actions, prelude::*, px,
-    size,
+    App, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, actions, point,
+    prelude::*, px, size,
 };
 use gpui_platform::application;
 
@@ -423,6 +423,15 @@ fn open_workspace(
         .unwrap_or_else(|| {
             WindowBounds::Windowed(Bounds::centered(None, size(px(1200.0), px(850.0)), cx))
         });
+    // Cascade so a new window doesn't sit exactly on top of the last one.
+    let window_bounds = match window_bounds {
+        WindowBounds::Windowed(mut b) => {
+            let step = px(24.0 * cx.windows().len() as f32);
+            b.origin += point(step, step);
+            WindowBounds::Windowed(b)
+        }
+        other => other,
+    };
     cx.open_window(
         WindowOptions {
             window_bounds: Some(window_bounds),
@@ -494,6 +503,14 @@ fn close_next_window(cx: &mut App) {
 /// An empty invocation still opens a workspace. Otherwise the caller chooses
 /// one tab group or one window per file, without imposing a document limit.
 fn window_paths(paths: Vec<PathBuf>, separate: bool) -> Vec<Vec<PathBuf>> {
+    // One view per file, as when opening from the dialog.
+    let mut unique: Vec<PathBuf> = Vec::new();
+    for p in paths {
+        if !unique.iter().any(|u| workspace::same_file(u, &p)) {
+            unique.push(p);
+        }
+    }
+    let paths = unique;
     if separate && !paths.is_empty() {
         paths.into_iter().map(|p| vec![p]).collect()
     } else {
@@ -514,6 +531,19 @@ mod window_tests {
         for (window, path) in windows.iter().zip(paths) {
             assert_eq!(window, &vec![path]);
         }
+    }
+
+    #[test]
+    fn a_file_named_twice_opens_once() {
+        let paths = vec![
+            PathBuf::from("a.pdf"),
+            PathBuf::from("b.pdf"),
+            PathBuf::from("a.pdf"),
+        ];
+        assert_eq!(
+            window_paths(paths, true),
+            vec![vec![PathBuf::from("a.pdf")], vec![PathBuf::from("b.pdf")]]
+        );
     }
 
     #[test]

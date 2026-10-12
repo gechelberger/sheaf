@@ -42,6 +42,7 @@ fn caption_region() -> gpui::Div {
 pub fn title_bar(
     title: SharedString,
     menu_bar: Option<AnyElement>,
+    on_close: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
     window: &Window,
     cx: &mut App,
 ) -> AnyElement {
@@ -100,14 +101,13 @@ pub fn title_bar(
         }
         // Windows sends WM_CLOSE through the existing window_should_close
         // callback, which prompts for unsaved changes without relying on focus.
-        // Other platforms dispatch the CloseWindow action.
+        // Elsewhere the caller closes directly: dispatching an action would
+        // miss the workspace when focus is in the palette or menu bar.
         buttons = buttons.child(button("win-close", "✕", true).map(|button| {
             if cfg!(target_os = "windows") {
                 button.window_control_area(WindowControlArea::Close)
             } else {
-                button.on_click(|_, window, cx| {
-                    window.dispatch_action(Box::new(crate::CloseWindow), cx)
-                })
+                button.on_click(on_close)
             }
         }));
     }

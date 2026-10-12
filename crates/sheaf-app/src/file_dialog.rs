@@ -13,6 +13,11 @@ pub fn open(cx: &App, options: PathPromptOptions) -> Dialog<Vec<PathBuf>> {
         let mut command = linux::command();
         if options.directories && !options.files {
             command.arg("--directory");
+        } else {
+            command.args([
+                "--file-filter=PDF files | *.pdf *.PDF",
+                "--file-filter=All files | *",
+            ]);
         }
         if options.multiple {
             command.args(["--multiple", "--separator=\n"]);

@@ -3,13 +3,13 @@
 //! view in the middle. F4 hides and shows all docks at once, as Acrobat's
 //! navigation-pane toggle does; individual docks have their own keys.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use gpui::{
     AnchoredPositionMode, AnyElement, App, Context, Entity, Focusable, KeyDownEvent, MouseButton,
     MouseMoveEvent, PathPromptOptions, Pixels, Point, PromptButton, PromptLevel, SharedString,
-    Subscription, Task, Window, anchored, deferred, div, prelude::*, px, rgb,
+    Subscription, Task, Window, WindowHandle, anchored, deferred, div, prelude::*, px, rgb,
 };
 
 use crate::docview::DocView;
@@ -434,12 +434,24 @@ impl Workspace {
     }
 
     pub fn open_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if let Some(ix) = self.position_of(&path, cx) {
+            self.active = ix;
+            cx.notify();
+            return;
+        }
         let (timing, launched) = (self.timing, self.launched);
         let password = self.password.clone();
         let doc = cx.new(|cx| DocView::new(path, password, timing, launched, cx));
         self.docs.push(doc);
         self.active = self.docs.len() - 1;
         cx.notify();
+    }
+
+    /// The tab showing this file, if any.
+    fn position_of(&self, path: &Path, cx: &App) -> Option<usize> {
+        self.docs
+            .iter()
+            .position(|d| same_file(&d.read(cx).path, path))
     }
 
     fn activate(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -605,7 +617,7 @@ impl Workspace {
         }
     }
 
-    fn prompt_open(&mut self, separate_windows: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn prompt_open(&mut self, separate_windows: bool, window: &Window, cx: &mut Context<Self>) {
         let rx = crate::file_dialog::open(
             cx,
             PathPromptOptions {
@@ -615,22 +627,11 @@ impl Workspace {
                 prompt: Some("Open".into()),
             },
         );
-        cx.spawn_in(window, async move |this, cx| match rx.await {
-            Ok(Ok(Some(paths))) => {
-                this.update_in(cx, |ws, window, cx| {
-                    for p in paths {
-                        if separate_windows {
-                            Self::new_window(vec![p], cx);
-                        } else {
-                            ws.open_path(p, cx);
-                        }
-                    }
-                    if !separate_windows {
-                        ws.focus_active(window, cx);
-                    }
-                })
-                .ok();
-            }
+        let Some(origin) = window.window_handle().downcast::<Self>() else {
+            return;
+        };
+        cx.spawn(async move |_, cx| match rx.await {
+            Ok(Ok(Some(paths))) => cx.update(|cx| open_paths(origin, paths, separate_windows, cx)),
             Ok(Ok(None)) => {}
             Ok(Err(e)) => log::error!("open dialog: {e:#}"),
             Err(_) => {}
@@ -951,7 +952,9 @@ impl Render for Workspace {
             self.native_title = native_title;
         }
         let menu_bar = self.menu_bar.clone().map(|m| m.into_any_element());
-        let title_bar = frame::title_bar(title, menu_bar, window, cx);
+        let on_close =
+            cx.listener(|ws, _: &gpui::ClickEvent, window, cx| ws.request_close(window, cx));
+        let title_bar = frame::title_bar(title, menu_bar, on_close, window, cx);
 
         let content = div()
             .key_context(KEY_CONTEXT)
@@ -1095,4 +1098,46 @@ impl Render for Workspace {
             );
         frame::client_side_decorations(content, window, cx)
     }
+}
+
+/// Open files picked in `origin`'s dialog. A file that is already open just
+/// brings its window and tab forward: two views of one file would share a
+/// recovery sidecar and each save would discard the other's edits.
+fn open_paths(
+    origin: WindowHandle<Workspace>,
+    paths: Vec<PathBuf>,
+    separate_windows: bool,
+    cx: &mut App,
+) {
+    for p in paths {
+        if let Some((handle, ix)) = find_open(&p, cx) {
+            handle
+                .update(cx, |ws, window, cx| {
+                    ws.activate(ix, window, cx);
+                    window.activate_window();
+                })
+                .ok();
+        } else if separate_windows {
+            Workspace::new_window(vec![p], cx);
+        } else {
+            origin.update(cx, |ws, _, cx| ws.open_path(p, cx)).ok();
+        }
+    }
+    if !separate_windows {
+        origin
+            .update(cx, |ws, window, cx| ws.focus_active(window, cx))
+            .ok();
+    }
+}
+
+/// The window and tab showing this file, in any window.
+fn find_open(path: &Path, cx: &App) -> Option<(WindowHandle<Workspace>, usize)> {
+    cx.windows()
+        .into_iter()
+        .filter_map(|w| w.downcast::<Workspace>())
+        .find_map(|handle| Some((handle, handle.read(cx).ok()?.position_of(path, cx)?)))
+}
+
+pub fn same_file(a: &Path, b: &Path) -> bool {
+    a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(a), Ok(b)) if a == b)
 }
