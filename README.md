@@ -152,7 +152,7 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 | **Tickmarks** (PDFlyer): quick-stamp library, keyboard-driven | ✅ |
 | **Connectors** (PDFlyer): linked markers that jump between pages | ✅ saved as Link annotations, so they jump in Acrobat too |
 | **Calculator tape** (PDFlyer): 10-key calc, tape placed as annotation | ✅ Calculator panel (Ctrl+Alt+4) |
-| Comments list / review panel, status, replies | 📋 |
+| Comments list / review panel, status, replies | ✅ Comments panel (Ctrl+Alt+5) lists ours and third-party; status/replies 📋 |
 | Flatten annotations | 📋 |
 | Export Clean Copy (strip annots, notes, tapes, stamps, attachments) | 🎯 |
 | Measurement tools (distance, area, perimeter, scale) | 📋 |

@@ -231,6 +231,9 @@ pub(crate) struct Doc {
     pub(crate) selected_annot: Option<(PageId, AnnotId)>,
     pub(crate) annot_editor: Option<AnnotEditor>,
     pub(crate) pending_connector: Option<crate::markup_tools::PendingConnector>,
+    /// Comments other tools left in the primary file (read-only).
+    pub(crate) foreign_annots: Vec<sheaf_doc::file::ForeignAnnot>,
+    pub(crate) selected_foreign: Option<usize>,
 }
 
 impl Doc {
@@ -313,6 +316,8 @@ pub struct DocView {
     pub(crate) pattern: Option<crate::pattern_panel::PatternSearch>,
     pub(crate) initial_pattern: Option<String>,
     pub(crate) calc: Option<crate::calc_panel::CalcTape>,
+    pub(crate) comments: Option<crate::comments_panel::Comments>,
+    pub(crate) pending_comments_focus: bool,
     pub(crate) initial_query: Option<String>,
     pub(crate) search_started: Option<Instant>,
     pub(crate) selftest_save: Option<PathBuf>,
@@ -355,6 +360,8 @@ impl DocView {
             pattern: None,
             initial_pattern: None,
             calc: None,
+            comments: None,
+            pending_comments_focus: false,
             initial_query: None,
             search_started: None,
             selftest_save: None,
@@ -457,6 +464,8 @@ impl DocView {
                             selected_annot: None,
                             annot_editor: None,
                             pending_connector: None,
+                            foreign_annots: Vec::new(),
+                            selected_foreign: None,
                         }));
                         viewer.fetch_page_sizes(cx);
                         viewer.fetch_outline(cx);
@@ -956,13 +965,12 @@ impl DocView {
             let t = Instant::now();
             let found = cx
                 .background_executor()
-                .spawn(async move { sheaf_doc::file::read_sheaf_annots(&path) })
+                .spawn(async move { sheaf_doc::file::read_annots(&path) })
                 .await;
-            let by_index = match found {
-                Ok(m) if !m.is_empty() => m,
-                Ok(_) => return,
+            let (by_index, foreign) = match found {
+                Ok(a) => (a.sheaf, a.foreign),
                 Err(e) => {
-                    log::warn!("reading sheaf annotations: {e:#}");
+                    log::warn!("reading annotations: {e:#}");
                     return;
                 }
             };
@@ -970,6 +978,18 @@ impl DocView {
                 let State::Ready(doc) = &mut view.state else {
                     return;
                 };
+                if timing && !foreign.is_empty() {
+                    eprintln!(
+                        "[timing] found {} third-party annotations in {:?}",
+                        foreign.len(),
+                        t.elapsed()
+                    );
+                }
+                doc.foreign_annots = foreign;
+                if by_index.is_empty() {
+                    cx.notify();
+                    return;
+                }
                 let pages: Vec<u32> = by_index.keys().copied().collect();
                 let n: usize = by_index.values().map(|v| v.len()).sum();
                 match doc.model.set_initial_annots(by_index) {
@@ -1196,6 +1216,27 @@ impl DocView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let last = match &self.state {
+            State::Ready(doc) => doc
+                .model
+                .state()
+                .annots_on(page)
+                .and_then(|l| l.last().map(|a| a.id)),
+            _ => None,
+        };
+        if let Some(id) = last {
+            self.start_annot_editor_for(page, id, window, cx);
+        }
+    }
+
+    /// Open the inline text field for annotation `id` on `page`.
+    pub(crate) fn start_annot_editor_for(
+        &mut self,
+        page: PageId,
+        id: AnnotId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
@@ -1203,11 +1244,10 @@ impl DocView {
             .model
             .state()
             .annots_on(page)
-            .and_then(|l| l.last().cloned())
+            .and_then(|l| l.iter().find(|a| a.id == id).cloned())
         else {
             return;
         };
-        let id = annot.id;
         let input = cx.new(|cx| {
             let mut i = TextInput::new("Type, then Enter", cx);
             i.set_text(annot.contents.clone(), cx);
@@ -2351,6 +2391,18 @@ impl Render for DocView {
                                         .child(ed.input.clone()),
                                 );
                             }
+                            if let Some(f) =
+                                doc.selected_foreign.and_then(|i| doc.foreign_annots.get(i))
+                                && pl.pref.source == doc.model.primary()
+                                && f.page == pl.pref.index
+                            {
+                                page_div = page_div.child(crate::comments_panel::foreign_outline(
+                                    f,
+                                    src,
+                                    pl.pref.rotation,
+                                    k,
+                                ));
+                            }
                             if let Some(preview) = DocView::drag_preview(
                                 doc,
                                 tool,
@@ -2479,6 +2531,7 @@ impl Render for DocView {
                 } else {
                     if let State::Ready(doc) = &mut v.state {
                         doc.selected_annot = None;
+                        doc.selected_foreign = None;
                         doc.drag = None;
                     }
                     if v.tool != Tool::Select {

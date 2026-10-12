@@ -16,8 +16,9 @@ use crate::docview::DocView;
 use crate::frame;
 use crate::menu_bar::MenuBar;
 use crate::{
-    About, ActivateMenuBar, CloseTab, NextTab, OpenFile, PrevTab, Quit, ShowCalc, ShowOutline,
-    ShowPatterns, ShowThumbnails, ToggleBottomDock, ToggleLeftDock, ToggleRightDock, ToggleSidebar,
+    About, ActivateMenuBar, CloseTab, NextTab, OpenFile, PrevTab, Quit, ShowCalc, ShowComments,
+    ShowOutline, ShowPatterns, ShowThumbnails, ToggleBottomDock, ToggleLeftDock, ToggleRightDock,
+    ToggleSidebar,
 };
 
 pub const KEY_CONTEXT: &str = "Workspace";
@@ -51,6 +52,7 @@ pub enum Panel {
     Outline,
     Patterns,
     Calc,
+    Comments,
 }
 
 impl Panel {
@@ -60,6 +62,7 @@ impl Panel {
             Panel::Outline => "Bookmarks",
             Panel::Patterns => "Patterns",
             Panel::Calc => "Calculator",
+            Panel::Comments => "Comments",
         }
     }
 
@@ -151,7 +154,7 @@ impl Workspace {
             active: 0,
             docks: [
                 Dock::new(vec![Panel::Thumbnails, Panel::Outline], true, 220.0),
-                Dock::new(vec![], false, 280.0),
+                Dock::new(vec![Panel::Comments], false, 300.0),
                 Dock::new(vec![Panel::Patterns, Panel::Calc], false, 240.0),
             ],
             all_hidden: false,
@@ -166,6 +169,7 @@ impl Workspace {
             Some("bookmarks") => this.show_panel(Panel::Outline),
             Some("patterns") => this.show_panel(Panel::Patterns),
             Some("calc") => this.show_panel(Panel::Calc),
+            Some("comments") => this.show_panel(Panel::Comments),
             _ => {}
         }
         for p in paths {
@@ -447,6 +451,7 @@ impl Workspace {
                 Panel::Outline => d.render_outline(window, cx),
                 Panel::Patterns => d.render_patterns(wide, window, cx),
                 Panel::Calc => d.render_calc(wide, window, cx),
+                Panel::Comments => d.render_comments(window, cx),
             }),
             _ => div().into_any_element(),
         };
@@ -637,6 +642,13 @@ impl Render for Workspace {
                 ws.show_panel(Panel::Patterns);
                 if let Some(doc) = ws.active_doc().cloned() {
                     doc.update(cx, |d, cx| d.focus_pattern_input(window, cx));
+                }
+                cx.notify();
+            }))
+            .on_action(cx.listener(|ws, _: &ShowComments, _, cx| {
+                ws.show_panel(Panel::Comments);
+                if let Some(doc) = ws.active_doc().cloned() {
+                    doc.update(cx, |d, cx| d.focus_comments(cx));
                 }
                 cx.notify();
             }))

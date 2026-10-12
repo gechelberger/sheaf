@@ -3,6 +3,7 @@
 //!     sheaf [--timing] [file.pdf ...]
 
 mod calc_panel;
+mod comments_panel;
 mod docview;
 mod frame;
 mod markup_tools;
@@ -73,6 +74,7 @@ actions!(
         ToolConnector
     ]
 );
+actions!(comments, [EditComment, DeleteComment]);
 actions!(
     outline,
     [
@@ -95,6 +97,7 @@ actions!(
         ShowOutline,
         ShowPatterns,
         ShowCalc,
+        ShowComments,
         NextTab,
         PrevTab,
         CloseTab,
@@ -116,7 +119,8 @@ struct Cli {
     selftest_insert: Option<PathBuf>,
     /// Dev: add one of each mark to page 1 and save here.
     selftest_annot: Option<PathBuf>,
-    /// Panel to open with: "pages" (default), "bookmarks", "patterns" or "calc".
+    /// Panel to open with: "pages" (default), "bookmarks", "patterns", "calc"
+    /// or "comments".
     panel: Option<String>,
     /// Run this regex in the Patterns panel once the first document loads.
     pattern: Option<String>,
@@ -171,7 +175,8 @@ fn main() {
         let ws = Some(workspace::KEY_CONTEXT);
         let ti = Some(text_input::KEY_CONTEXT);
         let outline = Some(outline_panel::KEY_CONTEXT);
-        let either = Some("DocView || Outline");
+        let comments = Some(comments_panel::KEY_CONTEXT);
+        let either = Some("DocView || Outline || Comments");
         let mb = Some(menu_bar::KEY_CONTEXT);
         cx.bind_keys([
             KeyBinding::new("right", NextPage, doc),
@@ -206,6 +211,9 @@ fn main() {
             KeyBinding::new("f2", RenameBookmark, outline),
             KeyBinding::new("delete", DeleteBookmark, outline),
             KeyBinding::new("escape", DeselectBookmark, outline),
+            // Comments panel (when it has focus).
+            KeyBinding::new("f2", EditComment, comments),
+            KeyBinding::new("delete", DeleteComment, comments),
             // Markup tools (Acrobat's single-key accelerators where it has them).
             KeyBinding::new("v", ToolSelect, doc),
             KeyBinding::new("s", ToolNote, doc),
@@ -246,6 +254,7 @@ fn main() {
             KeyBinding::new("ctrl-alt-2", ShowOutline, ws),
             KeyBinding::new("ctrl-alt-3", ShowPatterns, ws),
             KeyBinding::new("ctrl-alt-4", ShowCalc, ws),
+            KeyBinding::new("ctrl-alt-5", ShowComments, ws),
             KeyBinding::new("ctrl-alt-l", ToggleLeftDock, ws),
             KeyBinding::new("ctrl-alt-r", ToggleRightDock, ws),
             KeyBinding::new("ctrl-alt-j", ToggleBottomDock, ws),

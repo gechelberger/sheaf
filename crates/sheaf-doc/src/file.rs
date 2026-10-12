@@ -78,22 +78,86 @@ impl PdfFile {
 
 use std::collections::HashMap;
 
-use crate::annot::{Annot, PageGeom, from_json};
+use crate::annot::{Annot, Box2, PageGeom, Pt, from_json};
+
+/// An annotation some other tool left in the file. Listed read-only in the
+/// Comments panel; PDFium draws it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ForeignAnnot {
+    /// Page index in the file.
+    pub page: u32,
+    /// `/Subtype`, e.g. `Text`, `Highlight`.
+    pub subtype: String,
+    pub author: String,
+    pub contents: String,
+    /// `/M`, a PDF date string, or empty.
+    pub modified: String,
+    /// Bounds in the page's displayed space.
+    pub rect: Box2,
+}
+
+/// Everything annotation-shaped in a file: our marks (editable, keyed by
+/// page index) and everyone else's.
+#[derive(Debug, Default)]
+pub struct AnnotsInFile {
+    pub sheaf: HashMap<u32, Vec<Annot>>,
+    pub foreign: Vec<ForeignAnnot>,
+}
 
 /// Annotations sheaf wrote into `path` earlier, keyed by page index.
 pub fn read_sheaf_annots(path: impl AsRef<Path>) -> Result<HashMap<u32, Vec<Annot>>> {
-    let pdf = lopdf::Document::load(path.as_ref())?;
-    Ok(sheaf_annots_in(&pdf))
+    Ok(read_annots(path)?.sheaf)
 }
 
 /// Same as `read_sheaf_annots`, from bytes already in memory.
 pub fn read_sheaf_annots_mem(bytes: &[u8]) -> Result<HashMap<u32, Vec<Annot>>> {
     let pdf = lopdf::Document::load_mem(bytes)?;
-    Ok(sheaf_annots_in(&pdf))
+    Ok(annots_in(&pdf).sheaf)
 }
 
-fn sheaf_annots_in(pdf: &lopdf::Document) -> HashMap<u32, Vec<Annot>> {
-    let mut out: HashMap<u32, Vec<Annot>> = HashMap::new();
+/// All annotations in `path`.
+pub fn read_annots(path: impl AsRef<Path>) -> Result<AnnotsInFile> {
+    let pdf = lopdf::Document::load(path.as_ref())?;
+    Ok(annots_in(&pdf))
+}
+
+/// Decode a PDF text string: UTF-16BE with BOM, else PDFDoc/Latin-1.
+pub fn pdf_text(o: &lopdf::Object) -> String {
+    let Ok(bytes) = o.as_str() else {
+        return String::new();
+    };
+    if bytes.starts_with(&[0xFE, 0xFF]) {
+        let units: Vec<u16> = bytes[2..]
+            .chunks(2)
+            .map(|c| u16::from_be_bytes([c[0], *c.get(1).unwrap_or(&0)]))
+            .collect();
+        String::from_utf16_lossy(&units)
+    } else {
+        bytes.iter().map(|&b| b as char).collect()
+    }
+}
+
+/// Subtypes that aren't comments: links, form fields, and the popup
+/// windows that belong to other annotations.
+fn is_comment_subtype(s: &str) -> bool {
+    !matches!(
+        s,
+        "Link"
+            | "Widget"
+            | "Popup"
+            | "Screen"
+            | "PrinterMark"
+            | "TrapNet"
+            | "Watermark"
+            | "3D"
+            | "Movie"
+            | "Sound"
+            | "RichMedia"
+    )
+}
+
+fn annots_in(pdf: &lopdf::Document) -> AnnotsInFile {
+    let mut out = AnnotsInFile::default();
     for (i, page_id) in pdf.get_pages().into_values().enumerate() {
         let Ok(page) = pdf.get_dictionary(page_id) else {
             continue;
@@ -107,26 +171,55 @@ fn sheaf_annots_in(pdf: &lopdf::Document) -> HashMap<u32, Vec<Annot>> {
         let Ok(list) = annots.as_array() else {
             continue;
         };
+        let mut geom: Option<PageGeom> = None;
         for entry in list {
             let Ok((_, obj)) = pdf.dereference(entry) else {
                 continue;
             };
             let Ok(dict) = obj.as_dict() else { continue };
-            let Ok(payload) = dict.get(b"SheafAnnot").and_then(|o| o.as_str()) else {
+            if let Ok(payload) = dict.get(b"SheafAnnot") {
+                if let Some(a) = from_json(pdf_text(payload).as_bytes()) {
+                    out.sheaf.entry(i as u32).or_default().push(a);
+                }
                 continue;
-            };
-            let bytes = if payload.starts_with(&[0xFE, 0xFF]) {
-                let units: Vec<u16> = payload[2..]
-                    .chunks(2)
-                    .map(|c| u16::from_be_bytes([c[0], c[1]]))
-                    .collect();
-                String::from_utf16_lossy(&units).into_bytes()
-            } else {
-                payload.to_vec()
-            };
-            if let Some(a) = from_json(&bytes) {
-                out.entry(i as u32).or_default().push(a);
             }
+            let subtype = dict
+                .get(b"Subtype")
+                .ok()
+                .and_then(|o| o.as_name().ok())
+                .map(|n| String::from_utf8_lossy(n).into_owned())
+                .unwrap_or_default();
+            if subtype.is_empty() || !is_comment_subtype(&subtype) {
+                continue;
+            }
+            let rect: Vec<f32> = dict
+                .get(b"Rect")
+                .ok()
+                .and_then(|o| pdf.dereference(o).ok())
+                .and_then(|(_, o)| o.as_array().ok())
+                .map(|a| a.iter().map(|v| v.as_float().unwrap_or(0.0)).collect())
+                .unwrap_or_default();
+            if rect.len() != 4 {
+                continue;
+            }
+            let g = *geom.get_or_insert_with(|| page_geom(pdf, page_id));
+            let p = g.to_display(Pt {
+                x: rect[0],
+                y: rect[1],
+            });
+            let q = g.to_display(Pt {
+                x: rect[2],
+                y: rect[3],
+            });
+            let text = |key: &[u8]| dict.get(key).map(pdf_text).unwrap_or_default();
+            out.foreign.push(ForeignAnnot {
+                page: i as u32,
+                subtype,
+                author: text(b"T"),
+                contents: text(b"Contents"),
+                modified: text(b"M"),
+                rect: Box2::from_corners(p, q),
+            });
         }
     }
     out
@@ -169,5 +262,87 @@ pub fn page_geom(pdf: &lopdf::Document, page: lopdf::ObjectId) -> PageGeom {
     PageGeom {
         media: media.unwrap_or([0.0, 0.0, 612.0, 792.0]),
         rotate: rotate.unwrap_or(0).rem_euclid(360),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lopdf::{Object, Stream, dictionary};
+
+    /// One page carrying a third-party sticky note, a link (not a comment),
+    /// a popup (not a comment), and one of ours.
+    #[test]
+    fn reads_foreign_and_sheaf_annotations() {
+        let mut pdf = lopdf::Document::with_version("1.7");
+        let pages_id = pdf.new_object_id();
+        let content = pdf.add_object(Stream::new(dictionary! {}, b"".to_vec()));
+        let note = pdf.add_object(dictionary! {
+            "Type" => "Annot",
+            "Subtype" => "Text",
+            "Rect" => Object::Array(vec![100.0.into(), 700.0.into(), 120.0.into(), 720.0.into()]),
+            "T" => Object::String(b"Reviewer".to_vec(), lopdf::StringFormat::Literal),
+            "Contents" => Object::String(vec![0xFE, 0xFF, 0x00, b'H', 0x00, b'i', 0x20, 0x14], lopdf::StringFormat::Hexadecimal),
+            "M" => Object::String(b"D:20260101120000Z".to_vec(), lopdf::StringFormat::Literal),
+        });
+        let link = pdf.add_object(dictionary! {
+            "Type" => "Annot",
+            "Subtype" => "Link",
+            "Rect" => Object::Array(vec![0.0.into(), 0.0.into(), 10.0.into(), 10.0.into()]),
+        });
+        let popup = pdf.add_object(dictionary! {
+            "Type" => "Annot",
+            "Subtype" => "Popup",
+            "Rect" => Object::Array(vec![0.0.into(), 0.0.into(), 10.0.into(), 10.0.into()]),
+        });
+        let ours = Annot {
+            id: crate::annot::AnnotId(3),
+            kind: crate::annot::AnnotKind::Note {
+                pos: Pt { x: 1.0, y: 2.0 },
+            },
+            color: [1, 2, 3],
+            opacity: 1.0,
+            stroke: 1.0,
+            author: "me".into(),
+            contents: "mine".into(),
+            modified: String::new(),
+        };
+        let (dict, _) = crate::annot::to_pdf(
+            &ours,
+            &PageGeom {
+                media: [0.0, 0.0, 612.0, 792.0],
+                rotate: 0,
+            },
+        );
+        let mine = pdf.add_object(dict);
+        let page = pdf.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => Object::Array(vec![0.into(), 0.into(), 612.into(), 792.into()]),
+            "Contents" => content,
+            "Annots" => Object::Array(vec![note.into(), link.into(), popup.into(), mine.into()]),
+        });
+        pdf.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1,
+            }),
+        );
+        let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        pdf.trailer.set("Root", catalog);
+
+        let found = annots_in(&pdf);
+        assert_eq!(found.sheaf[&0], vec![ours]);
+        assert_eq!(found.foreign.len(), 1, "{:?}", found.foreign);
+        let f = &found.foreign[0];
+        assert_eq!(f.subtype, "Text");
+        assert_eq!(f.author, "Reviewer");
+        assert_eq!(f.contents, "Hi\u{2014}");
+        assert_eq!(f.modified, "D:20260101120000Z");
+        // User-space (100,700)-(120,720) on a 792pt page is displayed y 72..92.
+        assert_eq!(
+            (f.rect.x, f.rect.y, f.rect.w, f.rect.h),
+            (100.0, 72.0, 20.0, 20.0)
+        );
     }
 }

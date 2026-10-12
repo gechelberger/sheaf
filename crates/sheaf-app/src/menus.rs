@@ -63,6 +63,7 @@ pub fn app_menus() -> Vec<Menu> {
                 item("&Bookmarks", ShowOutline),
                 item("Patte&rns", ShowPatterns),
                 item("&Calculator", ShowCalc),
+                item("Co&mments", ShowComments),
                 sep(),
                 item("Navigation Pan&es", ToggleSidebar),
                 item("Left &Dock", ToggleLeftDock),
