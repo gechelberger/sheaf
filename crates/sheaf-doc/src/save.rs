@@ -192,7 +192,7 @@ pub fn save_to_path(model: &Snapshot, path: &Path) -> Result<Strategy> {
     Ok(Strategy::Rewrite)
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let dir = path.parent().unwrap_or(Path::new("."));
     let tmp = dir.join(format!(
         ".{}.sheaf-tmp",

@@ -328,6 +328,11 @@ pub struct DocView {
     pub(crate) selftest_insert: Option<PathBuf>,
     pub(crate) selftest_annot: Option<PathBuf>,
     pub(crate) selftest_clean: Option<PathBuf>,
+    /// Recovery data found when opening, until the user has been asked.
+    pending_recovery: Option<sheaf_doc::recovery::Recovery>,
+    autosave: Option<Task<()>>,
+    /// When the edits since the last sidecar write began.
+    autosave_since: Option<Instant>,
     pub(crate) tool: Tool,
     pub(crate) tool_color: [u8; 3],
     pub(crate) tick_glyph: String,
@@ -371,6 +376,9 @@ impl DocView {
             selftest_insert: None,
             selftest_annot: None,
             selftest_clean: None,
+            pending_recovery: None,
+            autosave: None,
+            autosave_since: None,
             tool: Tool::Select,
             tool_color: [255, 230, 0],
             tick_glyph: "✓".into(),
@@ -414,12 +422,13 @@ impl DocView {
                     let bytes = std::fs::metadata(&path)
                         .map(|m| m.len() as usize)
                         .unwrap_or(0);
-                    RenderHandle::open(path.clone(), None).map(|h| (h, path, bytes))
+                    let recovery = sheaf_doc::recovery::find(&path);
+                    RenderHandle::open(path.clone(), None).map(|h| (h, path, bytes, recovery))
                 })
                 .await;
             this.update(cx, |viewer, cx| {
                 match opened {
-                    Ok((handle, path, bytes)) => {
+                    Ok((handle, path, bytes, recovery)) => {
                         let info = handle.info();
                         if timing {
                             eprintln!(
@@ -429,77 +438,8 @@ impl DocView {
                                 info.page_count
                             );
                         }
-                        let source = SourceInfo {
-                            path,
-                            page_count: info.page_count,
-                            first_page: info.first_page,
-                            page_sizes: None,
-                            bytes,
-                        };
-                        let model =
-                            Document::new(source, &[], sheaf_doc::history::default_policy());
-                        let mut handles = HashMap::new();
-                        handles.insert(model.primary(), handle);
-                        viewer.state = State::Ready(Box::new(Doc {
-                            model,
-                            handles,
-                            version: 0,
-                            zoom: Zoom::FitWidth,
-                            scroll: ScrollHandle::new(),
-                            layout: None,
-                            previews: HashMap::new(),
-                            tiles: HashMap::new(),
-                            inflight: HashMap::new(),
-                            retired: Vec::new(),
-                            current_page: 0,
-                            pending_scroll: None,
-                            first_paint: None,
-                            notice: None,
-                            thumb_scroll: ScrollHandle::new(),
-                            thumb_keep: HashSet::new(),
-                            thumb_followed: None,
-                            outline_loaded: false,
-                            outline_expanded: HashSet::new(),
-                            outline_scroll: ScrollHandle::new(),
-                            selection: HashSet::new(),
-                            sel_anchor: None,
-                            drop_target: None,
-                            saving: false,
-                            outline_focus: cx.focus_handle(),
-                            outline_selected: None,
-                            outline_drop: None,
-                            outline_rename: None,
-                            outline_menu: None,
-                            outline_rows: Vec::new(),
-                            drag: None,
-                            selected_annot: None,
-                            annot_editor: None,
-                            pending_connector: None,
-                            foreign_annots: Vec::new(),
-                            selected_foreign: None,
-                        }));
-                        viewer.fetch_page_sizes(cx);
-                        viewer.fetch_outline(cx);
-                        viewer.load_sheaf_annots(cx);
-                        if let Some(p) = viewer.selftest_save.take() {
-                            viewer.selftest_save(p, cx);
-                        }
-                        if let Some(p) = viewer.selftest_insert.take() {
-                            viewer.insert_pdf(p, cx);
-                        }
-                        if let Some(p) = viewer.selftest_annot.take() {
-                            viewer.selftest_annot(p, cx);
-                        }
-                        if let Some(p) = viewer.selftest_clean.take() {
-                            viewer.selftest_clean(p, cx);
-                        }
-                        if let Some(src) = viewer.initial_pattern.take() {
-                            viewer.run_initial_pattern(src, cx);
-                        }
-                        if let Some(q) = viewer.initial_query.take() {
-                            viewer.new_search(cx);
-                            viewer.start_search(q, cx);
-                        }
+                        viewer.pending_recovery = recovery;
+                        viewer.install(handle, path, bytes, cx);
                     }
                     Err(e) => viewer.state = State::Failed(format!("{e:#}")),
                 }
@@ -508,6 +448,236 @@ impl DocView {
             .ok();
         })
         .detach();
+    }
+
+    /// Make an opened file the primary source and start the background
+    /// loads. `path` is what the engine opened: the document's own path,
+    /// except while showing recovered changes from a temporary file.
+    fn install(
+        &mut self,
+        handle: RenderHandle,
+        path: PathBuf,
+        bytes: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let info = handle.info();
+        let source = SourceInfo {
+            path,
+            page_count: info.page_count,
+            first_page: info.first_page,
+            page_sizes: None,
+            bytes,
+        };
+        let model = Document::new(source, &[], sheaf_doc::history::default_policy());
+        let mut handles = HashMap::new();
+        handles.insert(model.primary(), handle);
+        self.state = State::Ready(Box::new(Doc {
+            model,
+            handles,
+            version: 0,
+            zoom: Zoom::FitWidth,
+            scroll: ScrollHandle::new(),
+            layout: None,
+            previews: HashMap::new(),
+            tiles: HashMap::new(),
+            inflight: HashMap::new(),
+            retired: Vec::new(),
+            current_page: 0,
+            pending_scroll: None,
+            first_paint: None,
+            notice: None,
+            thumb_scroll: ScrollHandle::new(),
+            thumb_keep: HashSet::new(),
+            thumb_followed: None,
+            outline_loaded: false,
+            outline_expanded: HashSet::new(),
+            outline_scroll: ScrollHandle::new(),
+            selection: HashSet::new(),
+            sel_anchor: None,
+            drop_target: None,
+            saving: false,
+            outline_focus: cx.focus_handle(),
+            outline_selected: None,
+            outline_drop: None,
+            outline_rename: None,
+            outline_menu: None,
+            outline_rows: Vec::new(),
+            drag: None,
+            selected_annot: None,
+            annot_editor: None,
+            pending_connector: None,
+            foreign_annots: Vec::new(),
+            selected_foreign: None,
+        }));
+        self.fetch_page_sizes(cx);
+        self.fetch_outline(cx);
+        self.load_sheaf_annots(cx);
+        if let Some(p) = self.selftest_save.take() {
+            self.selftest_save(p, cx);
+        }
+        if let Some(p) = self.selftest_insert.take() {
+            self.insert_pdf(p, cx);
+        }
+        if let Some(p) = self.selftest_annot.take() {
+            self.selftest_annot(p, cx);
+        }
+        if let Some(p) = self.selftest_clean.take() {
+            self.selftest_clean(p, cx);
+        }
+        if let Some(src) = self.initial_pattern.take() {
+            self.run_initial_pattern(src, cx);
+        }
+        if let Some(q) = self.initial_query.take() {
+            self.new_search(cx);
+            self.start_search(q, cx);
+        }
+    }
+
+    /// Ask whether to apply recovery data found next to the file.
+    fn offer_recovery(
+        &mut self,
+        rec: sheaf_doc::recovery::Recovery,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = self.file_name();
+        let rx = window.prompt(
+            gpui::PromptLevel::Warning,
+            &format!("Recover unsaved changes to \"{name}\"?"),
+            Some("sheaf found edits that weren't saved when it last closed. Recovered changes stay unsaved until you save."),
+            &[gpui::PromptButton::ok("Recover"), gpui::PromptButton::new("Discard")],
+            cx,
+        );
+        let path = self.path.clone();
+        cx.spawn(async move |this, cx| match rx.await {
+            Ok(0) => {
+                this.update(cx, |v, cx| v.recover(rec, cx)).ok();
+            }
+            Ok(_) => sheaf_doc::recovery::discard(&path),
+            Err(_) => {}
+        })
+        .detach();
+    }
+
+    /// Open the original plus its recovery section from a temporary file,
+    /// leaving the document dirty so Save writes it back to its own path.
+    fn recover(&mut self, rec: sheaf_doc::recovery::Recovery, cx: &mut Context<Self>) {
+        let path = self.path.clone();
+        self.state = State::Loading;
+        let timing = self.timing;
+        cx.spawn(async move |this, cx| {
+            let t = Instant::now();
+            let opened = cx
+                .background_executor()
+                .spawn({
+                    let path = path.clone();
+                    async move {
+                        let stamp = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis())
+                            .unwrap_or(0);
+                        let tmp = std::env::temp_dir().join(format!(
+                            "sheaf-recovered-{}-{stamp}.pdf",
+                            std::process::id()
+                        ));
+                        sheaf_doc::recovery::materialize(&path, &rec, &tmp)?;
+                        let bytes = std::fs::metadata(&tmp)
+                            .map(|m| m.len() as usize)
+                            .unwrap_or(0);
+                        let handle = RenderHandle::open(tmp.clone(), None)?;
+                        anyhow::Ok((handle, tmp, bytes))
+                    }
+                })
+                .await;
+            this.update(cx, |viewer, cx| {
+                match opened {
+                    Ok((handle, tmp, bytes)) => {
+                        viewer.install(handle, tmp, bytes, cx);
+                        if let State::Ready(doc) = &mut viewer.state {
+                            doc.model.mark_unsaved();
+                            doc.notice =
+                                Some("Recovered unsaved changes — Ctrl+S to keep them".into());
+                        }
+                        if timing {
+                            eprintln!("[timing] recovered unsaved changes in {:?}", t.elapsed());
+                        }
+                    }
+                    Err(e) => {
+                        // Unusable recovery data: drop it and open the file as is.
+                        log::error!("recovery failed: {e:#}");
+                        sheaf_doc::recovery::discard(&path);
+                        viewer.open(cx);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    // ----- crash-recovery autosave ------------------------------------------
+
+    /// Write the recovery sidecar a few seconds after the last edit, and at
+    /// least every half minute while edits keep coming.
+    fn schedule_autosave(&mut self, cx: &mut Context<Self>) {
+        let first = *self.autosave_since.get_or_insert_with(Instant::now);
+        let delay = if first.elapsed() >= std::time::Duration::from_secs(30) {
+            std::time::Duration::ZERO
+        } else {
+            std::time::Duration::from_secs(3)
+        };
+        self.autosave = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            this.update(cx, |v, cx| v.write_recovery(cx)).ok();
+        }));
+    }
+
+    fn write_recovery(&mut self, cx: &mut Context<Self>) {
+        self.autosave = None;
+        self.autosave_since = None;
+        let path = self.path.clone();
+        let State::Ready(doc) = &self.state else {
+            return;
+        };
+        let (dirty, saving) = (doc.model.is_dirty(), doc.saving);
+        // Only against the file itself, not a recovered temporary.
+        let primary_is_file = doc
+            .model
+            .source(doc.model.primary())
+            .is_some_and(|s| s.path == path);
+        if !dirty {
+            sheaf_doc::recovery::discard(&path);
+            return;
+        }
+        if saving {
+            self.schedule_autosave(cx);
+            return;
+        }
+        if !primary_is_file {
+            return;
+        }
+        let snap = doc.model.snapshot();
+        let timing = self.timing;
+        cx.background_executor()
+            .spawn(async move {
+                let t = Instant::now();
+                match sheaf_doc::recovery::write(&snap) {
+                    Ok(Some(n)) => {
+                        if timing {
+                            eprintln!("[timing] recovery sidecar: {n} bytes in {:?}", t.elapsed());
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => log::warn!("writing recovery sidecar: {e:#}"),
+                }
+            })
+            .detach();
+    }
+
+    /// The user chose to drop unsaved changes: the sidecar goes with them.
+    pub fn discard_recovery(&self) {
+        sheaf_doc::recovery::discard(&self.path);
     }
 
     fn fetch_page_sizes(&mut self, cx: &mut Context<Self>) {
@@ -633,6 +803,7 @@ impl DocView {
                 });
                 doc.touched();
                 self.prune_selection();
+                self.schedule_autosave(cx);
                 cx.notify();
             }
             Err(e) => {
@@ -802,6 +973,7 @@ impl DocView {
         };
         doc.touched();
         self.prune_selection();
+        self.schedule_autosave(cx);
         cx.notify();
     }
 
@@ -815,6 +987,7 @@ impl DocView {
         };
         doc.touched();
         self.prune_selection();
+        self.schedule_autosave(cx);
         cx.notify();
     }
 
@@ -929,6 +1102,10 @@ impl DocView {
                             .detach();
                         }
                         doc.handles.insert(sid, handle);
+                        sheaf_doc::recovery::discard(&view.path);
+                        sheaf_doc::recovery::discard(&path);
+                        view.autosave = None;
+                        view.autosave_since = None;
                         view.path = path.clone();
                         doc.notice = Some(format!(
                             "Saved {} ({strategy:?}) in {:?}",
@@ -1537,6 +1714,7 @@ impl DocView {
                 }
                 doc.touched();
                 view.prune_selection();
+                view.schedule_autosave(cx);
                 cx.notify();
                 // Sizes for the new source arrive on their own.
                 cx.spawn(async move |this, cx| {
@@ -2040,6 +2218,9 @@ struct PagePlan {
 
 impl Render for DocView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(rec) = self.pending_recovery.take() {
+            self.offer_recovery(rec, window, cx);
+        }
         let viewport = window.viewport_size();
         if std::mem::take(&mut self.pending_focus) {
             window.focus(&self.focus_handle, cx);

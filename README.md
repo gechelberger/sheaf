@@ -371,6 +371,12 @@ Contexts: `DocView` (the page view), `Outline`, `Comments`, `Palette`,
 `TextInput`, `Workspace` (anywhere in the window), or none for global.
 Bad entries are reported on stderr at startup and skipped.
 
+**Crash recovery.** A few seconds after each edit, sheaf writes the unsaved
+changes as an incremental update to `<name>.pdf.sheaf-recovery` next to the
+file (only the edits, so it's small and quick). The file itself is never
+touched until you save. If sheaf didn't exit cleanly, the next open offers to
+recover; saving, or choosing Don't Save, removes the sidecar.
+
 ## Name
 
 A *sheaf* is a bundle of papers. It's also short, unclaimed on crates.io

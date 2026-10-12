@@ -477,7 +477,10 @@ impl Workspace {
         );
         cx.spawn(async move |_, cx| match rx.await {
             Ok(0) => cx.update(|cx| doc.update(cx, |d, cx| d.save(cx))).await,
-            Ok(1) => true,
+            Ok(1) => {
+                cx.update(|cx| doc.read(cx).discard_recovery());
+                true
+            }
             _ => false,
         })
     }

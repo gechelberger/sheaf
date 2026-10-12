@@ -480,6 +480,12 @@ impl Document {
         self.saved = Some(self.cursor);
     }
 
+    /// Treat the current state as unsaved even though nothing was edited
+    /// (a recovered document: its primary source is a temporary file).
+    pub fn mark_unsaved(&mut self) {
+        self.saved = None;
+    }
+
     pub fn can_undo(&self) -> bool {
         self.cursor > 0
     }

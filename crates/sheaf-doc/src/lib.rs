@@ -10,6 +10,7 @@ pub mod file;
 pub mod history;
 pub mod incremental;
 pub mod model;
+pub mod recovery;
 pub mod save;
 
 pub use annot::{Annot, AnnotId, AnnotKind, Box2, PageGeom, Pt, default_author, pdf_date_now};

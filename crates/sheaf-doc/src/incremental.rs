@@ -19,10 +19,24 @@ use crate::save::{
 
 /// Produce the full new file (original bytes + update section).
 pub fn incremental(snap: &Snapshot) -> Result<Vec<u8>> {
+    Ok(build(snap)?.1)
+}
+
+/// Just the update section, with the length of the original it appends
+/// to. Empty when there's nothing to write. Used for crash recovery.
+pub fn incremental_section(snap: &Snapshot) -> Result<(usize, Vec<u8>)> {
+    let (original_len, mut full) = build(snap)?;
+    let section = full.split_off(original_len);
+    Ok((original_len, section))
+}
+
+/// The original bytes with the update appended, and where the original ends.
+fn build(snap: &Snapshot) -> Result<(usize, Vec<u8>)> {
     let primary_id = snap.primary;
     let info = snap.source(primary_id).context("primary source missing")?;
     let original =
         std::fs::read(&info.path).with_context(|| format!("reading {}", info.path.display()))?;
+    let original_len = original.len();
     let mut pdf =
         Pdf::load_mem(&original).with_context(|| format!("parsing {}", info.path.display()))?;
     if pdf.encryption_state.is_some() || pdf.trailer.has(b"Encrypt") {
@@ -172,7 +186,7 @@ pub fn incremental(snap: &Snapshot) -> Result<Vec<u8>> {
         changed.entry(id).or_insert_with(|| obj.clone());
     }
     if changed.is_empty() {
-        return Ok(original);
+        return Ok((original_len, original));
     }
 
     // ----- serialize the update section ---------------------------------------
@@ -251,7 +265,7 @@ pub fn incremental(snap: &Snapshot) -> Result<Vec<u8>> {
             write!(out, "\nendobj\nstartxref\n{}\n%%EOF\n", xref_offset)?;
         }
     }
-    Ok(out)
+    Ok((original_len, out))
 }
 
 fn apply_rotation(dict: &mut Dictionary, delta: i32) {
