@@ -2,6 +2,7 @@
 //!
 //!     sheaf [--timing] [file.pdf ...]
 
+mod calc_panel;
 mod docview;
 mod frame;
 mod markup_tools;
@@ -93,6 +94,7 @@ actions!(
         ShowThumbnails,
         ShowOutline,
         ShowPatterns,
+        ShowCalc,
         NextTab,
         PrevTab,
         CloseTab,
@@ -114,7 +116,7 @@ struct Cli {
     selftest_insert: Option<PathBuf>,
     /// Dev: add one of each mark to page 1 and save here.
     selftest_annot: Option<PathBuf>,
-    /// Sidebar panel to open with: "pages" (default), "bookmarks" or "patterns".
+    /// Panel to open with: "pages" (default), "bookmarks", "patterns" or "calc".
     panel: Option<String>,
     /// Run this regex in the Patterns panel once the first document loads.
     pattern: Option<String>,
@@ -243,6 +245,7 @@ fn main() {
             KeyBinding::new("ctrl-alt-1", ShowThumbnails, ws),
             KeyBinding::new("ctrl-alt-2", ShowOutline, ws),
             KeyBinding::new("ctrl-alt-3", ShowPatterns, ws),
+            KeyBinding::new("ctrl-alt-4", ShowCalc, ws),
             KeyBinding::new("ctrl-alt-l", ToggleLeftDock, ws),
             KeyBinding::new("ctrl-alt-r", ToggleRightDock, ws),
             KeyBinding::new("ctrl-alt-j", ToggleBottomDock, ws),

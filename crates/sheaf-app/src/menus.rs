@@ -62,6 +62,7 @@ pub fn app_menus() -> Vec<Menu> {
                 item("&Thumbnails", ShowThumbnails),
                 item("&Bookmarks", ShowOutline),
                 item("Patte&rns", ShowPatterns),
+                item("&Calculator", ShowCalc),
                 sep(),
                 item("Navigation Pan&es", ToggleSidebar),
                 item("Left &Dock", ToggleLeftDock),
@@ -98,6 +99,9 @@ pub fn app_menus() -> Vec<Menu> {
                 item("&Pencil", ToolInk),
                 sep(),
                 item("Tic&kmark", ToolTick),
+                item("Co&nnector", ToolConnector),
+                sep(),
+                item("Calculator &Tape…", ShowCalc),
             ],
         ),
         menu(

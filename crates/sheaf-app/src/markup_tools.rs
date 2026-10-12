@@ -198,6 +198,10 @@ fn translate(kind: &AnnotKind, dx: f32, dy: f32) -> AnnotKind {
             label: label.clone(),
             partner: *partner,
         },
+        AnnotKind::Tape { rect, size } => AnnotKind::Tape {
+            rect: mb(rect),
+            size: *size,
+        },
     }
 }
 
@@ -332,6 +336,17 @@ impl DocView {
             return;
         };
         window.focus(&self.focus_handle, cx);
+        // A calculator tape waiting to be placed takes the click, whatever
+        // the tool.
+        let under = match &self.state {
+            State::Ready(doc) => doc.page_ref(page).map(|r| r.id),
+            _ => None,
+        };
+        if let Some(pid) = under
+            && self.place_tape_at(pid, p, cx)
+        {
+            return;
+        }
         let tool = self.tool;
         let color = self.tool_color;
         let glyph = self.tick_glyph.clone();

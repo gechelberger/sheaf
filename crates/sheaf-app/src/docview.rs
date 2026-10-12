@@ -312,6 +312,7 @@ pub struct DocView {
     pub(crate) search: Option<Search>,
     pub(crate) pattern: Option<crate::pattern_panel::PatternSearch>,
     pub(crate) initial_pattern: Option<String>,
+    pub(crate) calc: Option<crate::calc_panel::CalcTape>,
     pub(crate) initial_query: Option<String>,
     pub(crate) search_started: Option<Instant>,
     pub(crate) selftest_save: Option<PathBuf>,
@@ -353,6 +354,7 @@ impl DocView {
             search: None,
             pattern: None,
             initial_pattern: None,
+            calc: None,
             initial_query: None,
             search_started: None,
             selftest_save: None,
@@ -1165,6 +1167,20 @@ impl DocView {
             "Connector 1",
             cx,
         );
+        let mut tape = self.new_annot(
+            AnnotKind::Tape {
+                rect: Box2 {
+                    x: 360.0,
+                    y: 300.0,
+                    w: 110.0,
+                    h: 60.0,
+                },
+                size: 10.0,
+            },
+            [20, 20, 20],
+        );
+        tape.contents = "1,234.50 +\n250.00 +\n84.50 -\n1,400.00 T".into();
+        self.add_annot(p0, tape, "Place tape", cx);
         self.save_to(path, cx);
     }
 
@@ -2458,8 +2474,8 @@ impl Render for DocView {
             .on_action(cx.listener(|v, _: &CloseSearch, window, cx| {
                 if v.search.is_some() {
                     v.close_search(window, cx)
-                } else if v.cancel_pending_connector(cx) {
-                    // Esc with a half-placed connector just drops it.
+                } else if v.cancel_tape_placing(cx) || v.cancel_pending_connector(cx) {
+                    // Esc with a tape or connector half-placed just drops it.
                 } else {
                     if let State::Ready(doc) = &mut v.state {
                         doc.selected_annot = None;
@@ -2891,6 +2907,49 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
                     .text_size(px(rect.h * 0.8 * k))
                     .font_weight(gpui::FontWeight::BOLD)
                     .child(glyph.clone())
+                    .into_any_element(),
+            );
+        }
+        AnnotKind::Tape { rect, size } => {
+            use sheaf_doc::annot::{TAPE_LINE, TAPE_OP_W, TAPE_PAD, tape_lines};
+            let fs = *size * k;
+            let rows: Vec<AnyElement> = tape_lines(&a.contents)
+                .into_iter()
+                .map(|(v, op)| {
+                    let total = op == "T";
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .h(px(*size * TAPE_LINE * k))
+                        .when(total, |d| {
+                            d.border_t_1()
+                                .border_color(rgb(0x606060))
+                                .font_weight(gpui::FontWeight::BOLD)
+                        })
+                        .child(div().child(v))
+                        .child(
+                            div()
+                                .w(px(*size * TAPE_OP_W * k))
+                                .pl(px(fs * 0.2))
+                                .child(op),
+                        )
+                        .into_any_element()
+                })
+                .collect();
+            out.push(
+                place(*rect)
+                    .bg(rgb(0xffffff))
+                    .border_1()
+                    .border_color(rgb(0x999999))
+                    .p(px(TAPE_PAD * k))
+                    .flex()
+                    .flex_col()
+                    .overflow_hidden()
+                    .text_color(color)
+                    .text_size(px(fs))
+                    .line_height(px(*size * TAPE_LINE * k))
+                    .children(rows)
                     .into_any_element(),
             );
         }

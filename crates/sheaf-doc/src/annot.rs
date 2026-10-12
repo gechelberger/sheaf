@@ -104,6 +104,13 @@ pub enum AnnotKind {
         label: String,
         partner: Option<AnnotId>,
     },
+    /// Calculator tape. `contents` holds one entry per line as
+    /// `"<amount> <op>"` (see `tape_lines`); drawn as a paper tape with
+    /// right-aligned amounts, totals (`T`) ruled and bold.
+    Tape {
+        rect: Box2,
+        size: f32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -142,6 +149,7 @@ impl Annot {
                 h: NOTE_SIZE,
             },
             AnnotKind::FreeText { rect, .. }
+            | AnnotKind::Tape { rect, .. }
             | AnnotKind::Square { rect }
             | AnnotKind::Ellipse { rect } => *rect,
             AnnotKind::Stamp { rect, .. } | AnnotKind::Connector { rect, .. } => *rect,
@@ -173,6 +181,41 @@ impl Annot {
 pub const NOTE_SIZE: f32 = 20.0;
 /// Diameter of a connector marker, in points.
 pub const CONNECTOR_SIZE: f32 = 22.0;
+/// Tape layout: inner padding (pt), line height (em), operator column (em).
+pub const TAPE_PAD: f32 = 4.0;
+pub const TAPE_LINE: f32 = 1.25;
+pub const TAPE_OP_W: f32 = 0.9;
+
+/// Split tape contents into (amount, operator) per line. The operator is
+/// whatever follows the last space; a line without one is an amount alone.
+pub fn tape_lines(contents: &str) -> Vec<(String, String)> {
+    contents
+        .lines()
+        .map(|l| {
+            let l = l.trim_end();
+            match l.rsplit_once(' ') {
+                Some((v, op)) => (v.trim().to_string(), op.to_string()),
+                None => (l.to_string(), String::new()),
+            }
+        })
+        .collect()
+}
+
+/// Advance of `s` in Helvetica at `size`, from the AFM widths of the
+/// characters a tape uses (digits are all 556). Good enough to right-align.
+pub fn helv_width(s: &str, size: f32) -> f32 {
+    s.chars()
+        .map(|c| match c {
+            '.' | ',' | ' ' => 278.0,
+            '-' | '+' | '×' | '÷' => 584.0,
+            '(' | ')' => 333.0,
+            'T' => 611.0,
+            _ => 556.0,
+        })
+        .sum::<f32>()
+        * size
+        / 1000.0
+}
 
 impl Annot {
     /// The other end of a connector, if this is one and it's linked.
@@ -534,6 +577,66 @@ pub fn to_pdf(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
                     text_matrix(origin),
                     content_literal(line)
                 ));
+            }
+            content.push_str(" ET");
+        }
+        AnnotKind::Tape { rect, size } => {
+            dict.set("Subtype", Object::Name(b"FreeText".to_vec()));
+            dict.set(
+                "DA",
+                pdf_text_string(&format!("{HELV} {size} Tf {}", color_ops(c, true))),
+            );
+            dict.set("C", Object::Array(vec![Object::Real(1.0); 3]));
+            // Paper: white, thin grey border.
+            let [x0, y0, x1, y1] = geom.box_to_user(*rect);
+            content.push_str(&format!(
+                " 1 1 1 rg 0.6 G 0.5 w {x0:.2} {y0:.2} {:.2} {:.2} re B",
+                x1 - x0,
+                y1 - y0
+            ));
+            let lines = tape_lines(&a.contents);
+            let op_w = size * TAPE_OP_W;
+            let right = rect.right() - TAPE_PAD;
+            let baseline = |i: usize| rect.y + TAPE_PAD + size * (1.0 + TAPE_LINE * i as f32);
+            // Rules above totals (paths can't go inside BT/ET).
+            content.push_str(" 0.3 G 0.5 w");
+            for (i, (_, op)) in lines.iter().enumerate() {
+                if op == "T" {
+                    let y = baseline(i) - size * 1.05;
+                    let p = up(Pt {
+                        x: rect.x + TAPE_PAD,
+                        y,
+                    });
+                    let q = up(Pt { x: right, y });
+                    content.push_str(&format!(
+                        " {:.2} {:.2} m {:.2} {:.2} l S",
+                        p.x, p.y, q.x, q.y
+                    ));
+                }
+            }
+            content.push_str(&format!(" BT {}", color_ops(c, true)));
+            for (i, (val, op)) in lines.iter().enumerate() {
+                let font = if op == "T" { HELV_BOLD } else { HELV };
+                let origin = Pt {
+                    x: right - op_w - helv_width(val, *size),
+                    y: baseline(i),
+                };
+                content.push_str(&format!(
+                    " {font} {size:.2} Tf {} {} Tj",
+                    text_matrix(origin),
+                    content_literal(val)
+                ));
+                if !op.is_empty() {
+                    let origin = Pt {
+                        x: right - op_w + size * 0.2,
+                        y: baseline(i),
+                    };
+                    content.push_str(&format!(
+                        " {} {} Tj",
+                        text_matrix(origin),
+                        content_literal(op)
+                    ));
+                }
             }
             content.push_str(" ET");
         }
