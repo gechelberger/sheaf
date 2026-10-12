@@ -546,8 +546,16 @@ impl Workspace {
     }
 
     /// The window system asked to close the window: let it when nothing is
-    /// unsaved, otherwise run the prompts and quit from there.
+    /// unsaved, otherwise run the prompts and quit from there. On Windows,
+    /// quit through GPUI so native destruction does not precede GPUI cleanup.
     pub fn window_should_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if cfg!(target_os = "windows") {
+            // Returning true lets DefWindowProc destroy the HWND immediately.
+            // GPUI's WindowsWindow::drop then tries to revoke drag/drop and
+            // destroy that same HWND again. Keep it alive for GPUI's quit path.
+            self.request_quit(window, cx);
+            return false;
+        }
         if self.docs.iter().all(|d| !d.read(cx).is_dirty()) {
             self.persist_window(window);
             return true;

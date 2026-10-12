@@ -6,8 +6,8 @@
 
 use gpui::{
     AnyElement, App, Bounds, CursorStyle, Decorations, HitboxBehavior, Hsla, MouseButton, Pixels,
-    Point, ResizeEdge, SharedString, Size, Stateful, Styled, Tiling, Window, canvas, div, point,
-    prelude::*, px, rgb, size, transparent_black,
+    Point, ResizeEdge, SharedString, Size, Stateful, Styled, Tiling, Window, WindowControlArea,
+    canvas, div, point, prelude::*, px, rgb, size, transparent_black,
 };
 
 pub const TITLE_H: f32 = 34.0;
@@ -26,6 +26,17 @@ pub fn draws_menu_bar() -> bool {
     !cfg!(target_os = "macos")
 }
 
+/// A non-interactive title-bar region with native caption behavior on Windows.
+fn caption_region() -> gpui::Div {
+    div()
+        .h_full()
+        .flex()
+        .items_center()
+        .when(cfg!(target_os = "windows"), |d| {
+            d.window_control_area(WindowControlArea::Drag)
+        })
+}
+
 /// The title bar. `menu_bar` follows the app name; `title` is shown centered; the whole bar moves the
 /// window, double-click toggles maximize, right-click opens the window menu.
 pub fn title_bar(
@@ -39,6 +50,7 @@ pub fn title_bar(
     let button = |id: &'static str, label: &'static str, danger: bool| {
         div()
             .id(id)
+            .occlude()
             .w(px(46.0))
             .h_full()
             .flex()
@@ -54,28 +66,48 @@ pub fn title_bar(
                     s.bg(rgb(0x3a3a3a))
                 }
             })
-            // Buttons shouldn't start a window move.
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            // Linux's parent mouse handler must not move the window when a
+            // button is pressed. Windows needs the event to reach its native
+            // window-control handlers instead.
+            .when(!cfg!(target_os = "windows"), |button| {
+                button.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            })
             .child(label)
     };
     let mut buttons = div().flex().h_full().items_stretch();
     if draws_controls() {
         if controls.minimize {
-            buttons = buttons.child(
-                button("win-min", "—", false).on_click(|_, window, _| window.minimize_window()),
-            );
+            buttons = buttons.child(button("win-min", "—", false).map(|button| {
+                if cfg!(target_os = "windows") {
+                    button.window_control_area(WindowControlArea::Min)
+                } else {
+                    button.on_click(|_, window, _| window.minimize_window())
+                }
+            }));
         }
         if controls.maximize {
             buttons = buttons.child(
-                button("win-max", if maximized { "❐" } else { "▢" }, false)
-                    .on_click(|_, window, _| window.zoom_window()),
+                button("win-max", if maximized { "❐" } else { "▢" }, false).map(|button| {
+                    if cfg!(target_os = "windows") {
+                        // Windows' zoom() only maximizes. Native hit testing
+                        // handles restore as well as the Snap Layouts menu.
+                        button.window_control_area(WindowControlArea::Max)
+                    } else {
+                        button.on_click(|_, window, _| window.zoom_window())
+                    }
+                }),
             );
         }
-        // Through the Quit action so unsaved changes get their prompt.
-        buttons = buttons.child(
-            button("win-close", "✕", true)
-                .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::Quit), cx)),
-        );
+        // Windows sends WM_CLOSE through the existing window_should_close
+        // callback, which prompts for unsaved changes without relying on focus.
+        // Other platforms dispatch the Quit action.
+        buttons = buttons.child(button("win-close", "✕", true).map(|button| {
+            if cfg!(target_os = "windows") {
+                button.window_control_area(WindowControlArea::Close)
+            } else {
+                button.on_click(|_, window, cx| window.dispatch_action(Box::new(crate::Quit), cx))
+            }
+        }));
     }
     let _ = cx;
     div()
@@ -87,12 +119,14 @@ pub fn title_bar(
         .bg(rgb(0x181818))
         .border_b_1()
         .border_color(rgb(0x0e0e0e))
-        .on_mouse_down(MouseButton::Left, |e, window, _| {
-            if e.click_count == 2 {
-                window.zoom_window();
-            } else {
-                window.start_window_move();
-            }
+        .when(!cfg!(target_os = "windows"), |bar| {
+            bar.on_mouse_down(MouseButton::Left, |e, window, _| {
+                if e.click_count == 2 {
+                    window.zoom_window();
+                } else {
+                    window.start_window_move();
+                }
+            })
         })
         .on_click(|e, window, _| {
             if e.is_right_click()
@@ -101,20 +135,25 @@ pub fn title_bar(
                 window.show_window_menu(pos);
             }
         })
-        .child(div().pl_3().child(crate::brand::mark(px(16.0), window)))
+        // Keep native caption regions separate from menus and buttons. Native
+        // caption handling supplies dragging, double-click, and window menus.
         .child(
-            div()
+            caption_region()
+                .pl_3()
+                .child(crate::brand::mark(px(16.0), window)),
+        )
+        .child(
+            caption_region()
                 .pl_2()
                 .text_sm()
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(rgb(0xe0e0e0))
                 .child("sheaf"),
         )
-        .children(menu_bar.map(|m| div().h_full().pl_2().child(m)))
+        .children(menu_bar.map(|m| div().h_full().pl_2().occlude().child(m)))
         .child(
-            div()
+            caption_region()
                 .flex_1()
-                .flex()
                 .justify_center()
                 .text_sm()
                 .text_color(rgb(0x9a9a9a))
