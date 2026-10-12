@@ -100,12 +100,14 @@ pub fn title_bar(
         }
         // Windows sends WM_CLOSE through the existing window_should_close
         // callback, which prompts for unsaved changes without relying on focus.
-        // Other platforms dispatch the Quit action.
+        // Other platforms dispatch the CloseWindow action.
         buttons = buttons.child(button("win-close", "✕", true).map(|button| {
             if cfg!(target_os = "windows") {
                 button.window_control_area(WindowControlArea::Close)
             } else {
-                button.on_click(|_, window, cx| window.dispatch_action(Box::new(crate::Quit), cx))
+                button.on_click(|_, window, cx| {
+                    window.dispatch_action(Box::new(crate::CloseWindow), cx)
+                })
             }
         }));
     }

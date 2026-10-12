@@ -23,7 +23,9 @@ pub fn app_menus() -> Vec<Menu> {
         menu(
             "&File",
             vec![
+                item("&New Window", NewWindow),
                 item("&Open…", OpenFile),
+                item("Open in Separate &Windows…", OpenInWindows),
                 sep(),
                 item("&Save", Save),
                 item("Save &As…", SaveAs),
@@ -117,6 +119,7 @@ pub fn app_menus() -> Vec<Menu> {
                 item("&Previous Tab", PrevTab),
                 sep(),
                 item("&Close Tab", CloseTab),
+                item("Close &Window", CloseWindow),
             ],
         ),
         menu("&Help", vec![item("&About sheaf", About)]),

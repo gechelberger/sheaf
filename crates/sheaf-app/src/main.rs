@@ -1,6 +1,6 @@
 //! sheaf — a fast PDF editor. Currently: a fast PDF viewer.
 //!
-//!     sheaf [--timing] [file.pdf ...]
+//!     sheaf [--timing] [--separate-windows] [file.pdf ...]
 
 mod brand;
 mod calc_panel;
@@ -115,6 +115,9 @@ actions!(
         PrevTab,
         CloseTab,
         OpenFile,
+        NewWindow,
+        OpenInWindows,
+        CloseWindow,
         Quit,
         ActivateMenuBar,
         About,
@@ -123,6 +126,7 @@ actions!(
 );
 
 struct Cli {
+    separate_windows: bool,
     paths: Vec<PathBuf>,
     timing: bool,
     /// Open the search bar with this query once the first document loads.
@@ -152,6 +156,7 @@ struct Cli {
 
 fn parse_cli() -> Cli {
     let mut cli = Cli {
+        separate_windows: false,
         paths: Vec::new(),
         timing: false,
         find: None,
@@ -178,6 +183,7 @@ fn parse_cli() -> Cli {
                 std::process::exit(0);
             }
             Some("--timing") => cli.timing = true,
+            Some("--separate-windows") => cli.separate_windows = true,
             Some("--find") => cli.find = args.next().and_then(|q| q.to_str().map(String::from)),
             Some("--selftest-save") => cli.selftest_save = args.next().map(PathBuf::from),
             Some("--selftest-insert") => cli.selftest_insert = args.next().map(PathBuf::from),
@@ -333,6 +339,9 @@ fn main() {
             KeyBinding::new("ctrl-pageup", PrevTab, ws),
             KeyBinding::new("ctrl-w", CloseTab, ws),
             KeyBinding::new("ctrl-o", OpenFile, ws),
+            KeyBinding::new("ctrl-n", NewWindow, ws),
+            KeyBinding::new("ctrl-shift-o", OpenInWindows, ws),
+            KeyBinding::new("ctrl-shift-w", CloseWindow, ws),
             KeyBinding::new("ctrl-q", Quit, None),
             // Acrobat has no palette; Ctrl+Shift+P is its Page Setup, so not that.
             KeyBinding::new("ctrl-shift-k", CommandPalette, None),
@@ -357,75 +366,36 @@ fn main() {
         }
         cx.set_menus(menus::app_menus());
 
-        let settings = settings::Settings::load();
-        let window_bounds = settings
-            .window
-            .as_ref()
-            .and_then(|w| workspace::restore_window_bounds(w, cx))
-            .unwrap_or_else(|| {
-                WindowBounds::Windowed(Bounds::centered(None, size(px(1200.0), px(850.0)), cx))
-            });
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(window_bounds),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("sheaf".into()),
-                    // We draw the title bar ourselves (see frame.rs).
-                    appears_transparent: true,
-                    ..Default::default()
-                }),
-                // Wayland compositors (WSLg included) may not draw a frame
-                // at all; ask to draw it ourselves there.
-                window_decorations: if cfg!(target_os = "linux") {
-                    Some(gpui::WindowDecorations::Client)
-                } else {
-                    None
-                },
-                window_background: gpui::WindowBackgroundAppearance::Opaque,
-                // Matches StartupWMClass in sheaf.desktop, which is how
-                // Wayland finds the icon.
-                app_id: Some("sheaf".into()),
-                icon: brand::window_icon(),
-                ..Default::default()
+        let mut groups = window_paths(cli.paths, cli.separate_windows).into_iter();
+        let password = cli.password.clone();
+        open_workspace(
+            Launch {
+                paths: groups.next().expect("at least one window"),
+                timing: cli.timing,
+                find: cli.find,
+                selftest_save: cli.selftest_save,
+                selftest_insert: cli.selftest_insert,
+                selftest_annot: cli.selftest_annot,
+                selftest_clean: cli.selftest_clean,
+                start_panel: cli.panel.take(),
+                pattern: cli.pattern.take(),
+                launched,
+                settings: settings::Settings::load(),
+                password: cli.password.take(),
+                selftest_extract: cli.selftest_extract,
+                selftest_flatten: cli.selftest_flatten,
             },
-            move |window, cx| {
-                let ws = cx.new(|cx| {
-                    Workspace::new(
-                        window,
-                        Launch {
-                            paths: cli.paths,
-                            timing: cli.timing,
-                            find: cli.find,
-                            selftest_save: cli.selftest_save,
-                            selftest_insert: cli.selftest_insert,
-                            selftest_annot: cli.selftest_annot,
-                            selftest_clean: cli.selftest_clean,
-                            start_panel: cli.panel.take(),
-                            pattern: cli.pattern.take(),
-                            launched,
-                            settings,
-                            password: cli.password.take(),
-                            selftest_extract: cli.selftest_extract,
-                            selftest_flatten: cli.selftest_flatten,
-                        },
-                        cx,
-                    )
-                });
-                ws.update(cx, |ws, cx| {
-                    ws.focus_active(window, cx);
-                    if let Some(ch) = cli.menu {
-                        ws.open_menu(ch, window, cx);
-                    }
-                });
-                // Alt+F4 / the compositor's close: prompt for unsaved work.
-                window.on_window_should_close(cx, {
-                    let ws = ws.clone();
-                    move |window, cx| ws.update(cx, |ws, cx| ws.window_should_close(window, cx))
-                });
-                ws
-            },
+            cli.menu,
+            cx,
         )
         .expect("open window");
+        for paths in groups {
+            let mut launch = Launch::files(paths);
+            launch.timing = cli.timing;
+            launch.launched = launched;
+            launch.password = password.clone();
+            open_workspace(launch, None, cx).expect("open window");
+        }
         // No windows means nothing to do (macOS keeps apps alive without
         // windows, but sheaf has no dock-menu life yet).
         cx.on_window_closed(|cx, _| {
@@ -436,4 +406,122 @@ fn main() {
         .detach();
         cx.activate(true);
     });
+}
+
+/// Every window gets an independent workspace and the same close protection.
+fn open_workspace(
+    launch: Launch,
+    menu: Option<char>,
+    cx: &mut App,
+) -> anyhow::Result<gpui::WindowHandle<Workspace>> {
+    let window_bounds = launch
+        .settings
+        .window
+        .as_ref()
+        .and_then(|w| workspace::restore_window_bounds(w, cx))
+        .unwrap_or_else(|| {
+            WindowBounds::Windowed(Bounds::centered(None, size(px(1200.0), px(850.0)), cx))
+        });
+    cx.open_window(
+        WindowOptions {
+            window_bounds: Some(window_bounds),
+            titlebar: Some(TitlebarOptions {
+                title: Some("sheaf".into()),
+                // We draw the title bar ourselves (see frame.rs).
+                appears_transparent: true,
+                ..Default::default()
+            }),
+            // Wayland compositors (WSLg included) may not draw a frame
+            // at all; ask to draw it ourselves there.
+            window_decorations: if cfg!(target_os = "linux") {
+                Some(gpui::WindowDecorations::Client)
+            } else {
+                None
+            },
+            window_background: gpui::WindowBackgroundAppearance::Opaque,
+            // Matches StartupWMClass in sheaf.desktop, which is how
+            // Wayland finds the icon.
+            app_id: Some("sheaf".into()),
+            icon: brand::window_icon(),
+            ..Default::default()
+        },
+        move |window, cx| {
+            let ws = cx.new(|cx| Workspace::new(window, launch, cx));
+            ws.update(cx, |ws, cx| {
+                ws.focus_active(window, cx);
+                if let Some(ch) = menu {
+                    ws.open_menu(ch, window, cx);
+                }
+            });
+            // Alt+F4 / the compositor's close: prompt for unsaved work.
+            window.on_window_should_close(cx, {
+                let ws = ws.clone();
+                move |window, cx| ws.update(cx, |ws, cx| ws.window_should_close(window, cx))
+            });
+            ws
+        },
+    )
+}
+
+#[derive(Default)]
+struct Quitting(bool);
+impl gpui::Global for Quitting {}
+
+fn request_quit(cx: &mut App) {
+    if cx.try_global::<Quitting>().is_some_and(|q| q.0) {
+        return;
+    }
+    cx.set_global(Quitting(true));
+    close_next_window(cx);
+}
+
+fn close_next_window(cx: &mut App) {
+    if !cx.try_global::<Quitting>().is_some_and(|q| q.0) {
+        return;
+    }
+    if let Some(handle) = cx
+        .windows()
+        .into_iter()
+        .find_map(|w| w.downcast::<Workspace>())
+    {
+        let _ = handle.update(cx, |ws, window, cx| ws.request_close(window, cx));
+    } else {
+        cx.quit();
+    }
+}
+
+/// An empty invocation still opens a workspace. Otherwise the caller chooses
+/// one tab group or one window per file, without imposing a document limit.
+fn window_paths(paths: Vec<PathBuf>, separate: bool) -> Vec<Vec<PathBuf>> {
+    if separate && !paths.is_empty() {
+        paths.into_iter().map(|p| vec![p]).collect()
+    } else {
+        vec![paths]
+    }
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::*;
+
+    #[test]
+    fn five_pdfs_can_open_as_tabs_or_windows() {
+        let paths: Vec<_> = (1..=5).map(|n| PathBuf::from(format!("{n}.pdf"))).collect();
+        assert_eq!(window_paths(paths.clone(), false), vec![paths.clone()]);
+        let windows = window_paths(paths.clone(), true);
+        assert_eq!(windows.len(), 5);
+        for (window, path) in windows.iter().zip(paths) {
+            assert_eq!(window, &vec![path]);
+        }
+    }
+
+    #[test]
+    fn no_files_opens_one_empty_workspace() {
+        for separate in [false, true] {
+            assert_eq!(
+                window_paths(Vec::new(), separate),
+                vec![Vec::<PathBuf>::new()]
+            );
+        }
+    }
 }

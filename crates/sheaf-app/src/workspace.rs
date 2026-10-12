@@ -18,9 +18,9 @@ use crate::menu_bar::MenuBar;
 use crate::palette::{Palette, PaletteEvent};
 use crate::settings::{DockLayout, DockState, Settings, WindowPlacement};
 use crate::{
-    About, ActivateMenuBar, CloseTab, CommandPalette, NextTab, OpenFile, PrevTab, Quit, ShowCalc,
-    ShowComments, ShowOutline, ShowPatterns, ShowThumbnails, ToggleBottomDock, ToggleLeftDock,
-    ToggleRightDock, ToggleSidebar,
+    About, ActivateMenuBar, CloseTab, CloseWindow, CommandPalette, NewWindow, NextTab, OpenFile,
+    OpenInWindows, PrevTab, Quit, ShowCalc, ShowComments, ShowOutline, ShowPatterns,
+    ShowThumbnails, ToggleBottomDock, ToggleLeftDock, ToggleRightDock, ToggleSidebar,
 };
 
 pub const KEY_CONTEXT: &str = "Workspace";
@@ -46,6 +46,27 @@ pub struct Launch {
     pub password: Option<String>,
     pub selftest_extract: Option<PathBuf>,
     pub selftest_flatten: Option<PathBuf>,
+}
+
+impl Launch {
+    pub fn files(paths: Vec<PathBuf>) -> Self {
+        Self {
+            paths,
+            timing: false,
+            find: None,
+            selftest_save: None,
+            selftest_insert: None,
+            selftest_annot: None,
+            selftest_clean: None,
+            start_panel: None,
+            pattern: None,
+            launched: Instant::now(),
+            settings: Settings::load(),
+            password: None,
+            selftest_extract: None,
+            selftest_flatten: None,
+        }
+    }
 }
 
 const TAB_H: f32 = 32.0;
@@ -218,6 +239,9 @@ pub fn restore_window_bounds(w: &WindowPlacement, cx: &App) -> Option<gpui::Wind
 }
 
 pub struct Workspace {
+    focus: gpui::FocusHandle,
+    closing: bool,
+    native_title: String,
     docs: Vec<Entity<DocView>>,
     active: usize,
     docks: [Dock; 3],
@@ -261,6 +285,9 @@ impl Workspace {
         let (docks, all_hidden) =
             docks_from_layout(settings.docks.as_ref().unwrap_or(&DockLayout::default()));
         let mut this = Self {
+            focus: cx.focus_handle(),
+            closing: false,
+            native_title: "sheaf".into(),
             docs: Vec::new(),
             active: 0,
             docks,
@@ -428,6 +455,8 @@ impl Workspace {
         if let Some(doc) = self.active_doc() {
             let handle = doc.read(cx).focus_handle(cx);
             window.focus(&handle, cx);
+        } else {
+            window.focus(&self.focus, cx);
         }
     }
 
@@ -466,9 +495,11 @@ impl Workspace {
             return;
         }
         self.docs.remove(ix);
-        if !self.docs.is_empty() {
-            self.activate(self.active.min(self.docs.len() - 1), window, cx);
+        if ix < self.active {
+            self.active -= 1;
         }
+        self.active = self.active.min(self.docs.len().saturating_sub(1));
+        self.focus_active(window, cx);
         cx.notify();
     }
 
@@ -523,59 +554,76 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Quit, asking about each document with unsaved changes in turn.
-    pub fn request_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Close only this window, checking each edited document in turn.
+    pub fn request_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.closing {
+            return;
+        }
+        self.closing = true;
+        self.continue_close(window, cx);
+    }
+
+    fn continue_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(dirty) = self.docs.iter().find(|d| d.read(cx).is_dirty()).cloned() else {
             self.persist_window(window);
-            cx.quit();
+            window.remove_window();
+            if cx.try_global::<crate::Quitting>().is_some_and(|q| q.0) {
+                cx.defer(crate::close_next_window);
+            }
             return;
         };
+        window.activate_window();
         let may_close = self.confirm_close(dirty.clone(), window, cx);
         cx.spawn_in(window, async move |this, cx| {
-            if may_close.await {
-                this.update_in(cx, |ws, window, cx| {
+            let may_close = may_close.await;
+            this.update_in(cx, |ws, window, cx| {
+                if may_close {
                     if let Some(i) = ws.docs.iter().position(|d| *d == dirty) {
                         ws.close_now(i, window, cx);
                     }
-                    ws.request_quit(window, cx);
-                })
-                .ok();
-            }
+                    ws.continue_close(window, cx);
+                } else {
+                    ws.closing = false;
+                    cx.set_global(crate::Quitting(false));
+                }
+            })
+            .ok();
         })
         .detach();
     }
 
-    /// The window system asked to close the window: let it when nothing is
-    /// unsaved, otherwise run the prompts and quit from there. On Windows,
-    /// quit through GPUI so native destruction does not precede GPUI cleanup.
+    /// Route native close through GPUI cleanup on every platform, including
+    /// Windows where native destruction would otherwise precede cleanup.
     pub fn window_should_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if cfg!(target_os = "windows") {
-            // Returning true lets DefWindowProc destroy the HWND immediately.
-            // GPUI's WindowsWindow::drop then tries to revoke drag/drop and
-            // destroy that same HWND again. Keep it alive for GPUI's quit path.
-            self.request_quit(window, cx);
-            return false;
-        }
-        if self.docs.iter().all(|d| !d.read(cx).is_dirty()) {
-            self.persist_window(window);
-            return true;
-        }
-        self.request_quit(window, cx);
+        self.request_close(window, cx);
         false
     }
 
-    fn prompt_open(&mut self, cx: &mut Context<Self>) {
+    fn new_window(paths: Vec<PathBuf>, cx: &mut App) {
+        if let Err(e) = crate::open_workspace(Launch::files(paths), None, cx) {
+            log::error!("opening window: {e:#}");
+        }
+    }
+
+    fn prompt_open(&mut self, separate_windows: bool, window: &mut Window, cx: &mut Context<Self>) {
         let rx = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
             multiple: true,
             prompt: Some("Open".into()),
         });
-        cx.spawn(async move |this, cx| match rx.await {
+        cx.spawn_in(window, async move |this, cx| match rx.await {
             Ok(Ok(Some(paths))) => {
-                this.update(cx, |ws, cx| {
+                this.update_in(cx, |ws, window, cx| {
                     for p in paths {
-                        ws.open_path(p, cx);
+                        if separate_windows {
+                            Self::new_window(vec![p], cx);
+                        } else {
+                            ws.open_path(p, cx);
+                        }
+                    }
+                    if !separate_windows {
+                        ws.focus_active(window, cx);
                     }
                 })
                 .ok();
@@ -794,6 +842,7 @@ impl Workspace {
             let title = doc.read(cx).title();
             div()
                 .id(("tab", i))
+                .flex_shrink_0()
                 .h_full()
                 .px_3()
                 .flex()
@@ -821,6 +870,8 @@ impl Workspace {
                 )
         });
         div()
+            .id("document-tabs")
+            .overflow_x_scroll()
             .h(px(TAB_H))
             .flex_shrink_0()
             .flex()
@@ -887,11 +938,21 @@ impl Render for Workspace {
             Some(doc) => doc.read(cx).title(),
             None => "".into(),
         };
+        let native_title = if title.is_empty() {
+            "sheaf".to_string()
+        } else {
+            format!("{title} — sheaf")
+        };
+        if self.native_title != native_title {
+            window.set_window_title(&native_title);
+            self.native_title = native_title;
+        }
         let menu_bar = self.menu_bar.clone().map(|m| m.into_any_element());
         let title_bar = frame::title_bar(title, menu_bar, window, cx);
 
         let content = div()
             .key_context(KEY_CONTEXT)
+            .track_focus(&self.focus)
             .on_action(cx.listener(|ws, _: &ToggleSidebar, _, cx| {
                 ws.all_hidden = !ws.all_hidden;
                 ws.persist_layout();
@@ -946,8 +1007,15 @@ impl Render for Workspace {
                 }
             }))
             .on_action(cx.listener(|ws, _: &CloseTab, window, cx| ws.close(ws.active, window, cx)))
-            .on_action(cx.listener(|ws, _: &OpenFile, _, cx| ws.prompt_open(cx)))
-            .on_action(cx.listener(|ws, _: &Quit, window, cx| ws.request_quit(window, cx)))
+            .on_action(
+                cx.listener(|ws, _: &OpenFile, window, cx| ws.prompt_open(false, window, cx)),
+            )
+            .on_action(
+                cx.listener(|ws, _: &OpenInWindows, window, cx| ws.prompt_open(true, window, cx)),
+            )
+            .on_action(|_: &NewWindow, _, cx| Self::new_window(Vec::new(), cx))
+            .on_action(cx.listener(|ws, _: &CloseWindow, window, cx| ws.request_close(window, cx)))
+            .on_action(|_: &Quit, _, cx| cx.defer(crate::request_quit))
             .on_action(
                 cx.listener(|ws, _: &CommandPalette, window, cx| ws.toggle_palette(window, cx)),
             )

@@ -10,6 +10,21 @@ calculator tapes, bookmark-driven page management) — without the bloat.
 
 > **Status:** pre-alpha. Nothing works yet. This README is the design doc.
 
+## Opening PDFs in windows or tabs
+
+- **File → Open…** (`Ctrl+O`): select multiple PDFs to open them as tabs in
+  the current window. `Ctrl+Tab` / `Ctrl+Shift+Tab` switch tabs.
+- **File → Open in Separate Windows…** (`Ctrl+Shift+O`): select multiple PDFs
+  to open each in its own window.
+- **File → New Window** (`Ctrl+N`): open an empty window, then use Open to add tabs.
+- `Ctrl+W` closes a tab; `Ctrl+Shift+W` or the window close button closes just
+  that window. `Ctrl+Q` quits across all windows. Unsaved documents prompt
+  before closing; Cancel or a failed save stops the close/quit sequence.
+
+From the command line, `sheaf one.pdf two.pdf three.pdf four.pdf five.pdf`
+opens five tabs. Add `--separate-windows` to open five separate windows.
+Each window has its own active tab and document editing state.
+
 ## Why
 
 Acrobat has become slow enough that routine work — opening a 400-page scanned
@@ -116,7 +131,7 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 | Text search (find in document) | ✅ progressive; ~6 ms/page |
 | Pattern search (regex: SSNs, EINs, amounts, dates) — separate tool from Find, shared engine with redaction | ✅ Patterns panel, Ctrl+Shift+F |
 | User-defined patterns: add, save, and delete presets; several date formats built in | ✅ `patterns.json`; right-click a preset |
-| Tabs / multiple documents | ✅ |
+| Tabs / multiple documents / multiple windows | ✅ |
 | Split view (same doc, two positions) | 📋 |
 | Attachments panel | 📋 |
 | Layers (OCG) panel | 📋 |
