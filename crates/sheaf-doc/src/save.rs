@@ -45,8 +45,7 @@ pub fn export_clean_copy(model: &Snapshot, path: &Path) -> Result<()> {
 fn rewrite_with(model: &Snapshot, clean: bool) -> Result<Vec<u8>> {
     let primary_id = model.primary;
     let primary_info = model.source(primary_id).context("primary source missing")?;
-    let mut pdf = Pdf::load(&primary_info.path)
-        .with_context(|| format!("loading {}", primary_info.path.display()))?;
+    let mut pdf = crate::file::load_pdf(&primary_info.path, primary_info.password.as_deref())?;
 
     // Source page object ids and their inherited attributes, resolved against
     // the *original* trees before anything is re-parented.
@@ -54,8 +53,7 @@ fn rewrite_with(model: &Snapshot, clean: bool) -> Result<Vec<u8>> {
     sources.insert(primary_id, LoadedSource::from_pdf(&pdf)?);
     for (&sid, info) in &model.sources {
         if sid != primary_id && model.state.pages.iter().any(|p| p.source == sid) {
-            let other = Pdf::load(&info.path)
-                .with_context(|| format!("loading {}", info.path.display()))?;
+            let other = crate::file::load_pdf(&info.path, info.password.as_deref())?;
             sources.insert(sid, LoadedSource::from_pdf_owned(other)?);
         }
     }
@@ -716,6 +714,7 @@ mod tests {
             },
             page_sizes: None,
             bytes: 0,
+            password: None,
         }
     }
 
@@ -1479,6 +1478,92 @@ mod tests {
         // The open file itself can't be the target.
         assert!(export_clean_copy(&model.snapshot(), &a_path).is_err());
         assert_eq!(std::fs::read(&a_path).unwrap(), original);
+    }
+
+    /// An encrypted original opens with its password and saves as a plain
+    /// file with the edits applied.
+    #[test]
+    fn encrypted_source_saves_decrypted() {
+        use lopdf::{EncryptionState, EncryptionVersion, Permissions};
+        let dir = tempdir();
+        let plain = make_pdf(&dir, "plain.pdf", "E", 2, &[("Top", 0, 0)]);
+        let enc = dir.join("enc.pdf");
+        {
+            let mut pdf = Pdf::load(&plain).unwrap();
+            // The standard security handler keys off the file /ID.
+            let id = Object::String(b"0123456789abcdef".to_vec(), StringFormat::Hexadecimal);
+            pdf.trailer.set("ID", Object::Array(vec![id.clone(), id]));
+            let state = EncryptionState::try_from(EncryptionVersion::V2 {
+                document: &pdf,
+                owner_password: "owner",
+                user_password: "secret",
+                key_length: 128,
+                permissions: Permissions::default(),
+            })
+            .unwrap();
+            pdf.encrypt(&state).unwrap();
+            pdf.save(&enc).unwrap();
+        }
+        assert!(Pdf::load(&enc).unwrap().is_encrypted());
+        assert!(crate::file::load_pdf(&enc, Some("wrong")).is_err());
+        assert!(
+            !crate::file::load_pdf(&enc, Some("secret"))
+                .unwrap()
+                .is_encrypted()
+        );
+
+        let mut model = Document::new(
+            {
+                let mut i = info(&enc, 2);
+                i.password = Some("secret".into());
+                i
+            },
+            &[FlatOutlineItem {
+                title: "Top".into(),
+                page: Some(0),
+                depth: 0,
+            }],
+            Box::new(FixedCount(10)),
+        );
+        let p1 = model.page(1).unwrap().id;
+        model
+            .apply(
+                Edit::RotatePages {
+                    ids: vec![p1],
+                    by: Rotation::R90,
+                },
+                "rot",
+            )
+            .unwrap();
+        let out = dir.join("saved.pdf");
+        assert_eq!(
+            save_to_path(&model.snapshot(), &out).unwrap(),
+            Strategy::Rewrite
+        );
+        let saved = Pdf::load(&out).unwrap();
+        assert!(!saved.is_encrypted());
+        assert!(!saved.trailer.has(b"Encrypt"));
+        let pages = saved.get_pages();
+        assert_eq!(pages.len(), 2);
+        assert_eq!(
+            saved
+                .get_dictionary(pages[&2])
+                .unwrap()
+                .get(b"Rotate")
+                .unwrap()
+                .as_i64()
+                .unwrap(),
+            90
+        );
+        // The content survived decryption: the page's text is readable.
+        let content = saved.get_page_content(pages[&1]);
+        assert!(
+            String::from_utf8_lossy(&content).contains("E"),
+            "content stream not decrypted"
+        );
+        // Outline came through too.
+        let items = read_outline(&std::fs::read(&out).unwrap());
+        assert_eq!(items[0].1, "Top");
     }
 
     fn tempdir() -> std::path::PathBuf {

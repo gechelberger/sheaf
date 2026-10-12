@@ -104,9 +104,28 @@ pub struct AnnotsInFile {
     pub foreign: Vec<ForeignAnnot>,
 }
 
+/// Load a file with lopdf and, if it's encrypted, decrypt it in memory with
+/// `password` (or the empty user password many files use). The result is
+/// plain: strings and streams readable, `/Encrypt` gone, so writing it
+/// produces an unencrypted file.
+pub fn load_pdf(path: &Path, password: Option<&str>) -> Result<lopdf::Document> {
+    let mut pdf =
+        lopdf::Document::load(path).with_context(|| format!("loading {}", path.display()))?;
+    if pdf.is_encrypted() {
+        // lopdf only parses an encrypted file's objects when it has the
+        // password at load time, so load again with it.
+        pdf = lopdf::Document::load_with_password(path, password.unwrap_or(""))
+            .map_err(|e| anyhow::anyhow!("{e}"))
+            .with_context(|| format!("decrypting {}", path.display()))?;
+        pdf.trailer.remove(b"Encrypt");
+        pdf.encryption_state = None;
+    }
+    Ok(pdf)
+}
+
 /// Annotations sheaf wrote into `path` earlier, keyed by page index.
 pub fn read_sheaf_annots(path: impl AsRef<Path>) -> Result<HashMap<u32, Vec<Annot>>> {
-    Ok(read_annots(path)?.sheaf)
+    Ok(read_annots(path, None)?.sheaf)
 }
 
 /// Same as `read_sheaf_annots`, from bytes already in memory.
@@ -116,8 +135,8 @@ pub fn read_sheaf_annots_mem(bytes: &[u8]) -> Result<HashMap<u32, Vec<Annot>>> {
 }
 
 /// All annotations in `path`.
-pub fn read_annots(path: impl AsRef<Path>) -> Result<AnnotsInFile> {
-    let pdf = lopdf::Document::load(path.as_ref())?;
+pub fn read_annots(path: impl AsRef<Path>, password: Option<&str>) -> Result<AnnotsInFile> {
+    let pdf = load_pdf(path.as_ref(), password)?;
     Ok(annots_in(&pdf))
 }
 

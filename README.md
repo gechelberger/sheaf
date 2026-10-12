@@ -190,8 +190,8 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 ### Security
 | Feature | Status |
 |---|---|
-| Open password-protected PDFs | 🎯 |
-| Set / remove passwords, permissions | 📋 |
+| Open password-protected PDFs | ✅ prompt on open; saves write a plain (unencrypted) file |
+| Set / remove passwords, permissions; preserve encryption on save | 📋 |
 | Digital signatures (sign / verify) | 📋 |
 | Certificate encryption | ❓ |
 

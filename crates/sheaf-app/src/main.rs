@@ -130,6 +130,8 @@ struct Cli {
     selftest_annot: Option<PathBuf>,
     /// Add a couple of marks, then export a clean copy here.
     selftest_clean: Option<PathBuf>,
+    /// Open the files with this password (dev; prefer the prompt).
+    password: Option<String>,
     /// Panel to open with: "pages" (default), "bookmarks", "patterns", "calc"
     /// or "comments".
     panel: Option<String>,
@@ -148,6 +150,7 @@ fn parse_cli() -> Cli {
         selftest_insert: None,
         selftest_annot: None,
         selftest_clean: None,
+        password: None,
         panel: None,
         pattern: None,
         menu: None,
@@ -169,6 +172,9 @@ fn parse_cli() -> Cli {
             Some("--selftest-insert") => cli.selftest_insert = args.next().map(PathBuf::from),
             Some("--selftest-annot") => cli.selftest_annot = args.next().map(PathBuf::from),
             Some("--selftest-clean") => cli.selftest_clean = args.next().map(PathBuf::from),
+            Some("--password") => {
+                cli.password = args.next().and_then(|p| p.to_str().map(String::from))
+            }
             Some("--panel") => cli.panel = args.next().and_then(|p| p.to_str().map(String::from)),
             Some("--pattern") => {
                 cli.pattern = args.next().and_then(|p| p.to_str().map(String::from))
@@ -354,6 +360,7 @@ fn main() {
                             pattern: cli.pattern.take(),
                             launched,
                             settings,
+                            password: cli.password.take(),
                         },
                         cx,
                     )

@@ -145,6 +145,7 @@ mod tests {
                 },
                 page_sizes: None,
                 bytes,
+                password: None,
             },
             &[],
             Box::new(FixedCount(10)),

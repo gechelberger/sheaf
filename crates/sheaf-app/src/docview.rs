@@ -81,7 +81,17 @@ pub enum Zoom {
 pub(crate) enum State {
     Loading,
     Failed(String),
+    /// Encrypted: waiting for a password.
+    Locked(Locked),
     Ready(Box<Doc>),
+}
+
+pub(crate) struct Locked {
+    input: Entity<TextInput>,
+    _sub: Subscription,
+    /// A password was tried and rejected.
+    wrong: bool,
+    focus_pending: bool,
 }
 
 /// Page geometry in logical px at the current zoom, for one snapshot of the
@@ -328,6 +338,8 @@ pub struct DocView {
     pub(crate) selftest_insert: Option<PathBuf>,
     pub(crate) selftest_annot: Option<PathBuf>,
     pub(crate) selftest_clean: Option<PathBuf>,
+    /// Password the file needs, once known.
+    password: Option<String>,
     /// Recovery data found when opening, until the user has been asked.
     pending_recovery: Option<sheaf_doc::recovery::Recovery>,
     autosave: Option<Task<()>>,
@@ -355,9 +367,16 @@ pub(crate) struct Search {
 }
 
 impl DocView {
-    pub fn new(path: PathBuf, timing: bool, launched: Instant, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        path: PathBuf,
+        password: Option<String>,
+        timing: bool,
+        launched: Instant,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let mut this = Self {
             focus_handle: cx.focus_handle(),
+            password,
             path,
             timing,
             launched,
@@ -412,6 +431,7 @@ impl DocView {
 
     fn open(&mut self, cx: &mut Context<Self>) {
         let path = self.path.clone();
+        let password = self.password.clone();
         self.state = State::Loading;
         let timing = self.timing;
         let launched = self.launched;
@@ -423,7 +443,7 @@ impl DocView {
                         .map(|m| m.len() as usize)
                         .unwrap_or(0);
                     let recovery = sheaf_doc::recovery::find(&path);
-                    RenderHandle::open(path.clone(), None).map(|h| (h, path, bytes, recovery))
+                    RenderHandle::open(path.clone(), password).map(|h| (h, path, bytes, recovery))
                 })
                 .await;
             this.update(cx, |viewer, cx| {
@@ -441,6 +461,7 @@ impl DocView {
                         viewer.pending_recovery = recovery;
                         viewer.install(handle, path, bytes, cx);
                     }
+                    Err(e) if sheaf_render::OpenError::is_password(&e) => viewer.lock(cx),
                     Err(e) => viewer.state = State::Failed(format!("{e:#}")),
                 }
                 cx.notify();
@@ -448,6 +469,28 @@ impl DocView {
             .ok();
         })
         .detach();
+    }
+
+    /// Show the password prompt; Enter retries the open with what was typed.
+    fn lock(&mut self, cx: &mut Context<Self>) {
+        let wrong = self.password.take().is_some();
+        let input = cx.new(|cx| TextInput::new("Password", cx).masked());
+        let sub = cx.subscribe(&input, |this, input, ev: &TextInputEvent, cx| {
+            if *ev == TextInputEvent::Confirm {
+                let pw = input.read(cx).text().to_string();
+                if !pw.is_empty() {
+                    this.password = Some(pw);
+                    this.open(cx);
+                }
+            }
+        });
+        self.state = State::Locked(Locked {
+            input,
+            _sub: sub,
+            wrong,
+            focus_pending: true,
+        });
+        cx.notify();
     }
 
     /// Make an opened file the primary source and start the background
@@ -467,6 +510,7 @@ impl DocView {
             first_page: info.first_page,
             page_sizes: None,
             bytes,
+            password: self.password.clone(),
         };
         let model = Document::new(source, &[], sheaf_doc::history::default_policy());
         let mut handles = HashMap::new();
@@ -654,7 +698,7 @@ impl DocView {
             self.schedule_autosave(cx);
             return;
         }
-        if !primary_is_file {
+        if !primary_is_file || self.password.is_some() {
             return;
         }
         let snap = doc.model.snapshot();
@@ -1075,6 +1119,7 @@ impl DocView {
                             first_page,
                             page_sizes: None,
                             bytes,
+                            password: None,
                         };
                         let sid = doc.model.rebase_to_saved(saved);
                         // Our marks are now in the file; keep PDFium from drawing them.
@@ -1107,10 +1152,16 @@ impl DocView {
                         view.autosave = None;
                         view.autosave_since = None;
                         view.path = path.clone();
+                        let was_encrypted = view.password.take().is_some();
                         doc.notice = Some(format!(
-                            "Saved {} ({strategy:?}) in {:?}",
+                            "Saved {} ({strategy:?}) in {:?}{}",
                             path.display(),
-                            t.elapsed()
+                            t.elapsed(),
+                            if was_encrypted {
+                                " — password protection removed"
+                            } else {
+                                ""
+                            }
                         ));
                         if timing {
                             eprintln!(
@@ -1166,12 +1217,13 @@ impl DocView {
     /// take over their rendering.
     fn load_sheaf_annots(&mut self, cx: &mut Context<Self>) {
         let path = self.path.clone();
+        let password = self.password.clone();
         let timing = self.timing;
         cx.spawn(async move |this, cx| {
             let t = Instant::now();
             let found = cx
                 .background_executor()
-                .spawn(async move { sheaf_doc::file::read_annots(&path) })
+                .spawn(async move { sheaf_doc::file::read_annots(&path, password.as_deref()) })
                 .await;
             let (by_index, foreign) = match found {
                 Ok(a) => (a.sheaf, a.foreign),
@@ -1677,6 +1729,7 @@ impl DocView {
                     first_page,
                     page_sizes: None,
                     bytes,
+                    password: None,
                 });
                 doc.handles.insert(sid, handle);
                 let flat: Vec<FlatOutlineItem> = outline.iter().map(flat_item).collect();
@@ -2245,6 +2298,18 @@ impl Render for DocView {
         let status: SharedString = match &mut self.state {
             State::Loading => "Opening…".into(),
             State::Failed(e) => format!("Failed: {e}").into(),
+            State::Locked(l) => {
+                if std::mem::take(&mut l.focus_pending) {
+                    window.focus(&l.input.read(cx).focus_handle(cx), cx);
+                }
+                body = Some(
+                    div()
+                        .id("locked")
+                        .size_full()
+                        .child(locked_card(&self.path, l, cx)),
+                );
+                "Password required".into()
+            }
             State::Ready(doc) => {
                 // The scroll container's bounds lag a frame behind on first
                 // layout; fall back to the window size until we have them.
@@ -3375,3 +3440,73 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
 }
 
 const NOTE_GLYPH: f32 = 12.0;
+
+/// The password prompt shown in place of the pages for an encrypted file.
+fn locked_card(path: &std::path::Path, l: &Locked, cx: &mut Context<DocView>) -> AnyElement {
+    let name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("This file")
+        .to_string();
+    let input = l.input.clone();
+    div()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .w(px(380.0))
+                .p_4()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .bg(rgb(0x262626))
+                .border_1()
+                .border_color(rgb(0x4a4a4a))
+                .rounded_md()
+                .child(
+                    div()
+                        .text_sm()
+                        .child(format!("\"{name}\" is password protected.")),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(if l.wrong {
+                            rgb(0xe08080)
+                        } else {
+                            rgb(0x9a9a9a)
+                        })
+                        .child(if l.wrong {
+                            "That password didn't work. Try again."
+                        } else {
+                            "Enter the password to open it."
+                        }),
+                )
+                .child(input.clone())
+                .child(
+                    div().flex().justify_end().child(
+                        div()
+                            .id("unlock")
+                            .px_3()
+                            .py_1()
+                            .rounded_sm()
+                            .text_sm()
+                            .cursor_pointer()
+                            .bg(rgb(0x4a9eff))
+                            .text_color(rgb(0xffffff))
+                            .hover(|s| s.bg(rgb(0x5aaeff)))
+                            .on_click(cx.listener(move |v, _, _, cx| {
+                                let pw = input.read(cx).text().to_string();
+                                if !pw.is_empty() {
+                                    v.password = Some(pw);
+                                    v.open(cx);
+                                }
+                            }))
+                            .child("Open"),
+                    ),
+                ),
+        )
+        .into_any_element()
+}

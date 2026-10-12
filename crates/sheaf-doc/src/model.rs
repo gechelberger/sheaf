@@ -33,6 +33,9 @@ pub struct SourceInfo {
     pub page_sizes: Option<Vec<PageSize>>,
     /// File size, for the history memory estimate.
     pub bytes: usize,
+    /// The password the file was opened with, if it needed one. Saves
+    /// decrypt with it; the written file is not re-encrypted.
+    pub password: Option<String>,
 }
 
 impl SourceInfo {
@@ -1261,6 +1264,7 @@ mod tests {
             },
             page_sizes: None,
             bytes: 1000,
+            password: None,
         }
     }
 

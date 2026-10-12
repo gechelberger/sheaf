@@ -55,9 +55,16 @@ pub struct TextInput {
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
+    /// Draw asterisks instead of the text (passwords).
+    masked: bool,
 }
 
 impl TextInput {
+    pub fn masked(mut self) -> Self {
+        self.masked = true;
+        self
+    }
+
     pub fn new(placeholder: impl Into<SharedString>, cx: &mut Context<Self>) -> Self {
         Self {
             focus_handle: cx.focus_handle(),
@@ -69,6 +76,7 @@ impl TextInput {
             last_layout: None,
             last_bounds: None,
             is_selecting: false,
+            masked: false,
         }
     }
 
@@ -475,7 +483,18 @@ impl Element for TextElement {
         cx: &mut App,
     ) -> Self::PrepaintState {
         let input = self.input.read(cx);
-        let content = input.content.clone();
+        let content: SharedString = if input.masked {
+            // One asterisk per byte keeps the byte offsets the cursor and
+            // selection use valid for the masked text too.
+            input
+                .content
+                .chars()
+                .map(|c| "*".repeat(c.len_utf8()))
+                .collect::<String>()
+                .into()
+        } else {
+            input.content.clone()
+        };
         let selected_range = input.selected_range.clone();
         let cursor = input.cursor_offset();
         let style = window.text_style();

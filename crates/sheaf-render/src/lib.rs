@@ -143,6 +143,22 @@ pub trait Renderer {
     }
 }
 
+/// Why a file couldn't be opened, when the app can do something about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum OpenError {
+    /// The file is encrypted and the password given (if any) is wrong.
+    #[error("the file is password protected")]
+    Password,
+}
+
+impl OpenError {
+    /// Is this error, anywhere in its chain, a password problem?
+    pub fn is_password(err: &anyhow::Error) -> bool {
+        err.chain()
+            .any(|c| matches!(c.downcast_ref::<OpenError>(), Some(OpenError::Password)))
+    }
+}
+
 pub mod pdfium {
     use super::*;
     use pdfium_render::prelude::*;
@@ -213,9 +229,18 @@ pub mod pdfium {
             // viewer wants anyway. Truly huge files can revisit this.
             let bytes =
                 std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-            let doc = pdfium()?
-                .load_pdf_from_byte_vec(bytes, password)
-                .with_context(|| format!("pdfium loading {}", path.display()))?;
+            let doc = match pdfium()?.load_pdf_from_byte_vec(bytes, password) {
+                Ok(d) => d,
+                Err(PdfiumError::PdfiumLibraryInternalError(
+                    PdfiumInternalError::PasswordError,
+                )) => {
+                    return Err(crate::OpenError::Password)
+                        .with_context(|| format!("opening {}", path.display()));
+                }
+                Err(e) => {
+                    return Err(e).with_context(|| format!("pdfium loading {}", path.display()));
+                }
+            };
             Ok(Self { doc })
         }
     }

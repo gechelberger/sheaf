@@ -50,8 +50,7 @@ fn build(snap: &Snapshot) -> Result<(usize, Vec<u8>)> {
     let mut others: std::collections::HashMap<_, LoadedSource> = std::collections::HashMap::new();
     for (&sid, sinfo) in &snap.sources {
         if sid != primary_id && snap.state.pages.iter().any(|p| p.source == sid) {
-            let other = Pdf::load(&sinfo.path)
-                .with_context(|| format!("loading {}", sinfo.path.display()))?;
+            let other = crate::file::load_pdf(&sinfo.path, sinfo.password.as_deref())?;
             others.insert(sid, LoadedSource::from_pdf_owned(other)?);
         }
     }

@@ -42,6 +42,8 @@ pub struct Launch {
     pub pattern: Option<String>,
     pub launched: Instant,
     pub settings: Settings,
+    /// Dev: open the command-line files with this password.
+    pub password: Option<String>,
 }
 
 const TAB_H: f32 = 32.0;
@@ -232,6 +234,8 @@ pub struct Workspace {
     timing: bool,
     launched: Instant,
     settings: Settings,
+    /// Only for files named on the command line.
+    password: Option<String>,
 }
 
 impl Workspace {
@@ -248,6 +252,7 @@ impl Workspace {
             pattern,
             launched,
             settings,
+            password,
         } = launch;
         let (docks, all_hidden) =
             docks_from_layout(settings.docks.as_ref().unwrap_or(&DockLayout::default()));
@@ -264,6 +269,7 @@ impl Workspace {
             timing,
             launched,
             settings,
+            password,
         };
         match start_panel.as_deref() {
             Some("bookmarks") => this.show_panel(Panel::Outline),
@@ -275,6 +281,7 @@ impl Workspace {
         for p in paths {
             this.open_path(p, cx);
         }
+        this.password = None;
         if let (Some(q), Some(doc)) = (find, this.docs.first().cloned()) {
             doc.update(cx, |d, cx| d.set_initial_query(q, cx));
         }
@@ -391,7 +398,8 @@ impl Workspace {
 
     pub fn open_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         let (timing, launched) = (self.timing, self.launched);
-        let doc = cx.new(|cx| DocView::new(path, timing, launched, cx));
+        let password = self.password.clone();
+        let doc = cx.new(|cx| DocView::new(path, password, timing, launched, cx));
         self.docs.push(doc);
         self.active = self.docs.len() - 1;
         cx.notify();
