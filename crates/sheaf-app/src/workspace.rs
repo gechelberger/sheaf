@@ -606,12 +606,15 @@ impl Workspace {
     }
 
     fn prompt_open(&mut self, separate_windows: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let rx = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: true,
-            prompt: Some("Open".into()),
-        });
+        let rx = crate::file_dialog::open(
+            cx,
+            PathPromptOptions {
+                files: true,
+                directories: false,
+                multiple: true,
+                prompt: Some("Open".into()),
+            },
+        );
         cx.spawn_in(window, async move |this, cx| match rx.await {
             Ok(Ok(Some(paths))) => {
                 this.update_in(cx, |ws, window, cx| {

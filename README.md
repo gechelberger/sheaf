@@ -282,11 +282,16 @@ decide on accuracy for scanned tax forms, not on purity.
 # Linux (Debian/Ubuntu) system deps for GPUI — once:
 sudo apt install build-essential clang lld cmake pkg-config libfontconfig-dev \
   libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libvulkan1 libasound2-dev \
-  libglib2.0-dev libssl-dev libzstd-dev
+  libglib2.0-dev libssl-dev libzstd-dev xdg-desktop-portal xdg-desktop-portal-gtk
+
 
 scripts/fetch-pdfium.sh          # prebuilt libpdfium → vendor/pdfium/<os>-<arch>/
 cargo run -p sheaf-app           # the GPUI window
 ```
+
+On Linux, file dialogs use the desktop portal when available and fall back to
+Zenity if the portal fails. WSLg installations without a desktop portal need
+`sudo apt install zenity` for Open, Insert PDF, Save As, and export dialogs.
 
 On Windows, install Visual Studio 2022 (or the Build Tools) with the
 "Desktop development with C++" workload and a Windows 10/11 SDK, plus rustup

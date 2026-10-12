@@ -6,6 +6,7 @@ mod brand;
 mod calc_panel;
 mod comments_panel;
 mod docview;
+mod file_dialog;
 mod frame;
 mod keymap;
 mod markup_tools;

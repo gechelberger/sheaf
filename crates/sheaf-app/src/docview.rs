@@ -1066,7 +1066,7 @@ impl DocView {
             .file_name()
             .and_then(|s| s.to_str())
             .map(String::from);
-        let rx = cx.prompt_for_new_path(&dir, suggested.as_deref());
+        let rx = crate::file_dialog::save(cx, &dir, suggested.as_deref());
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(path))) = rx.await {
                 this.update(cx, |view, cx| view.save_to(path, cx).detach())
@@ -1594,7 +1594,7 @@ impl DocView {
             .file_stem()
             .and_then(|s| s.to_str())
             .map(|s| format!("{s} - pages.pdf"));
-        let rx = cx.prompt_for_new_path(&dir, suggested.as_deref());
+        let rx = crate::file_dialog::save(cx, &dir, suggested.as_deref());
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(path))) = rx.await {
                 this.update(cx, |view, cx| view.extract_to(ids, path, cx))
@@ -1650,7 +1650,7 @@ impl DocView {
             .file_stem()
             .and_then(|s| s.to_str())
             .map(|s| format!("{s} - flattened.pdf"));
-        let rx = cx.prompt_for_new_path(&dir, suggested.as_deref());
+        let rx = crate::file_dialog::save(cx, &dir, suggested.as_deref());
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(path))) = rx.await {
                 this.update(cx, |view, cx| view.export_flattened_to(path, cx))
@@ -1718,7 +1718,7 @@ impl DocView {
             .file_stem()
             .and_then(|s| s.to_str())
             .map(|s| format!("{s} - clean.pdf"));
-        let rx = cx.prompt_for_new_path(&dir, suggested.as_deref());
+        let rx = crate::file_dialog::save(cx, &dir, suggested.as_deref());
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(path))) = rx.await {
                 this.update(cx, |view, cx| view.export_clean_to(path, cx))
@@ -1870,12 +1870,15 @@ impl DocView {
     // ----- insert pdf ---------------------------------------------------------
 
     fn insert_pdf_prompt(&mut self, cx: &mut Context<Self>) {
-        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: true,
-            prompt: Some("Insert".into()),
-        });
+        let rx = crate::file_dialog::open(
+            cx,
+            gpui::PathPromptOptions {
+                files: true,
+                directories: false,
+                multiple: true,
+                prompt: Some("Insert".into()),
+            },
+        );
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(paths))) = rx.await {
                 this.update(cx, |view, cx| {
