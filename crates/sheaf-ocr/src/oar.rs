@@ -11,8 +11,26 @@ pub fn check(cfg: &OcrConfig) -> Result<(), EngineError> {
     crate::data::oar_models(&cfg.oar).map(|_| ())
 }
 
+/// Load Microsoft's ONNX Runtime from `path` once per process. ort keeps
+/// one global environment; a second call is a no-op.
+fn load_runtime(path: &std::path::Path) -> Result<(), EngineError> {
+    use std::sync::OnceLock;
+    static LOADED: OnceLock<Result<(), String>> = OnceLock::new();
+    LOADED
+        .get_or_init(|| {
+            ort::init_from(path)
+                .map(|env| {
+                    env.commit();
+                })
+                .map_err(|e| format!("loading ONNX Runtime from {}: {e}", path.display()))
+        })
+        .clone()
+        .map_err(EngineError::Init)
+}
+
 pub fn build(cfg: &OcrConfig) -> Result<Box<dyn OcrEngine>, EngineError> {
     let models = crate::data::oar_models(&cfg.oar)?;
+    load_runtime(&models.runtime)?;
     let mut builder =
         OAROCRBuilder::new(models.det.clone(), models.rec.clone(), models.dict.clone())
             .return_word_box(true)

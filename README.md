@@ -104,7 +104,7 @@ Tier 1 platforms gate every release and run the perf budgets in CI.
 | Rasterizer | **PDFium** via `pdfium-render` | Chrome's engine: fast, BSD-licensed, handles encrypted files, forms, broken PDFs. Hidden behind a `Renderer` trait so a pure-Rust engine (hayro) can replace it once mature. |
 | Document edits | **lopdf** (or our own object layer) | PDFium's write API is limited (esp. outlines). Structural edits — page tree, bookmarks, annotations — are done on the raw object graph and saved incrementally. The renderer re-loads from the edited bytes. |
 | Rendering strategy | **Tiled, async, cached** | Viewport requests tiles at the current zoom; a worker pool renders them off the UI thread; LRU cache keyed by `(page, zoom, tile)`. Low-res preview tile first, then full-res. This is the single biggest "feels fast" lever. |
-| Text / OCR | PDFium text extraction. OCR is a **core feature** behind an `OcrEngine` trait with two engines compiled in by default: **Tesseract 5** (built from source, linked statically) and **PaddleOCR PP-OCRv5** on ONNX Runtime (`oar-ocr`). | Both engines are native C/C++, so OCR can't live in a WASM plugin; the trait keeps engines swappable, and plugins get OCR as a host capability. Judged on scanned tax forms, not purity. |
+| Text / OCR | PDFium text extraction. OCR is a **core feature** behind an `OcrEngine` trait with two engines compiled in by default: **Tesseract 5** (built from source, linked statically) and **PaddleOCR PP-OCRv5** on ONNX Runtime (`oar-ocr`, with Microsoft's runtime library loaded on demand from `ocr/lib`). | Both engines are native C/C++, so OCR can't live in a WASM plugin; the trait keeps engines swappable, and plugins get OCR as a host capability. Judged on scanned tax forms, not purity. |
 | Save model | Incremental update by default; "Save As (rewrite)" optional | Preserves originals, fast saves on large files. Clean rewrite available for size reduction / "Export Clean Copy". |
 | Undo | Command pattern over the document model | Every edit is a reversible `Edit` enum; undo stack is per-document. |
 
@@ -297,12 +297,14 @@ cargo run -p sheaf-app           # the GPUI window
 
 **OCR engines and build time.** Both engines are on by default. The first
 build compiles Tesseract 5 and Leptonica from source (CMake and a C++17
-compiler; a few minutes, cached in `~/.tesseract-rs`) and downloads a
-prebuilt, statically linked ONNX Runtime; both need network access once.
-`cargo build -p sheaf-app --no-default-features` skips the engines for a
-quick build (the Recognize Text dialog then says so). The PaddleOCR engine's
-ONNX Runtime is built for x86-64-v3 and is only offered on CPUs with AVX2
-(Intel Haswell / AMD Excavator, 2013+); Tesseract runs anywhere.
+compiler; a few minutes, cached in `~/.tesseract-rs`) and needs network
+access once. `cargo build -p sheaf-app --no-default-features` skips the
+engines for a quick build (the Recognize Text dialog then says so). The
+PaddleOCR engine does not link ONNX Runtime: it loads Microsoft's generic
+build from `vendor/ocr/lib` (or `ocr/lib` beside a packaged binary) the
+first time it is used, so the app starts on any x86-64 CPU and the
+`ort` crate's AVX2-only static binaries are never involved. CI runs the
+binary under `qemu -cpu Nehalem` to keep it that way.
 
 On Linux, file dialogs use the desktop portal when available and fall back to
 Zenity if the portal fails. WSLg installations without a desktop portal need
@@ -333,7 +335,8 @@ scripts/package.sh               # → dist/sheaf-<version>-<os>-<arch>.tar.gz (
 ```
 
 The bundle is the release binary next to the PDFium library, the OCR data
-in `ocr/` (about 25 MB of language files and models), the licenses, and
+in `ocr/` (about 25 MB of language files and models, plus the ONNX Runtime
+library in `ocr/lib`), the licenses, and
 (on Linux) a `.desktop` entry; unpack it anywhere and run `sheaf`. The
 binary looks for `libpdfium` and `ocr/` beside itself first, so no install
 step is needed. Pushing a `v*` tag runs `.github/workflows/release.yml`, which builds

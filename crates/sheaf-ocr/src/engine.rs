@@ -140,8 +140,6 @@ pub trait OcrEngine: Send {
 pub enum EngineError {
     #[error("{0} is not compiled into this build")]
     NotCompiled(&'static str),
-    #[error("this CPU lacks AVX2, which the bundled ONNX Runtime needs")]
-    NoAvx2,
     #[error("{0}")]
     MissingData(String),
     #[error("{0}")]
@@ -174,9 +172,6 @@ pub fn check_engine(kind: EngineKind, cfg: &OcrConfig) -> Result<(), EngineError
         EngineKind::Oar => {
             #[cfg(feature = "oar")]
             {
-                if !has_avx2() {
-                    return Err(EngineError::NoAvx2);
-                }
                 crate::oar::check(cfg)
             }
             #[cfg(not(feature = "oar"))]
@@ -254,20 +249,6 @@ pub fn set_language(kind: EngineKind, cfg: &mut OcrConfig, id: &str) {
     match kind {
         EngineKind::Tesseract => cfg.tesseract.lang = id.to_string(),
         EngineKind::Oar => cfg.oar.model_set = id.to_string(),
-    }
-}
-
-/// The prebuilt ONNX Runtime is compiled for x86-64-v3; running it on an
-/// older CPU is an illegal instruction, not an error.
-#[cfg(feature = "oar")]
-fn has_avx2() -> bool {
-    #[cfg(target_arch = "x86_64")]
-    {
-        std::arch::is_x86_feature_detected!("avx2")
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        true
     }
 }
 

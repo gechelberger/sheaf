@@ -79,8 +79,8 @@ jobs:
           ldd target/debug/sheaf
           ! ldd target/debug/sheaf | grep -E 'libc\+\+|libunwind|onnxruntime|tesseract|leptonica'
 
-      # The prebuilt ONNX Runtime is x86-64-v3; make sure its static
-      # initialisers don't take the whole app down on a pre-AVX2 CPU.
+      # ONNX Runtime is loaded on demand (the ort crate's static binaries
+      # are x86-64-v3 and crashed here before main); keep it that way.
       - name: Starts on a CPU without AVX2 (Linux)
         if: runner.os == 'Linux'
         run: |

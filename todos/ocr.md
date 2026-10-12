@@ -425,6 +425,17 @@ pub struct OarConfig { model_set: String /* "en" */, det/rec/dict/textline_ori/d
 - Package: `scripts/package.sh` bundle contains `ocr/` and licenses; the
   unpacked `sheaf` finds data beside the binary (no `vendor/` cwd).
 
+## Outcome of the AVX2 risk (2026-10-12)
+
+The CI qemu gate failed on the first run: pyke's static ONNX Runtime
+executed AVX2 in its global constructors, before `main`. The fallback below
+is now the design: `sheaf-ocr` enables `ort/load-dynamic`, disables
+`oar-ocr`'s `download-binaries`, and `scripts/fetch-ocr-data.sh` ships
+Microsoft's generic ONNX Runtime 1.28.0 (`ocr/lib/libonnxruntime.so` /
+`onnxruntime.dll`), loaded with `ort::init_from` the first time the
+PaddleOCR engine is built. Nothing ORT-related runs at startup, and the
+AVX2 check is gone.
+
 ## Risks
 
 - **AVX2 / x86-64-v3 static ORT**: a SIGILL in static initialisers would

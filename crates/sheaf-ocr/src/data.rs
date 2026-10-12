@@ -112,9 +112,31 @@ pub const OAR_DET: &str = "pp-ocrv5_mobile_det.onnx";
 pub const OAR_TEXTLINE_ORI: &str = "pp-lcnet_x0_25_textline_ori.onnx";
 pub const OAR_DOC_ORI: &str = "pp-lcnet_x1_0_doc_ori.onnx";
 
+/// The ONNX Runtime shared library's file name on this platform.
+pub const ORT_LIB: &str = if cfg!(windows) {
+    "onnxruntime.dll"
+} else if cfg!(target_os = "macos") {
+    "libonnxruntime.dylib"
+} else {
+    "libonnxruntime.so"
+};
+
+/// Microsoft's ONNX Runtime library: `$ORT_DYLIB_PATH` (ort's own
+/// override), else `lib/<ORT_LIB>` in the data directory.
+pub fn onnxruntime_lib() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("ORT_DYLIB_PATH")
+        && !p.is_empty()
+    {
+        return Some(PathBuf::from(p));
+    }
+    data_dir().map(|d| d.join("lib").join(ORT_LIB))
+}
+
 /// The model files an oar engine will load.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OarModels {
+    /// The ONNX Runtime shared library.
+    pub runtime: PathBuf,
     pub det: PathBuf,
     pub rec: PathBuf,
     pub dict: PathBuf,
@@ -156,7 +178,15 @@ pub fn oar_models(cfg: &OarConfig) -> Result<OarModels, EngineError> {
             .or_else(|| bundled(name))
             .filter(|p| p.is_file())
     };
+    let runtime = onnxruntime_lib().ok_or_else(|| missing("the ONNX Runtime library"))?;
+    if !runtime.is_file() {
+        return Err(EngineError::MissingData(format!(
+            "ONNX Runtime library {} not found; {FETCH_HINT}",
+            runtime.display()
+        )));
+    }
     Ok(OarModels {
+        runtime,
         det: required(&cfg.det, OAR_DET, "text detection model")?,
         rec: required(&cfg.rec, set.rec, "text recognition model")?,
         dict: required(&cfg.dict, set.dict, "character dictionary")?,
@@ -206,6 +236,10 @@ mod tests {
         };
         let err = tessdata_check(&fra).unwrap_err().to_string();
         assert!(err.contains("fra.traineddata"), "{err}");
+        let err = oar_models(&OarConfig::default()).unwrap_err().to_string();
+        assert!(err.contains("ONNX Runtime library"), "{err}");
+        std::fs::create_dir_all(dir.join("lib")).unwrap();
+        std::fs::write(dir.join("lib").join(ORT_LIB), b"x").unwrap();
         let err = oar_models(&OarConfig::default()).unwrap_err().to_string();
         assert!(err.contains("detection model"), "{err}");
         assert!(oar_model_sets(&OarConfig::default()).is_empty());
