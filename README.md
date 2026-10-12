@@ -113,6 +113,7 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 | Bookmarks (outline) sidebar | ✅ |
 | Text search (find in document) | ✅ progressive; ~6 ms/page |
 | Pattern search (regex: SSNs, EINs, amounts, dates) — separate tool from Find, shared engine with redaction | ✅ Patterns panel, Ctrl+Shift+F |
+| User-defined patterns: add, save, and delete presets (the built-in Date is US-only) | 📋 |
 | Tabs / multiple documents | ✅ |
 | Split view (same doc, two positions) | 📋 |
 | Attachments panel | 📋 |
