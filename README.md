@@ -343,6 +343,11 @@ step is needed. Pushing a `v*` tag runs `.github/workflows/release.yml`, which b
 the Linux and Windows bundles and attaches them to a GitHub release; `ci.yml`
 runs fmt, clippy, tests and a build on every push.
 
+Versions are alpha pre-releases (`0.1.0-alpha.N`) until the app is ready for
+daily use. To release, bump `version` in the root `Cargo.toml` and push the
+tag `v<version>`. The workflow refuses a tag that doesn't match `Cargo.toml`
+and marks tags with a `-` suffix as pre-releases.
+
 ### M0 spikes
 
 ```sh

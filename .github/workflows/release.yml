@@ -1,7 +1,9 @@
 name: Release
 
-# Tag v0.1.0 (matching Cargo.toml's version) to build bundles for Linux and
-# Windows and attach them to a GitHub release.
+# Tag v<version> (matching Cargo.toml's version, e.g. v0.1.0-alpha.1) to
+# build bundles for Linux and Windows and attach them to a GitHub release.
+# Tags with a pre-release suffix (anything after a `-`) are marked as
+# pre-releases.
 on:
   push:
     tags: ["v*"]
@@ -22,6 +24,15 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
+
+      - name: Check tag matches Cargo.toml version
+        shell: bash
+        run: |
+          version="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+          [[ "${GITHUB_REF_NAME}" == "v${version}" ]] || {
+            echo "tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${version}" >&2
+            exit 1
+          }
 
       - name: Linux system deps (GPUI)
         if: runner.os == 'Linux'
@@ -59,3 +70,4 @@ jobs:
         with:
           files: dist/sheaf-*.tar.gz,dist/sheaf-*.zip
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
