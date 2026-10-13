@@ -7,8 +7,10 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PageIndex(pub u32);
 
+use serde::{Deserialize, Serialize};
+
 /// A size in PDF points (1/72 inch).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PageSize {
     pub width: f32,
     pub height: f32,
@@ -29,7 +31,7 @@ impl PageSize {
 }
 
 /// A clockwise quarter-turn rotation, as in the `/Rotate` entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum Rotation {
     #[default]
     R0,

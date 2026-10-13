@@ -6074,6 +6074,7 @@ dependencies = [
  "log",
  "regex",
  "resvg",
+ "schemars",
  "serde",
  "serde_json",
  "sheaf-core",
@@ -6088,6 +6089,9 @@ dependencies = [
 [[package]]
 name = "sheaf-core"
 version = "0.0.1"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "sheaf-doc"

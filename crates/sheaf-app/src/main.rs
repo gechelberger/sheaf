@@ -5,7 +5,9 @@
 mod assets;
 mod brand;
 mod calc_panel;
+mod commands;
 mod comments_panel;
+mod contrib;
 mod docview;
 mod file_dialog;
 mod frame;
@@ -239,211 +241,215 @@ fn main() {
     let launched = Instant::now();
     let cli = parse_cli();
 
-    application().with_assets(assets::Assets).run(move |cx: &mut App| {
-        let mut cli = cli;
-        let doc = Some(docview::KEY_CONTEXT);
-        // Bare keys that a focused text field nested in these contexts must
-        // receive as typed text; otherwise the outer binding swallows them.
-        let doc_keys = Some("DocView && !TextInput && !TextArea");
-        let outline_keys = Some("Outline && !TextInput");
-        let comments_keys = Some("Comments && !TextInput && !TextArea");
-        let ws = Some(workspace::KEY_CONTEXT);
-        let ti = Some(text_input::KEY_CONTEXT);
-        let ta = Some(text_area::KEY_CONTEXT);
-        let outline = Some(outline_panel::KEY_CONTEXT);
-        let comments = Some(comments_panel::KEY_CONTEXT);
-        let either = Some("DocView || Outline || Comments");
-        let mb = Some(menu_bar::KEY_CONTEXT);
-        let pal = Some(palette::KEY_CONTEXT);
-        let od = Some(ocr_dialog::KEY_CONTEXT);
-        let od_keys = Some("OcrDialog && !TextInput");
-        cx.bind_keys([
-            KeyBinding::new("right", NextPage, doc_keys),
-            KeyBinding::new("left", PrevPage, doc_keys),
-            KeyBinding::new("down", LineDown, doc_keys),
-            KeyBinding::new("up", LineUp, doc_keys),
-            KeyBinding::new("pagedown", ScreenDown, doc_keys),
-            KeyBinding::new("space", ScreenDown, doc_keys),
-            KeyBinding::new("pageup", ScreenUp, doc_keys),
-            KeyBinding::new("shift-space", ScreenUp, doc_keys),
-            KeyBinding::new("home", FirstPage, doc_keys),
-            KeyBinding::new("end", LastPage, doc_keys),
-            KeyBinding::new("ctrl-=", ZoomIn, doc),
-            KeyBinding::new("ctrl-+", ZoomIn, doc),
-            KeyBinding::new("ctrl--", ZoomOut, doc),
-            KeyBinding::new("ctrl-0", ZoomFitPage, doc),
-            KeyBinding::new("ctrl-1", ZoomActual, doc),
-            KeyBinding::new("ctrl-2", ZoomFitWidth, doc),
-            KeyBinding::new("r", RotatePageCw, doc_keys),
-            KeyBinding::new("shift-r", RotatePageCcw, doc_keys),
-            KeyBinding::new("delete", DeletePage, doc_keys),
-            KeyBinding::new("ctrl-d", DuplicatePages, doc),
-            KeyBinding::new("ctrl-a", SelectAllPages, doc),
-            KeyBinding::new("ctrl-z", Undo, either),
-            KeyBinding::new("ctrl-shift-z", Redo, either),
-            KeyBinding::new("ctrl-y", Redo, either),
-            KeyBinding::new("ctrl-s", Save, either),
-            KeyBinding::new("ctrl-shift-s", SaveAs, either),
-            KeyBinding::new("ctrl-shift-i", InsertPdf, doc),
-            KeyBinding::new("ctrl-b", NewBookmark, either),
-            // Bookmarks panel (when it has focus).
-            KeyBinding::new("f2", RenameBookmark, outline_keys),
-            KeyBinding::new("delete", DeleteBookmark, outline),
-            KeyBinding::new("escape", DeselectBookmark, outline),
-            // Comments panel (when it has focus).
-            KeyBinding::new("f2", EditComment, comments_keys),
-            KeyBinding::new("delete", DeleteComment, comments),
-            // Markup tools (Acrobat's single-key accelerators where it has them).
-            KeyBinding::new("v", ToolSelect, doc_keys),
-            KeyBinding::new("s", ToolNote, doc_keys),
-            KeyBinding::new("u", ToolHighlight, doc_keys),
-            KeyBinding::new("t", ToolFreeText, doc_keys),
-            KeyBinding::new("d", ToolSquare, doc_keys),
-            KeyBinding::new("o", ToolEllipse, doc_keys),
-            KeyBinding::new("l", ToolLine, doc_keys),
-            KeyBinding::new("a", ToolArrow, doc_keys),
-            KeyBinding::new("n", ToolInk, doc_keys),
-            KeyBinding::new("k", ToolTick, doc_keys),
-            KeyBinding::new("i", ToolConnector, doc_keys),
-            KeyBinding::new("ctrl-f", Find, doc),
-            KeyBinding::new("escape", CloseSearch, doc),
-            KeyBinding::new("f3", SearchNext, doc),
-            KeyBinding::new("shift-f3", SearchPrev, doc),
-            KeyBinding::new("enter", SearchNext, doc),
-            KeyBinding::new("shift-enter", SearchPrev, doc),
-            // Text input (deeper context wins over DocView for shared keys).
-            KeyBinding::new("backspace", text_input::Backspace, ti),
-            KeyBinding::new("delete", text_input::Delete, ti),
-            KeyBinding::new("left", text_input::Left, ti),
-            KeyBinding::new("right", text_input::Right, ti),
-            KeyBinding::new("shift-left", text_input::SelectLeft, ti),
-            KeyBinding::new("shift-right", text_input::SelectRight, ti),
-            KeyBinding::new("home", text_input::Home, ti),
-            KeyBinding::new("end", text_input::End, ti),
-            KeyBinding::new("ctrl-a", text_input::SelectAll, ti),
-            KeyBinding::new("ctrl-v", text_input::Paste, ti),
-            KeyBinding::new("ctrl-c", text_input::Copy, ti),
-            KeyBinding::new("ctrl-x", text_input::Cut, ti),
-            KeyBinding::new("space", text_input::InsertSpace, ti),
-            KeyBinding::new("shift-space", text_input::InsertSpace, ti),
-            KeyBinding::new("enter", text_input::Confirm, ti),
-            KeyBinding::new("escape", text_input::Cancel, ti),
-            // Multi-line text area (annotation text).
-            KeyBinding::new("backspace", text_area::Backspace, ta),
-            KeyBinding::new("delete", text_area::Delete, ta),
-            KeyBinding::new("left", text_area::Left, ta),
-            KeyBinding::new("right", text_area::Right, ta),
-            KeyBinding::new("up", text_area::Up, ta),
-            KeyBinding::new("down", text_area::Down, ta),
-            KeyBinding::new("shift-left", text_area::SelectLeft, ta),
-            KeyBinding::new("shift-right", text_area::SelectRight, ta),
-            KeyBinding::new("home", text_area::Home, ta),
-            KeyBinding::new("end", text_area::End, ta),
-            KeyBinding::new("ctrl-a", text_area::SelectAll, ta),
-            KeyBinding::new("ctrl-v", text_area::Paste, ta),
-            KeyBinding::new("ctrl-c", text_area::Copy, ta),
-            KeyBinding::new("ctrl-x", text_area::Cut, ta),
-            KeyBinding::new("space", text_area::InsertSpace, ta),
-            KeyBinding::new("shift-space", text_area::InsertSpace, ta),
-            KeyBinding::new("enter", text_area::Newline, ta),
-            KeyBinding::new("shift-enter", text_area::Newline, ta),
-            KeyBinding::new("ctrl-enter", text_area::Confirm, ta),
-            KeyBinding::new("escape", text_area::Cancel, ta),
-            KeyBinding::new("f4", ToggleSidebar, ws),
-            KeyBinding::new("ctrl-alt-1", ShowThumbnails, ws),
-            KeyBinding::new("ctrl-alt-2", ShowOutline, ws),
-            KeyBinding::new("ctrl-alt-3", ShowPatterns, ws),
-            KeyBinding::new("ctrl-alt-4", ShowCalc, ws),
-            KeyBinding::new("ctrl-alt-5", ShowComments, ws),
-            KeyBinding::new("ctrl-alt-l", ToggleLeftDock, ws),
-            KeyBinding::new("ctrl-alt-r", ToggleRightDock, ws),
-            KeyBinding::new("ctrl-alt-j", ToggleBottomDock, ws),
-            KeyBinding::new("ctrl-shift-f", ShowPatterns, ws),
-            KeyBinding::new("ctrl-tab", NextTab, ws),
-            KeyBinding::new("ctrl-shift-tab", PrevTab, ws),
-            KeyBinding::new("ctrl-pagedown", NextTab, ws),
-            KeyBinding::new("ctrl-pageup", PrevTab, ws),
-            KeyBinding::new("ctrl-w", CloseTab, ws),
-            KeyBinding::new("ctrl-o", OpenFile, ws),
-            KeyBinding::new("ctrl-n", NewWindow, ws),
-            KeyBinding::new("ctrl-shift-o", OpenInWindows, ws),
-            KeyBinding::new("ctrl-shift-w", CloseWindow, ws),
-            KeyBinding::new("ctrl-q", Quit, None),
-            // Acrobat has no palette; Ctrl+Shift+P is its Page Setup, so not that.
-            KeyBinding::new("ctrl-shift-k", CommandPalette, None),
-            KeyBinding::new("up", PaletteUp, pal),
-            KeyBinding::new("down", PaletteDown, pal),
-            KeyBinding::new("pageup", PalettePageUp, pal),
-            KeyBinding::new("pagedown", PalettePageDown, pal),
-            // Recognize Text (OCR). Acrobat has no default shortcut for it.
-            KeyBinding::new("ctrl-shift-t", RecognizeText, ws),
-            KeyBinding::new("tab", DialogNext, od),
-            KeyBinding::new("shift-tab", DialogPrev, od),
-            KeyBinding::new("down", DialogNext, od_keys),
-            KeyBinding::new("up", DialogPrev, od_keys),
-            KeyBinding::new("left", DialogLeft, od_keys),
-            KeyBinding::new("right", DialogRight, od_keys),
-            KeyBinding::new("space", DialogRight, od_keys),
-            KeyBinding::new("enter", DialogRun, od_keys),
-            KeyBinding::new("escape", DialogCancel, od_keys),
-            // Menu bar: Alt tapped alone or F10 highlights it, as on Windows.
-            KeyBinding::new("alt", ActivateMenuBar, ws),
-            KeyBinding::new("f10", ActivateMenuBar, ws),
-            KeyBinding::new("left", menu_bar::MenuLeft, mb),
-            KeyBinding::new("right", menu_bar::MenuRight, mb),
-            KeyBinding::new("up", menu_bar::MenuUp, mb),
-            KeyBinding::new("down", menu_bar::MenuDown, mb),
-            KeyBinding::new("enter", menu_bar::MenuConfirm, mb),
-            KeyBinding::new("space", menu_bar::MenuConfirm, mb),
-            KeyBinding::new("escape", menu_bar::MenuCancel, mb),
-        ]);
-        for e in keymap::load(cx) {
-            log::warn!("keymap.json: {e}");
-            eprintln!("keymap.json: {e}");
-        }
-        cx.set_menus(menus::app_menus());
-
-        let mut groups = window_paths(cli.paths, cli.separate_windows).into_iter();
-        let password = cli.password.clone();
-        open_workspace(
-            Launch {
-                paths: groups.next().expect("at least one window"),
-                timing: cli.timing,
-                find: cli.find,
-                selftest_save: cli.selftest_save,
-                selftest_insert: cli.selftest_insert,
-                selftest_annot: cli.selftest_annot,
-                selftest_clean: cli.selftest_clean,
-                start_panel: cli.panel.take(),
-                pattern: cli.pattern.take(),
-                launched,
-                settings: settings::Settings::load(),
-                password: cli.password.take(),
-                selftest_extract: cli.selftest_extract,
-                selftest_flatten: cli.selftest_flatten,
-                selftest_ocr: cli.selftest_ocr,
-            },
-            cli.menu,
-            cx,
-        )
-        .expect("open window");
-        for paths in groups {
-            let mut launch = Launch::files(paths);
-            launch.timing = cli.timing;
-            launch.launched = launched;
-            launch.password = password.clone();
-            open_workspace(launch, None, cx).expect("open window");
-        }
-        // No windows means nothing to do (macOS keeps apps alive without
-        // windows, but sheaf has no dock-menu life yet).
-        cx.on_window_closed(|cx, _| {
-            if cx.windows().is_empty() {
-                cx.quit();
+    application()
+        .with_assets(assets::Assets)
+        .run(move |cx: &mut App| {
+            let mut cli = cli;
+            let doc = Some(docview::KEY_CONTEXT);
+            // Bare keys that a focused text field nested in these contexts must
+            // receive as typed text; otherwise the outer binding swallows them.
+            let doc_keys = Some("DocView && !TextInput && !TextArea");
+            let outline_keys = Some("Outline && !TextInput");
+            let comments_keys = Some("Comments && !TextInput && !TextArea");
+            let ws = Some(workspace::KEY_CONTEXT);
+            let ti = Some(text_input::KEY_CONTEXT);
+            let ta = Some(text_area::KEY_CONTEXT);
+            let outline = Some(outline_panel::KEY_CONTEXT);
+            let comments = Some(comments_panel::KEY_CONTEXT);
+            let either = Some("DocView || Outline || Comments");
+            let mb = Some(menu_bar::KEY_CONTEXT);
+            let pal = Some(palette::KEY_CONTEXT);
+            let od = Some(ocr_dialog::KEY_CONTEXT);
+            let od_keys = Some("OcrDialog && !TextInput");
+            cx.bind_keys([
+                KeyBinding::new("right", NextPage, doc_keys),
+                KeyBinding::new("left", PrevPage, doc_keys),
+                KeyBinding::new("down", LineDown, doc_keys),
+                KeyBinding::new("up", LineUp, doc_keys),
+                KeyBinding::new("pagedown", ScreenDown, doc_keys),
+                KeyBinding::new("space", ScreenDown, doc_keys),
+                KeyBinding::new("pageup", ScreenUp, doc_keys),
+                KeyBinding::new("shift-space", ScreenUp, doc_keys),
+                KeyBinding::new("home", FirstPage, doc_keys),
+                KeyBinding::new("end", LastPage, doc_keys),
+                KeyBinding::new("ctrl-=", ZoomIn, doc),
+                KeyBinding::new("ctrl-+", ZoomIn, doc),
+                KeyBinding::new("ctrl--", ZoomOut, doc),
+                KeyBinding::new("ctrl-0", ZoomFitPage, doc),
+                KeyBinding::new("ctrl-1", ZoomActual, doc),
+                KeyBinding::new("ctrl-2", ZoomFitWidth, doc),
+                KeyBinding::new("r", RotatePageCw, doc_keys),
+                KeyBinding::new("shift-r", RotatePageCcw, doc_keys),
+                KeyBinding::new("delete", DeletePage, doc_keys),
+                KeyBinding::new("ctrl-d", DuplicatePages, doc),
+                KeyBinding::new("ctrl-a", SelectAllPages, doc),
+                KeyBinding::new("ctrl-z", Undo, either),
+                KeyBinding::new("ctrl-shift-z", Redo, either),
+                KeyBinding::new("ctrl-y", Redo, either),
+                KeyBinding::new("ctrl-s", Save, either),
+                KeyBinding::new("ctrl-shift-s", SaveAs, either),
+                KeyBinding::new("ctrl-shift-i", InsertPdf, doc),
+                KeyBinding::new("ctrl-b", NewBookmark, either),
+                // Bookmarks panel (when it has focus).
+                KeyBinding::new("f2", RenameBookmark, outline_keys),
+                KeyBinding::new("delete", DeleteBookmark, outline),
+                KeyBinding::new("escape", DeselectBookmark, outline),
+                // Comments panel (when it has focus).
+                KeyBinding::new("f2", EditComment, comments_keys),
+                KeyBinding::new("delete", DeleteComment, comments),
+                // Markup tools (Acrobat's single-key accelerators where it has them).
+                KeyBinding::new("v", ToolSelect, doc_keys),
+                KeyBinding::new("s", ToolNote, doc_keys),
+                KeyBinding::new("u", ToolHighlight, doc_keys),
+                KeyBinding::new("t", ToolFreeText, doc_keys),
+                KeyBinding::new("d", ToolSquare, doc_keys),
+                KeyBinding::new("o", ToolEllipse, doc_keys),
+                KeyBinding::new("l", ToolLine, doc_keys),
+                KeyBinding::new("a", ToolArrow, doc_keys),
+                KeyBinding::new("n", ToolInk, doc_keys),
+                KeyBinding::new("k", ToolTick, doc_keys),
+                KeyBinding::new("i", ToolConnector, doc_keys),
+                KeyBinding::new("ctrl-f", Find, doc),
+                KeyBinding::new("escape", CloseSearch, doc),
+                KeyBinding::new("f3", SearchNext, doc),
+                KeyBinding::new("shift-f3", SearchPrev, doc),
+                KeyBinding::new("enter", SearchNext, doc),
+                KeyBinding::new("shift-enter", SearchPrev, doc),
+                // Text input (deeper context wins over DocView for shared keys).
+                KeyBinding::new("backspace", text_input::Backspace, ti),
+                KeyBinding::new("delete", text_input::Delete, ti),
+                KeyBinding::new("left", text_input::Left, ti),
+                KeyBinding::new("right", text_input::Right, ti),
+                KeyBinding::new("shift-left", text_input::SelectLeft, ti),
+                KeyBinding::new("shift-right", text_input::SelectRight, ti),
+                KeyBinding::new("home", text_input::Home, ti),
+                KeyBinding::new("end", text_input::End, ti),
+                KeyBinding::new("ctrl-a", text_input::SelectAll, ti),
+                KeyBinding::new("ctrl-v", text_input::Paste, ti),
+                KeyBinding::new("ctrl-c", text_input::Copy, ti),
+                KeyBinding::new("ctrl-x", text_input::Cut, ti),
+                KeyBinding::new("space", text_input::InsertSpace, ti),
+                KeyBinding::new("shift-space", text_input::InsertSpace, ti),
+                KeyBinding::new("enter", text_input::Confirm, ti),
+                KeyBinding::new("escape", text_input::Cancel, ti),
+                // Multi-line text area (annotation text).
+                KeyBinding::new("backspace", text_area::Backspace, ta),
+                KeyBinding::new("delete", text_area::Delete, ta),
+                KeyBinding::new("left", text_area::Left, ta),
+                KeyBinding::new("right", text_area::Right, ta),
+                KeyBinding::new("up", text_area::Up, ta),
+                KeyBinding::new("down", text_area::Down, ta),
+                KeyBinding::new("shift-left", text_area::SelectLeft, ta),
+                KeyBinding::new("shift-right", text_area::SelectRight, ta),
+                KeyBinding::new("home", text_area::Home, ta),
+                KeyBinding::new("end", text_area::End, ta),
+                KeyBinding::new("ctrl-a", text_area::SelectAll, ta),
+                KeyBinding::new("ctrl-v", text_area::Paste, ta),
+                KeyBinding::new("ctrl-c", text_area::Copy, ta),
+                KeyBinding::new("ctrl-x", text_area::Cut, ta),
+                KeyBinding::new("space", text_area::InsertSpace, ta),
+                KeyBinding::new("shift-space", text_area::InsertSpace, ta),
+                KeyBinding::new("enter", text_area::Newline, ta),
+                KeyBinding::new("shift-enter", text_area::Newline, ta),
+                KeyBinding::new("ctrl-enter", text_area::Confirm, ta),
+                KeyBinding::new("escape", text_area::Cancel, ta),
+                KeyBinding::new("f4", ToggleSidebar, ws),
+                KeyBinding::new("ctrl-alt-1", ShowThumbnails, ws),
+                KeyBinding::new("ctrl-alt-2", ShowOutline, ws),
+                KeyBinding::new("ctrl-alt-3", ShowPatterns, ws),
+                KeyBinding::new("ctrl-alt-4", ShowCalc, ws),
+                KeyBinding::new("ctrl-alt-5", ShowComments, ws),
+                KeyBinding::new("ctrl-alt-l", ToggleLeftDock, ws),
+                KeyBinding::new("ctrl-alt-r", ToggleRightDock, ws),
+                KeyBinding::new("ctrl-alt-j", ToggleBottomDock, ws),
+                KeyBinding::new("ctrl-shift-f", ShowPatterns, ws),
+                KeyBinding::new("ctrl-tab", NextTab, ws),
+                KeyBinding::new("ctrl-shift-tab", PrevTab, ws),
+                KeyBinding::new("ctrl-pagedown", NextTab, ws),
+                KeyBinding::new("ctrl-pageup", PrevTab, ws),
+                KeyBinding::new("ctrl-w", CloseTab, ws),
+                KeyBinding::new("ctrl-o", OpenFile, ws),
+                KeyBinding::new("ctrl-n", NewWindow, ws),
+                KeyBinding::new("ctrl-shift-o", OpenInWindows, ws),
+                KeyBinding::new("ctrl-shift-w", CloseWindow, ws),
+                KeyBinding::new("ctrl-q", Quit, None),
+                // Acrobat has no palette; Ctrl+Shift+P is its Page Setup, so not that.
+                KeyBinding::new("ctrl-shift-k", CommandPalette, None),
+                KeyBinding::new("up", PaletteUp, pal),
+                KeyBinding::new("down", PaletteDown, pal),
+                KeyBinding::new("pageup", PalettePageUp, pal),
+                KeyBinding::new("pagedown", PalettePageDown, pal),
+                // Recognize Text (OCR). Acrobat has no default shortcut for it.
+                KeyBinding::new("ctrl-shift-t", RecognizeText, ws),
+                KeyBinding::new("tab", DialogNext, od),
+                KeyBinding::new("shift-tab", DialogPrev, od),
+                KeyBinding::new("down", DialogNext, od_keys),
+                KeyBinding::new("up", DialogPrev, od_keys),
+                KeyBinding::new("left", DialogLeft, od_keys),
+                KeyBinding::new("right", DialogRight, od_keys),
+                KeyBinding::new("space", DialogRight, od_keys),
+                KeyBinding::new("enter", DialogRun, od_keys),
+                KeyBinding::new("escape", DialogCancel, od_keys),
+                // Menu bar: Alt tapped alone or F10 highlights it, as on Windows.
+                KeyBinding::new("alt", ActivateMenuBar, ws),
+                KeyBinding::new("f10", ActivateMenuBar, ws),
+                KeyBinding::new("left", menu_bar::MenuLeft, mb),
+                KeyBinding::new("right", menu_bar::MenuRight, mb),
+                KeyBinding::new("up", menu_bar::MenuUp, mb),
+                KeyBinding::new("down", menu_bar::MenuDown, mb),
+                KeyBinding::new("enter", menu_bar::MenuConfirm, mb),
+                KeyBinding::new("space", menu_bar::MenuConfirm, mb),
+                KeyBinding::new("escape", menu_bar::MenuCancel, mb),
+            ]);
+            for e in keymap::load(cx) {
+                log::warn!("keymap.json: {e}");
+                eprintln!("keymap.json: {e}");
             }
-        })
-        .detach();
-        cx.activate(true);
-    });
+            cx.set_global(commands::CommandRegistry::builtin());
+            cx.set_global(contrib::Contributions::load());
+            cx.set_menus(menus::app_menus(cx));
+
+            let mut groups = window_paths(cli.paths, cli.separate_windows).into_iter();
+            let password = cli.password.clone();
+            open_workspace(
+                Launch {
+                    paths: groups.next().expect("at least one window"),
+                    timing: cli.timing,
+                    find: cli.find,
+                    selftest_save: cli.selftest_save,
+                    selftest_insert: cli.selftest_insert,
+                    selftest_annot: cli.selftest_annot,
+                    selftest_clean: cli.selftest_clean,
+                    start_panel: cli.panel.take(),
+                    pattern: cli.pattern.take(),
+                    launched,
+                    settings: settings::Settings::load(),
+                    password: cli.password.take(),
+                    selftest_extract: cli.selftest_extract,
+                    selftest_flatten: cli.selftest_flatten,
+                    selftest_ocr: cli.selftest_ocr,
+                },
+                cli.menu,
+                cx,
+            )
+            .expect("open window");
+            for paths in groups {
+                let mut launch = Launch::files(paths);
+                launch.timing = cli.timing;
+                launch.launched = launched;
+                launch.password = password.clone();
+                open_workspace(launch, None, cx).expect("open window");
+            }
+            // No windows means nothing to do (macOS keeps apps alive without
+            // windows, but sheaf has no dock-menu life yet).
+            cx.on_window_closed(|cx, _| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+            .detach();
+            cx.activate(true);
+        });
 }
 
 /// Every window gets an independent workspace and the same close protection.

@@ -186,7 +186,7 @@ impl DocView {
         true
     }
 
-    fn set_notice(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
+    pub(crate) fn set_notice(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
         if let State::Ready(doc) = &mut self.state {
             doc.notice = Some(text.into());
         }
@@ -333,8 +333,9 @@ impl DocView {
                 }
             };
         if applied {
-            self.schedule_autosave(cx);
+            self.after_model_change("Recognize text".into(), Default::default(), cx);
+        } else {
+            cx.notify();
         }
-        cx.notify();
     }
 }

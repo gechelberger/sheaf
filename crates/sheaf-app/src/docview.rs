@@ -26,7 +26,7 @@ use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, Pt};
 
 use crate::markup_tools::{Drag, Tool, arrow_head, rotate_pt, stroke_canvas};
 use sheaf_doc::{
-    Document, Edit, FlatOutlineItem, OutlineId, PageId, PageRef, SourceId, SourceInfo,
+    Document, Edit, EditOutcome, FlatOutlineItem, OutlineId, PageId, PageRef, SourceId, SourceInfo,
 };
 use sheaf_render::{
     Job, OutlineItem, PixelFormat, Rect, RenderHandle, RenderRequest, Rendered, SearchEvent,
@@ -379,6 +379,29 @@ pub(crate) struct AnnotEditor {
     pub _blur: Subscription,
 }
 
+/// What happened to a document, for listeners outside the view (plugins,
+/// see `todos/plugins.md`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum DocEvent {
+    /// The file is open and its model exists.
+    Opened,
+    /// The model changed: an edit, a batch, an undo or a redo. `label` is
+    /// the undo label ("Undo: …"/"Redo: …" for those two).
+    Edited {
+        label: String,
+        outcome: EditOutcome,
+    },
+    Saved {
+        path: PathBuf,
+    },
+    /// The set of selected pages changed.
+    SelectionChanged,
+    /// The tab closed. Emitted by the workspace just before it drops the view.
+    Closed,
+}
+
+impl gpui::EventEmitter<DocEvent> for DocView {}
+
 pub struct DocView {
     pub(crate) focus_handle: FocusHandle,
     pub(crate) path: PathBuf,
@@ -643,6 +666,7 @@ impl DocView {
         self.fetch_page_sizes(cx);
         self.fetch_outline(cx);
         self.load_sheaf_annots(cx);
+        cx.emit(DocEvent::Opened);
         if let Some(p) = self.selftest_save.take() {
             self.selftest_save(p, cx);
         }
@@ -920,7 +944,32 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        match doc.model.apply(edit, label) {
+        let result = doc.model.apply(edit, label);
+        self.finish_edit(label, result, cx);
+    }
+
+    /// Apply edits as one undo step; if any fails, none are applied.
+    #[allow(dead_code)] // For plugin edits (M6 slice 2).
+    pub(crate) fn apply_batch(&mut self, edits: Vec<Edit>, label: &str, cx: &mut Context<Self>) {
+        let State::Ready(doc) = &mut self.state else {
+            return;
+        };
+        let result = doc.model.apply_batch(edits, label);
+        self.finish_edit(label, result, cx);
+    }
+
+    /// After `apply`/`apply_batch`: notice, redraw, autosave, and tell
+    /// listeners.
+    fn finish_edit(
+        &mut self,
+        label: &str,
+        result: anyhow::Result<EditOutcome>,
+        cx: &mut Context<Self>,
+    ) {
+        let State::Ready(doc) = &mut self.state else {
+            return;
+        };
+        match result {
             Ok(out) => {
                 let mut parts = Vec::new();
                 if out.pages_removed > 0 {
@@ -943,15 +992,28 @@ impl DocView {
                     format!("{label}: removed {} — Ctrl+Z to undo", parts.join(" and "))
                 });
                 doc.touched();
-                self.prune_selection();
-                self.schedule_autosave(cx);
-                cx.notify();
+                self.after_model_change(label.to_string(), out, cx);
             }
             Err(e) => {
                 doc.notice = Some(format!("{label} failed: {e:#}"));
                 cx.notify();
             }
         }
+    }
+
+    /// Bookkeeping after any change to the model.
+    pub(crate) fn after_model_change(
+        &mut self,
+        label: String,
+        outcome: EditOutcome,
+        cx: &mut Context<Self>,
+    ) {
+        if self.prune_selection() {
+            cx.emit(DocEvent::SelectionChanged);
+        }
+        self.schedule_autosave(cx);
+        cx.emit(DocEvent::Edited { label, outcome });
+        cx.notify();
     }
 
     /// Pages an operation applies to: the selection, or the current page.
@@ -1012,6 +1074,7 @@ impl DocView {
             return;
         };
         doc.selection = doc.model.state().pages.iter().map(|p| p.id).collect();
+        cx.emit(DocEvent::SelectionChanged);
         cx.notify();
     }
 
@@ -1021,14 +1084,16 @@ impl DocView {
         };
         if !doc.selection.is_empty() {
             doc.selection.clear();
+            cx.emit(DocEvent::SelectionChanged);
             cx.notify();
         }
     }
 
-    /// Drop pages that no longer exist (after delete/undo/redo).
-    fn prune_selection(&mut self) {
+    /// Drop pages that no longer exist (after delete/undo/redo). True if
+    /// the page selection changed.
+    fn prune_selection(&mut self) -> bool {
         let State::Ready(doc) = &mut self.state else {
-            return;
+            return false;
         };
         if let Some((pid, aid)) = doc.selected_annot
             && !doc
@@ -1040,7 +1105,9 @@ impl DocView {
             doc.selected_annot = None;
         }
         let live: HashSet<PageId> = doc.model.state().pages.iter().map(|p| p.id).collect();
+        let before = doc.selection.len();
         doc.selection.retain(|id| live.contains(id));
+        doc.selection.len() != before
     }
 
     /// Thumbnail click: plain selects just that page, Ctrl toggles, Shift
@@ -1075,6 +1142,7 @@ impl DocView {
             doc.selection.insert(id);
             doc.sel_anchor = Some(index);
         }
+        cx.emit(DocEvent::SelectionChanged);
         self.go_to_page(index, cx);
     }
 
@@ -1101,6 +1169,7 @@ impl DocView {
         self.apply(Edit::MovePages { ids, before }, &label, cx);
         if let State::Ready(doc) = &mut self.state {
             doc.selection = moving;
+            cx.emit(DocEvent::SelectionChanged);
         }
     }
 
@@ -1108,28 +1177,28 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        doc.notice = match doc.model.undo() {
-            Some(label) => Some(format!("Undid: {label}")),
-            None => Some("Nothing to undo".into()),
+        let Some(label) = doc.model.undo().map(str::to_string) else {
+            doc.notice = Some("Nothing to undo".into());
+            cx.notify();
+            return;
         };
+        doc.notice = Some(format!("Undid: {label}"));
         doc.touched();
-        self.prune_selection();
-        self.schedule_autosave(cx);
-        cx.notify();
+        self.after_model_change(format!("Undo: {label}"), EditOutcome::default(), cx);
     }
 
     pub(crate) fn redo(&mut self, cx: &mut Context<Self>) {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        doc.notice = match doc.model.redo() {
-            Some(label) => Some(format!("Redid: {label}")),
-            None => Some("Nothing to redo".into()),
+        let Some(label) = doc.model.redo().map(str::to_string) else {
+            doc.notice = Some("Nothing to redo".into());
+            cx.notify();
+            return;
         };
+        doc.notice = Some(format!("Redid: {label}"));
         doc.touched();
-        self.prune_selection();
-        self.schedule_autosave(cx);
-        cx.notify();
+        self.after_model_change(format!("Redo: {label}"), EditOutcome::default(), cx);
     }
 
     // ----- save --------------------------------------------------------------
@@ -1270,6 +1339,7 @@ impl DocView {
                         }
                         doc.touched();
                         view.fetch_page_sizes(cx);
+                        cx.emit(DocEvent::Saved { path: path.clone() });
                         true
                     }
                     Err(e) => {
@@ -2043,6 +2113,7 @@ impl DocView {
                     .unwrap_or("file")
                     .to_string();
                 let label = format!("Insert {name}");
+                let mut outcome = None;
                 match doc.model.apply(
                     Edit::InsertPages {
                         source: sid,
@@ -2053,6 +2124,7 @@ impl DocView {
                     &label,
                 ) {
                     Ok(out) => {
+                        outcome = Some(out.clone());
                         doc.notice = Some(format!(
                             "Inserted {} page{} from {name}; {} bookmark{} merged",
                             out.pages_added,
@@ -2070,9 +2142,10 @@ impl DocView {
                     Err(e) => doc.notice = Some(format!("Insert failed: {e:#}")),
                 }
                 doc.touched();
-                view.prune_selection();
-                view.schedule_autosave(cx);
-                cx.notify();
+                match outcome {
+                    Some(out) => view.after_model_change(label, out, cx),
+                    None => cx.notify(),
+                }
                 // Sizes for the new source arrive on their own.
                 cx.spawn(async move |this, cx| {
                     if let Ok(Ok(sizes)) = sizes_rx.await {

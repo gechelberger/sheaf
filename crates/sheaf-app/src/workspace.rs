@@ -12,7 +12,8 @@ use gpui::{
     Subscription, Task, Window, WindowHandle, anchored, deferred, div, prelude::*, px, rgb,
 };
 
-use crate::docview::DocView;
+use crate::commands::{CommandRegistry, Run};
+use crate::docview::{DocEvent, DocView};
 use crate::frame;
 use crate::menu_bar::MenuBar;
 use crate::ocr_dialog::{OcrDialog, OcrDialogContext, OcrDialogEvent, OcrSpec};
@@ -79,14 +80,21 @@ const SPLITTER: f32 = 5.0;
 const MIN_DOCK: f32 = 140.0;
 const MAX_DOCK_FRACTION: f32 = 0.7;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Panel {
     Thumbnails,
     Outline,
     Patterns,
     Calc,
     Comments,
+    /// A panel a plugin contributes, by its id without the `plugin:` prefix.
+    /// Kept in the layout even while its plugin isn't loaded, so disabling
+    /// a plugin doesn't forget where its panel was.
+    Plugin(SharedString),
 }
+
+/// Saved-layout ids of plugin panels start with this.
+const PLUGIN_PANEL_PREFIX: &str = "plugin:";
 
 impl Panel {
     const ALL: [Panel; 5] = [
@@ -98,33 +106,40 @@ impl Panel {
     ];
 
     /// Stable id for settings and the `--panel` flag.
-    fn id(self) -> &'static str {
+    fn id(&self) -> SharedString {
         match self {
-            Panel::Thumbnails => "pages",
-            Panel::Outline => "bookmarks",
-            Panel::Patterns => "patterns",
-            Panel::Calc => "calc",
-            Panel::Comments => "comments",
+            Panel::Thumbnails => "pages".into(),
+            Panel::Outline => "bookmarks".into(),
+            Panel::Patterns => "patterns".into(),
+            Panel::Calc => "calc".into(),
+            Panel::Comments => "comments".into(),
+            Panel::Plugin(id) => format!("{PLUGIN_PANEL_PREFIX}{id}").into(),
         }
     }
 
     fn from_id(id: &str) -> Option<Panel> {
+        if let Some(rest) = id.strip_prefix(PLUGIN_PANEL_PREFIX) {
+            return (!rest.is_empty()).then(|| Panel::Plugin(rest.to_string().into()));
+        }
         Panel::ALL.into_iter().find(|p| p.id() == id)
     }
 
-    fn label(self) -> &'static str {
+    fn label(&self) -> SharedString {
         match self {
-            Panel::Thumbnails => "Pages",
-            Panel::Outline => "Bookmarks",
-            Panel::Patterns => "Patterns",
-            Panel::Calc => "Calculator",
-            Panel::Comments => "Comments",
+            Panel::Thumbnails => "Pages".into(),
+            Panel::Outline => "Bookmarks".into(),
+            Panel::Patterns => "Patterns".into(),
+            Panel::Calc => "Calculator".into(),
+            Panel::Comments => "Comments".into(),
+            // Plugins name their panels once they can contribute them
+            // (M6 slice 3); until then, the id.
+            Panel::Plugin(id) => id.clone(),
         }
     }
 
     /// Thumbnails have no horizontal layout yet, so they stay on the sides.
-    fn can_dock(self, side: Side) -> bool {
-        !(self == Panel::Thumbnails && side == Side::Bottom)
+    fn can_dock(&self, side: Side) -> bool {
+        !(*self == Panel::Thumbnails && side == Side::Bottom)
     }
 }
 
@@ -157,7 +172,7 @@ pub struct Dock {
 
 impl Dock {
     fn active_panel(&self) -> Option<Panel> {
-        self.panels.get(self.active).copied()
+        self.panels.get(self.active).cloned()
     }
 
     fn shows(&self) -> bool {
@@ -190,7 +205,7 @@ fn docks_from_layout(layout: &DockLayout) -> ([Dock; 3], bool) {
         let mut panels: Vec<Panel> = Vec::new();
         for p in st.panels.iter().filter_map(|id| Panel::from_id(id)) {
             if p.can_dock(side) && !seen.contains(&p) {
-                seen.push(p);
+                seen.push(p.clone());
                 panels.push(p);
             }
         }
@@ -209,7 +224,7 @@ fn docks_from_layout(layout: &DockLayout) -> ([Dock; 3], bool) {
             if let Some(p) = Panel::from_id(id)
                 && !seen.contains(&p)
             {
-                seen.push(p);
+                seen.push(p.clone());
                 docks[i].panels.push(p);
             }
         }
@@ -366,16 +381,16 @@ impl Workspace {
         &mut self.docks[side as usize]
     }
 
-    fn side_of(&self, panel: Panel) -> Option<Side> {
+    fn side_of(&self, panel: &Panel) -> Option<Side> {
         Side::ALL
             .into_iter()
-            .find(|s| self.dock(*s).panels.contains(&panel))
+            .find(|s| self.dock(*s).panels.contains(panel))
     }
 
     /// Make a panel visible: activate it in its dock, open the dock, and
     /// undo F4 if everything was hidden.
     fn show_panel(&mut self, panel: Panel) {
-        let Some(side) = self.side_of(panel) else {
+        let Some(side) = self.side_of(&panel) else {
             return;
         };
         let dock = self.dock_mut(side);
@@ -419,7 +434,7 @@ impl Workspace {
         if !panel.can_dock(to) {
             return;
         }
-        if let Some(from) = self.side_of(panel) {
+        if let Some(from) = self.side_of(&panel) {
             let dock = self.dock_mut(from);
             dock.panels.retain(|p| *p != panel);
             dock.active = dock.active.min(dock.panels.len().saturating_sub(1));
@@ -516,7 +531,20 @@ impl Workspace {
         .detach();
     }
 
+    /// Close a tab without asking.
     fn close_now(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(doc) = self.docs.get(ix).cloned() else {
+            return;
+        };
+        doc.update(cx, |_, cx| cx.emit(DocEvent::Closed));
+        // Subscriptions hold the view weakly; keep it alive until the event
+        // has been delivered.
+        cx.defer(move |_| drop(doc));
+        self.detach(ix, window, cx);
+    }
+
+    /// Take a tab out of this window (closed, or moved to another).
+    fn detach(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         if ix >= self.docs.len() {
             return;
         }
@@ -558,6 +586,22 @@ impl Workspace {
             }
             _ => false,
         })
+    }
+
+    /// `plugin::Run`, from a plugin's menu item, the palette or a key
+    /// binding. Plugins can't execute yet (M6 slice 2 adds the runtime), so
+    /// for now this only reports what was asked for.
+    fn run_plugin_command(&mut self, run: &Run, cx: &mut Context<Self>) {
+        let id = format!("{}::{}", run.plugin, run.command);
+        let msg = if cx.global::<CommandRegistry>().get(&id).is_some() {
+            format!("Can't run {id}: plugins aren't supported yet")
+        } else {
+            format!("No plugin command {id}")
+        };
+        log::warn!("{msg}");
+        if let Some(doc) = self.active_doc().cloned() {
+            doc.update(cx, |d, cx| d.set_notice(msg, cx));
+        }
     }
 
     /// Ctrl+Shift+K: open the command palette (or close it if it's open).
@@ -745,7 +789,7 @@ impl Workspace {
         if !moved {
             return;
         }
-        self.close_now(ix, window, cx);
+        self.detach(ix, window, cx);
         if self.docs.is_empty() {
             self.request_close(window, cx);
         }
@@ -843,10 +887,11 @@ impl Workspace {
         let active = dock.active_panel();
         let wide = side == Side::Bottom;
 
-        let tabs = panels.iter().map(|&panel| {
-            let is_active = active == Some(panel);
+        let tabs = panels.iter().enumerate().map(|(i, panel)| {
+            let is_active = active.as_ref() == Some(panel);
+            let (show, menu) = (panel.clone(), panel.clone());
             div()
-                .id(("dock-tab", panel as usize + 10 * side as usize))
+                .id(("dock-tab", i + 100 * side as usize))
                 .px_2()
                 .h_full()
                 .flex()
@@ -866,13 +911,13 @@ impl Workspace {
                 })
                 .hover(|s| s.bg(rgb(0x333333)))
                 .on_click(cx.listener(move |ws, _, _, cx| {
-                    ws.show_panel(panel);
+                    ws.show_panel(show.clone());
                     cx.notify();
                 }))
                 .on_mouse_down(
                     MouseButton::Right,
                     cx.listener(move |ws, ev: &gpui::MouseDownEvent, _, cx| {
-                        ws.dock_menu = Some((panel, ev.position));
+                        ws.dock_menu = Some((menu.clone(), ev.position));
                         cx.notify();
                     }),
                 )
@@ -914,6 +959,7 @@ impl Workspace {
                 Panel::Patterns => d.render_patterns(wide, window, cx),
                 Panel::Calc => d.render_calc(wide, window, cx),
                 Panel::Comments => d.render_comments(window, cx),
+                Panel::Plugin(id) => plugin_panel_placeholder(&id),
             }),
             _ => div().into_any_element(),
         };
@@ -934,16 +980,17 @@ impl Workspace {
         pos: Point<Pixels>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let current = self.side_of(panel);
+        let current = self.side_of(&panel);
         let items: Vec<_> = Side::ALL
             .into_iter()
             .filter(|s| Some(*s) != current && panel.can_dock(*s))
             .map(|side| {
+                let panel = panel.clone();
                 menu_item(
                     ("move-to", side as usize),
                     format!("Move to {}", side.label()),
                     cx,
-                    move |ws, _, _| ws.move_panel(panel, side),
+                    move |ws, _, _| ws.move_panel(panel.clone(), side),
                 )
             })
             .collect();
@@ -1122,6 +1169,7 @@ impl Render for Workspace {
         let bottom = show(self, Side::Bottom).then(|| self.render_dock(Side::Bottom, window, cx));
         let menu = self
             .dock_menu
+            .clone()
             .map(|(panel, pos)| self.render_dock_menu(panel, pos, cx));
         let tab_menu = self
             .tab_menu
@@ -1240,6 +1288,7 @@ impl Render for Workspace {
                 }
             }))
             .on_action(|_: &Quit, _, cx| cx.defer(crate::request_quit))
+            .on_action(cx.listener(|ws, run: &Run, _, cx| ws.run_plugin_command(run, cx)))
             .on_action(
                 cx.listener(|ws, _: &CommandPalette, window, cx| ws.toggle_palette(window, cx)),
             )
@@ -1391,4 +1440,52 @@ fn menu_item(
 
 pub fn same_file(a: &Path, b: &Path) -> bool {
     a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(a), Ok(b)) if a == b)
+}
+
+/// Body of a plugin panel whose plugin isn't loaded (or, before M6 slice 3,
+/// any plugin panel).
+fn plugin_panel_placeholder(id: &str) -> AnyElement {
+    div()
+        .p_3()
+        .text_sm()
+        .text_color(rgb(0x8a8a8a))
+        .child(format!("The plugin that provides “{id}” isn't loaded."))
+        .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plugin_panels_survive_a_layout_round_trip() {
+        let mut layout = DockLayout::default();
+        layout.right.panels = vec![
+            "comments".into(),
+            "plugin:amount-crossref.pairs".into(),
+            "plugin:".into(),
+            "nonsense".into(),
+        ];
+        layout.right.active = 1;
+        let (docks, _) = docks_from_layout(&layout);
+        let right = &docks[Side::Right as usize];
+        assert_eq!(
+            right.panels,
+            [
+                Panel::Comments,
+                Panel::Plugin("amount-crossref.pairs".into())
+            ]
+        );
+        assert_eq!(
+            right.active_panel(),
+            Some(Panel::Plugin("amount-crossref.pairs".into()))
+        );
+        assert_eq!(right.to_state().panels[1], "plugin:amount-crossref.pairs");
+        // Built-ins the file didn't mention still come back.
+        assert!(
+            docks[Side::Left as usize]
+                .panels
+                .contains(&Panel::Thumbnails)
+        );
+    }
 }

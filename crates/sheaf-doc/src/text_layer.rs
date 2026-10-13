@@ -24,12 +24,13 @@ use std::cmp::Ordering;
 use std::ops::Range;
 
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
+use serde::{Deserialize, Serialize};
 use sheaf_core::{PageSize, Rotation};
 
 use crate::annot::{Box2, PageGeom, Pt};
 
 /// One recognized word.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OcrWord {
     pub text: String,
     /// Source-displayed space (see module docs).
@@ -39,7 +40,7 @@ pub struct OcrWord {
 }
 
 /// The OCR result for one page.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TextLayer {
     /// Sorted by line (top to bottom in the upright frame), then left to right.
     pub words: Vec<OcrWord>,

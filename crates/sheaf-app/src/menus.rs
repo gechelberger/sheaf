@@ -1,17 +1,75 @@
-//! The application menus, defined once. macOS shows them in the system menu
-//! bar; everywhere else `menu_bar.rs` draws them in the title bar. A `&`
-//! before a letter marks its Alt-key mnemonic, as in Win32 menus.
+//! The built-in menus, defined once. They register their commands in the
+//! [`CommandRegistry`], which plugins extend; the menus shown come from
+//! there. macOS shows them in the system menu bar; everywhere else
+//! `menu_bar.rs` draws them in the title bar. A `&` before a letter marks
+//! its Alt-key mnemonic, as in Win32 menus.
 
-use gpui::{Action, Menu, MenuItem};
+use gpui::{Action, App, Menu};
 
+use crate::commands::{Command, CommandRegistry, MenuEntry, MenuSpec, Target};
 use crate::*;
 
-pub fn app_menus() -> Vec<Menu> {
+/// The menus to show, built-in and contributed.
+pub fn app_menus(cx: &App) -> Vec<Menu> {
+    cx.global::<CommandRegistry>().gpui_menus()
+}
+
+/// Register every built-in command, then the menus that place them. A
+/// command's palette category is the first menu it appears in, skipping
+/// the macOS application menu (which only repeats File and Help items).
+pub fn register_builtins(reg: &mut CommandRegistry) {
+    let menus = builtin_menus();
+    let app_menu_last = menus
+        .iter()
+        .filter(|m| m.0 != APP_MENU)
+        .chain(menus.iter().filter(|m| m.0 == APP_MENU));
+    for (name, items) in app_menu_last {
+        for it in items {
+            if let Item::Action(label, action) = it
+                && reg.get(action.name()).is_none()
+            {
+                reg.add(Command {
+                    id: action.name().to_string(),
+                    label: label.to_string(),
+                    category: parse_label(name).0,
+                    target: Target::Builtin(action.boxed_clone()),
+                })
+                .expect("unique built-in id");
+            }
+        }
+    }
+    for (name, items) in menus {
+        let entries = items
+            .into_iter()
+            .map(|it| match it {
+                Item::Action(label, action) => MenuEntry::Command {
+                    id: action.name().to_string(),
+                    label: label.to_string(),
+                },
+                Item::Sep => MenuEntry::Separator,
+            })
+            .collect();
+        reg.add_menu(MenuSpec {
+            name: name.to_string(),
+            entries,
+        })
+        .expect("built-in menus name registered commands");
+    }
+}
+
+const APP_MENU: &str = "sheaf";
+
+enum Item {
+    Action(&'static str, Box<dyn Action>),
+    Sep,
+}
+
+fn builtin_menus() -> Vec<(&'static str, Vec<Item>)> {
     let mut menus = Vec::new();
     // macOS takes the first menu as the application menu.
     if cfg!(target_os = "macos") {
         menus.push(menu(
-            "sheaf",
+            APP_MENU,
             vec![
                 item("&About sheaf", About),
                 sep(),
@@ -153,7 +211,7 @@ pub fn mnemonic(label: &str) -> Option<char> {
 }
 
 /// macOS menus don't use mnemonics; strip the markers there.
-fn label(s: &str) -> String {
+pub fn label(s: &str) -> String {
     if cfg!(target_os = "macos") {
         parse_label(s).0
     } else {
@@ -161,14 +219,14 @@ fn label(s: &str) -> String {
     }
 }
 
-fn menu(name: &str, items: Vec<MenuItem>) -> Menu {
-    Menu::new(label(name)).items(items)
+fn menu(name: &'static str, items: Vec<Item>) -> (&'static str, Vec<Item>) {
+    (name, items)
 }
 
-fn item(name: &str, action: impl Action) -> MenuItem {
-    MenuItem::action(label(name), action)
+fn item(name: &'static str, action: impl Action) -> Item {
+    Item::Action(name, Box::new(action))
 }
 
-fn sep() -> MenuItem {
-    MenuItem::separator()
+fn sep() -> Item {
+    Item::Sep
 }

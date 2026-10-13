@@ -59,7 +59,8 @@ Why WASM: one `.wasm` file runs unchanged on Windows and Linux, with no Rust ABI
 
 ## Slices
 
-### Slice 1: data-driven host (no WASM yet)
+### Slice 1: data-driven host (no WASM yet) — done 2026-10-13
+Landed as `commands.rs` (registry + `plugin::Run`), `contrib.rs` (presets, tickmark sets, stamps; user marks in `marks.json`), `DocEvent` in `docview.rs`, `Panel::Plugin` (saved as `plugin:<id>`), and `Document::apply_batch` plus serde on `Edit` in `sheaf-doc`. `plugin::Run` only reports "plugins aren't supported yet" until slice 2. Deviation: the palette lists each command once (it used to list an action once per menu it appeared in).
 - **`CommandRegistry`** (a global in `sheaf-app`):
   - Entries hold id, label, category and target. The target is either `Builtin(Box<dyn Action>)` or `Plugin{plugin, command}`.
   - Built-in commands register from the current `app_menus()` data.

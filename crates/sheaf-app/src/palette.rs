@@ -1,13 +1,15 @@
-//! Command palette: every menu command in one searchable list. Type to
-//! filter, Up/Down to pick, Enter to run. Each row also shows the action's
-//! name, which is what `keymap.json` binds (see `keymap.rs`).
+//! Command palette: every registered command, built-in or from a plugin, in
+//! one searchable list. Type to filter, Up/Down to pick, Enter to run. Each
+//! row also shows the command's id, which is what `keymap.json` binds (see
+//! `keymap.rs`).
 
 use gpui::{
-    Action, AnyElement, App, Context, Entity, EventEmitter, Focusable, Menu, MenuItem, MouseButton,
-    Subscription, Window, div, prelude::*, px, rgb, rgba,
+    Action, AnyElement, App, Context, Entity, EventEmitter, Focusable, MouseButton, Subscription,
+    Window, div, prelude::*, px, rgb, rgba,
 };
 
-use crate::menus::{app_menus, parse_label};
+use crate::commands::CommandRegistry;
+use crate::menus::parse_label;
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::{PaletteDown, PalettePageDown, PalettePageUp, PaletteUp};
 
@@ -17,6 +19,7 @@ const ROW_H: f32 = 30.0;
 const MAX_ROWS: usize = 12;
 
 pub struct Command {
+    pub id: String,
     pub category: String,
     pub label: String,
     pub action: Box<dyn Action>,
@@ -41,37 +44,22 @@ pub struct Palette {
 
 impl EventEmitter<PaletteEvent> for Palette {}
 
-/// Every action reachable from the menus, in menu order.
+/// Every registered command, in registration (built-ins: menu) order.
 pub fn commands(cx: &App) -> Vec<Command> {
-    fn walk(category: &str, items: &[MenuItem], out: &mut Vec<Command>, cx: &App) {
-        for item in items {
-            match item {
-                MenuItem::Action { name, action, .. } => {
-                    let label = parse_label(name).0.trim_end_matches('…').to_string();
-                    out.push(Command {
-                        category: category.to_string(),
-                        label,
-                        shortcut: crate::menu_bar::shortcut(action.as_ref(), cx)
-                            .map(|s| s.to_string()),
-                        action: action.boxed_clone(),
-                    });
-                }
-                MenuItem::Submenu(Menu { name, items, .. }) => {
-                    walk(&parse_label(name).0, items, out, cx)
-                }
-                _ => {}
+    cx.global::<CommandRegistry>()
+        .commands()
+        .iter()
+        .map(|c| {
+            let action = c.target.action();
+            Command {
+                id: c.id.clone(),
+                category: c.category.clone(),
+                label: parse_label(&c.label).0.trim_end_matches('…').to_string(),
+                shortcut: crate::menu_bar::shortcut(action.as_ref(), cx).map(|s| s.to_string()),
+                action,
             }
-        }
-    }
-    let mut out = Vec::new();
-    for Menu { name, items, .. } in app_menus() {
-        let category = parse_label(&name).0;
-        if category == "sheaf" {
-            continue; // macOS application menu: duplicates of File/Help.
-        }
-        walk(&category, &items, &mut out, cx);
-    }
-    out
+        })
+        .collect()
 }
 
 /// Subsequence match of `query` against `hay` (both lowercase). Higher is
@@ -217,7 +205,7 @@ impl Render for Palette {
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .text_ellipsis()
-                            .child(c.action.name().to_string()),
+                            .child(c.id.clone()),
                     )
                     .when_some(c.shortcut.clone(), |d, s| {
                         d.child(div().text_xs().text_color(rgb(0xb0b0b0)).child(s))

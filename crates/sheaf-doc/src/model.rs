@@ -7,20 +7,21 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use im::Vector;
+use serde::{Deserialize, Serialize};
 use sheaf_core::{PageSize, Rotation};
 
 use crate::annot::{Annot, AnnotId, AnnotKind};
 use crate::history::{HistoryPolicy, HistoryStats};
 use crate::text_layer::TextLayer;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SourceId(pub u32);
 
 /// Stable identity of a page in the virtual document. Never reused.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct PageId(pub u64);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct OutlineId(pub u64);
 
 /// What the model knows about an opened file. Sizes are as the engine
@@ -68,7 +69,7 @@ pub struct OutlineNode {
 }
 
 /// A bookmark as read from a file: pre-order with depth.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FlatOutlineItem {
     pub title: String,
     pub page: Option<u32>,
@@ -155,7 +156,9 @@ impl DocState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+/// One change to the document. Serializable so plugins can submit edits
+/// as data (see `todos/plugins.md`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Edit {
     /// Move `ids` (kept in document order) to just before `before`, or to the end.
     MovePages {
@@ -207,10 +210,24 @@ pub enum Edit {
         after: Option<OutlineId>,
         with_pages: bool,
     },
+    /// `None` fields are left unchanged. For `target` and `color`,
+    /// `Some(None)` clears the value; in JSON that is `null`, and an absent
+    /// key means unchanged.
     OutlineEdit {
         id: OutlineId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "double_option"
+        )]
         target: Option<Option<PageId>>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "double_option"
+        )]
         color: Option<Option<[u8; 3]>>,
     },
     /// Delete a bookmark and its subtree.
@@ -249,6 +266,28 @@ pub enum Edit {
     ClearTextLayers {
         ids: Vec<PageId>,
     },
+}
+
+/// Serde for `Option<Option<T>>` fields that distinguishes "absent"
+/// (outer `None`, via `#[serde(default)]`) from `null` (`Some(None)`).
+mod double_option {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<T: Serialize, S: Serializer>(
+        v: &Option<Option<T>>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        match v {
+            Some(inner) => inner.serialize(s),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, T: Deserialize<'de>, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<Option<Option<T>>, D::Error> {
+        Option::<T>::deserialize(d).map(Some)
+    }
 }
 
 /// Identifies a long-running job whose results arrive in batches but
@@ -567,6 +606,32 @@ impl Document {
         }
         self.push_version(state, label.into(), None);
         Ok(outcome)
+    }
+
+    /// Apply several edits in order as one version, so one undo reverts them
+    /// all. Each edit sees the result of the ones before it. If any edit
+    /// fails, none are applied.
+    pub fn apply_batch(
+        &mut self,
+        edits: Vec<Edit>,
+        label: impl Into<String>,
+    ) -> Result<EditOutcome> {
+        let mut state = self.state().clone();
+        let mut total = EditOutcome::default();
+        for (i, edit) in edits.into_iter().enumerate() {
+            let (next, out) = self
+                .compute(state, edit)
+                .with_context(|| format!("edit {} of batch", i + 1))?;
+            state = next;
+            total.pages_removed += out.pages_removed;
+            total.pages_added += out.pages_added;
+            total.bookmarks_removed += out.bookmarks_removed;
+            total.bookmarks_added += out.bookmarks_added;
+        }
+        if state != *self.state() {
+            self.push_version(state, label.into(), None);
+        }
+        Ok(total)
     }
 
     /// Start a job whose batches of edits should undo as one step.
@@ -2174,5 +2239,143 @@ mod tests {
         let m2 = d.stats().marginal_bytes;
         let pages = d.page_count() * std::mem::size_of::<PageRef>();
         assert!(*m2.last().unwrap() <= *m.last().unwrap() + pages);
+    }
+
+    #[test]
+    fn apply_batch_is_one_undo_step() {
+        let mut d = doc();
+        let before = d.state().clone();
+        let p0 = id_at(&d, 0);
+        let p3 = id_at(&d, 3);
+        d.apply_batch(
+            vec![
+                Edit::OutlineInsert {
+                    parent: None,
+                    after: None,
+                    title: "W-2".into(),
+                    target: Some(p0),
+                },
+                Edit::OutlineInsert {
+                    parent: None,
+                    after: None,
+                    title: "1099-INT".into(),
+                    target: Some(p3),
+                },
+                Edit::RotatePages {
+                    ids: vec![p3],
+                    by: Rotation::R90,
+                },
+            ],
+            "Plugin edits",
+        )
+        .unwrap();
+        assert_eq!(d.state().outline.len(), before.outline.len() + 2);
+        assert_eq!(d.undo_label(), Some("Plugin edits"));
+        d.undo();
+        assert_eq!(*d.state(), before);
+        assert!(!d.can_undo());
+    }
+
+    #[test]
+    fn apply_batch_failure_applies_nothing() {
+        let mut d = doc();
+        let before = d.state().clone();
+        let p0 = id_at(&d, 0);
+        let err = d.apply_batch(
+            vec![
+                Edit::DeletePages { ids: vec![p0] },
+                Edit::MovePages {
+                    ids: vec![id_at(&d, 1)],
+                    before: Some(PageId(9999)),
+                },
+            ],
+            "bad",
+        );
+        assert!(err.is_err());
+        assert_eq!(*d.state(), before);
+        assert!(!d.can_undo());
+    }
+
+    #[test]
+    fn apply_batch_sums_outcomes() {
+        let mut d = doc();
+        let ids = vec![id_at(&d, 0)];
+        let out = d
+            .apply_batch(
+                vec![
+                    Edit::DuplicatePages { ids: ids.clone() },
+                    Edit::DuplicatePages { ids },
+                ],
+                "dup twice",
+            )
+            .unwrap();
+        assert_eq!(out.pages_added, 2);
+        assert_eq!(d.page_count(), 8);
+    }
+
+    #[test]
+    fn edit_serde_round_trip() {
+        let annot = Annot {
+            id: AnnotId(0),
+            kind: AnnotKind::Connector {
+                rect: crate::annot::Box2 {
+                    x: 1.0,
+                    y: 2.0,
+                    w: 3.0,
+                    h: 4.0,
+                },
+                label: "1".into(),
+                partner: None,
+            },
+            color: [255, 0, 0],
+            opacity: 1.0,
+            stroke: 1.0,
+            author: "me".into(),
+            contents: String::new(),
+            modified: "D:20261013000000".into(),
+        };
+        let edits = vec![
+            Edit::MovePages {
+                ids: vec![PageId(1), PageId(2)],
+                before: None,
+            },
+            Edit::RotatePages {
+                ids: vec![PageId(0)],
+                by: Rotation::R270,
+            },
+            Edit::InsertPages {
+                source: SourceId(1),
+                range: 0..3,
+                before: Some(PageId(4)),
+                outline: Some(flat(&[("X", Some(0), 0)])),
+            },
+            Edit::OutlineEdit {
+                id: OutlineId(3),
+                title: Some("T".into()),
+                target: Some(None),
+                color: Some(Some([1, 2, 3])),
+            },
+            Edit::ConnectorAdd {
+                a: (PageId(0), annot.clone()),
+                b: (PageId(1), annot),
+            },
+            Edit::SetTextLayers {
+                layers: vec![(PageId(0), tl("hi"))],
+            },
+        ];
+        let json = serde_json::to_string(&edits).unwrap();
+        let back: Vec<Edit> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, edits);
+        // Absent keys leave a bookmark field unchanged; null clears it.
+        let e: Edit = serde_json::from_str(r#"{"OutlineEdit":{"id":3,"target":null}}"#).unwrap();
+        assert_eq!(
+            e,
+            Edit::OutlineEdit {
+                id: OutlineId(3),
+                title: None,
+                target: Some(None),
+                color: None,
+            }
+        );
     }
 }
