@@ -343,6 +343,20 @@ step is needed. Pushing a `v*` tag runs `.github/workflows/release.yml`, which b
 the Linux and Windows bundles and attaches them to a GitHub release; `ci.yml`
 runs fmt, clippy, tests and a build on every push.
 
+Versions are alpha pre-releases (`0.1.0-alpha.N`) until the app is ready for
+daily use. To release, bump `version` in the root `Cargo.toml` and in
+`packaging/crates-io/sheaf-pdf/Cargo.toml`, then push the tag
+`v<version>`. The workflow refuses a tag that doesn't match `Cargo.toml` and
+marks tags with a `-` suffix as pre-releases.
+
+`sheaf-pdf` on crates.io is a placeholder, since the app can't be published
+there (GPUI is a git dependency). Its README points people to the release
+bundles and to building from source. Publish it with
+`cargo publish` from `packaging/crates-io/sheaf-pdf` after the matching
+release's bundles are up. Its `Cargo.toml` has `cargo binstall` metadata
+commented out, to enable once the app can find libpdfium and `ocr/`
+somewhere other than beside its binary.
+
 ### M0 spikes
 
 ```sh

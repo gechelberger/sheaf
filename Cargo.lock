@@ -6061,7 +6061,7 @@ dependencies = [
 
 [[package]]
 name = "sheaf-app"
-version = "0.0.1"
+version = "0.1.0-alpha.1"
 dependencies = [
  "anyhow",
  "embed-resource",
@@ -6087,11 +6087,11 @@ dependencies = [
 
 [[package]]
 name = "sheaf-core"
-version = "0.0.1"
+version = "0.1.0-alpha.1"
 
 [[package]]
 name = "sheaf-doc"
-version = "0.0.1"
+version = "0.1.0-alpha.1"
 dependencies = [
  "anyhow",
  "env_logger",
@@ -6107,7 +6107,7 @@ dependencies = [
 
 [[package]]
 name = "sheaf-ocr"
-version = "0.0.1"
+version = "0.1.0-alpha.1"
 dependencies = [
  "anyhow",
  "env_logger",
@@ -6128,7 +6128,7 @@ dependencies = [
 
 [[package]]
 name = "sheaf-render"
-version = "0.0.1"
+version = "0.1.0-alpha.1"
 dependencies = [
  "anyhow",
  "env_logger",
@@ -6145,7 +6145,7 @@ dependencies = [
 
 [[package]]
 name = "sheaf-ui"
-version = "0.0.1"
+version = "0.1.0-alpha.1"
 dependencies = [
  "gpui",
  "sheaf-core",

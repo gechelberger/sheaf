@@ -1,0 +1,42 @@
+# Placeholder for the `sheaf-pdf` name on crates.io. The app itself can't be
+# published there (GPUI is a git dependency and the binary needs libpdfium and
+# OCR data beside it), so this crate only tells people how to get it.
+#
+# Keep `version` equal to the workspace version: once binstall is enabled,
+# it builds release download URLs from this version, and release tags are
+# v<workspace version>. Publish only after the matching release's bundles
+# are up.
+[package]
+name = "sheaf-pdf"
+version = "0.1.0-alpha.1"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/gechelberger/sheaf"
+description = "Sheaf, a fast PDF editor. Placeholder: see the README for prebuilt bundles and building from source."
+readme = "README.md"
+keywords = ["pdf", "editor", "ocr", "gui"]
+categories = ["gui"]
+
+[[bin]]
+# Same name as the real binary, so binstall can pick it out of the bundles.
+name = "sheaf"
+path = "src/main.rs"
+
+# Not enabled yet: binstall copies only the binary into ~/.cargo/bin and
+# leaves libpdfium and ocr/ behind, so sheaf has to be able to find them
+# somewhere else first (e.g. a per-user data dir). When it can, uncomment.
+#
+# [package.metadata.binstall]
+# pkg-fmt = "tgz"
+# # Never fall back to compiling this placeholder.
+# disabled-strategies = ["quick-install", "compile"]
+#
+# [package.metadata.binstall.overrides.x86_64-unknown-linux-gnu]
+# pkg-url = "{ repo }/releases/download/v{ version }/sheaf-{ version }-linux-x86_64.tar.gz"
+# bin-dir = "sheaf-{ version }-linux-x86_64/{ bin }{ binary-ext }"
+#
+# [package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+# pkg-url = "{ repo }/releases/download/v{ version }/sheaf-{ version }-windows-x86_64.zip"
+# pkg-fmt = "zip"
+# # package.sh zips the bundle's contents, with no top-level folder.
+# bin-dir = "{ bin }{ binary-ext }"
