@@ -20,8 +20,8 @@ use std::path::{Path, PathBuf};
 
 pub use manifest::{EventKind, Grants, Manifest, Permissions};
 pub use runtime::{
-    Call, CallContext, CallOutput, DocContext, DocEvent, EditBatch, Limits, LoadOptions, Plugin,
-    PluginError, Runtime, Status, TextMatch, TextSource,
+    Call, CallContext, CallOutput, DocContext, DocEvent, EditBatch, Limits, LoadOptions, OcrSource,
+    Plugin, PluginError, Runtime, Status, TextMatch, TextSource,
 };
 
 /// The version of `sheaf:plugin` this host provides.

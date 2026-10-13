@@ -76,6 +76,19 @@ pub trait TextSource: Send + Sync {
     ) -> Result<Vec<sheaf_doc::Box2>>;
 }
 
+/// Runs OCR for plugins. The app implements it over `sheaf_ocr`.
+pub trait OcrSource: Send + Sync {
+    /// Recognize one page. `size` is the page as displayed (after its
+    /// rotation in sheaf).
+    fn recognize(
+        &self,
+        page: &sheaf_doc::PageRef,
+        size: sheaf_core::PageSize,
+        language: Option<String>,
+        dpi: Option<u32>,
+    ) -> Result<sheaf_doc::TextLayer>;
+}
+
 /// A document event, for plugins that subscribe to it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DocEvent {
@@ -161,6 +174,8 @@ pub struct DocContext {
     pub selection: Vec<PageId>,
     pub current_page: Option<PageId>,
     pub text: Arc<dyn TextSource>,
+    /// None: `ocr.recognize` reports that OCR isn't available.
+    pub ocr: Option<Arc<dyn OcrSource>>,
 }
 
 /// Edits one `edits.submit` asked for: one undo step.
@@ -696,6 +711,33 @@ impl HostState {
             .copied()
             .ok_or_else(|| format!("no page {page}"))?;
         Ok((d, p))
+    }
+}
+
+impl api::ocr::Host for HostState {
+    fn recognize(
+        &mut self,
+        page: u64,
+        options: api::ocr::OcrOptions,
+    ) -> Result<api::ocr::TextLayer, String> {
+        let (d, p) = self.page_ref(page)?;
+        let ocr = d.ocr.clone().ok_or("OCR isn't available")?;
+        let size = convert::page_size(&d.snapshot, &p);
+        let started = Instant::now();
+        let layer = ocr.recognize(&p, size, options.language, options.dpi);
+        // The engine's time isn't the plugin's.
+        self.deadline += started.elapsed();
+        layer
+            .map(|l| convert::layer_to_wit(&l))
+            .map_err(|e| format!("{e:#}"))
+    }
+
+    fn page_text_layer(&mut self, page: u64) -> Option<api::ocr::TextLayer> {
+        let d = self.doc()?;
+        d.snapshot
+            .state
+            .text_layer(PageId(page))
+            .map(|l| convert::layer_to_wit(l))
     }
 }
 

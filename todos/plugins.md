@@ -103,7 +103,9 @@ Not yet: the `ocr` host capability from the architecture section isn't in any sl
 - Permissions enforced through WASI preopens, with a first-run consent prompt for each permission.
 - Plugins → Manage dialog: list plugins, enable/disable, show errors and permissions, install from folder or `.sheafplugin` zip.
 
-### Slice 5: SDK, docs, CI, packaging
+### Slice 5: SDK, docs, CI, packaging — done 2026-10-13
+Landed: `ocr` host interface (`recognize`, `page-text-layer`; the engine's time isn't charged to the plugin); SDK `Plugin` trait (only `run_command` required, blanket `Guest` impl), `FormBuilder`/`Answers`, `Batch`, `info`/`warn` — the bundled plugins use them; `docs/plugins.md` (guide, manifest reference, API, limits, versioning, trust model, bundled plugins); CI checks fmt/clippy/unit tests of `plugins/*` and the fixture and stages them; the release workflow installs the WASI target since `package.sh` builds the bundled plugins; README M6 row, building and configuration notes.
+Still open: the "host keeps N-1 worlds" policy has nothing to keep yet (0.1.0 is the first world); the manual GUI check below hasn't been run (no display in the session that built this), nor the Windows build.
 - `ocr` host interface (`recognize(page, options)`, `page-text-layer(page)`), proxied to `sheaf_ocr`. Not in the original slices; added here so the architecture section's capability exists.
 - `sheaf-plugin-api` polished.
 - `docs/plugins.md`: authoring guide, API versioning policy (semver on the WIT package; the host keeps N-1 worlds), and the trust model.

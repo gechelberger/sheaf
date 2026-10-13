@@ -66,15 +66,42 @@ pub fn box_from_wit(b: w::Box2) -> Box2 {
     }
 }
 
-pub fn page_info(snap: &Snapshot, p: &PageRef) -> w::PageInfo {
-    let size = snap
-        .source(p.source)
+/// A page's size as displayed: its source size turned by its rotation.
+pub fn page_size(snap: &Snapshot, p: &PageRef) -> PageSize {
+    snap.source(p.source)
         .map(|s| s.page_size(p.index))
         .unwrap_or(PageSize {
             width: 612.0,
             height: 792.0,
         })
-        .rotated(p.rotation);
+        .rotated(p.rotation)
+}
+
+pub fn layer_to_wit(
+    l: &sheaf_doc::TextLayer,
+) -> crate::runtime::bindings::sheaf::plugin::ocr::TextLayer {
+    use crate::runtime::bindings::sheaf::plugin::ocr as wo;
+    wo::TextLayer {
+        words: l
+            .words
+            .iter()
+            .map(|w| wo::OcrWord {
+                text: w.text.clone(),
+                rect: box_to_wit(w.rect),
+                confidence: w.confidence,
+            })
+            .collect(),
+        lines: l
+            .lines
+            .iter()
+            .map(|r| (r.start as u32, r.end as u32))
+            .collect(),
+        engine: l.engine.clone(),
+    }
+}
+
+pub fn page_info(snap: &Snapshot, p: &PageRef) -> w::PageInfo {
+    let size = page_size(snap, p);
     w::PageInfo {
         id: p.id.0,
         rotation: rotation_to_wit(p.rotation),

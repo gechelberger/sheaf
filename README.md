@@ -261,7 +261,7 @@ rest of the path to parity in [ROADMAP.md](ROADMAP.md).
 | M3 | **Markup**: standard annotations, stamps, tickmarks, connectors, calc tape, comments panel, clean copy export. *Done 2026-10-11 (Linux).* | The PDFlyer workflow |
 | M4 | **Polish → v0.1**: unsaved-changes prompts, settings with persisted layout, command palette, user keymap, crash-recovery autosave, packaging + CI. *Done 2026-10-11 (Linux; Windows bundle and CI workflows not yet exercised).* | Daily-driver readiness |
 | M5 | **Scan & OCR**: `OcrEngine` trait with Tesseract and PaddleOCR engines, batch OCR over a binder with progress and cancel, invisible text layer written on save, search over OCR text. *OCR slices done 2026-10-12 (Linux; Windows build not yet exercised). Scan cleanup, image import, scanner intake and separator sheets still planned — see [`todos/ocr.md`](todos/ocr.md).* | Scanned binders become searchable |
-| M6 | **Plugins**: WASM components, declarative UI, command registry. *Planned — see [`todos/plugins.md`](todos/plugins.md).* | Extensibility without forking |
+| M6 | **Plugins**: WASM components (wasmtime, WIT), command registry, declarative forms and panels, document events, storage, OCR as a host capability, permissions with consent, plugin manager, bundled plugins (tax-form bookmarks, amount cross-reference). *Slices done 2026-10-13 (Linux; Windows build not yet exercised) — see [`docs/plugins.md`](docs/plugins.md) and [`todos/plugins.md`](todos/plugins.md).* | Extensibility without forking |
 
 M7 onward (viewing and output through v1.0 parity) is laid out in [ROADMAP.md](ROADMAP.md).
 
@@ -292,8 +292,15 @@ sudo apt install build-essential clang lld cmake pkg-config libfontconfig-dev \
 
 scripts/fetch-pdfium.sh          # prebuilt libpdfium → vendor/pdfium/<os>-<arch>/
 scripts/fetch-ocr-data.sh        # Tesseract language data + PaddleOCR models → vendor/ocr/
+scripts/build-plugins.sh         # the bundled plugins (plugins/) → target/plugins/
 cargo run -p sheaf-app           # the GPUI window
 ```
+
+**Plugins.** sheaf runs WebAssembly plugins (the `plugins` feature, on by
+default; `--no-default-features` leaves out wasmtime too). The bundled
+plugins build for `wasm32-wasip2`, which `rust-toolchain.toml` installs;
+debug builds pick them up from `target/plugins`. Writing your own:
+[`docs/plugins.md`](docs/plugins.md).
 
 **OCR engines and build time.** Both engines are on by default. The first
 build compiles Tesseract 5 and Leptonica from source (CMake and a C++17
@@ -336,7 +343,7 @@ scripts/package.sh               # → dist/sheaf-<version>-<os>-<arch>.tar.gz (
 
 The bundle is the release binary next to the PDFium library, the OCR data
 in `ocr/` (about 25 MB of language files and models, plus the ONNX Runtime
-library in `ocr/lib`), the licenses, and
+library in `ocr/lib`), the bundled plugins in `plugins/`, the licenses, and
 (on Linux) a `.desktop` entry; unpack it anywhere and run `sheaf`. The
 binary looks for `libpdfium` and `ocr/` beside itself first, so no install
 step is needed. Pushing a `v*` tag runs `.github/workflows/release.yml`, which builds
@@ -428,6 +435,13 @@ on macOS (`SHEAF_CONFIG_DIR` overrides).
 - `patterns.json` — the Patterns panel's presets, seeded from the built-ins on
   first run. Edit, delete, or add them from the panel (right-click a chip;
   "+ Save…" stores the current pattern) or by hand.
+- `marks.json` — extra tickmark sets and stamps for the markup toolbar:
+  `{ "tickmarks": [{ "name": "Audit", "marks": ["Σ", "◊"] }], "stamps": ["PBC"] }`.
+- `plugins/` — installed plugins, one folder each (see
+  [`docs/plugins.md`](docs/plugins.md)); `plugins.json` records which are
+  turned off and what each may access; `plugin-data/<id>/` holds each
+  plugin's storage and the `settings.json` you can give it. Manage them from
+  Plugins → Manage Plugins….
 - `keymap.json` — your key bindings, loaded after the defaults so they win.
   Zed's format: a list of `{ "context", "bindings" }` entries. Actions are
   named as the command palette (Ctrl+Shift+K) shows them; `null` unbinds.
@@ -440,7 +454,8 @@ on macOS (`SHEAF_CONFIG_DIR` overrides).
 ```
 
 Contexts: `DocView` (the page view), `Outline`, `Comments`, `Palette`,
-`OcrDialog`, `TextInput`, `Workspace` (anywhere in the window), or none for global.
+`OcrDialog`, `PluginForm`, `PluginManager`, `TextInput`, `Workspace` (anywhere in the window), or none for global.
+Plugin commands are `plugin::Run` with `{ "plugin": "<id>", "command": "<id>" }`.
 Bad entries are reported on stderr at startup and skipped.
 
 **Crash recovery.** A few seconds after each edit, sheaf writes the unsaved

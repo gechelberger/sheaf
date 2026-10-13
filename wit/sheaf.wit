@@ -167,6 +167,43 @@ interface text {
     text-boxes: func(page: page-id, rect: box2) -> result<list<box2>, string>;
 }
 
+/// Text recognition with the engines built into sheaf, so plugins don't
+/// carry their own.
+interface ocr {
+    use types.{page-id, box2};
+
+    record ocr-word {
+        text: string,
+        /// Page coordinates, like annotations.
+        rect: box2,
+        /// 0 to 1.
+        confidence: f32,
+    }
+
+    record text-layer {
+        words: list<ocr-word>,
+        /// Index ranges into `words` (start, end), one per line, top to
+        /// bottom.
+        lines: list<tuple<u32, u32>>,
+        /// Which engine produced it, e.g. "tesseract 5.5.2".
+        engine: string,
+    }
+
+    record ocr-options {
+        /// An engine language or model set, e.g. "eng"; none uses the
+        /// user's choice from Recognize Text.
+        language: option<string>,
+        /// Render resolution; none uses the user's choice.
+        dpi: option<u32>,
+    }
+
+    /// Recognize one page now with the user's OCR engine. Doesn't change the
+    /// document. Time spent here doesn't count against the call's limit.
+    recognize: func(page: page-id, options: ocr-options) -> result<text-layer, string>;
+    /// The page's OCR layer that hasn't been saved yet, if any.
+    page-text-layer: func(page: page-id) -> option<text-layer>;
+}
+
 /// A small per-plugin store that survives restarts, and the plugin's
 /// settings. Kept in `<config>/plugin-data/<id>/`.
 interface storage {
@@ -278,6 +315,7 @@ world plugin {
     import edits;
     import ui;
     import storage;
+    import ocr;
     import log;
 
     /// Called once after loading.

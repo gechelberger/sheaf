@@ -3,13 +3,9 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
-use sheaf_plugin_api::types::{
-    Annot, AnnotKind, Box2, ConnectorPair, ConnectorShape, Edit, PageAnnot, Rgb,
-};
-use sheaf_plugin_api::ui::{
-    self, Field, FieldKind, FieldValue, Form, NumberField, PanelRow, RowAction,
-};
-use sheaf_plugin_api::{Guest, document, edits, text};
+use sheaf_plugin_api::types::{AnnotKind, Box2};
+use sheaf_plugin_api::ui::{self, PanelRow, RowAction};
+use sheaf_plugin_api::{Batch, FormBuilder, Plugin, document, text};
 
 /// Money as written in returns and statements: "$1,234.56", "(1,234)",
 /// "12,500", "980.10". Bare integers without a separator are too noisy
@@ -19,11 +15,6 @@ const AMOUNT: &str = r"\(?\$?\s?\d{1,3}(?:,\d{3})+(?:\.\d{2})?\)?|\(?\$?\s?\d+\.
 const PANEL: &str = "pairs";
 /// Connector side, as sheaf's own connector tool draws them.
 const CONNECTOR: f32 = 22.0;
-const BLUE: Rgb = Rgb {
-    r: 0,
-    g: 120,
-    b: 255,
-};
 
 /// An amount in cents, from its text. Parentheses mean negative.
 pub fn parse_amount(s: &str) -> Option<i64> {
@@ -177,38 +168,19 @@ fn next_label() -> u32 {
         + 1
 }
 
-fn connector(page: u64, amount: &Box2, label: &str) -> PageAnnot {
-    PageAnnot {
-        page,
-        annot: Annot {
-            id: 0,
-            kind: AnnotKind::Connector(ConnectorShape {
-                rect: connector_rect(amount),
-                label: label.into(),
-                partner: None,
-            }),
-            color: BLUE,
-            opacity: 1.0,
-            stroke: 1.5,
-            author: String::new(),
-            contents: format!("Amount cross-reference {label}"),
-        },
-    }
-}
-
-fn link(pairs: &[Pair]) -> Vec<Edit> {
+/// One connector pair per pair, numbered from the next free label.
+fn link(label: String, pairs: &[Pair]) -> Batch {
     let first = next_label();
     pairs
         .iter()
         .enumerate()
-        .map(|(i, p)| {
-            let label = (first + i as u32).to_string();
-            Edit::ConnectorAdd(ConnectorPair {
-                a: connector(p.a.page, &p.a.rect, &label),
-                b: connector(p.b.page, &p.b.rect, &label),
-            })
+        .fold(Batch::new(label), |b, (i, p)| {
+            b.connector(
+                (p.a.page, connector_rect(&p.a.rect)),
+                (p.b.page, connector_rect(&p.b.rect)),
+                &(first + i as u32).to_string(),
+            )
         })
-        .collect()
 }
 
 fn find() -> Result<(), String> {
@@ -216,45 +188,21 @@ fn find() -> Result<(), String> {
     if pages.is_empty() {
         return Err("open a document first".into());
     }
-    let form = Form {
-        title: "Find Matching Amounts".into(),
-        fields: vec![
-            Field {
-                id: "min".into(),
-                label: "Smallest amount".into(),
-                kind: FieldKind::Number(NumberField {
-                    default: 100.0,
-                    min: Some(0.0),
-                    max: None,
-                }),
-            },
-            Field {
-                id: "pages".into(),
-                label: "Pages".into(),
-                kind: FieldKind::PageRange(String::new()),
-            },
-            Field {
-                id: "round".into(),
-                label: "Skip round hundreds".into(),
-                kind: FieldKind::Checkbox(true),
-            },
-        ],
-        submit_label: Some("Find".into()),
-    };
-    let Some(answers) = ui::show_form(&form) else {
+    let Some(a) = FormBuilder::new("Find Matching Amounts")
+        .number_in("min", "Smallest amount", 100.0, 0.0, 1e12)
+        .pages("pages", "Pages")
+        .checkbox("round", "Skip round hundreds", true)
+        .submit_label("Find")
+        .show()
+    else {
         return Ok(());
     };
-    let mut min_cents = 10_000;
-    let mut skip_round = true;
-    let mut scan: Vec<u64> = pages.iter().map(|p| p.id).collect();
-    for a in answers {
-        match (a.id.as_str(), a.value) {
-            ("min", FieldValue::Number(n)) => min_cents = (n * 100.0).round() as i64,
-            ("round", FieldValue::Checkbox(b)) => skip_round = b,
-            ("pages", FieldValue::PageRange(p)) => scan = p,
-            _ => {}
-        }
-    }
+    let min_cents = (a.number("min").unwrap_or(100.0) * 100.0).round() as i64;
+    let skip_round = a.checked("round").unwrap_or(true);
+    let scan: Vec<u64> = match a.pages("pages") {
+        Some(p) => p.to_vec(),
+        None => pages.iter().map(|p| p.id).collect(),
+    };
     let mut seen = Vec::new();
     for (index, p) in pages.iter().enumerate() {
         if !scan.contains(&p.id) {
@@ -300,11 +248,7 @@ fn find() -> Result<(), String> {
 
 struct AmountCrossref;
 
-impl Guest for AmountCrossref {
-    fn activate() -> Result<(), String> {
-        Ok(())
-    }
-
+impl Plugin for AmountCrossref {
     fn run_command(id: String, _args_json: Option<String>) -> Result<(), String> {
         match id.as_str() {
             "find" => find(),
@@ -314,10 +258,11 @@ impl Guest for AmountCrossref {
                     return Err("nothing to link; run Find Matching Amounts first".into());
                 }
                 let n = pairs.len();
-                edits::submit(
-                    &format!("Link {n} amount{}", if n == 1 { "" } else { "s" }),
-                    &link(&pairs),
-                );
+                link(
+                    format!("Link {n} amount{}", if n == 1 { "" } else { "s" }),
+                    &pairs,
+                )
+                .submit();
                 set_pending(Vec::new());
                 Ok(())
             }
@@ -336,18 +281,15 @@ impl Guest for AmountCrossref {
             .ok_or("that match is gone; run Find Matching Amounts again")?;
         let pair = pairs.remove(at);
         match action.as_str() {
-            "link" => edits::submit(
-                &format!("Link {}", format_amount(pair.cents)),
-                &link(std::slice::from_ref(&pair)),
-            ),
+            "link" => link(
+                format!("Link {}", format_amount(pair.cents)),
+                std::slice::from_ref(&pair),
+            )
+            .submit(),
             "dismiss" => {}
             other => return Err(format!("unknown action {other}")),
         }
         set_pending(pairs);
-        Ok(())
-    }
-
-    fn on_event(_event: sheaf_plugin_api::types::DocEvent) -> Result<(), String> {
         Ok(())
     }
 }

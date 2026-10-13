@@ -4,7 +4,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 use sheaf_plugin_api::types::{Edit, OutlineInsert};
-use sheaf_plugin_api::{Guest, document, edits, log, text};
+use sheaf_plugin_api::{Batch, Plugin, document, text};
 
 /// Form headers, most specific first. Group 1 is the form's name.
 static FORMS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
@@ -111,11 +111,7 @@ pub fn plan(pages: &[Option<String>]) -> Vec<(usize, String)> {
 
 struct TaxFormBookmarks;
 
-impl Guest for TaxFormBookmarks {
-    fn activate() -> Result<(), String> {
-        Ok(())
-    }
-
+impl Plugin for TaxFormBookmarks {
     fn run_command(id: String, _args_json: Option<String>) -> Result<(), String> {
         if id != "scan" {
             return Err(format!("unknown command {id}"));
@@ -129,7 +125,7 @@ impl Guest for TaxFormBookmarks {
             .map(|p| match text::page_text(p.id) {
                 Ok(t) => detect(&t),
                 Err(e) => {
-                    log::log(log::Level::Warn, &format!("page {}: {e}", p.id));
+                    sheaf_plugin_api::warn(&format!("page {}: {e}", p.id));
                     None
                 }
             })
@@ -152,32 +148,19 @@ impl Guest for TaxFormBookmarks {
         // Append after the last top-level bookmark. Every insert names the
         // same sibling, so insert in reverse to end up in page order.
         let last_top = outline.iter().rfind(|o| o.depth == 0).map(|o| o.id);
-        let batch: Vec<Edit> = new
-            .into_iter()
+        let n = new.len();
+        let label = format!("Bookmark {n} tax form{}", if n == 1 { "" } else { "s" });
+        new.into_iter()
             .rev()
-            .map(|(page, title)| {
-                Edit::OutlineInsert(OutlineInsert {
+            .fold(Batch::new(label), |b, (page, title)| {
+                b.push(Edit::OutlineInsert(OutlineInsert {
                     parent: None,
                     after: last_top,
                     title,
                     target: Some(page),
-                })
+                }))
             })
-            .collect();
-        let label = format!(
-            "Bookmark {} tax form{}",
-            batch.len(),
-            if batch.len() == 1 { "" } else { "s" }
-        );
-        edits::submit(&label, &batch);
-        Ok(())
-    }
-
-    fn panel_action(_panel: String, _row: String, _action: String) -> Result<(), String> {
-        Err("this plugin has no panels".into())
-    }
-
-    fn on_event(_event: sheaf_plugin_api::types::DocEvent) -> Result<(), String> {
+            .submit();
         Ok(())
     }
 }

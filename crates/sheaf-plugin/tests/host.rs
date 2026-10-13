@@ -153,6 +153,7 @@ fn ctx(d: &Document) -> CallContext {
             selection: d.page(1).map(|p| p.id).into_iter().collect(),
             current_page: Some(d.page(0).unwrap().id),
             text: Arc::new(FakeText),
+            ocr: None,
         }),
         ui: None,
     }
@@ -440,6 +441,7 @@ fn tax_form_bookmarks_example() {
             selection: Vec::new(),
             current_page: None,
             text: text.clone(),
+            ocr: None,
         }),
         ui: None,
     };
@@ -622,6 +624,7 @@ fn amount_crossref_bundled_plugin() {
             selection: Vec::new(),
             current_page: None,
             text: text.clone(),
+            ocr: None,
         }),
         ui: Some(ui.clone()),
     };
@@ -795,4 +798,56 @@ fn search_and_text_boxes() {
     let d = doc(1);
     let err = run(&p, "find", Some("FORM"), ctx(&d)).unwrap_err();
     assert_eq!(err, PluginError::Failed("1 hits, 1 boxes".into()));
+}
+
+struct FakeOcr;
+
+impl sheaf_plugin::OcrSource for FakeOcr {
+    fn recognize(
+        &self,
+        page: &sheaf_doc::PageRef,
+        size: PageSize,
+        language: Option<String>,
+        _dpi: Option<u32>,
+    ) -> Result<sheaf_doc::TextLayer> {
+        // Slow, like a real engine: longer than the plugin's time limit.
+        std::thread::sleep(Duration::from_millis(400));
+        Ok(sheaf_doc::TextLayer::from_engine(
+            vec![sheaf_doc::OcrWord {
+                text: format!("page{}", page.index),
+                rect: sheaf_doc::Box2 {
+                    x: 10.0,
+                    y: 10.0,
+                    w: 40.0,
+                    h: 10.0,
+                },
+                confidence: 0.9,
+            }],
+            size,
+            page.rotation,
+            &format!("fake-{}", language.unwrap_or_default()),
+        ))
+    }
+}
+
+#[test]
+fn ocr_runs_on_the_host_and_isnt_charged_to_the_plugin() {
+    let p = load(
+        "ocr",
+        Limits {
+            call_timeout: Duration::from_millis(200),
+            ..Limits::default()
+        },
+    );
+    let d = doc(1);
+    let mut c = ctx(&d);
+    c.doc.as_mut().unwrap().ocr = Some(Arc::new(FakeOcr));
+    let err = run(&p, "ocr", None, c).unwrap_err();
+    assert_eq!(
+        err,
+        PluginError::Failed("page0 by fake-deu stored=false".into())
+    );
+    // Without an OCR source, it says so.
+    let err = run(&p, "ocr", None, ctx(&d)).unwrap_err();
+    assert_eq!(err, PluginError::Failed("OCR isn't available".into()));
 }

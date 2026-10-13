@@ -781,6 +781,63 @@ fn to_box(r: sheaf_render::Rect) -> sheaf_doc::Box2 {
     }
 }
 
+/// OCR for plugins: one page at a time through `sheaf_ocr::job`, with the
+/// user's engine and settings.
+struct EngineOcr(HashMap<SourceId, RenderHandle>);
+
+impl sheaf_plugin::OcrSource for EngineOcr {
+    fn recognize(
+        &self,
+        page: &sheaf_doc::PageRef,
+        size: sheaf_core::PageSize,
+        language: Option<String>,
+        dpi: Option<u32>,
+    ) -> Result<sheaf_doc::TextLayer> {
+        use sheaf_ocr::{OcrEvent, OcrPage, OcrRequest, PageSource};
+        let mut config = crate::settings::Settings::load().ocr;
+        if let Some(l) = language {
+            sheaf_ocr::set_language(config.engine, &mut config, &l);
+        }
+        if let Some(d) = dpi {
+            config.dpi = d;
+        }
+        let sources: HashMap<SourceId, Arc<dyn PageSource>> = self
+            .0
+            .iter()
+            .map(|(sid, h)| (*sid, Arc::new(h.clone()) as Arc<dyn PageSource>))
+            .collect();
+        let req = OcrRequest {
+            pages: vec![OcrPage {
+                id: page.id,
+                source: page.source,
+                index: page.index,
+                rotation: page.rotation,
+                size,
+            }],
+            skip_pages_with_text: false,
+            engine: config.engine,
+            config,
+        };
+        let (_job, mut rx) = sheaf_ocr::job::start(req, sources);
+        futures::executor::block_on(async {
+            while let Some(ev) = rx.next().await {
+                match ev {
+                    OcrEvent::Page { layer, .. } => return Ok(layer),
+                    OcrEvent::Failed { error, .. } => anyhow::bail!(error),
+                    OcrEvent::Aborted(e) => anyhow::bail!(e),
+                    OcrEvent::Finished { .. } => break,
+                    _ => {}
+                }
+            }
+            anyhow::bail!("OCR produced no result")
+        })
+    }
+}
+
+pub fn ocr_source(handles: &HashMap<SourceId, RenderHandle>) -> Arc<dyn sheaf_plugin::OcrSource> {
+    Arc::new(EngineOcr(handles.clone()))
+}
+
 pub fn text_source(handles: &HashMap<SourceId, RenderHandle>) -> Arc<dyn TextSource> {
     Arc::new(EngineText(handles.clone()))
 }
