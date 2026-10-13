@@ -21,6 +21,8 @@ mod outline_panel;
 mod palette;
 mod pattern_panel;
 mod patterns;
+#[cfg(feature = "plugins")]
+mod plugins;
 mod settings;
 mod text_area;
 mod text_input;
@@ -401,12 +403,15 @@ fn main() {
                 KeyBinding::new("space", menu_bar::MenuConfirm, mb),
                 KeyBinding::new("escape", menu_bar::MenuCancel, mb),
             ]);
+            cx.set_global(commands::CommandRegistry::builtin());
+            cx.set_global(contrib::Contributions::load());
+            // Plugin bindings first, so the user's keymap can override them.
+            #[cfg(feature = "plugins")]
+            plugins::init(&settings::Settings::load(), cx);
             for e in keymap::load(cx) {
                 log::warn!("keymap.json: {e}");
                 eprintln!("keymap.json: {e}");
             }
-            cx.set_global(commands::CommandRegistry::builtin());
-            cx.set_global(contrib::Contributions::load());
             cx.set_menus(menus::app_menus(cx));
 
             let mut groups = window_paths(cli.paths, cli.separate_windows).into_iter();

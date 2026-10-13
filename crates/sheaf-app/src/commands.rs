@@ -8,9 +8,8 @@
 //! `<plugin>::<command>` and run through [`Run`]. Ids are unique: the first
 //! registration wins, so built-ins (registered first) can't be shadowed.
 
-// The plugin half of this API is called once the plugin runtime loads
-// manifests (M6 slice 2); until then only the tests use it.
-#![cfg_attr(not(test), allow(dead_code))]
+// Without the `plugins` feature, the plugin half of this API goes unused.
+#![cfg_attr(not(any(test, feature = "plugins")), allow(dead_code))]
 
 use std::collections::HashMap;
 use std::fmt;
@@ -123,6 +122,7 @@ impl CommandRegistry {
         self.index.get(id).map(|&i| &self.commands[i])
     }
 
+    #[cfg(test)]
     pub fn menus(&self) -> &[MenuSpec] {
         &self.menus
     }

@@ -8,3 +8,6 @@
 # Logo art and generated app icons are source.
 !assets/icons/**/*.png
 !crates/sheaf-app/resources/*.png
+
+# Plugin crates build in their own workspaces.
+target/

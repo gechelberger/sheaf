@@ -76,7 +76,10 @@ Landed as `commands.rs` (registry + `plugin::Run`), `contrib.rs` (presets, tickm
   - Tickmark sets and stamps become data the same way.
   - `Panel` gets a `Plugin(String)` variant.
 
-### Slice 2: WASM runtime core
+### Slice 2: WASM runtime core — done 2026-10-13
+Landed: `crates/sheaf-plugin` (wasmtime 49 component host, manifest loader, `discover`), `crates/sheaf-plugin-api` (minimal guest SDK over wit-bindgen 0.62, `export!`), `wit/sheaf.wit`, app `plugins.rs` (startup discovery, registration, `plugin::Run` applies each `edits.submit` as one undo step), Cargo feature `plugins` (default on), `settings.plugins.disabled`, `RenderHandle::page_text`. Host tests build the fixture and the example for `wasm32-wasip2` on first use (target pinned in `rust-toolchain.toml`).
+Pulled forward from later slices: a minimal `text.page-text` (slice 2's example needs it; unsaved OCR layers win over the engine), WASI with no preopens and no network, the trap/timeout/memory/file-denied tests, and the `sheaf-plugin-api` crate.
+Decisions: edits a plugin submits are applied after its command returns (so it can't see ids of what it just created within the same call); each `submit` is one undo step. Plugin ids can't take a built-in action namespace (`docview`, `tools`, …). Plugin key bindings use the `Workspace` context and load before `keymap.json`, so users can override them.
 - `sheaf-plugin` crate: wasmtime component host and manifest loader.
 - WIT covering the `document`, `edits`, `log` and `run-command` interfaces.
 - Plugin discovery at startup.

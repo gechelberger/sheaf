@@ -949,7 +949,7 @@ impl DocView {
     }
 
     /// Apply edits as one undo step; if any fails, none are applied.
-    #[allow(dead_code)] // For plugin edits (M6 slice 2).
+    #[cfg_attr(not(feature = "plugins"), allow(dead_code))]
     pub(crate) fn apply_batch(&mut self, edits: Vec<Edit>, label: &str, cx: &mut Context<Self>) {
         let State::Ready(doc) = &mut self.state else {
             return;
@@ -1014,6 +1014,29 @@ impl DocView {
         self.schedule_autosave(cx);
         cx.emit(DocEvent::Edited { label, outcome });
         cx.notify();
+    }
+
+    /// What a plugin command sees of this document.
+    #[cfg(feature = "plugins")]
+    pub(crate) fn plugin_context(&self) -> Option<sheaf_plugin::DocContext> {
+        let State::Ready(doc) = &self.state else {
+            return None;
+        };
+        let selection = doc
+            .model
+            .state()
+            .pages
+            .iter()
+            .filter(|p| doc.selection.contains(&p.id))
+            .map(|p| p.id)
+            .collect();
+        Some(sheaf_plugin::DocContext {
+            path: self.path.clone(),
+            snapshot: doc.model.snapshot(),
+            selection,
+            current_page: doc.page_ref(doc.current_page).map(|p| p.id),
+            text: crate::plugins::text_source(&doc.handles),
+        })
     }
 
     /// Pages an operation applies to: the selection, or the current page.

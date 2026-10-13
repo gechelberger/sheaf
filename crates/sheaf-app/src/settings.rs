@@ -17,6 +17,14 @@ pub struct Settings {
     pub docks: Option<DockLayout>,
     /// OCR engine, resolution and last-used options (see `sheaf_ocr`).
     pub ocr: sheaf_ocr::OcrConfig,
+    pub plugins: PluginSettings,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct PluginSettings {
+    /// Ids of installed plugins the user turned off.
+    pub disabled: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -167,6 +175,9 @@ mod tests {
                 engine: sheaf_ocr::EngineKind::Oar,
                 dpi: 200,
                 ..Default::default()
+            },
+            plugins: PluginSettings {
+                disabled: vec!["tax-form-bookmarks".into()],
             },
         };
         s.save().unwrap();

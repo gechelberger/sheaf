@@ -126,6 +126,8 @@ pub trait Renderer {
     /// synthesizes (spaces, line breaks) and whitespace don't count. Zero
     /// means an image-only page, an OCR candidate.
     fn page_text_len(&self, page: PageIndex) -> Result<usize>;
+    /// The page's text in reading order, as the engine extracts it.
+    fn page_text(&self, page: PageIndex) -> Result<String>;
     /// Render a whole page scaled so its width is `target_width` device pixels.
     fn render(&self, page: PageIndex, job: Job, format: PixelFormat) -> Result<Raster>;
 
@@ -396,6 +398,11 @@ pub mod pdfium {
                 .filter(|c| !c.is_generated().unwrap_or(false))
                 .filter(|c| c.unicode_char().is_some_and(|ch| !ch.is_whitespace()))
                 .count())
+        }
+
+        fn page_text(&self, page: PageIndex) -> Result<String> {
+            let p = self.doc.pages().get(page.0 as i32)?;
+            Ok(p.text()?.all())
         }
 
         fn text_boxes_in_rect(&self, page: PageIndex, rect: Rect) -> Result<Vec<Rect>> {
@@ -672,6 +679,10 @@ enum Msg {
         page: u32,
         reply: oneshot::Sender<Result<usize>>,
     },
+    Text {
+        page: u32,
+        reply: oneshot::Sender<Result<String>>,
+    },
     PageSize {
         page: u32,
         reply: oneshot::Sender<Result<PageSize>>,
@@ -795,6 +806,13 @@ impl RenderHandle {
         rx
     }
 
+    /// A page's extracted text (see [`Renderer::page_text`]).
+    pub fn page_text(&self, page: u32) -> oneshot::Receiver<Result<String>> {
+        let (tx, rx) = oneshot::channel();
+        self.send(Msg::Text { page, reply: tx });
+        rx
+    }
+
     /// Fetch the bookmark tree.
     pub fn outline(&self) -> oneshot::Receiver<Result<Vec<OutlineItem>>> {
         let (tx, rx) = oneshot::channel();
@@ -904,6 +922,9 @@ fn worker_loop(engine: impl Renderer, rx: mpsc::Receiver<Msg>) {
                 }
                 Msg::TextLen { page, reply } => {
                     let _ = reply.send(engine.page_text_len(PageIndex(page)));
+                }
+                Msg::Text { page, reply } => {
+                    let _ = reply.send(engine.page_text(PageIndex(page)));
                 }
                 Msg::PageSize { page, reply } => {
                     let _ = reply.send(engine.page_size(PageIndex(page)));

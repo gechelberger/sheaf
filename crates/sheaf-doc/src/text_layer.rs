@@ -88,6 +88,21 @@ impl TextLayer {
         self.words.is_empty()
     }
 
+    /// The recognized text: words joined by spaces, lines by newlines.
+    pub fn text(&self) -> String {
+        self.lines
+            .iter()
+            .map(|l| {
+                self.words[l.clone()]
+                    .iter()
+                    .map(|w| w.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     /// Rough heap bytes, for the history memory policy.
     pub fn byte_estimate(&self) -> usize {
         self.words.iter().map(|w| 64 + w.text.len()).sum::<usize>() + 16 * self.lines.len()

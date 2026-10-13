@@ -18,6 +18,6 @@ pub use annot::{Annot, AnnotId, AnnotKind, Box2, PageGeom, Pt, default_author, p
 pub use history::{AllOf, FixedCount, HistoryPolicy, HistoryStats, MemoryBudget};
 pub use model::{
     DocState, Document, Edit, EditOutcome, FlatOutlineItem, JobId, OutlineId, OutlineNode, PageId,
-    PageRef, SourceId, SourceInfo,
+    PageRef, Snapshot, SourceId, SourceInfo,
 };
 pub use text_layer::{OcrWord, TextHit, TextLayer};

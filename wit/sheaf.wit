@@ -1,0 +1,173 @@
+/// The sheaf plugin API. Plugins are WebAssembly components targeting the
+/// `plugin` world. See docs/plugins.md.
+///
+/// Versioning: semver on this package. The host keeps serving the previous
+/// minor/major world when it moves on (N-1), so a plugin built against an
+/// older API keeps loading.
+package sheaf:plugin@0.1.0;
+
+/// Shared data types. Ids are opaque and stable for the life of an open
+/// document; they are not page numbers.
+interface types {
+    type page-id = u64;
+    type outline-id = u64;
+    type annot-id = u64;
+
+    /// Clockwise quarter turns.
+    enum rotation { r0, r90, r180, r270 }
+
+    record rgb { r: u8, g: u8, b: u8 }
+
+    /// Page coordinates: points, top-left origin, in the page's displayed
+    /// space (after the file's own /Rotate, before any rotation added in
+    /// sheaf).
+    record pt { x: f32, y: f32 }
+    record box2 { x: f32, y: f32, w: f32, h: f32 }
+
+    record page-info {
+        id: page-id,
+        /// Rotation added in sheaf on top of the file's.
+        rotation: rotation,
+        /// Displayed size in points, including `rotation`.
+        width: f32,
+        height: f32,
+    }
+
+    /// A bookmark, in pre-order with its depth (0 = top level).
+    record outline-item {
+        id: outline-id,
+        title: string,
+        target: option<page-id>,
+        color: option<rgb>,
+        depth: u16,
+    }
+
+    record line-shape { a: pt, b: pt, arrow: bool }
+    record text-box { rect: box2, size: f32 }
+    record stamp-shape { rect: box2, glyph: string }
+    record connector-shape {
+        rect: box2,
+        label: string,
+        /// Set by the host; ignored in edits.
+        partner: option<annot-id>,
+    }
+
+    variant annot-kind {
+        highlight(list<box2>),
+        note(pt),
+        free-text(text-box),
+        square(box2),
+        ellipse(box2),
+        line(line-shape),
+        ink(list<list<pt>>),
+        stamp(stamp-shape),
+        connector(connector-shape),
+        tape(text-box),
+    }
+
+    record annot {
+        /// Assigned by the host; ignored when adding.
+        id: annot-id,
+        kind: annot-kind,
+        color: rgb,
+        /// 0 to 1.
+        opacity: f32,
+        stroke: f32,
+        /// Empty means the user's name.
+        author: string,
+        contents: string,
+    }
+
+    record move-pages { ids: list<page-id>, before: option<page-id> }
+    record rotate-pages { ids: list<page-id>, by: rotation }
+    record outline-insert {
+        parent: option<outline-id>,
+        /// Insert after this sibling; none means first.
+        after: option<outline-id>,
+        title: string,
+        target: option<page-id>,
+    }
+    record outline-move {
+        id: outline-id,
+        parent: option<outline-id>,
+        after: option<outline-id>,
+        with-pages: bool,
+    }
+    /// None leaves a field as it is; for target and color, some(none)
+    /// clears it.
+    record outline-edit {
+        id: outline-id,
+        title: option<string>,
+        target: option<option<page-id>>,
+        color: option<option<rgb>>,
+    }
+    record page-annot { page: page-id, annot: annot }
+    record annot-ref { page: page-id, id: annot-id }
+    record connector-pair { a: page-annot, b: page-annot }
+
+    /// One change to the document; mirrors sheaf's own edits.
+    variant edit {
+        move-pages(move-pages),
+        rotate-pages(rotate-pages),
+        delete-pages(list<page-id>),
+        duplicate-pages(list<page-id>),
+        outline-insert(outline-insert),
+        outline-move(outline-move),
+        outline-edit(outline-edit),
+        outline-delete(outline-id),
+        annot-add(page-annot),
+        annot-update(page-annot),
+        annot-delete(annot-ref),
+        connector-add(connector-pair),
+    }
+}
+
+/// The document the command runs against, as it was when the call started.
+/// With no document open, `path` is none and the lists are empty.
+interface document {
+    use types.{page-id, page-info, outline-item, annot};
+
+    path: func() -> option<string>;
+    /// In document order.
+    pages: func() -> list<page-info>;
+    outline: func() -> list<outline-item>;
+    annotations: func(page: page-id) -> list<annot>;
+    /// Selected pages in document order; empty when nothing is selected.
+    selection: func() -> list<page-id>;
+    current-page: func() -> option<page-id>;
+}
+
+/// Page text, including OCR layers not yet saved.
+interface text {
+    use types.{page-id};
+
+    page-text: func(page: page-id) -> result<string, string>;
+}
+
+/// Changes to the document. Each `submit` becomes one undo step, applied
+/// after the command returns, in order; if any edit in a batch fails, that
+/// batch is skipped and the user is told.
+interface edits {
+    use types.{edit};
+
+    submit: func(label: string, edits: list<edit>);
+}
+
+interface log {
+    enum level { trace, debug, info, warn, error }
+
+    log: func(level: level, message: string);
+}
+
+world plugin {
+    import document;
+    import text;
+    import edits;
+    import log;
+
+    /// Called once after loading.
+    export activate: func() -> result<_, string>;
+    /// Run a command declared in the manifest. `args-json` is what a key
+    /// binding passed, if anything.
+    export run-command: func(id: string, args-json: option<string>) -> result<_, string>;
+}

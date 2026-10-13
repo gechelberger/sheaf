@@ -12,7 +12,7 @@ use gpui::{
     Subscription, Task, Window, WindowHandle, anchored, deferred, div, prelude::*, px, rgb,
 };
 
-use crate::commands::{CommandRegistry, Run};
+use crate::commands::Run;
 use crate::docview::{DocEvent, DocView};
 use crate::frame;
 use crate::menu_bar::MenuBar;
@@ -589,15 +589,18 @@ impl Workspace {
     }
 
     /// `plugin::Run`, from a plugin's menu item, the palette or a key
-    /// binding. Plugins can't execute yet (M6 slice 2 adds the runtime), so
-    /// for now this only reports what was asked for.
+    /// binding: runs against the active document.
+    #[cfg(feature = "plugins")]
     fn run_plugin_command(&mut self, run: &Run, cx: &mut Context<Self>) {
-        let id = format!("{}::{}", run.plugin, run.command);
-        let msg = if cx.global::<CommandRegistry>().get(&id).is_some() {
-            format!("Can't run {id}: plugins aren't supported yet")
-        } else {
-            format!("No plugin command {id}")
-        };
+        crate::plugins::run(run, self.active_doc().cloned(), cx);
+    }
+
+    #[cfg(not(feature = "plugins"))]
+    fn run_plugin_command(&mut self, run: &Run, cx: &mut Context<Self>) {
+        let msg = format!(
+            "Can't run {}::{}: this build has no plugin support",
+            run.plugin, run.command
+        );
         log::warn!("{msg}");
         if let Some(doc) = self.active_doc().cloned() {
             doc.update(cx, |d, cx| d.set_notice(msg, cx));

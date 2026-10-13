@@ -14,9 +14,8 @@
 //! }
 //! ```
 
-// The plugin half of this API is called once the plugin runtime loads
-// manifests (M6 slice 2); until then only the tests use it.
-#![cfg_attr(not(test), allow(dead_code))]
+// Without the `plugins` feature, the plugin half of this API goes unused.
+#![cfg_attr(not(any(test, feature = "plugins")), allow(dead_code))]
 
 use std::path::PathBuf;
 
@@ -127,10 +126,12 @@ impl Contributions {
         self.add_marks(marks);
     }
 
+    #[cfg(test)]
     pub fn tick_sets(&self) -> &[TickSet] {
         &self.tick_sets
     }
 
+    #[cfg(test)]
     pub fn stamps(&self) -> &[String] {
         &self.stamps
     }

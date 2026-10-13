@@ -33,6 +33,11 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      # Plugin fixtures and examples are WASI components. Installed for the
+      # pinned toolchain, which this runs under inside the checkout.
+      - name: WASI target
+        run: rustup target add wasm32-wasip2
+
       - uses: Swatinem/rust-cache@v2
 
       # tesseract-rs builds Tesseract and Leptonica from source into this
