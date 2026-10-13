@@ -2,6 +2,7 @@
 //!
 //!     sheaf [--timing] [--separate-windows] [file.pdf ...]
 
+mod assets;
 mod brand;
 mod calc_panel;
 mod comments_panel;
@@ -21,6 +22,7 @@ mod patterns;
 mod settings;
 mod text_area;
 mod text_input;
+mod tooltip;
 mod workspace;
 
 use std::path::PathBuf;
@@ -237,7 +239,7 @@ fn main() {
     let launched = Instant::now();
     let cli = parse_cli();
 
-    application().run(move |cx: &mut App| {
+    application().with_assets(assets::Assets).run(move |cx: &mut App| {
         let mut cli = cli;
         let doc = Some(docview::KEY_CONTEXT);
         // Bare keys that a focused text field nested in these contexts must
