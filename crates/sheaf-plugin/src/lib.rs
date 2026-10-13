@@ -13,13 +13,14 @@
 mod convert;
 pub mod manifest;
 mod runtime;
+pub mod ui;
 
 use std::path::{Path, PathBuf};
 
 pub use manifest::{Manifest, Permissions};
 pub use runtime::{
-    CallContext, CallOutput, DocContext, EditBatch, Limits, Plugin, PluginError, Runtime, Status,
-    TextSource,
+    Call, CallContext, CallOutput, DocContext, EditBatch, Limits, Plugin, PluginError, Runtime,
+    Status, TextMatch, TextSource,
 };
 
 /// The version of `sheaf:plugin` this host provides.

@@ -84,13 +84,15 @@ Decisions: edits a plugin submits are applied after its command returns (so it c
 - WIT covering the `document`, `edits`, `log` and `run-command` interfaces.
 - Plugin discovery at startup.
 - Commands contributed by plugins appear in menus and the palette.
-- First plugin, `examples/plugins/tax-form-bookmarks` (chosen 2026-10-11): scans page text (including OCR layers) for form headers such as "Form 1040", "Schedule C", "W-2", "1099-INT" and inserts bookmarks named like "1099-INT — Chase". It targets `wasm32-wasip2` and exercises `text` plus batch edits.
+- First plugin, `plugins/tax-form-bookmarks` (chosen 2026-10-11): scans page text (including OCR layers) for form headers such as "Form 1040", "Schedule C", "W-2", "1099-INT" and inserts bookmarks named like "1099-INT — Chase". It targets `wasm32-wasip2` and exercises `text` plus batch edits.
 
-### Slice 3: declarative UI
+### Slice 3: declarative UI — done 2026-10-13
+Landed: WIT `ui` interface (`show-form`, `notice`, `set-panel`) and `panel-action` export; `text.pattern-search` (pulled forward from slice 4 for amount-crossref); `plugin_form.rs` (form card, same keys as the OCR card); `plugin_panel.rs` (per-document rows; row click shows the page; actions dispatch `plugin::PanelAction`); panels declared in manifests get a View → Plugin Panels entry and join the right dock unless the saved layout places them. Time a call spends waiting on a form doesn't count against its time limit (wall-clock deadline in the epoch callback). The SDK derives `PartialEq` on WIT types.
+**Bundled plugins (Greg, 2026-10-13):** plugins that make sense as plugins ship with sheaf so we dogfood the API — `plugins/` (was `examples/plugins/`): `tax-form-bookmarks`, `amount-crossref`. No difference from user plugins except being available at install: `scripts/build-plugins.sh` stages them, `package.sh` puts them in `plugins/` beside the binary, and on startup sheaf installs any it hasn't installed before into `<config>/plugins` (recorded in `.bundled.json`, so a deleted one stays deleted and a replaced one isn't overwritten; untouched copies upgrade). Debug builds read `target/plugins`.
 - `ui.show-form`: a modal with text, number, choice, checkbox, file-picker and page-range fields. The host draws it with the existing `text_input.rs`.
 - Notices.
 - Panel contribution: a plugin supplies a tree/list model (rows with label, icon, badge and actions). The host draws it in the dock and saves its layout by string ID.
-- Second plugin, `examples/plugins/amount-crossref` (chosen 2026-10-11): finds the same dollar amount on different pages (a K-1 total and the 1040 line it flows to) via pattern search, lists the candidate pairs in a panel, and places `ConnectorAdd` pairs for the ones the user accepts. Exercises text boxes, a review panel and connector edits.
+- Second plugin, `plugins/amount-crossref` (chosen 2026-10-11): finds the same dollar amount on different pages (a K-1 total and the 1040 line it flows to) via pattern search, lists the candidate pairs in a panel, and places `ConnectorAdd` pairs for the ones the user accepts. Exercises text boxes, a review panel and connector edits.
 
 ### Slice 4: events, storage, permissions, manager
 - `on-event` subscriptions, declared in the manifest.
@@ -115,7 +117,7 @@ Decisions: edits a plugin submits are applied after its command returns (so it c
 ## Critical files
 - `crates/sheaf-app/src/{main.rs, menus.rs, palette.rs, keymap.rs, workspace.rs, docview.rs, settings.rs, pattern_panel.rs, markup_tools.rs}`
 - `crates/sheaf-doc/src/model.rs` (serde on `Edit`, `apply_batch`)
-- New: `crates/sheaf-plugin/`, `crates/sheaf-plugin-api/`, `wit/sheaf.wit`, `examples/plugins/*`, `docs/plugins.md`
+- New: `crates/sheaf-plugin/`, `crates/sheaf-plugin-api/`, `wit/sheaf.wit`, `plugins/*`, `docs/plugins.md`
 - `.github/workflows/ci.yml`, `scripts/package.sh`, `README.md`
 
 ## Verification

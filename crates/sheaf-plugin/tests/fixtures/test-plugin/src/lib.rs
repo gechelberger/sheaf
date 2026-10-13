@@ -1,6 +1,7 @@
 //! Exercises the host: each command tests one behavior.
 
 use sheaf_plugin_api::types::{Edit, OutlineInsert};
+use sheaf_plugin_api::ui::{self, Field, FieldKind, FieldValue, Form, PanelRow, RowAction};
 use sheaf_plugin_api::{Guest, document, edits, log, text};
 
 struct TestPlugin;
@@ -52,6 +53,77 @@ impl Guest for TestPlugin {
                 document::current_page(),
                 args_json
             )),
+            // Ask for a title, then bookmark page 1 with it.
+            "form" => {
+                let form = Form {
+                    title: "Bookmark".into(),
+                    fields: vec![
+                        Field {
+                            id: "title".into(),
+                            label: "Title".into(),
+                            kind: FieldKind::Text(ui::TextField {
+                                default: "Untitled".into(),
+                                placeholder: String::new(),
+                            }),
+                        },
+                        Field {
+                            id: "pages".into(),
+                            label: "Pages".into(),
+                            kind: FieldKind::PageRange(String::new()),
+                        },
+                    ],
+                    submit_label: None,
+                };
+                let Some(answers) = ui::show_form(&form) else {
+                    return Err("cancelled".into());
+                };
+                let mut title = String::new();
+                let mut target = None;
+                for a in answers {
+                    match (a.id.as_str(), a.value) {
+                        ("title", FieldValue::Text(t)) => title = t,
+                        ("pages", FieldValue::PageRange(p)) => target = p.first().copied(),
+                        _ => {}
+                    }
+                }
+                edits::submit(
+                    "Bookmark",
+                    &[Edit::OutlineInsert(OutlineInsert {
+                        parent: None,
+                        after: None,
+                        title,
+                        target,
+                    })],
+                );
+                Ok(())
+            }
+            // One row per match of the argument regex on every page.
+            "panel" => {
+                let re = args_json.unwrap_or_else(|| r"\d+".into());
+                let mut rows = Vec::new();
+                for p in document::pages() {
+                    for (i, m) in text::pattern_search(p.id, &re)?.into_iter().enumerate() {
+                        let r = &m.rects[0];
+                        rows.push(PanelRow {
+                            id: format!("{}-{i}", p.id),
+                            label: m.text,
+                            detail: format!("{:.0},{:.0}", r.x, r.y),
+                            badge: None,
+                            icon: ui::Icon::Page,
+                            depth: 0,
+                            page: Some(p.id),
+                            actions: vec![RowAction {
+                                id: "pick".into(),
+                                label: "Pick".into(),
+                            }],
+                        });
+                    }
+                }
+                ui::set_panel("matches", &rows);
+                ui::set_panel("undeclared", &rows);
+                ui::notice(&format!("{} matches", rows.len()));
+                Ok(())
+            }
             "fail" => Err("nope".into()),
             "trap" => panic!("boom"),
             "spin" => {
@@ -73,6 +145,10 @@ impl Guest for TestPlugin {
             }
             other => Err(format!("unknown command {other}")),
         }
+    }
+
+    fn panel_action(panel: String, row: String, action: String) -> Result<(), String> {
+        Err(format!("{panel}/{row}/{action}"))
     }
 }
 

@@ -4,17 +4,18 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow};
 use futures::channel::oneshot;
 use sheaf_doc::{Edit, PageId, Snapshot, SourceId};
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
-use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder, Trap};
+use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder, Trap, UpdateDeadline};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
 use crate::convert;
 use crate::manifest::{Manifest, WASM_NAME};
+use crate::ui::Ui;
 
 pub(crate) mod bindings {
     wasmtime::component::bindgen!({
@@ -49,13 +50,55 @@ impl Default for Limits {
 /// layer. The app implements it over its render workers.
 pub trait TextSource: Send + Sync {
     fn page_text(&self, source: SourceId, index: u32) -> Result<String>;
+    /// Every match of `re` on the page, with boxes in the page's displayed
+    /// space.
+    fn pattern_search(
+        &self,
+        source: SourceId,
+        index: u32,
+        re: &Arc<regex::Regex>,
+    ) -> Result<Vec<TextMatch>>;
 }
 
-/// What a call can see.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextMatch {
+    pub text: String,
+    pub rects: Vec<sheaf_doc::Box2>,
+}
+
+/// What a call can see and reach.
 #[derive(Clone, Default)]
 pub struct CallContext {
     /// None when no document is open.
     pub doc: Option<DocContext>,
+    /// Where `ui` calls go. None: forms are cancelled, notices logged,
+    /// panel updates dropped.
+    pub ui: Option<Arc<dyn Ui>>,
+}
+
+/// One entry point into a plugin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Call {
+    Command {
+        id: String,
+        args: Option<String>,
+    },
+    PanelAction {
+        panel: String,
+        row: String,
+        action: String,
+    },
+}
+
+impl std::fmt::Display for Call {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Call::Command { id, .. } => write!(f, "command {id:?}"),
+            Call::PanelAction { panel, action, .. } => {
+                write!(f, "action {action:?} in panel {panel:?}")
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -156,9 +199,10 @@ impl Runtime {
         let (tx, rx) = mpsc::channel::<Request>();
         let status = Arc::new(Mutex::new(Status::Loading));
         let (rt, st, id) = (self.clone(), status.clone(), manifest.id.clone());
+        let panels = manifest.panels.iter().map(|p| p.id.clone()).collect();
         let spawned = thread::Builder::new()
             .name(format!("plugin-{id}"))
-            .spawn(move || worker(rt, dir, id, st, rx));
+            .spawn(move || worker(rt, dir, id, panels, st, rx));
         if let Err(e) = spawned {
             *status.lock().unwrap() = Status::Failed(format!("starting its thread: {e}"));
         }
@@ -171,8 +215,7 @@ impl Runtime {
 }
 
 struct Request {
-    command: String,
-    args: Option<String>,
+    call: Call,
     ctx: CallContext,
     reply: oneshot::Sender<Result<CallOutput, PluginError>>,
 }
@@ -201,13 +244,23 @@ impl Plugin {
         args: Option<String>,
         ctx: CallContext,
     ) -> oneshot::Receiver<Result<CallOutput, PluginError>> {
-        let (reply, rx) = oneshot::channel();
-        let req = Request {
-            command: command.to_string(),
-            args,
+        self.call(
+            Call::Command {
+                id: command.to_string(),
+                args,
+            },
             ctx,
-            reply,
-        };
+        )
+    }
+
+    /// Queue a call. The reply arrives when it finishes.
+    pub fn call(
+        &self,
+        call: Call,
+        ctx: CallContext,
+    ) -> oneshot::Receiver<Result<CallOutput, PluginError>> {
+        let (reply, rx) = oneshot::channel();
+        let req = Request { call, ctx, reply };
         if let Err(mpsc::SendError(req)) = self.tx.send(req) {
             let why = match self.status() {
                 Status::Failed(m) => m,
@@ -223,11 +276,12 @@ fn worker(
     rt: Arc<Runtime>,
     dir: PathBuf,
     id: String,
+    panels: Vec<String>,
     status: Arc<Mutex<Status>>,
     rx: mpsc::Receiver<Request>,
 ) {
     let set = |s: Status| *status.lock().unwrap() = s;
-    let mut inst = match Instance::start(&rt, &dir, &id) {
+    let mut inst = match Instance::start(&rt, &dir, &id, panels) {
         Ok(i) => {
             set(Status::Ready);
             i
@@ -248,9 +302,9 @@ fn worker(
             let _ = req.reply.send(Err(PluginError::Unavailable(why.clone())));
             continue;
         }
-        let result = inst.run(&req.command, req.args.as_deref(), req.ctx);
+        let result = inst.run(&req.call, req.ctx);
         if let Err(PluginError::Trapped(m)) = &result {
-            log::error!("plugin {id} trapped in {:?}: {m}", req.command);
+            log::error!("plugin {id} trapped in {}: {m}", req.call);
             set(Status::Failed(m.clone()));
             dead = Some(m.clone());
         }
@@ -265,12 +319,11 @@ fn worker(
 struct Instance {
     store: Option<Store<HostState>>,
     world: Option<bindings::Plugin>,
-    timeout_ticks: u64,
     timeout: Duration,
 }
 
 impl Instance {
-    fn start(rt: &Runtime, dir: &std::path::Path, id: &str) -> Result<Self> {
+    fn start(rt: &Runtime, dir: &std::path::Path, id: &str, panels: Vec<String>) -> Result<Self> {
         let wasm = dir.join(WASM_NAME);
         let component = Component::from_file(&rt.engine, &wasm)
             .map_err(anyhow::Error::from)
@@ -283,17 +336,28 @@ impl Instance {
                 .memory_size(rt.limits.memory_bytes)
                 .build(),
             plugin: id.to_string(),
+            panels,
             call: None,
             batches: Vec::new(),
+            deadline: Instant::now() + rt.limits.call_timeout,
         };
         let mut store = Store::new(&rt.engine, state);
         store.limiter(|s| &mut s.limits);
-        let timeout_ticks = (rt.limits.call_timeout.as_millis() / TICK.as_millis()).max(1) as u64;
-        store.set_epoch_deadline(timeout_ticks);
+        // Checked every tick against a wall-clock deadline, which host calls
+        // that wait for the user push back.
+        store.epoch_deadline_callback(|cx| {
+            Ok(if Instant::now() < cx.data().deadline {
+                UpdateDeadline::Continue(1)
+            } else {
+                UpdateDeadline::Interrupt
+            })
+        });
+        store.set_epoch_deadline(1);
         let world = bindings::Plugin::instantiate(&mut store, &component, &rt.linker)
             .map_err(anyhow::Error::from)
             .context("instantiating")?;
-        store.set_epoch_deadline(timeout_ticks);
+        store.data_mut().deadline = Instant::now() + rt.limits.call_timeout;
+        store.set_epoch_deadline(1);
         world
             .call_activate(&mut store)
             .map_err(|e| anyhow!(describe_trap(&e, rt.limits.call_timeout)))
@@ -302,7 +366,6 @@ impl Instance {
         Ok(Self {
             store: Some(store),
             world: Some(world),
-            timeout_ticks,
             timeout: rt.limits.call_timeout,
         })
     }
@@ -312,19 +375,21 @@ impl Instance {
         self.store = None;
     }
 
-    fn run(
-        &mut self,
-        command: &str,
-        args: Option<&str>,
-        ctx: CallContext,
-    ) -> Result<CallOutput, PluginError> {
+    fn run(&mut self, call: &Call, ctx: CallContext) -> Result<CallOutput, PluginError> {
         let (Some(store), Some(world)) = (&mut self.store, &self.world) else {
             return Err(PluginError::Unavailable("unloaded".into()));
         };
-        store.data_mut().call = Some(ctx);
-        store.data_mut().batches.clear();
-        store.set_epoch_deadline(self.timeout_ticks);
-        let result = world.call_run_command(&mut *store, command, args);
+        let data = store.data_mut();
+        data.call = Some(ctx);
+        data.batches.clear();
+        data.deadline = Instant::now() + self.timeout;
+        store.set_epoch_deadline(1);
+        let result = match call {
+            Call::Command { id, args } => world.call_run_command(&mut *store, id, args.as_deref()),
+            Call::PanelAction { panel, row, action } => {
+                world.call_panel_action(&mut *store, panel, row, action)
+            }
+        };
         let data = store.data_mut();
         data.call = None;
         let batches = std::mem::take(&mut data.batches);
@@ -350,13 +415,21 @@ pub(crate) struct HostState {
     table: ResourceTable,
     limits: StoreLimits,
     plugin: String,
+    /// Panel ids the manifest declares.
+    panels: Vec<String>,
     call: Option<CallContext>,
     batches: Vec<EditBatch>,
+    /// When the running call times out.
+    deadline: Instant,
 }
 
 impl HostState {
     fn doc(&self) -> Option<&DocContext> {
         self.call.as_ref()?.doc.as_ref()
+    }
+
+    fn ui(&self) -> Option<Arc<dyn Ui>> {
+        self.call.as_ref()?.ui.clone()
     }
 }
 
@@ -439,6 +512,73 @@ impl api::text::Host for HostState {
         d.text
             .page_text(p.source, p.index)
             .map_err(|e| format!("{e:#}"))
+    }
+
+    fn pattern_search(
+        &mut self,
+        page: u64,
+        regex: String,
+    ) -> Result<Vec<api::types::TextMatch>, String> {
+        let d = self.doc().ok_or("no document is open")?;
+        let re = regex::RegexBuilder::new(&regex)
+            .size_limit(1 << 20)
+            .build()
+            .map_err(|e| e.to_string())?;
+        let id = PageId(page);
+        let found: Vec<TextMatch> = match d.snapshot.state.text_layer(id) {
+            Some(layer) => sheaf_doc::text_layer::pattern_search(layer, &re)
+                .into_iter()
+                .map(|h| TextMatch {
+                    text: h.text,
+                    rects: h.rects,
+                })
+                .collect(),
+            None => {
+                let p = d
+                    .snapshot
+                    .state
+                    .pages
+                    .iter()
+                    .find(|p| p.id == id)
+                    .ok_or_else(|| format!("no page {page}"))?;
+                d.text
+                    .pattern_search(p.source, p.index, &Arc::new(re))
+                    .map_err(|e| format!("{e:#}"))?
+            }
+        };
+        Ok(found.into_iter().map(convert::text_match_to_wit).collect())
+    }
+}
+
+impl api::ui::Host for HostState {
+    fn show_form(&mut self, form: api::ui::Form) -> Option<Vec<api::ui::FieldAnswer>> {
+        let ui = self.ui()?;
+        let started = Instant::now();
+        let answer = ui.show_form(convert::form_from_wit(form));
+        // The user's thinking time isn't the plugin's.
+        self.deadline += started.elapsed();
+        answer.map(|a| a.into_iter().map(convert::answer_to_wit).collect())
+    }
+
+    fn notice(&mut self, message: String) {
+        match self.ui() {
+            Some(ui) => ui.notice(message),
+            None => log::info!(target: "plugin", "[{}] {message}", self.plugin),
+        }
+    }
+
+    fn set_panel(&mut self, panel: String, rows: Vec<api::ui::PanelRow>) {
+        if !self.panels.contains(&panel) {
+            log::warn!(
+                target: "plugin",
+                "[{}] set-panel: {panel:?} isn't declared in the manifest",
+                self.plugin
+            );
+            return;
+        }
+        if let Some(ui) = self.ui() {
+            ui.set_panel(panel, rows.into_iter().map(convert::row_from_wit).collect());
+        }
     }
 }
 

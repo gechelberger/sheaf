@@ -5,7 +5,10 @@ use sheaf_doc::{
     Annot, AnnotId, AnnotKind, Box2, Edit, OutlineId, OutlineNode, PageId, PageRef, Pt, Snapshot,
 };
 
+use crate::runtime::TextMatch;
 use crate::runtime::bindings::sheaf::plugin::types as w;
+use crate::runtime::bindings::sheaf::plugin::ui as wu;
+use crate::ui;
 
 pub fn rotation_to_wit(r: Rotation) -> w::Rotation {
     match r {
@@ -255,6 +258,96 @@ pub fn edit_from_wit(e: w::Edit) -> Edit {
             a: page_annot(c.a),
             b: page_annot(c.b),
         },
+    }
+}
+
+pub fn text_match_to_wit(m: TextMatch) -> w::TextMatch {
+    w::TextMatch {
+        text: m.text,
+        rects: m.rects.into_iter().map(box_to_wit).collect(),
+    }
+}
+
+pub fn form_from_wit(f: wu::Form) -> ui::Form {
+    ui::Form {
+        title: f.title,
+        submit_label: f
+            .submit_label
+            .filter(|l| !l.trim().is_empty())
+            .unwrap_or_else(|| "OK".into()),
+        fields: f
+            .fields
+            .into_iter()
+            .map(|f| ui::Field {
+                id: f.id,
+                label: f.label,
+                kind: match f.kind {
+                    wu::FieldKind::Text(t) => ui::FieldKind::Text {
+                        default: t.default,
+                        placeholder: t.placeholder,
+                    },
+                    wu::FieldKind::Number(n) => ui::FieldKind::Number {
+                        default: n.default,
+                        min: n.min,
+                        max: n.max,
+                    },
+                    wu::FieldKind::Choice(c) => ui::FieldKind::Choice {
+                        default: (c.default as usize).min(c.options.len().saturating_sub(1)),
+                        options: c.options,
+                    },
+                    wu::FieldKind::Checkbox(b) => ui::FieldKind::Checkbox(b),
+                    wu::FieldKind::File(f) => ui::FieldKind::File {
+                        save: f.save,
+                        extensions: f.extensions,
+                    },
+                    wu::FieldKind::PageRange(r) => ui::FieldKind::PageRange(r),
+                },
+            })
+            .collect(),
+    }
+}
+
+pub fn answer_to_wit(a: ui::FieldAnswer) -> wu::FieldAnswer {
+    wu::FieldAnswer {
+        id: a.id,
+        value: match a.value {
+            ui::FieldValue::Text(t) => wu::FieldValue::Text(t),
+            ui::FieldValue::Number(n) => wu::FieldValue::Number(n),
+            ui::FieldValue::Choice(i) => wu::FieldValue::Choice(i as u32),
+            ui::FieldValue::Checkbox(b) => wu::FieldValue::Checkbox(b),
+            ui::FieldValue::File(p) => wu::FieldValue::File(p),
+            ui::FieldValue::PageRange(ids) => {
+                wu::FieldValue::PageRange(ids.into_iter().map(|p| p.0).collect())
+            }
+        },
+    }
+}
+
+pub fn row_from_wit(r: wu::PanelRow) -> ui::PanelRow {
+    ui::PanelRow {
+        id: r.id,
+        label: r.label,
+        detail: r.detail,
+        badge: r.badge,
+        icon: match r.icon {
+            wu::Icon::None => ui::Icon::None,
+            wu::Icon::Check => ui::Icon::Check,
+            wu::Icon::Cross => ui::Icon::Cross,
+            wu::Icon::Link => ui::Icon::Link,
+            wu::Icon::Warning => ui::Icon::Warning,
+            wu::Icon::Info => ui::Icon::Info,
+            wu::Icon::Page => ui::Icon::Page,
+        },
+        depth: r.depth,
+        page: r.page.map(PageId),
+        actions: r
+            .actions
+            .into_iter()
+            .map(|a| ui::RowAction {
+                id: a.id,
+                label: a.label,
+            })
+            .collect(),
     }
 }
 

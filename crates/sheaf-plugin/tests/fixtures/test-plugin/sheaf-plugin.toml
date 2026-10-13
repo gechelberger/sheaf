@@ -7,3 +7,7 @@ api = "^0.1"
 id = "bookmark"
 label = "Bookmark Pages"
 menu = "Tools/Test"
+
+[[panels]]
+id = "matches"
+label = "Matches"

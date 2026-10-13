@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 # Plugins build for wasm32-wasip2 in their own workspaces.
-exclude = ["examples/plugins", "crates/sheaf-plugin/tests/fixtures"]
+exclude = ["plugins", "crates/sheaf-plugin/tests/fixtures"]
 members = [
     "crates/sheaf-core",
     "crates/sheaf-doc",

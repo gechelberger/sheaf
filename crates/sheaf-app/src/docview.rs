@@ -442,6 +442,9 @@ pub struct DocView {
     pub(crate) tool: Tool,
     pub(crate) tool_color: [u8; 3],
     pub(crate) tick_glyph: String,
+    /// Rows of plugin panels for this document, by `<plugin>.<panel>`.
+    #[cfg(feature = "plugins")]
+    pub(crate) plugin_panels: HashMap<String, crate::plugin_panel::PluginPanelState>,
 }
 
 /// A search match, addressed by page id so it survives reordering and so
@@ -511,6 +514,8 @@ impl DocView {
             tool: Tool::Select,
             tool_color: [255, 230, 0],
             tick_glyph: "✓".into(),
+            #[cfg(feature = "plugins")]
+            plugin_panels: HashMap::new(),
         };
         this.open(cx);
         this
@@ -1693,6 +1698,15 @@ impl DocView {
         );
         self.add_annot(p0, tick, "Tickmark", cx);
         self.export_clean_to(path, cx);
+    }
+
+    /// Every page's id, in document order.
+    #[cfg_attr(not(feature = "plugins"), allow(dead_code))]
+    pub(crate) fn page_ids(&self) -> Vec<PageId> {
+        match &self.state {
+            State::Ready(doc) => doc.model.state().pages.iter().map(|p| p.id).collect(),
+            _ => Vec::new(),
+        }
     }
 
     fn doc_page_id(&self, index: usize) -> Option<PageId> {

@@ -40,6 +40,15 @@ pub struct Marks {
     pub stamps: Vec<String>,
 }
 
+/// A dock panel a plugin declares. `id` is `<plugin>.<panel>`, the id
+/// `Panel::Plugin` carries and the saved layout uses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginPanel {
+    pub id: String,
+    pub plugin: String,
+    pub label: String,
+}
+
 /// One preset and the plugin it came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginPreset {
@@ -54,6 +63,7 @@ pub struct Contributions {
     tick_sets: Vec<TickSet>,
     stamps: Vec<String>,
     presets: Vec<PluginPreset>,
+    panels: Vec<PluginPanel>,
 }
 
 impl Global for Contributions {}
@@ -68,6 +78,7 @@ impl Default for Contributions {
             }],
             stamps: Vec::new(),
             presets: Vec::new(),
+            panels: Vec::new(),
         }
     }
 }
@@ -124,6 +135,20 @@ impl Contributions {
                 preset,
             }));
         self.add_marks(marks);
+    }
+
+    pub fn add_panel(&mut self, panel: PluginPanel) {
+        if !self.panels.iter().any(|p| p.id == panel.id) {
+            self.panels.push(panel);
+        }
+    }
+
+    pub fn plugin_panels(&self) -> &[PluginPanel] {
+        &self.panels
+    }
+
+    pub fn panel(&self, id: &str) -> Option<&PluginPanel> {
+        self.panels.iter().find(|p| p.id == id)
     }
 
     #[cfg(test)]

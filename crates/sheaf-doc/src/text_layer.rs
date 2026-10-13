@@ -90,17 +90,7 @@ impl TextLayer {
 
     /// The recognized text: words joined by spaces, lines by newlines.
     pub fn text(&self) -> String {
-        self.lines
-            .iter()
-            .map(|l| {
-                self.words[l.clone()]
-                    .iter()
-                    .map(|w| w.text.as_str())
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+        page_text(self).s
     }
 
     /// Rough heap bytes, for the history memory policy.

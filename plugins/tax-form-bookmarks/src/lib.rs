@@ -151,7 +151,7 @@ impl Guest for TaxFormBookmarks {
         }
         // Append after the last top-level bookmark. Every insert names the
         // same sibling, so insert in reverse to end up in page order.
-        let last_top = outline.iter().filter(|o| o.depth == 0).last().map(|o| o.id);
+        let last_top = outline.iter().rfind(|o| o.depth == 0).map(|o| o.id);
         let batch: Vec<Edit> = new
             .into_iter()
             .rev()
@@ -171,6 +171,10 @@ impl Guest for TaxFormBookmarks {
         );
         edits::submit(&label, &batch);
         Ok(())
+    }
+
+    fn panel_action(_panel: String, _row: String, _action: String) -> Result<(), String> {
+        Err("this plugin has no panels".into())
     }
 }
 

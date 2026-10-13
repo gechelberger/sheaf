@@ -683,6 +683,11 @@ enum Msg {
         page: u32,
         reply: oneshot::Sender<Result<String>>,
     },
+    PatternPage {
+        page: u32,
+        re: std::sync::Arc<regex::Regex>,
+        reply: oneshot::Sender<Result<Vec<SearchHit>>>,
+    },
     PageSize {
         page: u32,
         reply: oneshot::Sender<Result<PageSize>>,
@@ -813,6 +818,23 @@ impl RenderHandle {
         rx
     }
 
+    /// Every match of `re` on one page, with its boxes. Unlike
+    /// [`pattern_search`](Self::pattern_search) this answers once, for one
+    /// page, and doesn't replace a running document-wide search.
+    pub fn pattern_search_page(
+        &self,
+        page: u32,
+        re: std::sync::Arc<regex::Regex>,
+    ) -> oneshot::Receiver<Result<Vec<SearchHit>>> {
+        let (tx, rx) = oneshot::channel();
+        self.send(Msg::PatternPage {
+            page,
+            re,
+            reply: tx,
+        });
+        rx
+    }
+
     /// Fetch the bookmark tree.
     pub fn outline(&self) -> oneshot::Receiver<Result<Vec<OutlineItem>>> {
         let (tx, rx) = oneshot::channel();
@@ -925,6 +947,9 @@ fn worker_loop(engine: impl Renderer, rx: mpsc::Receiver<Msg>) {
                 }
                 Msg::Text { page, reply } => {
                     let _ = reply.send(engine.page_text(PageIndex(page)));
+                }
+                Msg::PatternPage { page, re, reply } => {
+                    let _ = reply.send(engine.pattern_search_page(PageIndex(page), &re));
                 }
                 Msg::PageSize { page, reply } => {
                     let _ = reply.send(engine.page_size(PageIndex(page)));

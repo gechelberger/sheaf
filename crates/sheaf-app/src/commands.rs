@@ -32,6 +32,22 @@ pub struct Run {
     pub args: Option<serde_json::Value>,
 }
 
+/// Show a plugin's dock panel, by its `<plugin>.<panel>` id.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema, Action)]
+#[action(namespace = workspace)]
+pub struct ShowPluginPanel {
+    pub panel: String,
+}
+
+/// A row action in a plugin panel: `panel` is `<plugin>.<panel>`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema, Action)]
+#[action(namespace = plugin)]
+pub struct PanelAction {
+    pub panel: String,
+    pub row: String,
+    pub action: String,
+}
+
 pub enum Target {
     Builtin(Box<dyn Action>),
     Plugin { plugin: String, command: String },
@@ -166,6 +182,28 @@ impl CommandRegistry {
         menu: Option<&str>,
     ) -> Result<String, RegistryError> {
         let id = format!("{plugin}::{command}");
+        self.add_placed(
+            Command {
+                id: id.clone(),
+                label: label.to_string(),
+                category: category.to_string(),
+                target: Target::Plugin {
+                    plugin: plugin.to_string(),
+                    command: command.to_string(),
+                },
+            },
+            menu,
+        )?;
+        Ok(id)
+    }
+
+    /// Register a command and, when `menu` names a path such as
+    /// `"View/Plugin Panels"`, place it there. Nothing is added on error.
+    pub fn add_placed(
+        &mut self,
+        command: Command,
+        menu: Option<&str>,
+    ) -> Result<(), RegistryError> {
         let path: Vec<&str> = match menu {
             Some(p) => {
                 let parts: Vec<&str> = p.split('/').map(str::trim).collect();
@@ -176,19 +214,12 @@ impl CommandRegistry {
             }
             None => Vec::new(),
         };
-        self.add(Command {
-            id: id.clone(),
-            label: label.to_string(),
-            category: category.to_string(),
-            target: Target::Plugin {
-                plugin: plugin.to_string(),
-                command: command.to_string(),
-            },
-        })?;
+        let (id, label) = (command.id.clone(), command.label.clone());
+        self.add(command)?;
         if !path.is_empty() {
-            self.place(&path, &id, label);
+            self.place(&path, &id, &label);
         }
-        Ok(id)
+        Ok(())
     }
 
     /// Put a command in the menu at `path`, creating menus as needed. Names

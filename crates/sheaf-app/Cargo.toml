@@ -15,7 +15,7 @@ default = ["ocr-tesseract", "ocr-oar", "plugins"]
 ocr-tesseract = ["sheaf-ocr/tesseract"]
 ocr-oar = ["sheaf-ocr/oar"]
 # WebAssembly plugins (wasmtime). Off for a quicker dev build.
-plugins = ["dep:sheaf-plugin"]
+plugins = ["dep:sheaf-plugin", "dep:semver"]
 
 [dependencies]
 sheaf-core.workspace = true
@@ -24,6 +24,7 @@ sheaf-doc.workspace = true
 sheaf-ui.workspace = true
 sheaf-ocr.workspace = true
 sheaf-plugin = { workspace = true, optional = true }
+semver = { version = "1", features = ["serde"], optional = true }
 gpui.workspace = true
 gpui_platform.workspace = true
 anyhow.workspace = true

@@ -11,9 +11,10 @@ use anyhow::Result;
 use futures::executor::block_on;
 use sheaf_core::PageSize;
 use sheaf_doc::{Document, Edit, FixedCount, SourceId, SourceInfo};
+use sheaf_plugin::ui::{FieldAnswer, FieldKind, FieldValue, Form, PanelRow, Ui};
 use sheaf_plugin::{
-    CallContext, CallOutput, DocContext, Limits, Manifest, Plugin, PluginError, Runtime, Status,
-    TextSource,
+    Call, CallContext, CallOutput, DocContext, Limits, Manifest, Plugin, PluginError, Runtime,
+    Status, TextMatch, TextSource,
 };
 
 fn workspace_root() -> PathBuf {
@@ -70,11 +71,35 @@ fn load(name: &str, limits: Limits) -> Plugin {
     Runtime::new(limits).unwrap().load(dir, manifest)
 }
 
+/// Pattern search over plain text, with a made-up box per match.
+fn search(text: &str, re: &regex::Regex) -> Vec<TextMatch> {
+    re.find_iter(text)
+        .map(|m| TextMatch {
+            text: m.as_str().to_string(),
+            rects: vec![sheaf_doc::Box2 {
+                x: m.start() as f32,
+                y: 10.0,
+                w: m.len() as f32,
+                h: 10.0,
+            }],
+        })
+        .collect()
+}
+
 struct FakeText;
 
 impl TextSource for FakeText {
     fn page_text(&self, _source: SourceId, index: u32) -> Result<String> {
         Ok(format!("Form {}\nsecond line", 1040 + index))
+    }
+
+    fn pattern_search(
+        &self,
+        source: SourceId,
+        index: u32,
+        re: &Arc<regex::Regex>,
+    ) -> Result<Vec<TextMatch>> {
+        Ok(search(&self.page_text(source, index)?, re))
     }
 }
 
@@ -101,10 +126,11 @@ fn ctx(d: &Document) -> CallContext {
         doc: Some(DocContext {
             path: "return.pdf".into(),
             snapshot: d.snapshot(),
-            selection: vec![d.page(1).unwrap().id],
+            selection: d.page(1).map(|p| p.id).into_iter().collect(),
             current_page: Some(d.page(0).unwrap().id),
             text: Arc::new(FakeText),
         }),
+        ui: None,
     }
 }
 
@@ -329,11 +355,20 @@ impl TextSource for Pages {
             .unwrap_or("")
             .to_string())
     }
+
+    fn pattern_search(
+        &self,
+        source: SourceId,
+        index: u32,
+        re: &Arc<regex::Regex>,
+    ) -> Result<Vec<TextMatch>> {
+        Ok(search(&self.page_text(source, index)?, re))
+    }
 }
 
 #[test]
 fn tax_form_bookmarks_example() {
-    let src = workspace_root().join("examples/plugins/tax-form-bookmarks");
+    let src = workspace_root().join("plugins/tax-form-bookmarks");
     let wasm = build_plugin(&src, "tax_form_bookmarks.wasm");
     let dir = install("tax-form-bookmarks", &src, &wasm);
     let p = Runtime::new(Limits::default())
@@ -356,6 +391,7 @@ fn tax_form_bookmarks_example() {
             current_page: None,
             text: text.clone(),
         }),
+        ui: None,
     };
     let out = run(&p, "scan", None, ctx(&d)).unwrap();
     let b = &out.batches[0];
@@ -380,4 +416,234 @@ fn tax_form_bookmarks_example() {
         run(&p, "scan", None, ctx(&d)).unwrap_err(),
         PluginError::Failed("no new tax forms found".into())
     );
+}
+
+/// Records UI calls; answers forms from a script.
+#[derive(Default)]
+struct FakeUi {
+    answer: std::sync::Mutex<Option<Vec<FieldAnswer>>>,
+    /// How long "the user" takes to answer.
+    delay: Duration,
+    forms: std::sync::Mutex<Vec<Form>>,
+    notices: std::sync::Mutex<Vec<String>>,
+    panels: std::sync::Mutex<Vec<(String, Vec<PanelRow>)>>,
+}
+
+impl Ui for FakeUi {
+    fn show_form(&self, form: Form) -> Option<Vec<FieldAnswer>> {
+        self.forms.lock().unwrap().push(form);
+        std::thread::sleep(self.delay);
+        self.answer.lock().unwrap().take()
+    }
+
+    fn notice(&self, message: String) {
+        self.notices.lock().unwrap().push(message);
+    }
+
+    fn set_panel(&self, panel: String, rows: Vec<PanelRow>) {
+        self.panels.lock().unwrap().push((panel, rows));
+    }
+}
+
+fn with_ui(d: &Document, ui: &Arc<FakeUi>) -> CallContext {
+    CallContext {
+        ui: Some(ui.clone()),
+        ..ctx(d)
+    }
+}
+
+#[test]
+fn forms_round_trip_and_waiting_is_free() {
+    // The user takes longer than the plugin's whole time limit.
+    let p = load(
+        "form",
+        Limits {
+            call_timeout: Duration::from_millis(200),
+            ..Limits::default()
+        },
+    );
+    let d = doc(3);
+    let ui = Arc::new(FakeUi {
+        delay: Duration::from_millis(500),
+        ..FakeUi::default()
+    });
+    *ui.answer.lock().unwrap() = Some(vec![
+        FieldAnswer {
+            id: "title".into(),
+            value: FieldValue::Text("Engagement letter".into()),
+        },
+        FieldAnswer {
+            id: "pages".into(),
+            value: FieldValue::PageRange(vec![d.page(2).unwrap().id]),
+        },
+    ]);
+    let out = run(&p, "form", None, with_ui(&d, &ui)).unwrap();
+    {
+        let forms = ui.forms.lock().unwrap();
+        let form = &forms[0];
+        assert_eq!(form.title, "Bookmark");
+        assert_eq!(form.submit_label, "OK");
+        assert!(
+            matches!(&form.fields[0].kind, FieldKind::Text { default, .. } if default == "Untitled")
+        );
+        assert_eq!(form.fields[1].kind, FieldKind::PageRange(String::new()));
+    }
+    assert_eq!(
+        out.batches[0].edits,
+        [Edit::OutlineInsert {
+            parent: None,
+            after: None,
+            title: "Engagement letter".into(),
+            target: Some(d.page(2).unwrap().id),
+        }]
+    );
+    // Cancelled (and no UI at all) come back as none.
+    let err = run(&p, "form", None, with_ui(&d, &ui)).unwrap_err();
+    assert_eq!(err, PluginError::Failed("cancelled".into()));
+    let err = run(&p, "form", None, ctx(&d)).unwrap_err();
+    assert_eq!(err, PluginError::Failed("cancelled".into()));
+}
+
+#[test]
+fn panels_notices_and_panel_actions() {
+    let p = load("panel", Limits::default());
+    let d = doc(2);
+    let ui = Arc::new(FakeUi::default());
+    run(&p, "panel", Some(r"\d{4}"), with_ui(&d, &ui)).unwrap();
+    let panels = ui.panels.lock().unwrap();
+    assert_eq!(panels.len(), 1, "undeclared panels are dropped");
+    let (id, rows) = &panels[0];
+    assert_eq!(id, "matches");
+    let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
+    assert_eq!(labels, ["1040", "1041"]);
+    assert_eq!(rows[1].page, Some(d.page(1).unwrap().id));
+    assert_eq!(rows[0].detail, "5,10");
+    assert_eq!(*ui.notices.lock().unwrap(), ["2 matches"]);
+
+    let err = block_on(p.call(
+        Call::PanelAction {
+            panel: "matches".into(),
+            row: rows[0].id.clone(),
+            action: "pick".into(),
+        },
+        ctx(&d),
+    ))
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(
+        err,
+        PluginError::Failed(format!("matches/{}/pick", rows[0].id))
+    );
+}
+
+#[test]
+fn bad_regex_is_an_error_not_a_trap() {
+    let p = load("bad-regex", Limits::default());
+    let d = doc(1);
+    let err = run(&p, "panel", Some("(unclosed"), ctx(&d)).unwrap_err();
+    assert!(
+        matches!(&err, PluginError::Failed(m) if m.contains("unclosed")),
+        "{err:?}"
+    );
+    assert_eq!(p.status(), Status::Ready);
+}
+
+#[test]
+fn amount_crossref_bundled_plugin() {
+    let src = workspace_root().join("plugins/amount-crossref");
+    let wasm = build_plugin(&src, "amount_crossref.wasm");
+    let dir = install("amount-crossref", &src, &wasm);
+    let p = Runtime::new(Limits::default())
+        .unwrap()
+        .load(dir.clone(), Manifest::load(&dir).unwrap());
+    let text: Arc<dyn TextSource> = Arc::new(Pages(vec![
+        "Schedule K-1 box 1 ordinary income 12,345.67",
+        "Form 1040 line 8 $12,345.67 and fee 99.00 and 2,000.00",
+        "Workpaper total (12,345.67) memo 12,345.67 rounded 2,000.00",
+    ]));
+    let mut d = doc(3);
+    let ui = Arc::new(FakeUi::default());
+    let ctx = |d: &Document, ui: &Arc<FakeUi>| CallContext {
+        doc: Some(DocContext {
+            path: "binder.pdf".into(),
+            snapshot: d.snapshot(),
+            selection: Vec::new(),
+            current_page: None,
+            text: text.clone(),
+        }),
+        ui: Some(ui.clone()),
+    };
+    let all: Vec<_> = (0..3).map(|i| d.page(i).unwrap().id).collect();
+    *ui.answer.lock().unwrap() = Some(vec![
+        FieldAnswer {
+            id: "min".into(),
+            value: FieldValue::Number(100.0),
+        },
+        FieldAnswer {
+            id: "pages".into(),
+            value: FieldValue::PageRange(all.clone()),
+        },
+        FieldAnswer {
+            id: "round".into(),
+            value: FieldValue::Checkbox(true),
+        },
+    ]);
+    let out = run(&p, "find", None, ctx(&d, &ui)).unwrap();
+    assert!(out.batches.is_empty());
+    let rows = ui.panels.lock().unwrap().last().unwrap().1.clone();
+    let summary: Vec<(String, String)> = rows
+        .iter()
+        .map(|r| (r.label.clone(), r.detail.clone()))
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            ("$12,345.67".to_string(), "page 1 ⇄ page 2".to_string()),
+            ("$12,345.67".to_string(), "page 2 ⇄ page 3".to_string()),
+        ],
+        "99.00 is under the minimum, 2,000.00 is round, (12,345.67) is negative"
+    );
+    assert_eq!(
+        ui.notices.lock().unwrap().last().unwrap(),
+        "2 matching pairs — see Amount Matches"
+    );
+
+    // Link the first pair from the panel.
+    let out = block_on(p.call(
+        Call::PanelAction {
+            panel: "pairs".into(),
+            row: rows[0].id.clone(),
+            action: "link".into(),
+        },
+        ctx(&d, &ui),
+    ))
+    .unwrap()
+    .unwrap();
+    assert_eq!(out.batches[0].label, "Link $12,345.67");
+    d.apply_batch(out.batches[0].edits.clone(), &out.batches[0].label)
+        .unwrap();
+    let labels: Vec<(usize, String)> = (0..3)
+        .flat_map(|i| {
+            let id = d.page(i).unwrap().id;
+            d.state()
+                .annots_on(id)
+                .map(|l| {
+                    l.iter()
+                        .filter_map(|a| match &a.kind {
+                            sheaf_doc::AnnotKind::Connector { label, partner, .. } => {
+                                assert!(partner.is_some(), "the host pairs the ends");
+                                Some((i, label.clone()))
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        })
+        .collect();
+    assert_eq!(labels, [(0, "1".to_string()), (1, "1".to_string())]);
+    // The panel now holds just the other pair.
+    let rows = ui.panels.lock().unwrap().last().unwrap().1.clone();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].detail, "page 2 ⇄ page 3");
 }

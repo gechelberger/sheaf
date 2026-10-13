@@ -33,8 +33,9 @@ pub mod bindings {
         pub_export_macro: true,
         export_macro_name: "export",
         default_bindings_module: "sheaf_plugin_api::bindings",
+        additional_derives: [PartialEq],
     });
 }
 
-pub use bindings::sheaf::plugin::{document, edits, log, text, types};
+pub use bindings::sheaf::plugin::{document, edits, log, text, types, ui};
 pub use bindings::{Guest, export};

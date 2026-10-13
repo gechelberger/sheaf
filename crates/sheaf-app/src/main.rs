@@ -22,6 +22,10 @@ mod palette;
 mod pattern_panel;
 mod patterns;
 #[cfg(feature = "plugins")]
+mod plugin_form;
+#[cfg(feature = "plugins")]
+mod plugin_panel;
+#[cfg(feature = "plugins")]
 mod plugins;
 mod settings;
 mod text_area;
@@ -263,6 +267,8 @@ fn main() {
             let pal = Some(palette::KEY_CONTEXT);
             let od = Some(ocr_dialog::KEY_CONTEXT);
             let od_keys = Some("OcrDialog && !TextInput");
+            let pf = Some("PluginForm");
+            let pf_keys = Some("PluginForm && !TextInput");
             cx.bind_keys([
                 KeyBinding::new("right", NextPage, doc_keys),
                 KeyBinding::new("left", PrevPage, doc_keys),
@@ -392,6 +398,14 @@ fn main() {
                 KeyBinding::new("space", DialogRight, od_keys),
                 KeyBinding::new("enter", DialogRun, od_keys),
                 KeyBinding::new("escape", DialogCancel, od_keys),
+                // Plugin forms: same keys as the OCR card.
+                KeyBinding::new("tab", DialogNext, pf),
+                KeyBinding::new("shift-tab", DialogPrev, pf),
+                KeyBinding::new("left", DialogLeft, pf_keys),
+                KeyBinding::new("right", DialogRight, pf_keys),
+                KeyBinding::new("space", DialogRight, pf_keys),
+                KeyBinding::new("enter", DialogRun, pf_keys),
+                KeyBinding::new("escape", DialogCancel, pf_keys),
                 // Menu bar: Alt tapped alone or F10 highlights it, as on Windows.
                 KeyBinding::new("alt", ActivateMenuBar, ws),
                 KeyBinding::new("f10", ActivateMenuBar, ws),

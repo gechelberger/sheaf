@@ -8,14 +8,10 @@ bookmarks undo as one step.
 
 Tools → Tax → Bookmarks from Tax Forms, the command palette, or Ctrl+Alt+B.
 
-## Build and install
+## Build
 
-```sh
-cargo build --release --target wasm32-wasip2
-dest="${SHEAF_CONFIG_DIR:-$HOME/.config/sheaf}/plugins/tax-form-bookmarks"
-mkdir -p "$dest"
-cp sheaf-plugin.toml "$dest/"
-cp target/wasm32-wasip2/release/tax_form_bookmarks.wasm "$dest/plugin.wasm"
-```
+Ships with sheaf. `scripts/build-plugins.sh` builds every plugin in
+`plugins/`; sheaf installs them into its plugin directory on first run.
+To work on just this one: `cargo build --release --target wasm32-wasip2`.
 
 The detection logic has unit tests that run on the host: `cargo test`.

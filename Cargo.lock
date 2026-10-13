@@ -6451,6 +6451,7 @@ dependencies = [
  "regex",
  "resvg",
  "schemars",
+ "semver",
  "serde",
  "serde_json",
  "sheaf-core",
