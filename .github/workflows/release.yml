@@ -3,8 +3,7 @@ name: Release
 # Tag v<version> (matching Cargo.toml's version, e.g. v0.1.0-alpha.1) to
 # build bundles for Linux and Windows and attach them to a GitHub release.
 # Tags with a pre-release suffix (anything after a `-`) are marked as
-# pre-releases. cargo-binstall builds download URLs from the sheaf-pdf
-# version, so the tag must match it exactly.
+# pre-releases.
 on:
   push:
     tags: ["v*"]
