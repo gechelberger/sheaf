@@ -8,13 +8,14 @@
 
 use gpui::{
     AnyElement, Context, CursorStyle, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    PathBuilder, Pixels, Point, Window, canvas, div, prelude::*, px, rgb, rgba,
+    PathBuilder, Pixels, Point, Window, canvas, div, prelude::*, px, rgb, rgba, svg,
 };
 use sheaf_core::{PageSize, Rotation};
 use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, Edit, PageId, Pt, annot::CONNECTOR_SIZE};
 use sheaf_render::Rect;
 
 use crate::docview::{DocView, State, rotate_rect};
+use crate::tooltip::Tooltip;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
@@ -49,19 +50,66 @@ impl Tool {
         }
     }
 
-    pub fn key(self) -> &'static str {
+    /// Embedded artwork path (see `assets.rs`).
+    pub fn icon(self) -> &'static str {
         match self {
-            Tool::Select => "V",
-            Tool::Note => "S",
-            Tool::Highlight => "U",
-            Tool::FreeText => "T",
-            Tool::Square => "D",
-            Tool::Ellipse => "O",
-            Tool::Line => "L",
-            Tool::Arrow => "A",
-            Tool::Ink => "N",
-            Tool::Tick => "K",
-            Tool::Connector => "I",
+            Tool::Select => "icons/select.svg",
+            Tool::Note => "icons/note.svg",
+            Tool::Highlight => "icons/highlight.svg",
+            Tool::FreeText => "icons/text.svg",
+            Tool::Square => "icons/rectangle.svg",
+            Tool::Ellipse => "icons/ellipse.svg",
+            Tool::Line => "icons/line.svg",
+            Tool::Arrow => "icons/arrow.svg",
+            Tool::Ink => "icons/pencil.svg",
+            Tool::Tick => "icons/tick.svg",
+            Tool::Connector => "icons/connector.svg",
+        }
+    }
+
+    /// Tooltip title; fuller than the undo-history `label`.
+    pub fn title(self) -> &'static str {
+        match self {
+            Tool::Note => "Sticky Note",
+            Tool::FreeText => "Free Text",
+            Tool::Square => "Rectangle",
+            Tool::Tick => "Tickmark",
+            t => t.label(),
+        }
+    }
+
+    /// Tooltip flavor text.
+    pub fn description(self) -> &'static str {
+        match self {
+            Tool::Select => "Select, move, and delete annotations",
+            Tool::Note => "Click to pin a comment to the page",
+            Tool::Highlight => "Drag across text to highlight it",
+            Tool::FreeText => "Drag a box, then type text onto the page",
+            Tool::Square => "Drag to draw a rectangle",
+            Tool::Ellipse => "Drag to draw an ellipse",
+            Tool::Line => "Drag to draw a straight line",
+            Tool::Arrow => "Drag to draw an arrow",
+            Tool::Ink => "Draw freehand",
+            Tool::Tick => "Click to stamp the selected tickmark",
+            Tool::Connector => "Click twice to place a linked pair of markers",
+        }
+    }
+
+    /// The action that selects this tool; its binding is the shortcut shown.
+    pub fn action(self) -> Box<dyn gpui::Action> {
+        use crate::*;
+        match self {
+            Tool::Select => Box::new(ToolSelect),
+            Tool::Note => Box::new(ToolNote),
+            Tool::Highlight => Box::new(ToolHighlight),
+            Tool::FreeText => Box::new(ToolFreeText),
+            Tool::Square => Box::new(ToolSquare),
+            Tool::Ellipse => Box::new(ToolEllipse),
+            Tool::Line => Box::new(ToolLine),
+            Tool::Arrow => Box::new(ToolArrow),
+            Tool::Ink => Box::new(ToolInk),
+            Tool::Tick => Box::new(ToolTick),
+            Tool::Connector => Box::new(ToolConnector),
         }
     }
 
@@ -83,15 +131,15 @@ impl Tool {
 /// The PDFlyer-style tickmark palette.
 pub const TICKS: &[&str] = &["✓", "✗", "F", "T", "C", "R", "V", "X", "?"];
 
-/// Colors offered in the toolbar.
-pub const COLORS: &[[u8; 3]] = &[
-    [255, 230, 0],
-    [220, 40, 40],
-    [0, 120, 255],
-    [0, 150, 0],
-    [255, 140, 0],
-    [160, 60, 220],
-    [20, 20, 20],
+/// Colors offered in the toolbar, with their tooltip names.
+pub const COLORS: &[([u8; 3], &str)] = &[
+    ([255, 230, 0], "Yellow"),
+    ([220, 40, 40], "Red"),
+    ([0, 120, 255], "Blue"),
+    ([0, 150, 0], "Green"),
+    ([255, 140, 0], "Orange"),
+    ([160, 60, 220], "Purple"),
+    ([20, 20, 20], "Black"),
 ];
 
 /// A mouse drag in progress on a page.
@@ -671,21 +719,27 @@ impl DocView {
                 let active = t == tool;
                 div()
                     .id(("tool", t as usize))
-                    .px_2()
-                    .py_0p5()
+                    .size(px(26.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
                     .rounded_sm()
-                    .text_xs()
                     .cursor_pointer()
                     .bg(if active { rgb(0x4a9eff) } else { rgb(0x3a3a3a) })
                     .text_color(if active { rgb(0xffffff) } else { rgb(0xc0c0c0) })
-                    .hover(|s| s.bg(rgb(0x4a4a4a)))
+                    .hover(|s| s.bg(if active { rgb(0x5aaaff) } else { rgb(0x4a4a4a) }))
                     .on_click(cx.listener(move |v, _, _, cx| v.set_tool(t, cx)))
-                    .child(format!("{} ({})", t.label(), t.key()))
+                    .tooltip(Tooltip::for_action(t.title(), t.description(), t.action()))
+                    .child(svg().path(t.icon()).size(px(18.0)).text_color(if active {
+                        rgb(0xffffff)
+                    } else {
+                        rgb(0xc0c0c0)
+                    }))
             })
             .collect();
         let colors: Vec<_> = COLORS
             .iter()
-            .map(|&c| {
+            .map(|&(c, name)| {
                 let active = c == color;
                 div()
                     .id((
@@ -701,6 +755,7 @@ impl DocView {
                     .border_2()
                     .border_color(if active { rgb(0xffffff) } else { rgb(0x1a1a1a) })
                     .cursor_pointer()
+                    .tooltip(Tooltip::text(name))
                     .on_click(cx.listener(move |v, _, _, cx| {
                         v.tool_color = c;
                         cx.notify();
@@ -726,6 +781,11 @@ impl DocView {
                     .cursor_pointer()
                     .bg(if active { rgb(0x4a9eff) } else { rgb(0x3a3a3a) })
                     .hover(|s| s.bg(rgb(0x4a4a4a)))
+                    .tooltip(Tooltip::for_action(
+                        format!("Tickmark {g}"),
+                        "Click on the page to stamp this mark",
+                        Box::new(crate::ToolTick),
+                    ))
                     .on_click(cx.listener(move |v, _, _, cx| {
                         v.tick_glyph = g.to_string();
                         v.set_tool(Tool::Tick, cx);

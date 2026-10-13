@@ -295,6 +295,10 @@ impl TextArea {
 
     /// Element-relative position of a byte offset, from the last layout.
     fn position_for_offset(&self, offset: usize, line_height: Pixels) -> Option<Point<Pixels>> {
+        // An empty area's layout is the placeholder's, not the content's.
+        if self.content.is_empty() {
+            return Some(point(px(0.0), px(0.0)));
+        }
         let para = self.last_layout.iter().rev().find(|p| p.start <= offset)?;
         let local = offset - para.start;
         let p = para.line.position_for_index(local, line_height)?;
@@ -303,6 +307,9 @@ impl TextArea {
 
     /// Byte offset nearest an element-relative position.
     fn offset_for_position(&self, pos: Point<Pixels>, line_height: Pixels) -> Option<usize> {
+        if self.content.is_empty() {
+            return Some(0);
+        }
         let last = self.last_layout.last()?;
         if pos.y >= last.top + last.line.size(line_height).height {
             return Some(self.content.len());
@@ -317,7 +324,13 @@ impl TextArea {
             .line
             .closest_index_for_position(point(pos.x, pos.y - para.top), line_height)
             .unwrap_or_else(|ix| ix);
-        Some(para.start + local.min(para.line.len()))
+        // The layout is from the last paint and may be stale; never hand
+        // back an offset past the end or inside a char.
+        let mut ix = (para.start + local.min(para.line.len())).min(self.content.len());
+        while !self.content.is_char_boundary(ix) {
+            ix -= 1;
+        }
+        Some(ix)
     }
 
     fn index_for_mouse_position(&self, position: Point<Pixels>, window: &Window) -> usize {
@@ -466,7 +479,7 @@ impl EntityInputHandler for TextArea {
         self.selected_range = new_selected_range_utf16
             .as_ref()
             .map(|range_utf16| self.range_from_utf16(range_utf16))
-            .map(|new_range| new_range.start + range.start..new_range.end + range.end)
+            .map(|new_range| new_range.start + range.start..new_range.end + range.start)
             .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
         cx.notify();
     }

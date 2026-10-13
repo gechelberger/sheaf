@@ -6,9 +6,9 @@ Each command lives at `<command>/icon.svg`. Transparent backgrounds and
 disabled button colors. Designed for 20–32px display.
 
 Open `preview.html` in a browser to review the set on light and dark surfaces
-at 16, 20, 24, and 32px. These are assets only; the app still uses its existing labels.
-When integrating, retain the command label and shortcut as a tooltip and an
-accessible button name. Inline SVG inherits CSS color; an SVG loaded through
+at 16, 20, 24, and 32px. The markup toolbar uses the tool icons, embedded via
+`crates/sheaf-app/src/assets.rs`; add an entry there when wiring up another one.
+Keep the command label and shortcut as a tooltip and an accessible button name. Inline SVG inherits CSS color; an SVG loaded through
 an image element does not inherit the parent element's color.
 
 | Directory | Command | Rust action |
