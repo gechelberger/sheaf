@@ -390,6 +390,8 @@ pub enum DocEvent {
     Edited {
         label: String,
         outcome: EditOutcome,
+        /// The plugin whose edits these were, if any.
+        plugin: Option<String>,
     },
     Saved {
         path: PathBuf,
@@ -442,6 +444,9 @@ pub struct DocView {
     pub(crate) tool: Tool,
     pub(crate) tool_color: [u8; 3],
     pub(crate) tick_glyph: String,
+    /// Set while a plugin's edits are applied, so its own edits aren't
+    /// reported back to it.
+    pub(crate) edit_source: Option<String>,
     /// Rows of plugin panels for this document, by `<plugin>.<panel>`.
     #[cfg(feature = "plugins")]
     pub(crate) plugin_panels: HashMap<String, crate::plugin_panel::PluginPanelState>,
@@ -514,6 +519,7 @@ impl DocView {
             tool: Tool::Select,
             tool_color: [255, 230, 0],
             tick_glyph: "✓".into(),
+            edit_source: None,
             #[cfg(feature = "plugins")]
             plugin_panels: HashMap::new(),
         };
@@ -1017,7 +1023,12 @@ impl DocView {
             cx.emit(DocEvent::SelectionChanged);
         }
         self.schedule_autosave(cx);
-        cx.emit(DocEvent::Edited { label, outcome });
+        let plugin = self.edit_source.clone();
+        cx.emit(DocEvent::Edited {
+            label,
+            outcome,
+            plugin,
+        });
         cx.notify();
     }
 

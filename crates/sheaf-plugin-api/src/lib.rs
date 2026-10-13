@@ -37,5 +37,5 @@ pub mod bindings {
     });
 }
 
-pub use bindings::sheaf::plugin::{document, edits, log, text, types, ui};
+pub use bindings::sheaf::plugin::{document, edits, log, storage, text, types, ui};
 pub use bindings::{Guest, export};

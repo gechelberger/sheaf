@@ -287,6 +287,12 @@ pub struct Workspace {
     /// A plugin's `ui.show-form`, while open.
     #[cfg(feature = "plugins")]
     plugin_form: Option<(Entity<crate::plugin_form::PluginForm>, Subscription)>,
+    /// Plugins > Manage Plugins…, while open.
+    #[cfg(feature = "plugins")]
+    plugin_manager: Option<(Entity<crate::plugin_manager::PluginManager>, Subscription)>,
+    /// Each open document's events, forwarded to plugins.
+    #[cfg(feature = "plugins")]
+    doc_subs: Vec<(gpui::EntityId, Subscription)>,
     /// File/Edit/View… in the title bar; None where the OS draws menus.
     menu_bar: Option<Entity<MenuBar>>,
     /// Bounds of the dock area from the last frame, for splitter math.
@@ -342,6 +348,10 @@ impl Workspace {
             ocr_dialog: None,
             #[cfg(feature = "plugins")]
             plugin_form: None,
+            #[cfg(feature = "plugins")]
+            plugin_manager: None,
+            #[cfg(feature = "plugins")]
+            doc_subs: Vec::new(),
             menu_bar: frame::draws_menu_bar().then(|| cx.new(|cx| MenuBar::new(window, cx))),
             area: gpui::Bounds::default(),
             timing,
@@ -357,8 +367,10 @@ impl Workspace {
             _ => {}
         }
         for p in paths {
-            this.open_path(p, cx);
+            this.open_path(p, window, cx);
         }
+        #[cfg(feature = "plugins")]
+        crate::plugins::ask_consent(window, cx);
         this.password = None;
         if let (Some(q), Some(doc)) = (find, this.docs.first().cloned()) {
             doc.update(cx, |d, cx| d.set_initial_query(q, cx));
@@ -483,7 +495,7 @@ impl Workspace {
         cx.notify();
     }
 
-    pub fn open_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+    pub fn open_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(ix) = self.position_of(&path, cx) {
             self.active = ix;
             cx.notify();
@@ -492,6 +504,7 @@ impl Workspace {
         let (timing, launched) = (self.timing, self.launched);
         let password = self.password.clone();
         let doc = cx.new(|cx| DocView::new(path, password, timing, launched, cx));
+        self.watch(&doc, window, cx);
         self.docs.push(doc);
         self.active = self.docs.len() - 1;
         cx.notify();
@@ -561,15 +574,38 @@ impl Workspace {
         // Subscriptions hold the view weakly; keep it alive until the event
         // has been delivered.
         cx.defer(move |_| drop(doc));
-        self.detach(ix, window, cx);
+        self.detach(ix, true, window, cx);
     }
 
-    /// Take a tab out of this window (closed, or moved to another).
-    fn detach(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+    /// Forward a document's events to the plugins that want them.
+    #[cfg(feature = "plugins")]
+    fn watch(&mut self, doc: &Entity<DocView>, window: &mut Window, cx: &mut Context<Self>) {
+        let id = doc.entity_id();
+        let sub = cx.subscribe_in(doc, window, move |ws, doc, ev: &DocEvent, window, cx| {
+            crate::plugins::dispatch_event(doc, ev, window, cx);
+            if *ev == DocEvent::Closed {
+                ws.doc_subs.retain(|(d, _)| *d != id);
+            }
+        });
+        self.doc_subs.push((id, sub));
+    }
+
+    #[cfg(not(feature = "plugins"))]
+    fn watch(&mut self, _: &Entity<DocView>, _: &mut Window, _: &mut Context<Self>) {}
+
+    /// Take a tab out of this window (closed, or moved to another). A
+    /// closing tab's event subscription stays until `Closed` is delivered.
+    fn detach(&mut self, ix: usize, closing: bool, window: &mut Window, cx: &mut Context<Self>) {
         if ix >= self.docs.len() {
             return;
         }
-        self.docs.remove(ix);
+        let doc = self.docs.remove(ix);
+        #[cfg(feature = "plugins")]
+        if !closing {
+            self.doc_subs.retain(|(d, _)| *d != doc.entity_id());
+        }
+        #[cfg(not(feature = "plugins"))]
+        let _ = (doc, closing);
         if ix < self.active {
             self.active -= 1;
         }
@@ -632,6 +668,49 @@ impl Workspace {
             action: a.action.clone(),
         };
         crate::plugins::run(plugin, call, self.active_doc().cloned(), window, cx);
+    }
+
+    /// Pick up changed menus in the title bar.
+    #[cfg_attr(not(feature = "plugins"), allow(dead_code))]
+    pub fn reload_menus(&mut self, cx: &mut Context<Self>) {
+        if let Some(bar) = &self.menu_bar {
+            bar.update(cx, |b, cx| b.reload(cx));
+        }
+        cx.notify();
+    }
+
+    /// Plugins > Manage Plugins…: open the manager (or close it).
+    #[cfg(feature = "plugins")]
+    fn toggle_plugin_manager(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::plugin_manager::{PluginManager, PluginManagerEvent};
+        if self.plugin_manager.take().is_some() {
+            self.focus_active(window, cx);
+            cx.notify();
+            return;
+        }
+        let m = cx.new(|cx| PluginManager::new(window, cx));
+        let sub = cx.subscribe_in(&m, window, |ws, _, ev: &PluginManagerEvent, window, cx| {
+            match ev {
+                PluginManagerEvent::Dismiss => {
+                    ws.plugin_manager = None;
+                    ws.focus_active(window, cx);
+                }
+            }
+            cx.notify();
+        });
+        self.plugin_manager = Some((m, sub));
+        cx.notify();
+    }
+
+    #[cfg(not(feature = "plugins"))]
+    fn toggle_plugin_manager(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        drop(window.prompt(
+            PromptLevel::Info,
+            "This build of sheaf has no plugin support",
+            None,
+            &["OK"],
+            cx,
+        ));
     }
 
     /// Carry out a plugin's `ui` request for a call on `doc`.
@@ -881,6 +960,7 @@ impl Workspace {
                 if ws.closing {
                     return false;
                 }
+                ws.watch(&doc, window, cx);
                 ws.docs.push(doc);
                 ws.active = ws.docs.len() - 1;
                 ws.focus_active(window, cx);
@@ -892,7 +972,7 @@ impl Workspace {
         if !moved {
             return;
         }
-        self.detach(ix, window, cx);
+        self.detach(ix, false, window, cx);
         if self.docs.is_empty() {
             self.request_close(window, cx);
         }
@@ -1401,6 +1481,9 @@ impl Render for Workspace {
             .on_action(
                 cx.listener(|ws, a: &PanelAction, window, cx| ws.run_panel_action(a, window, cx)),
             )
+            .on_action(cx.listener(|ws, _: &crate::ManagePlugins, window, cx| {
+                ws.toggle_plugin_manager(window, cx)
+            }))
             .on_action(
                 cx.listener(|ws, _: &CommandPalette, window, cx| ws.toggle_palette(window, cx)),
             )
@@ -1485,11 +1568,17 @@ impl Render for Workspace {
                     .map(|(d, _)| deferred(d.clone()).with_priority(2)),
             );
         #[cfg(feature = "plugins")]
-        let content = content.children(
-            self.plugin_form
-                .as_ref()
-                .map(|(f, _)| deferred(f.clone()).with_priority(3)),
-        );
+        let content = content
+            .children(
+                self.plugin_manager
+                    .as_ref()
+                    .map(|(m, _)| deferred(m.clone()).with_priority(2)),
+            )
+            .children(
+                self.plugin_form
+                    .as_ref()
+                    .map(|(f, _)| deferred(f.clone()).with_priority(3)),
+            );
         frame::client_side_decorations(content, window, cx)
     }
 }
@@ -1514,7 +1603,9 @@ fn open_paths(
         } else if separate_windows {
             Workspace::new_window(vec![p], cx);
         } else {
-            origin.update(cx, |ws, _, cx| ws.open_path(p, cx)).ok();
+            origin
+                .update(cx, |ws, window, cx| ws.open_path(p, window, cx))
+                .ok();
         }
     }
     if !separate_windows {

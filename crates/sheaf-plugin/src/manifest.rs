@@ -24,7 +24,7 @@
 //! stamps = ["Agreed to return"]
 //! ```
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
 use serde::Deserialize;
@@ -68,6 +68,9 @@ pub struct Manifest {
     pub marks: MarksDecl,
     #[serde(default)]
     pub panels: Vec<PanelDecl>,
+    /// Document events to receive through `on-event`.
+    #[serde(default)]
+    pub events: Vec<EventKind>,
     #[serde(default)]
     pub permissions: Permissions,
 }
@@ -118,7 +121,7 @@ pub struct PanelDecl {
 }
 
 /// What the plugin may reach outside the document. Nothing by default.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Permissions {
     /// Directories it may read (`~` expands to the home directory).
@@ -126,6 +129,75 @@ pub struct Permissions {
     /// Directories it may read and write.
     pub write: Vec<String>,
     pub network: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EventKind {
+    Opened,
+    Edited,
+    Saved,
+    SelectionChanged,
+    Closed,
+}
+
+/// Permissions as concrete directories.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Grants {
+    pub read: Vec<PathBuf>,
+    pub write: Vec<PathBuf>,
+    pub network: bool,
+}
+
+impl Grants {
+    pub fn is_empty(&self) -> bool {
+        self.read.is_empty() && self.write.is_empty() && !self.network
+    }
+
+    /// One line per permission, for asking the user.
+    pub fn describe(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        out.extend(
+            self.read
+                .iter()
+                .map(|d| format!("Read files in {}", d.display())),
+        );
+        out.extend(
+            self.write
+                .iter()
+                .map(|d| format!("Read and change files in {}", d.display())),
+        );
+        if self.network {
+            out.push("Use the network".into());
+        }
+        out
+    }
+}
+
+impl Permissions {
+    /// The directories this asks for, with `~` expanded.
+    pub fn grants(&self) -> Grants {
+        Grants {
+            read: self.read.iter().map(|d| expand_home(d)).collect(),
+            write: self.write.iter().map(|d| expand_home(d)).collect(),
+            network: self.network,
+        }
+    }
+}
+
+fn expand_home(p: &str) -> PathBuf {
+    let home = || {
+        std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(PathBuf::from)
+    };
+    match p.strip_prefix("~") {
+        Some(rest) if rest.is_empty() || rest.starts_with(['/', '\\']) => match home() {
+            Some(h) => h.join(rest.trim_start_matches(['/', '\\'])),
+            None => PathBuf::from(p),
+        },
+        _ => PathBuf::from(p),
+    }
 }
 
 impl Manifest {
@@ -184,6 +256,12 @@ impl Manifest {
         }
         for p in &self.presets {
             regex::Regex::new(&p.regex).with_context(|| format!("preset {:?}", p.name))?;
+        }
+        for d in self.permissions.read.iter().chain(&self.permissions.write) {
+            let p = expand_home(d);
+            if !p.is_absolute() {
+                bail!("permission directory {d:?} must be absolute (or start with ~)");
+            }
         }
         let mut panels = Vec::new();
         for p in &self.panels {

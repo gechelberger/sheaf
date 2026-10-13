@@ -683,6 +683,12 @@ enum Msg {
         page: u32,
         reply: oneshot::Sender<Result<String>>,
     },
+    SearchPage {
+        page: u32,
+        query: String,
+        match_case: bool,
+        reply: oneshot::Sender<Result<Vec<SearchHit>>>,
+    },
     PatternPage {
         page: u32,
         re: std::sync::Arc<regex::Regex>,
@@ -818,6 +824,24 @@ impl RenderHandle {
         rx
     }
 
+    /// Every occurrence of `query` on one page, like Find but for one page
+    /// and without replacing a running search.
+    pub fn search_page(
+        &self,
+        page: u32,
+        query: String,
+        match_case: bool,
+    ) -> oneshot::Receiver<Result<Vec<SearchHit>>> {
+        let (tx, rx) = oneshot::channel();
+        self.send(Msg::SearchPage {
+            page,
+            query,
+            match_case,
+            reply: tx,
+        });
+        rx
+    }
+
     /// Every match of `re` on one page, with its boxes. Unlike
     /// [`pattern_search`](Self::pattern_search) this answers once, for one
     /// page, and doesn't replace a running document-wide search.
@@ -947,6 +971,14 @@ fn worker_loop(engine: impl Renderer, rx: mpsc::Receiver<Msg>) {
                 }
                 Msg::Text { page, reply } => {
                     let _ = reply.send(engine.page_text(PageIndex(page)));
+                }
+                Msg::SearchPage {
+                    page,
+                    query,
+                    match_case,
+                    reply,
+                } => {
+                    let _ = reply.send(engine.search_page(PageIndex(page), &query, match_case));
                 }
                 Msg::PatternPage { page, re, reply } => {
                     let _ = reply.send(engine.pattern_search_page(PageIndex(page), &re));

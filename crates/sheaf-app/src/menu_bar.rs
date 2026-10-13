@@ -73,6 +73,14 @@ impl MenuBar {
         }
     }
 
+    /// Pick up changed menus (a plugin turned on or off).
+    #[cfg_attr(not(feature = "plugins"), allow(dead_code))]
+    pub fn reload(&mut self, cx: &mut Context<Self>) {
+        self.menus = cx.get_menus().unwrap_or_default();
+        self.restore = None;
+        self.reset(cx);
+    }
+
     /// Alt tap / F10: highlight the first title, or close if already active.
     pub fn toggle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.active.is_some() {

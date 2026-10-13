@@ -6462,6 +6462,7 @@ dependencies = [
  "sheaf-ui",
  "smallvec",
  "unicode-segmentation",
+ "zip 9.0.2",
 ]
 
 [[package]]
@@ -7032,7 +7033,7 @@ dependencies = [
  "libc",
  "reqwest",
  "thiserror 2.0.21",
- "zip",
+ "zip 8.6.0",
 ]
 
 [[package]]
@@ -9455,6 +9456,20 @@ dependencies = [
  "memchr",
  "typed-path",
  "zopfli",
+]
+
+[[package]]
+name = "zip"
+version = "9.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e2fc56a6707efb066c40aead2409ebb1224e6dde24a074e9fbc78ced500507b"
+dependencies = [
+ "crc32fast",
+ "flate2",
+ "indexmap",
+ "memchr",
+ "nix",
+ "typed-path",
 ]
 
 [[package]]

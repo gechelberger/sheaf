@@ -108,6 +108,19 @@ interface types {
     record annot-ref { page: page-id, id: annot-id }
     record connector-pair { a: page-annot, b: page-annot }
 
+    /// Something that happened to a document, for plugins that subscribe
+    /// (manifest `events`).
+    variant doc-event {
+        opened,
+        /// The document changed: an edit, an undo or a redo. The undo
+        /// label. Not sent for the plugin's own edits.
+        edited(string),
+        /// Saved, to this path.
+        saved(string),
+        selection-changed,
+        closed,
+    }
+
     /// One change to the document; mirrors sheaf's own edits.
     variant edit {
         move-pages(move-pages),
@@ -142,12 +155,29 @@ interface document {
 
 /// Page text, including OCR layers not yet saved.
 interface text {
-    use types.{page-id, text-match};
+    use types.{page-id, text-match, box2};
 
     page-text: func(page: page-id) -> result<string, string>;
     /// Every match of a regular expression (Rust `regex` syntax) on one
     /// page, with its position.
     pattern-search: func(page: page-id, regex: string) -> result<list<text-match>, string>;
+    /// Every occurrence of `query`, like Find.
+    search: func(page: page-id, query: string, match-case: bool) -> result<list<text-match>, string>;
+    /// Boxes of the text under `rect`, merged per line.
+    text-boxes: func(page: page-id, rect: box2) -> result<list<box2>, string>;
+}
+
+/// A small per-plugin store that survives restarts, and the plugin's
+/// settings. Kept in `<config>/plugin-data/<id>/`.
+interface storage {
+    get: func(key: string) -> option<string>;
+    /// Fails when the store would pass its size limit (4 MiB).
+    set: func(key: string, value: string) -> result<_, string>;
+    delete: func(key: string);
+    keys: func() -> list<string>;
+    /// The plugin's settings: the JSON in its `settings.json`, which the
+    /// user edits. "{}" when there is none.
+    settings: func() -> string;
 }
 
 /// Changes to the document. Each `submit` becomes one undo step, applied
@@ -241,10 +271,13 @@ interface log {
 }
 
 world plugin {
+    use types.{doc-event};
+
     import document;
     import text;
     import edits;
     import ui;
+    import storage;
     import log;
 
     /// Called once after loading.
@@ -255,4 +288,7 @@ world plugin {
     /// The user clicked `action` on row `row` of `panel`. Edits and UI
     /// calls work as in `run-command`.
     export panel-action: func(panel: string, row: string, action: string) -> result<_, string>;
+    /// A document event the manifest subscribes to. Edits and UI calls work
+    /// as in `run-command`.
+    export on-event: func(event: doc-event) -> result<_, string>;
 }

@@ -1,8 +1,9 @@
 //! Exercises the host: each command tests one behavior.
 
+use sheaf_plugin_api::types::DocEvent;
 use sheaf_plugin_api::types::{Edit, OutlineInsert};
 use sheaf_plugin_api::ui::{self, Field, FieldKind, FieldValue, Form, PanelRow, RowAction};
-use sheaf_plugin_api::{Guest, document, edits, log, text};
+use sheaf_plugin_api::{Guest, document, edits, log, storage, text};
 
 struct TestPlugin;
 
@@ -124,6 +125,38 @@ impl Guest for TestPlugin {
                 ui::notice(&format!("{} matches", rows.len()));
                 Ok(())
             }
+            // Storage: "k=v" sets, "k" reads (the answer comes back as the error).
+            "store" => {
+                let arg = args_json.unwrap_or_default();
+                match arg.split_once('=') {
+                    Some((k, v)) => storage::set(k, v),
+                    None => Err(format!("{:?}", storage::get(&arg))),
+                }
+            }
+            "settings" => Err(storage::settings()),
+            "events" => Err(storage::get("events").unwrap_or_default()),
+            "write-file" => {
+                let path = args_json.unwrap_or_default();
+                match std::fs::write(&path, "x") {
+                    Ok(()) => Err("wrote".into()),
+                    Err(e) => Err(format!("denied: {e}")),
+                }
+            }
+            "find" => {
+                let q = args_json.unwrap_or_default();
+                let p = document::pages().first().map(|p| p.id).ok_or("no pages")?;
+                let hits = text::search(p, &q, false)?;
+                let boxes = text::text_boxes(
+                    p,
+                    sheaf_plugin_api::types::Box2 {
+                        x: 0.0,
+                        y: 0.0,
+                        w: 1000.0,
+                        h: 1000.0,
+                    },
+                )?;
+                Err(format!("{} hits, {} boxes", hits.len(), boxes.len()))
+            }
             "fail" => Err("nope".into()),
             "trap" => panic!("boom"),
             "spin" => {
@@ -149,6 +182,23 @@ impl Guest for TestPlugin {
 
     fn panel_action(panel: String, row: String, action: String) -> Result<(), String> {
         Err(format!("{panel}/{row}/{action}"))
+    }
+
+    /// Append each event to storage, for the test to read back.
+    fn on_event(event: DocEvent) -> Result<(), String> {
+        let name = match event {
+            DocEvent::Opened => "opened".to_string(),
+            DocEvent::Edited(l) => format!("edited:{l}"),
+            DocEvent::Saved(p) => format!("saved:{p}"),
+            DocEvent::SelectionChanged => "selection".to_string(),
+            DocEvent::Closed => "closed".to_string(),
+        };
+        let mut all = storage::get("events").unwrap_or_default();
+        if !all.is_empty() {
+            all.push(',');
+        }
+        all.push_str(&name);
+        storage::set("events", &all)
     }
 }
 

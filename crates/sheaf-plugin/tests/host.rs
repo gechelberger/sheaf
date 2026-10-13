@@ -13,8 +13,8 @@ use sheaf_core::PageSize;
 use sheaf_doc::{Document, Edit, FixedCount, SourceId, SourceInfo};
 use sheaf_plugin::ui::{FieldAnswer, FieldKind, FieldValue, Form, PanelRow, Ui};
 use sheaf_plugin::{
-    Call, CallContext, CallOutput, DocContext, Limits, Manifest, Plugin, PluginError, Runtime,
-    Status, TextMatch, TextSource,
+    Call, CallContext, CallOutput, DocContext, DocEvent, Grants, Limits, LoadOptions, Manifest,
+    Plugin, PluginError, Runtime, Status, TextMatch, TextSource,
 };
 
 fn workspace_root() -> PathBuf {
@@ -68,7 +68,9 @@ fn plugin_dir(name: &str) -> PathBuf {
 fn load(name: &str, limits: Limits) -> Plugin {
     let dir = plugin_dir(name);
     let manifest = Manifest::load(&dir).unwrap();
-    Runtime::new(limits).unwrap().load(dir, manifest)
+    Runtime::new(limits)
+        .unwrap()
+        .load(dir, manifest, LoadOptions::default())
 }
 
 /// Pattern search over plain text, with a made-up box per match.
@@ -100,6 +102,28 @@ impl TextSource for FakeText {
         re: &Arc<regex::Regex>,
     ) -> Result<Vec<TextMatch>> {
         Ok(search(&self.page_text(source, index)?, re))
+    }
+
+    fn search(
+        &self,
+        source: SourceId,
+        index: u32,
+        query: &str,
+        match_case: bool,
+    ) -> Result<Vec<TextMatch>> {
+        let re = regex::RegexBuilder::new(&regex::escape(query))
+            .case_insensitive(!match_case)
+            .build()?;
+        Ok(search(&self.page_text(source, index)?, &re))
+    }
+
+    fn text_boxes(
+        &self,
+        _source: SourceId,
+        _index: u32,
+        rect: sheaf_doc::Box2,
+    ) -> Result<Vec<sheaf_doc::Box2>> {
+        Ok(vec![rect])
     }
 }
 
@@ -307,7 +331,9 @@ fn a_missing_wasm_fails_to_load() {
     let dir = plugin_dir("missing");
     std::fs::remove_file(dir.join("plugin.wasm")).unwrap();
     let manifest = Manifest::load(&dir).unwrap();
-    let p = Runtime::new(Limits::default()).unwrap().load(dir, manifest);
+    let p = Runtime::new(Limits::default())
+        .unwrap()
+        .load(dir, manifest, LoadOptions::default());
     let err = run(&p, "bookmark", None, CallContext::default()).unwrap_err();
     assert!(matches!(err, PluginError::Unavailable(m) if m.contains("plugin.wasm")));
     assert!(matches!(p.status(), Status::Failed(_)));
@@ -364,6 +390,28 @@ impl TextSource for Pages {
     ) -> Result<Vec<TextMatch>> {
         Ok(search(&self.page_text(source, index)?, re))
     }
+
+    fn search(
+        &self,
+        source: SourceId,
+        index: u32,
+        query: &str,
+        match_case: bool,
+    ) -> Result<Vec<TextMatch>> {
+        let re = regex::RegexBuilder::new(&regex::escape(query))
+            .case_insensitive(!match_case)
+            .build()?;
+        Ok(search(&self.page_text(source, index)?, &re))
+    }
+
+    fn text_boxes(
+        &self,
+        _source: SourceId,
+        _index: u32,
+        rect: sheaf_doc::Box2,
+    ) -> Result<Vec<sheaf_doc::Box2>> {
+        Ok(vec![rect])
+    }
 }
 
 #[test]
@@ -371,9 +419,11 @@ fn tax_form_bookmarks_example() {
     let src = workspace_root().join("plugins/tax-form-bookmarks");
     let wasm = build_plugin(&src, "tax_form_bookmarks.wasm");
     let dir = install("tax-form-bookmarks", &src, &wasm);
-    let p = Runtime::new(Limits::default())
-        .unwrap()
-        .load(dir.clone(), Manifest::load(&dir).unwrap());
+    let p = Runtime::new(Limits::default()).unwrap().load(
+        dir.clone(),
+        Manifest::load(&dir).unwrap(),
+        LoadOptions::default(),
+    );
     let texts = Pages(vec![
         "Form 1040 U.S. Individual Income Tax Return",
         "Form 1040 (2025) Page 2",
@@ -553,9 +603,11 @@ fn amount_crossref_bundled_plugin() {
     let src = workspace_root().join("plugins/amount-crossref");
     let wasm = build_plugin(&src, "amount_crossref.wasm");
     let dir = install("amount-crossref", &src, &wasm);
-    let p = Runtime::new(Limits::default())
-        .unwrap()
-        .load(dir.clone(), Manifest::load(&dir).unwrap());
+    let p = Runtime::new(Limits::default()).unwrap().load(
+        dir.clone(),
+        Manifest::load(&dir).unwrap(),
+        LoadOptions::default(),
+    );
     let text: Arc<dyn TextSource> = Arc::new(Pages(vec![
         "Schedule K-1 box 1 ordinary income 12,345.67",
         "Form 1040 line 8 $12,345.67 and fee 99.00 and 2,000.00",
@@ -646,4 +698,101 @@ fn amount_crossref_bundled_plugin() {
     let rows = ui.panels.lock().unwrap().last().unwrap().1.clone();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].detail, "page 2 ⇄ page 3");
+}
+
+fn load_with(name: &str, opts: LoadOptions) -> Plugin {
+    let dir = plugin_dir(name);
+    let manifest = Manifest::load(&dir).unwrap();
+    Runtime::new(Limits::default())
+        .unwrap()
+        .load(dir, manifest, opts)
+}
+
+fn scratch(name: &str) -> PathBuf {
+    let d = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+fn answer(p: &Plugin, cmd: &str, args: Option<&str>) -> String {
+    match run(p, cmd, args, CallContext::default()) {
+        Err(PluginError::Failed(m)) => m,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn storage_survives_a_restart() {
+    let data = scratch("storage-data");
+    let opts = LoadOptions {
+        data_dir: Some(data.clone()),
+        ..LoadOptions::default()
+    };
+    let p = load_with("storage", opts.clone());
+    run(&p, "store", Some("client=Acme"), CallContext::default()).unwrap();
+    drop(p);
+    let p = load_with("storage", opts);
+    assert_eq!(answer(&p, "store", Some("client")), r#"Some("Acme")"#);
+    assert_eq!(answer(&p, "settings", None), "{}");
+    std::fs::write(data.join("settings.json"), r#"{"x":1}"#).unwrap();
+    assert_eq!(answer(&p, "settings", None), r#"{"x":1}"#);
+}
+
+#[test]
+fn events_arrive_through_on_event() {
+    let p = load("events", Limits::default());
+    for e in [
+        DocEvent::Opened,
+        DocEvent::Edited("Rotate page".into()),
+        DocEvent::Closed,
+    ] {
+        block_on(p.call(Call::Event(e), CallContext::default()))
+            .unwrap()
+            .unwrap();
+    }
+    assert_eq!(
+        answer(&p, "events", None),
+        "opened,edited:Rotate page,closed"
+    );
+    let m = p.manifest();
+    assert!(m.events.contains(&sheaf_plugin::EventKind::Edited));
+    assert!(!m.events.contains(&sheaf_plugin::EventKind::Saved));
+}
+
+#[test]
+fn granted_directories_are_reachable_and_only_as_granted() {
+    let ro = scratch("grant-ro");
+    let rw = scratch("grant-rw");
+    let outside = scratch("grant-outside");
+    for d in [&ro, &rw, &outside] {
+        std::fs::write(d.join("f.txt"), "hello").unwrap();
+    }
+    let p = load_with(
+        "grants",
+        LoadOptions {
+            grants: Grants {
+                read: vec![ro.clone()],
+                write: vec![rw.clone()],
+                network: false,
+            },
+            ..LoadOptions::default()
+        },
+    );
+    let path = |d: &Path| d.join("f.txt").to_string_lossy().replace('\\', "/");
+    assert_eq!(answer(&p, "read-file", Some(&path(&ro))), "read 5 bytes");
+    assert_eq!(answer(&p, "read-file", Some(&path(&rw))), "read 5 bytes");
+    assert!(answer(&p, "read-file", Some(&path(&outside))).starts_with("denied"));
+    assert!(answer(&p, "write-file", Some(&path(&ro))).starts_with("denied"));
+    assert_eq!(answer(&p, "write-file", Some(&path(&rw))), "wrote");
+    assert!(answer(&p, "write-file", Some(&path(&outside))).starts_with("denied"));
+    assert_eq!(std::fs::read_to_string(rw.join("f.txt")).unwrap(), "x");
+}
+
+#[test]
+fn search_and_text_boxes() {
+    let p = load("find", Limits::default());
+    let d = doc(1);
+    let err = run(&p, "find", Some("FORM"), ctx(&d)).unwrap_err();
+    assert_eq!(err, PluginError::Failed("1 hits, 1 boxes".into()));
 }

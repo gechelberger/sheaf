@@ -222,6 +222,47 @@ impl CommandRegistry {
         Ok(())
     }
 
+    /// Take out every command `plugin` registered (ids `<plugin>::…`) and
+    /// their menu items, along with submenus and menus left empty and the
+    /// separators that set them off.
+    pub fn remove_plugin(&mut self, plugin: &str) {
+        let prefix = format!("{plugin}::");
+        self.commands.retain(|c| !c.id.starts_with(&prefix));
+        self.index = self
+            .commands
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (c.id.clone(), i))
+            .collect();
+        fn prune(entries: &mut Vec<MenuEntry>, prefix: &str) {
+            entries.retain_mut(|e| match e {
+                MenuEntry::Command { id, .. } => !id.starts_with(prefix),
+                MenuEntry::Separator => true,
+                MenuEntry::Submenu(m) => {
+                    prune(&mut m.entries, prefix);
+                    !m.entries.is_empty()
+                }
+            });
+            // No separator first, last, or next to another.
+            let mut out: Vec<MenuEntry> = Vec::with_capacity(entries.len());
+            for e in entries.drain(..) {
+                let sep = matches!(e, MenuEntry::Separator);
+                if sep && matches!(out.last(), None | Some(MenuEntry::Separator)) {
+                    continue;
+                }
+                out.push(e);
+            }
+            if matches!(out.last(), Some(MenuEntry::Separator)) {
+                out.pop();
+            }
+            *entries = out;
+        }
+        for m in &mut self.menus {
+            prune(&mut m.entries, &prefix);
+        }
+        self.menus.retain(|m| !m.entries.is_empty());
+    }
+
     /// Put a command in the menu at `path`, creating menus as needed. Names
     /// match existing menus ignoring case and `&` markers. A new top-level
     /// menu goes before Window; a new submenu goes at the end of its parent,
@@ -414,6 +455,29 @@ mod tests {
             Err(RegistryError::BadMenuPath("Tax//Y".into()))
         );
         assert!(reg.get("tax::x").is_none(), "nothing registered on error");
+    }
+
+    #[test]
+    fn removing_a_plugin_restores_the_menus() {
+        let before: Vec<Vec<String>> = CommandRegistry::builtin()
+            .menus()
+            .iter()
+            .map(|m| names(&m.entries))
+            .collect();
+        let mut reg = CommandRegistry::builtin();
+        reg.add_plugin_command("wp", "tick", "Tick", "WP", Some("Tools/Workpapers"))
+            .unwrap();
+        reg.add_plugin_command("wp", "own", "Own", "WP", Some("Workpapers"))
+            .unwrap();
+        reg.add_plugin_command("tax", "scan", "Scan", "Tax", Some("Tools/Tax"))
+            .unwrap();
+        reg.remove_plugin("wp");
+        assert!(reg.get("wp::tick").is_none());
+        assert!(reg.get("tax::scan").is_some());
+        assert!(reg.get("docview::Save").is_some(), "index rebuilt");
+        reg.remove_plugin("tax");
+        let after: Vec<Vec<String>> = reg.menus().iter().map(|m| names(&m.entries)).collect();
+        assert_eq!(after, before);
     }
 
     #[test]

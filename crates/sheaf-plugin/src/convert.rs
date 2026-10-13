@@ -5,9 +5,9 @@ use sheaf_doc::{
     Annot, AnnotId, AnnotKind, Box2, Edit, OutlineId, OutlineNode, PageId, PageRef, Pt, Snapshot,
 };
 
-use crate::runtime::TextMatch;
 use crate::runtime::bindings::sheaf::plugin::types as w;
 use crate::runtime::bindings::sheaf::plugin::ui as wu;
+use crate::runtime::{DocEvent, TextMatch};
 use crate::ui;
 
 pub fn rotation_to_wit(r: Rotation) -> w::Rotation {
@@ -48,7 +48,7 @@ fn pt_from_wit(p: w::Pt) -> Pt {
     Pt { x: p.x, y: p.y }
 }
 
-fn box_to_wit(b: Box2) -> w::Box2 {
+pub fn box_to_wit(b: Box2) -> w::Box2 {
     w::Box2 {
         x: b.x,
         y: b.y,
@@ -57,7 +57,7 @@ fn box_to_wit(b: Box2) -> w::Box2 {
     }
 }
 
-fn box_from_wit(b: w::Box2) -> Box2 {
+pub fn box_from_wit(b: w::Box2) -> Box2 {
     Box2 {
         x: b.x,
         y: b.y,
@@ -258,6 +258,16 @@ pub fn edit_from_wit(e: w::Edit) -> Edit {
             a: page_annot(c.a),
             b: page_annot(c.b),
         },
+    }
+}
+
+pub fn event_to_wit(e: &DocEvent) -> w::DocEvent {
+    match e {
+        DocEvent::Opened => w::DocEvent::Opened,
+        DocEvent::Edited(l) => w::DocEvent::Edited(l.clone()),
+        DocEvent::Saved(p) => w::DocEvent::Saved(p.clone()),
+        DocEvent::SelectionChanged => w::DocEvent::SelectionChanged,
+        DocEvent::Closed => w::DocEvent::Closed,
     }
 }
 

@@ -24,6 +24,8 @@ mod patterns;
 #[cfg(feature = "plugins")]
 mod plugin_form;
 #[cfg(feature = "plugins")]
+mod plugin_manager;
+#[cfg(feature = "plugins")]
 mod plugin_panel;
 #[cfg(feature = "plugins")]
 mod plugins;
@@ -137,7 +139,8 @@ actions!(
         ActivateMenuBar,
         About,
         CommandPalette,
-        RecognizeText
+        RecognizeText,
+        ManagePlugins
     ]
 );
 actions!(
@@ -268,6 +271,7 @@ fn main() {
             let od = Some(ocr_dialog::KEY_CONTEXT);
             let od_keys = Some("OcrDialog && !TextInput");
             let pf = Some("PluginForm");
+            let pm = Some("PluginManager");
             let pf_keys = Some("PluginForm && !TextInput");
             cx.bind_keys([
                 KeyBinding::new("right", NextPage, doc_keys),
@@ -406,6 +410,7 @@ fn main() {
                 KeyBinding::new("space", DialogRight, pf_keys),
                 KeyBinding::new("enter", DialogRun, pf_keys),
                 KeyBinding::new("escape", DialogCancel, pf_keys),
+                KeyBinding::new("escape", DialogCancel, pm),
                 // Menu bar: Alt tapped alone or F10 highlights it, as on Windows.
                 KeyBinding::new("alt", ActivateMenuBar, ws),
                 KeyBinding::new("f10", ActivateMenuBar, ws),
@@ -421,7 +426,7 @@ fn main() {
             cx.set_global(contrib::Contributions::load());
             // Plugin bindings first, so the user's keymap can override them.
             #[cfg(feature = "plugins")]
-            plugins::init(&settings::Settings::load(), cx);
+            plugins::init(cx);
             for e in keymap::load(cx) {
                 log::warn!("keymap.json: {e}");
                 eprintln!("keymap.json: {e}");

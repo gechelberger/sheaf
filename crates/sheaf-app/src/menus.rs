@@ -14,6 +14,18 @@ pub fn app_menus(cx: &App) -> Vec<Menu> {
     cx.global::<CommandRegistry>().gpui_menus()
 }
 
+/// After the registry changes (a plugin turned on or off): set the menus
+/// again and redraw every window's title-bar menus.
+#[cfg_attr(not(feature = "plugins"), allow(dead_code))]
+pub fn refresh(cx: &mut App) {
+    cx.set_menus(app_menus(cx));
+    for w in cx.windows() {
+        if let Some(ws) = w.downcast::<crate::workspace::Workspace>() {
+            ws.update(cx, |ws, _, cx| ws.reload_menus(cx)).ok();
+        }
+    }
+}
+
 /// Register every built-in command, then the menus that place them. A
 /// command's palette category is the first menu it appears in, skipping
 /// the macOS application menu (which only repeats File and Help items).
@@ -173,6 +185,7 @@ fn builtin_menus() -> Vec<(&'static str, Vec<Item>)> {
                 item("Calculator &Tape…", ShowCalc),
             ],
         ),
+        menu("&Plugins", vec![item("&Manage Plugins…", ManagePlugins)]),
         menu(
             "&Window",
             vec![

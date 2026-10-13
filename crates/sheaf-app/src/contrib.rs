@@ -59,9 +59,11 @@ pub struct PluginPreset {
 /// The PDFlyer-style tickmark palette.
 pub const BUILTIN_TICKS: &[&str] = &["✓", "✗", "F", "T", "C", "R", "V", "X", "?"];
 
+/// Lists below carry the plugin each item came from (None: built in or the
+/// user's own), so a plugin's items can be taken out when it's turned off.
 pub struct Contributions {
-    tick_sets: Vec<TickSet>,
-    stamps: Vec<String>,
+    tick_sets: Vec<(Option<String>, TickSet)>,
+    stamps: Vec<(Option<String>, String)>,
     presets: Vec<PluginPreset>,
     panels: Vec<PluginPanel>,
 }
@@ -72,10 +74,13 @@ impl Default for Contributions {
     /// Just the built-ins.
     fn default() -> Self {
         Self {
-            tick_sets: vec![TickSet {
-                name: "Tickmarks".into(),
-                marks: BUILTIN_TICKS.iter().map(|s| s.to_string()).collect(),
-            }],
+            tick_sets: vec![(
+                None,
+                TickSet {
+                    name: "Tickmarks".into(),
+                    marks: BUILTIN_TICKS.iter().map(|s| s.to_string()).collect(),
+                },
+            )],
             stamps: Vec::new(),
             presets: Vec::new(),
             panels: Vec::new(),
@@ -95,7 +100,7 @@ impl Contributions {
         let path = marks_path();
         match std::fs::read(&path) {
             Ok(bytes) => match serde_json::from_slice::<Marks>(&bytes) {
-                Ok(m) => c.add_marks(m),
+                Ok(m) => c.add_marks(None, m),
                 Err(e) => log::warn!("ignoring {}: {e}", path.display()),
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -104,7 +109,8 @@ impl Contributions {
         c
     }
 
-    pub fn add_marks(&mut self, marks: Marks) {
+    pub fn add_marks(&mut self, source: Option<&str>, marks: Marks) {
+        let source = source.map(str::to_string);
         for set in marks.tickmarks {
             let marks: Vec<String> = set
                 .marks
@@ -113,16 +119,19 @@ impl Contributions {
                 .filter(|m| !m.is_empty())
                 .collect();
             if !marks.is_empty() {
-                self.tick_sets.push(TickSet {
-                    name: set.name,
-                    marks,
-                });
+                self.tick_sets.push((
+                    source.clone(),
+                    TickSet {
+                        name: set.name,
+                        marks,
+                    },
+                ));
             }
         }
         for s in marks.stamps {
             let s = s.trim().to_string();
-            if !s.is_empty() && !self.stamps.contains(&s) {
-                self.stamps.push(s);
+            if !s.is_empty() && !self.stamps.iter().any(|(_, x)| *x == s) {
+                self.stamps.push((source.clone(), s));
             }
         }
     }
@@ -134,7 +143,16 @@ impl Contributions {
                 plugin: plugin.to_string(),
                 preset,
             }));
-        self.add_marks(marks);
+        self.add_marks(Some(plugin), marks);
+    }
+
+    /// Take out everything `plugin` added.
+    pub fn remove_plugin(&mut self, plugin: &str) {
+        let theirs = |src: &Option<String>| src.as_deref() == Some(plugin);
+        self.tick_sets.retain(|(src, _)| !theirs(src));
+        self.stamps.retain(|(src, _)| !theirs(src));
+        self.presets.retain(|p| p.plugin != plugin);
+        self.panels.retain(|p| p.plugin != plugin);
     }
 
     pub fn add_panel(&mut self, panel: PluginPanel) {
@@ -152,13 +170,13 @@ impl Contributions {
     }
 
     #[cfg(test)]
-    pub fn tick_sets(&self) -> &[TickSet] {
-        &self.tick_sets
+    pub fn tick_sets(&self) -> Vec<&TickSet> {
+        self.tick_sets.iter().map(|(_, t)| t).collect()
     }
 
     #[cfg(test)]
-    pub fn stamps(&self) -> &[String] {
-        &self.stamps
+    pub fn stamps(&self) -> Vec<&str> {
+        self.stamps.iter().map(|(_, s)| s.as_str()).collect()
     }
 
     pub fn plugin_presets(&self) -> &[PluginPreset] {
@@ -172,8 +190,8 @@ impl Contributions {
         let all = self
             .tick_sets
             .iter()
-            .flat_map(|s| s.marks.iter())
-            .chain(self.stamps.iter());
+            .flat_map(|(_, s)| s.marks.iter())
+            .chain(self.stamps.iter().map(|(_, s)| s));
         for m in all {
             if !out.contains(m) {
                 out.push(m.clone());
@@ -206,7 +224,7 @@ mod tests {
                  "stamps": ["PBC", "PBC", ""] }"#,
         )
         .unwrap();
-        c.add_marks(user);
+        c.add_marks(None, user);
         c.add_plugin(
             "wp",
             vec![Preset {
@@ -228,6 +246,9 @@ mod tests {
         assert_eq!(bar.iter().filter(|m| *m == "✓").count(), 1);
         assert_eq!(&bar[bar.len() - 3..], ["Σ", "PBC", "Agreed to GL"]);
         assert_eq!(c.plugin_presets()[0].plugin, "wp");
+        c.remove_plugin("wp");
+        assert!(c.plugin_presets().is_empty());
+        assert_eq!(c.stamps(), ["PBC"], "the user's stamp stays");
     }
 
     #[test]

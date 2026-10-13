@@ -14,7 +14,8 @@ use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder, Trap, Upd
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
 use crate::convert;
-use crate::manifest::{Manifest, WASM_NAME};
+use crate::manifest::{Grants, Manifest, WASM_NAME};
+use crate::storage::Storage;
 use crate::ui::Ui;
 
 pub(crate) mod bindings {
@@ -58,6 +59,55 @@ pub trait TextSource: Send + Sync {
         index: u32,
         re: &Arc<regex::Regex>,
     ) -> Result<Vec<TextMatch>>;
+    /// Every occurrence of `query`, like Find.
+    fn search(
+        &self,
+        source: SourceId,
+        index: u32,
+        query: &str,
+        match_case: bool,
+    ) -> Result<Vec<TextMatch>>;
+    /// Boxes of the text under `rect`, merged per line.
+    fn text_boxes(
+        &self,
+        source: SourceId,
+        index: u32,
+        rect: sheaf_doc::Box2,
+    ) -> Result<Vec<sheaf_doc::Box2>>;
+}
+
+/// A document event, for plugins that subscribe to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DocEvent {
+    Opened,
+    /// The undo label.
+    Edited(String),
+    /// The path saved to.
+    Saved(String),
+    SelectionChanged,
+    Closed,
+}
+
+impl DocEvent {
+    pub fn kind(&self) -> crate::manifest::EventKind {
+        use crate::manifest::EventKind;
+        match self {
+            DocEvent::Opened => EventKind::Opened,
+            DocEvent::Edited(_) => EventKind::Edited,
+            DocEvent::Saved(_) => EventKind::Saved,
+            DocEvent::SelectionChanged => EventKind::SelectionChanged,
+            DocEvent::Closed => EventKind::Closed,
+        }
+    }
+}
+
+/// How to start a plugin beyond its manifest.
+#[derive(Debug, Clone, Default)]
+pub struct LoadOptions {
+    /// Where its `storage` lives; None keeps it in memory.
+    pub data_dir: Option<PathBuf>,
+    /// The permissions the user granted (a subset of the manifest's).
+    pub grants: Grants,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -88,6 +138,7 @@ pub enum Call {
         row: String,
         action: String,
     },
+    Event(DocEvent),
 }
 
 impl std::fmt::Display for Call {
@@ -97,6 +148,7 @@ impl std::fmt::Display for Call {
             Call::PanelAction { panel, action, .. } => {
                 write!(f, "action {action:?} in panel {panel:?}")
             }
+            Call::Event(e) => write!(f, "event {e:?}"),
         }
     }
 }
@@ -195,14 +247,14 @@ impl Runtime {
     /// Start a plugin: its thread compiles and instantiates `plugin.wasm`
     /// from `dir` and calls `activate`. Returns at once; calls made before
     /// loading finishes wait for it.
-    pub fn load(self: &Arc<Self>, dir: PathBuf, manifest: Manifest) -> Plugin {
+    pub fn load(self: &Arc<Self>, dir: PathBuf, manifest: Manifest, opts: LoadOptions) -> Plugin {
         let (tx, rx) = mpsc::channel::<Request>();
         let status = Arc::new(Mutex::new(Status::Loading));
         let (rt, st, id) = (self.clone(), status.clone(), manifest.id.clone());
         let panels = manifest.panels.iter().map(|p| p.id.clone()).collect();
         let spawned = thread::Builder::new()
             .name(format!("plugin-{id}"))
-            .spawn(move || worker(rt, dir, id, panels, st, rx));
+            .spawn(move || worker(rt, dir, id, panels, opts, st, rx));
         if let Err(e) = spawned {
             *status.lock().unwrap() = Status::Failed(format!("starting its thread: {e}"));
         }
@@ -277,11 +329,12 @@ fn worker(
     dir: PathBuf,
     id: String,
     panels: Vec<String>,
+    opts: LoadOptions,
     status: Arc<Mutex<Status>>,
     rx: mpsc::Receiver<Request>,
 ) {
     let set = |s: Status| *status.lock().unwrap() = s;
-    let mut inst = match Instance::start(&rt, &dir, &id, panels) {
+    let mut inst = match Instance::start(&rt, &dir, &id, panels, opts) {
         Ok(i) => {
             set(Status::Ready);
             i
@@ -323,12 +376,18 @@ struct Instance {
 }
 
 impl Instance {
-    fn start(rt: &Runtime, dir: &std::path::Path, id: &str, panels: Vec<String>) -> Result<Self> {
+    fn start(
+        rt: &Runtime,
+        dir: &std::path::Path,
+        id: &str,
+        panels: Vec<String>,
+        opts: LoadOptions,
+    ) -> Result<Self> {
         let wasm = dir.join(WASM_NAME);
         let component = Component::from_file(&rt.engine, &wasm)
             .map_err(anyhow::Error::from)
             .with_context(|| format!("loading {}", wasm.display()))?;
-        let wasi = WasiCtx::builder().inherit_stderr().build();
+        let wasi = wasi_ctx(&opts.grants)?;
         let state = HostState {
             wasi,
             table: ResourceTable::new(),
@@ -337,6 +396,7 @@ impl Instance {
                 .build(),
             plugin: id.to_string(),
             panels,
+            storage: Storage::new(opts.data_dir),
             call: None,
             batches: Vec::new(),
             deadline: Instant::now() + rt.limits.call_timeout,
@@ -389,6 +449,7 @@ impl Instance {
             Call::PanelAction { panel, row, action } => {
                 world.call_panel_action(&mut *store, panel, row, action)
             }
+            Call::Event(e) => world.call_on_event(&mut *store, &convert::event_to_wit(e)),
         };
         let data = store.data_mut();
         data.call = None;
@@ -399,6 +460,37 @@ impl Instance {
             Err(e) => Err(PluginError::Trapped(describe_trap(&e, self.timeout))),
         }
     }
+}
+
+/// WASI with only what the user granted: the listed directories (seen by
+/// the plugin at their own paths, with `/` separators) and, if allowed, the
+/// network. Stderr goes to ours, for panic messages.
+fn wasi_ctx(grants: &Grants) -> Result<WasiCtx> {
+    use wasmtime_wasi::{FsPerms, WasiCtxBuilder};
+    let mut b = WasiCtxBuilder::new();
+    b.inherit_stderr();
+    for (dirs, perms) in [
+        (&grants.read, FsPerms::ReadOnly),
+        (&grants.write, FsPerms::ReadWrite),
+    ] {
+        for d in dirs {
+            if !d.is_dir() {
+                log::warn!("plugin permission: {} isn't a directory", d.display());
+                continue;
+            }
+            let guest = d.to_string_lossy().replace('\\', "/");
+            b.preopened_dir(d, guest, perms)
+                .map_err(anyhow::Error::from)
+                .with_context(|| format!("opening {}", d.display()))?;
+        }
+    }
+    if grants.network {
+        b.allow_tcp(true)
+            .allow_udp(true)
+            .allow_ip_name_lookup(true)
+            .socket_addr_check(|_, _| Box::pin(async { true }));
+    }
+    Ok(b.build())
 }
 
 fn describe_trap(e: &wasmtime::Error, timeout: Duration) -> String {
@@ -417,6 +509,7 @@ pub(crate) struct HostState {
     plugin: String,
     /// Panel ids the manifest declares.
     panels: Vec<String>,
+    storage: Storage,
     call: Option<CallContext>,
     batches: Vec<EditBatch>,
     /// When the running call times out.
@@ -547,6 +640,86 @@ impl api::text::Host for HostState {
             }
         };
         Ok(found.into_iter().map(convert::text_match_to_wit).collect())
+    }
+
+    fn search(
+        &mut self,
+        page: u64,
+        query: String,
+        match_case: bool,
+    ) -> Result<Vec<api::types::TextMatch>, String> {
+        let (d, p) = self.page_ref(page)?;
+        let found: Vec<TextMatch> = match d.snapshot.state.text_layer(p.id) {
+            Some(layer) => sheaf_doc::text_layer::search(layer, &query, match_case)
+                .into_iter()
+                .map(|h| TextMatch {
+                    text: h.text,
+                    rects: h.rects,
+                })
+                .collect(),
+            None => d
+                .text
+                .search(p.source, p.index, &query, match_case)
+                .map_err(|e| format!("{e:#}"))?,
+        };
+        Ok(found.into_iter().map(convert::text_match_to_wit).collect())
+    }
+
+    fn text_boxes(
+        &mut self,
+        page: u64,
+        rect: api::types::Box2,
+    ) -> Result<Vec<api::types::Box2>, String> {
+        let (d, p) = self.page_ref(page)?;
+        let rect = convert::box_from_wit(rect);
+        let boxes = match d.snapshot.state.text_layer(p.id) {
+            Some(layer) => layer.boxes_in_rect(rect),
+            None => d
+                .text
+                .text_boxes(p.source, p.index, rect)
+                .map_err(|e| format!("{e:#}"))?,
+        };
+        Ok(boxes.into_iter().map(convert::box_to_wit).collect())
+    }
+}
+
+impl HostState {
+    /// The page, for text calls.
+    fn page_ref(&self, page: u64) -> Result<(&DocContext, sheaf_doc::PageRef), String> {
+        let d = self.doc().ok_or("no document is open")?;
+        let p = d
+            .snapshot
+            .state
+            .pages
+            .iter()
+            .find(|p| p.id == PageId(page))
+            .copied()
+            .ok_or_else(|| format!("no page {page}"))?;
+        Ok((d, p))
+    }
+}
+
+impl api::storage::Host for HostState {
+    fn get(&mut self, key: String) -> Option<String> {
+        self.storage.get(&key)
+    }
+
+    fn set(&mut self, key: String, value: String) -> Result<(), String> {
+        self.storage.set(key, value)
+    }
+
+    fn delete(&mut self, key: String) {
+        if let Err(e) = self.storage.delete(&key) {
+            log::warn!(target: "plugin", "[{}] {e}", self.plugin);
+        }
+    }
+
+    fn keys(&mut self) -> Vec<String> {
+        self.storage.keys()
+    }
+
+    fn settings(&mut self) -> String {
+        self.storage.settings()
     }
 }
 

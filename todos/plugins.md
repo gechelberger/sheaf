@@ -94,7 +94,9 @@ Landed: WIT `ui` interface (`show-form`, `notice`, `set-panel`) and `panel-actio
 - Panel contribution: a plugin supplies a tree/list model (rows with label, icon, badge and actions). The host draws it in the dock and saves its layout by string ID.
 - Second plugin, `plugins/amount-crossref` (chosen 2026-10-11): finds the same dollar amount on different pages (a K-1 total and the 1040 line it flows to) via pattern search, lists the candidate pairs in a panel, and places `ConnectorAdd` pairs for the ones the user accepts. Exercises text boxes, a review panel and connector edits.
 
-### Slice 4: events, storage, permissions, manager
+### Slice 4: events, storage, permissions, manager — done 2026-10-13
+Landed: WIT `doc-event` + `on-event` export (manifest `events = [...]`; a plugin isn't told about its own edits), `text.search` and `text.text-boxes`, `storage` (per-plugin key/value with a 4 MiB quota plus a user-edited `settings.json`, in `<config>/plugin-data/<id>/`), WASI preopens for granted `read`/`write` dirs and network only when granted. Consent: a plugin asking for permissions runs without them until the user answers a prompt in the first window; answers live in `<config>/plugins.json` (with the disabled list — moved out of `settings.json` so windows saving their settings can't clobber it); asking for more later asks again. Plugins → Manage Plugins…: status/errors, turn on/off live (commands, menus, presets, marks and panels are added/removed; key bindings stay until restart and report the plugin is off), allow/revoke permissions, uninstall (storage kept), install from a folder or a `.sheafplugin` zip (only known file names are extracted; duplicates rejected).
+Not yet: the `ocr` host capability from the architecture section isn't in any slice; tracked under slice 5 below.
 - `on-event` subscriptions, declared in the manifest.
 - `text` interface, proxied to the render worker.
 - `storage` interface.
@@ -102,6 +104,7 @@ Landed: WIT `ui` interface (`show-form`, `notice`, `set-panel`) and `panel-actio
 - Plugins → Manage dialog: list plugins, enable/disable, show errors and permissions, install from folder or `.sheafplugin` zip.
 
 ### Slice 5: SDK, docs, CI, packaging
+- `ocr` host interface (`recognize(page, options)`, `page-text-layer(page)`), proxied to `sheaf_ocr`. Not in the original slices; added here so the architecture section's capability exists.
 - `sheaf-plugin-api` polished.
 - `docs/plugins.md`: authoring guide, API versioning policy (semver on the WIT package; the host keeps N-1 worlds), and the trust model.
 - CI builds the example plugins on ubuntu and windows and runs host integration tests against them on both.

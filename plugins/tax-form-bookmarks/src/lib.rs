@@ -176,6 +176,10 @@ impl Guest for TaxFormBookmarks {
     fn panel_action(_panel: String, _row: String, _action: String) -> Result<(), String> {
         Err("this plugin has no panels".into())
     }
+
+    fn on_event(_event: sheaf_plugin_api::types::DocEvent) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 sheaf_plugin_api::export!(TaxFormBookmarks);
