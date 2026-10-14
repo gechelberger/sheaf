@@ -36,7 +36,34 @@ enum Then {
     SaveTo(PathBuf),
 }
 
+impl crate::docview::Doc {
+    /// A portfolio just opened: its files in folder order, the one it
+    /// names first selected, and a word about what this is.
+    pub(crate) fn open_portfolio(&mut self) {
+        self.attachments
+            .sort_by(|a, b| (&a.folder, &a.name).cmp(&(&b.folder, &b.name)));
+        let initial = self.collection.as_ref().and_then(|c| c.initial.clone());
+        self.attachment_selected = initial
+            .and_then(|key| {
+                self.attachments
+                    .iter()
+                    .position(|a| a.at == AttachmentRef::Named(key.clone()))
+            })
+            .or((!self.attachments.is_empty()).then_some(0));
+        let n = self.attachments.len();
+        self.notice = Some(format!(
+            "PDF Portfolio: {n} file{} — open one from the Attachments panel",
+            if n == 1 { "" } else { "s" }
+        ));
+    }
+}
+
 impl DocView {
+    /// A panel the document wants shown, once.
+    pub fn take_wanted_panel(&mut self) -> Option<&'static str> {
+        self.wanted_panel.take()
+    }
+
     pub(crate) fn attachments(&self) -> &[Attachment] {
         match &self.state {
             State::Ready(doc) => &doc.attachments,

@@ -141,7 +141,7 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 | Split view (same document, two places) | ✅ View > Split (Ctrl+\\); F6 switches pane |
 | Split view (same doc, two positions) | 📋 |
 | Attachments panel | ✅ View > Attachments (Ctrl+Alt+6): open (PDFs in sheaf, others with the system program after a warning) or save out |
-| Open PDF Portfolios (browse and extract embedded files) | 📋 |
+| Open PDF Portfolios (browse and extract embedded files) | ✅ opens on its cover sheet with the Attachments panel: folders, metadata columns, open/save |
 | Layers (OCG) panel | 📋 |
 
 ### Page organization

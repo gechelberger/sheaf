@@ -1192,6 +1192,12 @@ impl Render for Workspace {
             .unwrap_or_default();
         let bare = presentation != crate::presentation::Presentation::Normal;
         let full = presentation == crate::presentation::Presentation::FullScreen;
+        if let Some(doc) = self.doc().cloned()
+            && let Some(id) = doc.update(cx, |d, _| d.take_wanted_panel())
+            && let Some(panel) = Panel::from_id(id)
+        {
+            self.show_panel(panel);
+        }
         let show = |ws: &Self, side: Side| {
             !bare && !ws.all_hidden && ws.doc.is_some() && ws.dock(side).shows()
         };

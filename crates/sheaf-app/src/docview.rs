@@ -418,6 +418,9 @@ pub struct DocView {
     /// Full Screen / Read Mode (see presentation.rs).
     pub(crate) presentation: crate::presentation::Presentation,
     pub(crate) saved_view: Option<crate::presentation::SavedView>,
+    /// A dock panel this document asks the workspace to show (by panel id),
+    /// e.g. Attachments when a portfolio opens.
+    pub(crate) wanted_panel: Option<&'static str>,
     /// View > Go to Page, while open.
     pub(crate) goto: Option<crate::goto::GoTo>,
     /// View > Rulers / Grid, and the guides dragged out of the rulers.
@@ -502,6 +505,7 @@ impl DocView {
             presentation: Default::default(),
             saved_view: None,
             goto: None,
+            wanted_panel: None,
             rulers: false,
             grid: false,
             guides: Vec::new(),
@@ -1469,6 +1473,10 @@ impl DocView {
                 doc.attachments = facts.attachments;
                 doc.collection = facts.collection;
                 doc.facts_loaded = true;
+                if doc.collection.is_some() {
+                    doc.open_portfolio();
+                    view.wanted_panel = Some("attachments");
+                }
                 if by_index.is_empty() {
                     cx.notify();
                     return;
