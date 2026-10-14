@@ -24,12 +24,14 @@ pub enum Kind {
     Png,
     Jpeg,
     Tiff,
+    Text,
 }
 
-const KINDS: [(Kind, &str); 3] = [
+const KINDS: [(Kind, &str); 4] = [
     (Kind::Png, "PNG"),
     (Kind::Jpeg, "JPEG"),
     (Kind::Tiff, "TIFF (multi-page)"),
+    (Kind::Text, "Text"),
 ];
 const TIFF_MODES: [(TiffMode, &str); 3] = [
     (TiffMode::BlackWhite, "Black and white (G4)"),
@@ -146,6 +148,8 @@ impl ExportDialog {
         .into_iter()
         .filter(|&r| r != ROW_QUALITY || self.kind == Kind::Jpeg)
         .filter(|&r| r != ROW_COLOR || self.kind == Kind::Tiff)
+        // Text has no resolution, and marks aren't text.
+        .filter(|&r| self.kind != Kind::Text || (r != ROW_DPI && r != ROW_MARKUP))
         .collect()
     }
 
@@ -219,6 +223,7 @@ impl ExportDialog {
             Kind::Png => Format::Png,
             Kind::Jpeg => Format::Jpeg(self.quality),
             Kind::Tiff => Format::Tiff(self.tiff),
+            Kind::Text => Format::Text,
         }
     }
 
@@ -228,7 +233,7 @@ impl ExportDialog {
                 pages,
                 format: self.format(),
                 dpi: self.dpi,
-                markup: self.markup,
+                markup: self.markup && self.kind != Kind::Text,
             })),
             Ok(_) => {
                 self.error = Some("No pages to export".into());
@@ -384,26 +389,28 @@ impl Render for ExportDialog {
             .child(
                 dialog::card("export-dialog", px(600.0))
                     .child(dialog::header("Export Pages").child(dialog::subtitle(
-                        if self.kind == Kind::Tiff {
-                            "every page in one file"
-                        } else {
-                            "one image file per page"
+                        match self.kind {
+                            Kind::Tiff => "every page in one file",
+                            Kind::Text => "the pages' text in one file, a form feed between pages",
+                            _ => "one image file per page",
                         },
                     )))
                     .child(self.row_el(ROW_FORMAT, "Format", format))
-                    .child(
-                        self.row_el(
-                            ROW_DPI,
-                            "Resolution",
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .child(dpi)
-                                .child(dialog::subtitle(size_hint))
-                                .into_any_element(),
-                        ),
-                    )
+                    .when(self.kind != Kind::Text, |d| {
+                        d.child(
+                            self.row_el(
+                                ROW_DPI,
+                                "Resolution",
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(dpi)
+                                    .child(dialog::subtitle(size_hint))
+                                    .into_any_element(),
+                            ),
+                        )
+                    })
                     .when(self.kind == Kind::Jpeg, |d| {
                         d.child(self.row_el(ROW_QUALITY, "Quality", quality))
                     })
@@ -412,7 +419,9 @@ impl Render for ExportDialog {
                     })
                     .child(self.row_el(ROW_PAGES, "Pages", pages))
                     .child(self.row_el(ROW_RANGE, "", range))
-                    .child(self.row_el(ROW_MARKUP, "Include", markup))
+                    .when(self.kind != Kind::Text, |d| {
+                        d.child(self.row_el(ROW_MARKUP, "Include", markup))
+                    })
                     .when_some(self.error.clone(), |d, e| d.child(dialog::message(e, true)))
                     .child(
                         dialog::footer()

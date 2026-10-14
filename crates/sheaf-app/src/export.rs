@@ -20,6 +20,8 @@ pub enum Format {
     Jpeg(u8),
     /// Every page in one multi-page file.
     Tiff(TiffMode),
+    /// The pages' text, one file, a form feed between pages.
+    Text,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,12 +40,13 @@ impl Format {
             Format::Png => "png",
             Format::Jpeg(_) => "jpg",
             Format::Tiff(_) => "tif",
+            Format::Text => "txt",
         }
     }
 
     /// One file for the whole job (else one per page).
     pub fn single_file(self) -> bool {
-        matches!(self, Format::Tiff(_))
+        matches!(self, Format::Tiff(_) | Format::Text)
     }
 }
 
@@ -84,6 +87,11 @@ pub fn run(
     let engine = flattened(snapshot, &job.pages, job.markup)?;
     let n = engine.page_count() as usize;
     std::fs::create_dir_all(&job.dir).with_context(|| format!("creating {}", job.dir.display()))?;
+    if job.format == Format::Text {
+        let path = job.dir.join(format!("{}.txt", job.stem));
+        write_text(&engine, n, &path, &mut progress)?;
+        return Ok(vec![path]);
+    }
     if let Format::Tiff(mode) = job.format {
         let path = job.dir.join(format!("{}.tif", job.stem));
         write_tiff(&engine, n, job.dpi, mode, &path, &mut progress)?;
@@ -139,6 +147,43 @@ pub(crate) fn render_at(engine: &PdfiumEngine, i: u32, dpi: u32) -> Result<Raste
         },
         PixelFormat::Rgba,
     )
+}
+
+/// The text of all `n` pages, in reading order as PDFium extracts it,
+/// into one UTF-8 file. Pages are separated by a form feed on a line of
+/// its own, which `less` and printers treat as a page break.
+fn write_text(
+    engine: &PdfiumEngine,
+    n: usize,
+    path: &Path,
+    progress: &mut impl FnMut(Progress) -> bool,
+) -> Result<()> {
+    let mut out = String::new();
+    for i in 0..n {
+        if i > 0 {
+            out.push_str("\u{c}\n");
+        }
+        out.push_str(&page_text(&engine.page_text(PageIndex(i as u32))?));
+        if !progress(Progress::Page { done: i + 1, of: n }) {
+            break;
+        }
+    }
+    std::fs::write(path, out).with_context(|| format!("writing {}", path.display()))
+}
+
+/// One page's extracted text with `\n` line ends, no trailing spaces, and
+/// a final newline.
+fn page_text(raw: &str) -> String {
+    let mut t = raw.replace("\r\n", "\n").replace('\r', "\n");
+    // PDFium marks hyphens it broke a word at with U+0002; keep the hyphen.
+    t = t.replace('\u{2}', "-");
+    // No trailing spaces on lines (PDFium leaves them at line breaks).
+    let lines: Vec<&str> = t.lines().map(str::trim_end).collect();
+    let mut s = lines.join("\n").trim_end().to_string();
+    if !s.is_empty() {
+        s.push('\n');
+    }
+    s
 }
 
 /// All `n` pages of `engine` into one TIFF at `path`.
@@ -247,7 +292,7 @@ pub fn encode(raster: Raster, format: Format, dpi: u32) -> Result<Vec<u8>> {
             enc.set_compression(png::Compression::Balanced);
             enc.write_header()?.write_image_data(rgb.as_raw())?;
         }
-        Format::Tiff(_) => bail!("TIFF pages go into one file; use write_tiff"),
+        Format::Tiff(_) | Format::Text => bail!("this format goes into one file"),
         Format::Jpeg(q) => {
             let rgb = image::DynamicImage::ImageRgba8(rgba).into_rgb8();
             let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(
@@ -316,6 +361,15 @@ mod tests {
             format: PixelFormat::Rgba,
             data,
         }
+    }
+
+    #[test]
+    fn page_text_normalizes_line_ends() {
+        assert_eq!(
+            page_text("Form 1040\r\nwage-\u{2}\r\nearner \r\n\r\n"),
+            "Form 1040\nwage--\nearner\n"
+        );
+        assert_eq!(page_text("  \r\n"), "");
     }
 
     #[test]
