@@ -45,6 +45,7 @@ sheaf scan photos/*.jpg -o receipts.pdf --mode bw --ocr
 
 | Subcommand | Does |
 |---|---|
+| `combine` | PDFs and images into one PDF in order; `file:range` takes some pages (`a.pdf:1-3,7`). A bookmark per file (`--no-file-bookmarks` to skip), `--image-page` |
 | `export` | Pages to PNG, JPEG, TIFF or text, as File > Export Pages. Prints the files written; refuses to overwrite without `--force` |
 | `scan` | Photos or scans of paper to a clean PDF: finds the page in the photo and straightens it, turns it upright, levels the text, evens out shadows and color casts. `--mode color\|gray\|bw`, `--page letter\|a4\|original`, `--dpi`, `--ocr` (searchable text that lines up with the page), `--no-crop`/`--no-deskew`/… to skip a step, `--flatten-curl` for curled or bent pages (UVDoc model; `scripts/fetch-ocr-data.sh --uvdoc`) |
 | `images-to-pdf` | JPEG, PNG, TIFF (every page), BMP, GIF and WebP files to one PDF, a page each: `--page original\|letter\|a4`, `--margin`, `--dpi` |
@@ -180,7 +181,7 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 | Delete / extract / duplicate pages | ✅ Document > Extract Pages… keeps marks and relevant bookmarks |
 | Insert PDF at position (PDFlyer "Insert PDF") | ✅ |
 | Merge bookmarks on insert (parents merged, children appended) | ✅ |
-| Combine Files: many PDFs and images into one, choosing pages from each | 📋 |
+| Combine Files: many PDFs and images into one, choosing pages from each | ✅ File > Create > Combine Files…: add files or a folder or drop them, reorder, a page range per file, a bookmark per file holding its own bookmarks, images at their size or fitted to Letter/A4. `sheaf combine -o out.pdf a.pdf:1-3 scan.tif b.png` |
 | Split document (by page range, by bookmark, by size) | 📋 |
 | Insert blank page / from image / from scanner | 📋 |
 | Crop pages | 📋 |

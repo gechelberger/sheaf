@@ -335,6 +335,7 @@ pub struct Workspace {
     /// File > Export Pages, while open.
     export: Option<(Entity<crate::export_dialog::ExportDialog>, Subscription)>,
     scan: Option<(Entity<crate::scan_dialog::ScanDialog>, Subscription)>,
+    combine: Option<(Entity<crate::combine_dialog::CombineDialog>, Subscription)>,
     /// File > Print, while open.
     print: Option<(Entity<crate::print_dialog::PrintDialog>, Subscription)>,
     /// File > Properties, while open.
@@ -429,6 +430,7 @@ impl Workspace {
             palette: None,
             export: None,
             scan: None,
+            combine: None,
             print: None,
             properties: None,
             ocr_dialog: None,
@@ -984,6 +986,67 @@ impl Workspace {
             &["OK"],
         ));
         crate::recent::forget(&path, cx);
+    }
+
+    /// File > Create > Combine Files: pick some files, then the dialog
+    /// (where more can be added).
+    fn combine_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.combine.is_some() {
+            return;
+        }
+        let rx = crate::file_dialog::open_filtered(
+            cx,
+            gpui::PathPromptOptions {
+                files: true,
+                directories: false,
+                multiple: true,
+                prompt: Some("Choose Files to Combine".into()),
+            },
+            crate::file_dialog::Filter::PdfAndImages,
+        );
+        cx.spawn_in(window, async move |ws, cx| {
+            let Ok(Ok(Some(files))) = rx.await else {
+                return;
+            };
+            ws.update_in(cx, |ws, window, cx| {
+                ws.open_combine_dialog(files, window, cx)
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn open_combine_dialog(
+        &mut self,
+        files: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let params = self.settings.combine.clone();
+        let dialog =
+            cx.new(|cx| crate::combine_dialog::CombineDialog::new(files, params, window, cx));
+        let sub = cx.subscribe_in(
+            &dialog,
+            window,
+            |ws, _, ev: &crate::combine_dialog::CombineEvent, window, cx| {
+                ws.combine = None;
+                ws.focus_active(window, cx);
+                if let crate::combine_dialog::CombineEvent::Created { path, params } = ev {
+                    ws.settings.combine = params.clone();
+                    if let Err(e) = ws.settings.save() {
+                        log::warn!("saving settings: {e:#}");
+                    }
+                    let origin = window.window_handle().downcast::<Workspace>();
+                    let path = path.clone();
+                    if let Some(origin) = origin {
+                        cx.defer(move |cx| open_paths(origin, vec![path], cx));
+                    }
+                }
+                cx.notify();
+            },
+        );
+        self.combine = Some((dialog, sub));
+        cx.notify();
     }
 
     /// File > Create > From Scans/Photos: pick the images, then the dialog.
@@ -2086,6 +2149,9 @@ impl Render for Workspace {
                 ws.create_from_scans(window, cx)
             }))
             .on_action(
+                cx.listener(|ws, _: &crate::CombineFiles, window, cx| ws.combine_files(window, cx)),
+            )
+            .on_action(
                 cx.listener(|ws, a: &crate::recent::OpenRecent, window, cx| {
                     ws.open_recent(a.path.clone(), window, cx)
                 }),
@@ -2196,6 +2262,11 @@ impl Render for Workspace {
             )
             .children(
                 self.scan
+                    .as_ref()
+                    .map(|(d, _)| deferred(d.clone()).with_priority(2)),
+            )
+            .children(
+                self.combine
                     .as_ref()
                     .map(|(d, _)| deferred(d.clone()).with_priority(2)),
             )

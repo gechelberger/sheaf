@@ -9,6 +9,7 @@ mod attachments_panel;
 mod availability;
 mod brand;
 mod calc_panel;
+mod combine_dialog;
 mod command_info;
 mod commands;
 mod comments_panel;
@@ -169,6 +170,7 @@ actions!(
         Print,
         ExportPages,
         CreateFromScans,
+        CombineFiles,
         ToggleToolbar,
         CustomizeToolbar
     ]
@@ -312,6 +314,7 @@ fn main() {
             let pd = Some(print_dialog::KEY_CONTEXT);
             let ed = Some(export_dialog::KEY_CONTEXT);
             let sd = Some(scan_dialog::KEY_CONTEXT);
+            let cd = Some("CombineDialog && !TextInput");
             let ed_keys = Some("ExportDialog && !TextInput");
             let pd_keys = Some("PrintDialog && !TextInput");
             let pf_keys = Some("PluginForm && !TextInput");
@@ -418,6 +421,8 @@ fn main() {
                 KeyBinding::new("space", DialogRight, sd),
                 KeyBinding::new("enter", DialogRun, sd),
                 KeyBinding::new("escape", DialogCancel, sd),
+                KeyBinding::new("enter", DialogRun, cd),
+                KeyBinding::new("escape", DialogCancel, cd),
                 KeyBinding::new("tab", DialogNext, pd),
                 KeyBinding::new("shift-tab", DialogPrev, pd),
                 KeyBinding::new("left", DialogLeft, pd_keys),

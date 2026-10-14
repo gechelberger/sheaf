@@ -34,6 +34,7 @@ const FILES: &[(&str, &[u8])] = icons![
     "customize-toolbar",
     "close-document",
     "close-window",
+    "combine-files",
     "command-palette",
     "comments",
     "connector",

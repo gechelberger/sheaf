@@ -5,6 +5,7 @@
 //! `check()` once cancelled. Ops move here one at a time, when the
 //! command line needs them.
 
+pub mod combine;
 pub mod export;
 pub mod images;
 pub mod open;

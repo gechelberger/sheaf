@@ -9,13 +9,14 @@
 use clap::{Parser, Subcommand};
 use std::ffi::{OsStr, OsString};
 
+mod combine;
 mod export;
 mod images;
 mod progress;
 mod scan;
 
 /// The subcommands, for the app to recognize its hand-off.
-pub const SUBCOMMANDS: &[&str] = &["export", "images-to-pdf", "scan"];
+pub const SUBCOMMANDS: &[&str] = &["combine", "export", "images-to-pdf", "scan"];
 
 /// Whether `arg` (the first argument after the program name) names a
 /// subcommand. A file of that name in the current directory still opens
@@ -36,6 +37,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    Combine(combine::CombineArgs),
     Export(export::ExportArgs),
     ImagesToPdf(images::ImagesArgs),
     Scan(scan::ScanArgs),
@@ -59,6 +61,7 @@ where
         }
     };
     let result = match cli.command {
+        Command::Combine(args) => combine::run(args, cli.quiet),
         Command::Export(args) => export::run(args, cli.quiet),
         Command::ImagesToPdf(args) => images::run(args, cli.quiet),
         Command::Scan(args) => scan::run(args, cli.quiet),

@@ -8,6 +8,7 @@
 pub mod annot;
 pub mod attachments;
 pub mod file;
+pub mod generated;
 pub mod history;
 pub mod images;
 pub mod incremental;

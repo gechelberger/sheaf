@@ -11,9 +11,23 @@ use sheaf_render::pdfium::PdfiumEngine;
 /// `path` as a document: its pages, bookmarks and sheaf's own marks, as
 /// the app shows them on open.
 pub fn open(path: &Path, password: Option<&str>) -> Result<Document> {
+    let (source, outline) = describe(path, password)?;
+    let mut doc = Document::new(source, &outline, sheaf_doc::history::default_policy());
+    let (annots, _) = sheaf_doc::file::read_open(path, password)?;
+    if !annots.sheaf.is_empty() {
+        doc.set_initial_annots(annots.sheaf)?;
+    }
+    Ok(doc)
+}
+
+/// What the model needs to know about a file to use its pages, and its
+/// bookmarks (page numbers are 0-based indexes into the file).
+pub fn describe(path: &Path, password: Option<&str>) -> Result<(SourceInfo, Vec<FlatOutlineItem>)> {
     let engine = PdfiumEngine::open(path, password)?;
     let sizes = engine.page_sizes()?;
-    let first_page = *sizes.first().context("the file has no pages")?;
+    let first_page = *sizes
+        .first()
+        .with_context(|| format!("{} has no pages", path.display()))?;
     let source = SourceInfo {
         path: path.to_path_buf(),
         page_count: engine.page_count(),
@@ -24,7 +38,7 @@ pub fn open(path: &Path, password: Option<&str>) -> Result<Document> {
             .unwrap_or(0),
         password: password.map(str::to_string),
     };
-    let outline: Vec<FlatOutlineItem> = engine
+    let outline = engine
         .outline()
         .unwrap_or_else(|e| {
             log::warn!("{}: bookmarks: {e:#}", path.display());
@@ -38,10 +52,5 @@ pub fn open(path: &Path, password: Option<&str>) -> Result<Document> {
             view: i.view,
         })
         .collect();
-    let mut doc = Document::new(source, &outline, sheaf_doc::history::default_policy());
-    let (annots, _) = sheaf_doc::file::read_open(path, password)?;
-    if !annots.sheaf.is_empty() {
-        doc.set_initial_annots(annots.sheaf)?;
-    }
-    Ok(doc)
+    Ok((source, outline))
 }
