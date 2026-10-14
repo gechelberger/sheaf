@@ -735,12 +735,18 @@ impl DocView {
         cx: &mut Context<Self>,
     ) {
         let name = self.file_name();
-        let rx = window.prompt(
+        let rx = crate::prompts::ask(
+            window,
+            cx,
             gpui::PromptLevel::Warning,
             &format!("Recover unsaved changes to \"{name}\"?"),
-            Some("sheaf found edits that weren't saved when it last closed. Recovered changes stay unsaved until you save."),
-            &[gpui::PromptButton::ok("Recover"), gpui::PromptButton::new("Discard")],
-            cx,
+            Some(
+                "sheaf found edits that weren't saved when it last closed. Recovered changes stay unsaved until you save.",
+            ),
+            &[
+                gpui::PromptButton::ok("Recover"),
+                gpui::PromptButton::new("Discard"),
+            ],
         );
         let path = self.path.clone();
         cx.spawn(async move |this, cx| match rx.await {

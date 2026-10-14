@@ -286,7 +286,7 @@ pub struct Workspace {
     ocr_dialog: Option<(Entity<OcrDialog>, Subscription)>,
     /// A plugin's `ui.show-form`, while open.
     #[cfg(feature = "plugins")]
-    plugin_form: Option<(Entity<crate::plugin_form::PluginForm>, Subscription)>,
+    pub(crate) plugin_form: Option<(Entity<crate::plugin_form::PluginForm>, Subscription)>,
     /// Plugins > Manage Plugins…, while open.
     #[cfg(feature = "plugins")]
     plugin_manager: Option<(Entity<crate::plugin_manager::PluginManager>, Subscription)>,
@@ -624,7 +624,9 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Task<bool> {
         let name = doc.read(cx).file_name();
-        let rx = window.prompt(
+        let rx = crate::prompts::ask(
+            window,
+            cx,
             PromptLevel::Warning,
             &format!("Save changes to \"{name}\" before closing?"),
             Some("Your changes will be lost if you don't save them."),
@@ -633,7 +635,6 @@ impl Workspace {
                 PromptButton::new("Don't Save"),
                 PromptButton::cancel("Cancel"),
             ],
-            cx,
         );
         cx.spawn(async move |_, cx| match rx.await {
             Ok(0) => cx.update(|cx| doc.update(cx, |d, cx| d.save(cx))).await,
@@ -704,12 +705,13 @@ impl Workspace {
 
     #[cfg(not(feature = "plugins"))]
     fn toggle_plugin_manager(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        drop(window.prompt(
+        drop(crate::prompts::ask(
+            window,
+            cx,
             PromptLevel::Info,
             "This build of sheaf has no plugin support",
             None,
             &["OK"],
-            cx,
         ));
     }
 
@@ -1507,7 +1509,14 @@ impl Render for Workspace {
                     env!("CARGO_PKG_VERSION"),
                     env!("SHEAF_GIT_COMMIT")
                 );
-                drop(window.prompt(PromptLevel::Info, "sheaf", Some(&detail), &["OK"], cx));
+                drop(crate::prompts::ask(
+                    window,
+                    cx,
+                    PromptLevel::Info,
+                    "sheaf",
+                    Some(&detail),
+                    &["OK"],
+                ));
             })
             // Alt+letter opens the menu with that mnemonic.
             .on_key_down(cx.listener(|ws, e: &KeyDownEvent, window, cx| {

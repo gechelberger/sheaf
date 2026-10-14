@@ -13,7 +13,7 @@ pub const CURRENCIES: &[&str] = &[
     "ILS", "IDR", "MYR", "PHP", "THB",
 ];
 
-const DEFAULT_BASE: &str = "https://api.frankfurter.app";
+const DEFAULT_BASE: &str = "https://api.frankfurter.dev/v1";
 
 /// Symbols and their currency, longest first so `CA$` wins over `$`.
 const SYMBOLS: &[(&str, &str)] = &[

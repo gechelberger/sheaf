@@ -16,9 +16,9 @@ the currency you choose: "≈ USD 1,352.10 (EUR 1,234.56 × 1.0956, ECB
 - Amounts already in the target currency, and ones already converted to it,
   are skipped.
 
-Rates come from [Frankfurter](https://www.frankfurter.app), a free service
+Rates come from [Frankfurter](https://frankfurter.dev), a free service
 that republishes the European Central Bank's reference rates. It needs no
-account. This plugin may only reach `api.frankfurter.app`, and sheaf asks
+account. This plugin may only reach `api.frankfurter.dev`, and sheaf asks
 you before it does. Rates are kept in the plugin's storage, so a date
 already looked up works offline. `settings.json` may set `"base_url"` to use
 a different Frankfurter-compatible server.

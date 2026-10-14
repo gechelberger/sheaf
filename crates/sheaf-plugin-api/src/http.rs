@@ -51,8 +51,46 @@ fn describe(e: &ErrorCode) -> String {
     }
 }
 
-/// GET a URL and read the whole body (up to [`MAX_BODY`]).
+/// Most redirects `get` follows.
+pub const MAX_REDIRECTS: usize = 5;
+
+/// GET a URL and read the whole body (up to [`MAX_BODY`]), following
+/// redirects. Each hop must be to a host the plugin may reach.
 pub fn get(url: &str) -> Result<Response, String> {
+    let mut url = url.to_string();
+    for _ in 0..=MAX_REDIRECTS {
+        match get_once(&url)? {
+            (r, Some(next)) if (300..400).contains(&r.status) => url = resolve(&url, &next),
+            (r, _) => return Ok(r),
+        }
+    }
+    Err(format!("too many redirects, last to {url}"))
+}
+
+/// `location` relative to `base`: absolute URLs as they are, `/path` on
+/// the same host.
+pub fn resolve(base: &str, location: &str) -> String {
+    if location.starts_with("http://") || location.starts_with("https://") {
+        return location.to_string();
+    }
+    let scheme_end = base.find("://").map(|i| i + 3).unwrap_or(0);
+    let host_end = base[scheme_end..]
+        .find('/')
+        .map(|i| scheme_end + i)
+        .unwrap_or(base.len());
+    if location.starts_with('/') {
+        format!("{}{location}", &base[..host_end])
+    } else {
+        let dir_end = base
+            .rfind('/')
+            .filter(|i| *i >= host_end)
+            .unwrap_or(host_end);
+        format!("{}/{location}", &base[..dir_end])
+    }
+}
+
+/// One request: the response, and its `Location` if it has one.
+fn get_once(url: &str) -> Result<(Response, Option<String>), String> {
     let (scheme, authority, path) = split_url(url)?;
     let req = OutgoingRequest::new(Fields::new());
     req.set_method(&Method::Get).map_err(|_| "bad method")?;
@@ -71,6 +109,12 @@ pub fn get(url: &str) -> Result<Response, String> {
         pending.subscribe().block();
     };
     let status = resp.status();
+    let location = resp
+        .headers()
+        .get("location")
+        .into_iter()
+        .next()
+        .map(|v| String::from_utf8_lossy(&v).into_owned());
     let body = resp.consume().map_err(|_| "no response body")?;
     let mut out = Vec::new();
     {
@@ -91,7 +135,7 @@ pub fn get(url: &str) -> Result<Response, String> {
         }
     }
     let _ = IncomingBody::finish(body);
-    Ok(Response { status, body: out })
+    Ok((Response { status, body: out }, location))
 }
 
 #[cfg(test)]
@@ -111,6 +155,12 @@ mod tests {
         let (_, a, p) = split_url("http://h?q=1").unwrap();
         assert_eq!((a.as_str(), p.as_str()), ("h", "/?q=1"));
         assert!(split_url("ftp://x").is_err());
+        assert_eq!(
+            resolve("https://a.app/x?y", "https://b.dev/v1/x"),
+            "https://b.dev/v1/x"
+        );
+        assert_eq!(resolve("https://a.app/v1/x", "/v2/y"), "https://a.app/v2/y");
+        assert_eq!(resolve("https://a.app/v1/x", "z"), "https://a.app/v1/z");
         assert!(split_url("https:///x").is_err());
     }
 }

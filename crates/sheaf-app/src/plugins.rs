@@ -567,17 +567,21 @@ pub fn ask_consent(window: &mut Window, cx: &mut Context<Workspace>) {
                 "{}\n\nYou can change this later in Plugins → Manage Plugins.",
                 lines.join("\n")
             );
+            log::info!("plugin {id}: asking for permission");
             let answer = cx.update(|window, cx| {
-                window.prompt(
+                crate::prompts::ask(
+                    window,
+                    cx,
                     gpui::PromptLevel::Info,
                     &format!("The “{name}” plugin wants to:"),
                     Some(&detail),
                     &["Allow", "Don't Allow"],
-                    cx,
                 )
             });
             let Ok(rx) = answer else { return };
-            let allow = matches!(rx.await, Ok(0));
+            let answer = rx.await;
+            log::info!("plugin {id}: permission answer {answer:?}");
+            let allow = matches!(answer, Ok(0));
             cx.update(|_, cx| set_allowed(&id, allow, cx)).ok();
         }
     })
@@ -1000,7 +1004,12 @@ pub fn run(
         Call::Command { id, .. } => cx
             .global::<CommandRegistry>()
             .get(&format!("{plugin_id}::{id}"))
-            .map(|c| crate::menus::parse_label(&c.label).0),
+            .map(|c| {
+                crate::menus::parse_label(&c.label)
+                    .0
+                    .trim_end_matches('…')
+                    .to_string()
+            }),
         Call::PanelAction { .. } | Call::Event(_) => None,
     }
     .unwrap_or_else(|| plugin_name(plugin_id, cx));

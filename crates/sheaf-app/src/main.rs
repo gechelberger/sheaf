@@ -29,7 +29,9 @@ mod plugin_manager;
 mod plugin_panel;
 #[cfg(feature = "plugins")]
 mod plugins;
+mod prompts;
 mod region;
+mod script;
 mod settings;
 mod text_area;
 mod text_input;
@@ -186,6 +188,8 @@ struct Cli {
     pattern: Option<String>,
     /// Dev: open the menu with this mnemonic letter at startup.
     menu: Option<char>,
+    /// Dev: drive the first window from these steps (see script.rs).
+    script: Option<PathBuf>,
 }
 
 fn parse_cli() -> Cli {
@@ -205,6 +209,7 @@ fn parse_cli() -> Cli {
         panel: None,
         pattern: None,
         menu: None,
+        script: None,
     };
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {
@@ -239,6 +244,7 @@ fn parse_cli() -> Cli {
                     .next()
                     .and_then(|m| m.to_str().and_then(|m| m.chars().next()))
             }
+            Some("--script") => cli.script = args.next().map(PathBuf::from),
             Some(s) if s.starts_with("--") => eprintln!("unknown flag {s}"),
             _ => cli.paths.push(arg.into()),
         }
@@ -436,7 +442,7 @@ fn main() {
 
             let mut groups = window_paths(cli.paths, cli.separate_windows).into_iter();
             let password = cli.password.clone();
-            open_workspace(
+            let first = open_workspace(
                 Launch {
                     paths: groups.next().expect("at least one window"),
                     timing: cli.timing,
@@ -458,6 +464,9 @@ fn main() {
                 cx,
             )
             .expect("open window");
+            if let Some(path) = cli.script.take() {
+                script::start(path, first, cx);
+            }
             for paths in groups {
                 let mut launch = Launch::files(paths);
                 launch.timing = cli.timing;

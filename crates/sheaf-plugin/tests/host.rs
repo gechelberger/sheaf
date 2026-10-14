@@ -1098,7 +1098,7 @@ fn currency_convert_bundled_plugin() {
     let wasm = build_plugin(&src, "currency_convert.wasm");
     let dir = install("currency-convert", &src, &wasm);
     let manifest = Manifest::load(&dir).unwrap();
-    assert_eq!(manifest.permissions.network, ["api.frankfurter.app"]);
+    assert_eq!(manifest.permissions.network, ["api.frankfurter.dev"]);
     let (port, requests) = rate_server();
     let data = scratch("currency-data");
     std::fs::write(

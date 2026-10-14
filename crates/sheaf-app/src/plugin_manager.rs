@@ -153,12 +153,13 @@ impl PluginManager {
     }
 
     fn uninstall(&mut self, id: String, name: String, window: &mut Window, cx: &mut Context<Self>) {
-        let rx = window.prompt(
+        let rx = crate::prompts::ask(
+            window,
+            cx,
             PromptLevel::Warning,
             &format!("Uninstall “{name}”?"),
             Some("Its files are removed. Data it saved stays, in case you reinstall it."),
             &["Uninstall", "Cancel"],
-            cx,
         );
         cx.spawn(async move |this, cx| {
             if matches!(rx.await, Ok(0)) {

@@ -202,6 +202,37 @@ impl PluginForm {
         }
     }
 
+    /// Dev (`--script`): set fields by id from JSON, then submit.
+    pub(crate) fn script_fill(
+        &mut self,
+        values: &serde_json::Map<String, serde_json::Value>,
+        cx: &mut Context<Self>,
+    ) {
+        for (i, f) in self.form.fields.iter().enumerate() {
+            let Some(v) = values.get(&f.id) else { continue };
+            let text = || match v {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            match &mut self.fields[i] {
+                FieldState::Text(input)
+                | FieldState::Number { input, .. }
+                | FieldState::PageRange(input) => {
+                    let t = text();
+                    input.update(cx, |inp, cx| inp.set_text(t, cx));
+                }
+                FieldState::Choice { index, options } => {
+                    if let Some(n) = v.as_u64() {
+                        *index = (n as usize).min(options.len().saturating_sub(1));
+                    }
+                }
+                FieldState::Checkbox(b) => *b = v.as_bool().unwrap_or(*b),
+                FieldState::File { path, .. } => *path = v.as_str().map(String::from),
+            }
+        }
+        self.submit(cx);
+    }
+
     fn submit(&mut self, cx: &mut Context<Self>) {
         match self.answers(cx) {
             Ok(a) => cx.emit(PluginFormEvent::Submit(a)),

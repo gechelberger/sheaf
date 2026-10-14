@@ -16,6 +16,14 @@ pub struct PluginPanelState {
 }
 
 impl DocView {
+    /// Every plugin panel's rows (for `--script` dumps).
+    pub(crate) fn plugin_panel_rows(&self) -> Vec<(&str, &[PanelRow])> {
+        self.plugin_panels
+            .iter()
+            .map(|(id, p)| (id.as_str(), p.rows.as_slice()))
+            .collect()
+    }
+
     /// Replace a panel's rows (`id` is `<plugin>.<panel>`).
     pub(crate) fn set_plugin_panel(
         &mut self,
