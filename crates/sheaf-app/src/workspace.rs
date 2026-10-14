@@ -1095,7 +1095,7 @@ impl Workspace {
             let Ok(Ok(Some(mut files))) = rx.await else {
                 return;
             };
-            files.retain(|p| sheaf_doc::images::is_image_path(p));
+            files.retain(|p| sheaf_image::io::is_image_path(p));
             files.sort();
             if files.is_empty() {
                 return;
@@ -1211,7 +1211,7 @@ impl Workspace {
             let Ok(Ok(Some(mut files))) = rx.await else {
                 return;
             };
-            files.retain(|p| sheaf_doc::images::is_image_path(p));
+            files.retain(|p| sheaf_image::io::is_image_path(p));
             if files.is_empty() {
                 return;
             }

@@ -14,11 +14,10 @@ im.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 regex.workspace = true
-# Image import: decoding, multi-page TIFF, Flate and CCITT G4.
-image = { workspace = true, features = ["jpeg", "tiff", "bmp", "gif", "webp"] }
-tiff = "0.11"
-fax = "0.2"
+# Image pages: decoding and G4 come from sheaf-image; Flate is ours.
+sheaf-image.workspace = true
 flate2 = "1"
 
 [dev-dependencies]
+image.workspace = true
 env_logger.workspace = true

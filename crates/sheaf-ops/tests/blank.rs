@@ -117,8 +117,7 @@ fn a_noisy_scanned_blank_is_blank() {
             }
         }
     }
-    let page =
-        sheaf_doc::images::PageImage::from_image(image::DynamicImage::ImageLuma8(img), 150.0);
+    let page = sheaf_image::io::PageImage::from_image(image::DynamicImage::ImageLuma8(img), 150.0);
     let bytes = sheaf_doc::images::to_pdf(&[page], sheaf_doc::images::PageFit::Original).unwrap();
     let path = dir.join("scan.pdf");
     std::fs::write(&path, bytes).unwrap();

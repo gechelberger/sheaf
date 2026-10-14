@@ -130,7 +130,7 @@ pub fn install(
     };
     let image = match &wm.mark {
         Mark::Image { path, .. } => {
-            let img = crate::images::read(path)?
+            let img = sheaf_image::io::read(path)?
                 .into_iter()
                 .next()
                 .context("the image has no pages")?;

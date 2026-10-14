@@ -8,7 +8,11 @@
 //! - [`clean`]: scans and phone photos of paper made into clean pages.
 //! - [`blank`]: whether a page image is blank.
 //! - [`raster`]: rendered pages as pixels, and their conversions.
+//! - [`io`]: image files in, as [`io::PageImage`]s or upright RGB.
+//! - [`encode`]: compact encodings out (CCITT G4, …).
 
 pub mod blank;
 pub mod clean;
+pub mod encode;
+pub mod io;
 pub mod raster;

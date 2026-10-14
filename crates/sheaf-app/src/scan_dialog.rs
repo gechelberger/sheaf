@@ -292,7 +292,7 @@ impl ScanDialog {
                 .spawn(async move {
                     let image = match loaded {
                         Some(im) => im,
-                        None => Arc::new(shrink(sheaf_image::clean::load(&path)?)),
+                        None => Arc::new(shrink(sheaf_image::io::load(&path)?)),
                     };
                     let views = preview(&image, &params)?;
                     anyhow::Ok((image, views))

@@ -9,9 +9,10 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sheaf_core::PageSize;
-use sheaf_doc::images::{PageImage, placement};
+use sheaf_doc::images::placement;
 use sheaf_doc::{Box2, Document, Edit, SourceInfo, TextLayer};
 use sheaf_image::clean::ScanParams;
+use sheaf_image::io::PageImage;
 use sheaf_ocr::{OcrConfig, OcrImage, OcrWord};
 use sheaf_progress::{Progress, Unit};
 
@@ -86,7 +87,7 @@ pub fn clean_one(
     params: &ScanParams,
     progress: &dyn Progress,
 ) -> Result<sheaf_image::clean::Cleaned> {
-    let image = sheaf_image::clean::load(path)?;
+    let image = sheaf_image::io::load(path)?;
     clean_image(image, params, progress, &mut |_, _| {})
         .with_context(|| format!("cleaning up {}", path.display()))
 }

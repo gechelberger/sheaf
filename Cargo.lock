@@ -6510,7 +6510,6 @@ version = "0.1.0-alpha.1"
 dependencies = [
  "anyhow",
  "env_logger",
- "fax",
  "flate2",
  "im",
  "image",
@@ -6520,8 +6519,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sheaf-core",
+ "sheaf-image",
  "thiserror 2.0.21",
- "tiff",
 ]
 
 [[package]]
@@ -6529,12 +6528,15 @@ name = "sheaf-image"
 version = "0.1.0-alpha.1"
 dependencies = [
  "anyhow",
+ "fax",
  "image",
  "imageproc",
  "log",
+ "png 0.18.1",
  "serde",
  "serde_json",
  "sheaf-progress",
+ "tiff",
 ]
 
 [[package]]
@@ -6567,7 +6569,6 @@ dependencies = [
  "image",
  "log",
  "lopdf",
- "png 0.18.1",
  "regex",
  "serde",
  "serde_json",
@@ -6577,7 +6578,6 @@ dependencies = [
  "sheaf-ocr",
  "sheaf-progress",
  "sheaf-render",
- "tiff",
 ]
 
 [[package]]

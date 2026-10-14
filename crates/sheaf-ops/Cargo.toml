@@ -19,9 +19,6 @@ log.workspace = true
 regex.workspace = true
 serde.workspace = true
 image = { workspace = true, features = ["jpeg"] }
-# PNG resolution (pHYs) and multi-page TIFF for export.
-png = "0.18"
-tiff = "0.11"
 
 [dev-dependencies]
 serde_json.workspace = true

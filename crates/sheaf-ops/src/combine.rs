@@ -91,7 +91,7 @@ pub fn page_source(path: &Path, image_page: Paper) -> Result<PathBuf> {
     if is_pdf(path) {
         return Ok(path.to_path_buf());
     }
-    let pages = sheaf_doc::images::read(path)?;
+    let pages = sheaf_image::io::read(path)?;
     let pdf = sheaf_doc::images::to_pdf(&pages, image_page.fit(0.0))?;
     sheaf_doc::generated::store(&pdf)
 }

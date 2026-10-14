@@ -81,7 +81,7 @@ fn folder_files(dir: &Path) -> Vec<PathBuf> {
 }
 
 fn accepted(p: &Path) -> bool {
-    sheaf_doc::images::is_image_path(p)
+    sheaf_image::io::is_image_path(p)
         || p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
 }
 
@@ -96,7 +96,7 @@ fn inspect(path: &Path) -> Kind {
             Err(e) => Kind::Unreadable(format!("{e:#}")),
         }
     } else {
-        match sheaf_doc::images::read(path) {
+        match sheaf_image::io::read(path) {
             Ok(pages) => Kind::Image(pages.len()),
             Err(e) => Kind::Unreadable(format!("{e:#}")),
         }

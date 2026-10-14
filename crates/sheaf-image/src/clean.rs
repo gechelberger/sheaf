@@ -18,7 +18,7 @@
 
 use anyhow::Result;
 use image::imageops::FilterType;
-use image::{DynamicImage, GrayImage, ImageDecoder, ImageReader, Luma, Rgb, RgbImage};
+use image::{DynamicImage, GrayImage, Luma, Rgb, RgbImage};
 use imageproc::geometric_transformations::{Border, Interpolation, Projection};
 use imageproc::point::Point;
 use serde::{Deserialize, Serialize};
@@ -109,23 +109,6 @@ pub struct Cleaned {
     pub turns: u16,
     /// Degrees of skew removed (clockwise positive).
     pub skew: f32,
-}
-
-/// An image file, turned upright per its EXIF orientation.
-pub fn load(path: &std::path::Path) -> Result<RgbImage> {
-    use anyhow::Context;
-    let mut decoder = ImageReader::open(path)
-        .with_context(|| format!("opening {}", path.display()))?
-        .with_guessed_format()?
-        .into_decoder()
-        .with_context(|| format!("reading {}", path.display()))?;
-    let orientation = decoder
-        .orientation()
-        .unwrap_or(image::metadata::Orientation::NoTransforms);
-    let mut image = DynamicImage::from_decoder(decoder)
-        .with_context(|| format!("decoding {}", path.display()))?;
-    image.apply_orientation(orientation);
-    Ok(image.into_rgb8())
 }
 
 /// A point in the pipeline, for previews.

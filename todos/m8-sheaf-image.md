@@ -208,3 +208,28 @@ sheaf-image/src/
    Not changed: the app's `to_render_image` (BGRA passthrough to gpui) and the print
    paths. Checked with workspace tests, clippy, and the ten eval photos (same result,
    none dropped).
+3. Done.
+   - **`sheaf_image::io`:** `PageImage`, `Pixels`, `read`, `read_bytes`,
+     `is_image_path`, `DEFAULT_DPI` and the JPEG, PNG and TIFF parsing, from
+     `sheaf-doc`. `load` (upright RGB) moves there from `clean`.
+   - **`sheaf_image::encode`:**
+     - `g4`, from `sheaf-doc`;
+     - `png` and `jpeg` (each recording its DPI);
+     - `TiffWriter`/`TiffPage`, which writes a page at a time in color, gray or G4,
+       with resolution and page-number tags.
+
+     All of it came out of `export.rs`, which now only renders, names and
+     temp-file-renames.
+   - **What `sheaf_doc::images` keeps:** `PageFit`, `Placement`, `placement`,
+     `to_pdf`, `image_stream` and `files_to_pdf`.
+   - **Dependencies:** `sheaf-doc` drops `image`, `tiff` and `fax`; `sheaf-ops` drops
+     `png` and `tiff`.
+   - **No re-exports:** callers in `sheaf-ops`, `sheaf-app` and `sheaf-doc`'s
+     `watermark` switched.
+
+   **Bug found by the new TIFF round-trip test:** TIFF import never read the
+   resolution. `tiff`'s `get_tag_f32` only accepts FLOAT, and TIFF writes RATIONAL, so
+   every TIFF came in at 96 dpi. A 300 dpi scanner TIFF made a page three times too
+   big. `io::resolution` now reads RATIONAL (and the other numeric types). Checked end
+   to end: `sheaf export -f tiff` at 200 dpi, re-imported with `images-to-pdf
+   --page original`, gives 612×792 in all three modes.
