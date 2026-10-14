@@ -118,12 +118,12 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        let Some(f) = doc.foreign_annots.get(ix).cloned() else {
+        let Some((source, f)) = doc.foreign_annots.get(ix).cloned() else {
             return;
         };
         doc.selected_annot = None;
         doc.selected_foreign = Some(ix);
-        if let Some(index) = doc.index_of_source_page(f.page)
+        if let Some(index) = doc.index_of_page_in(source, f.page)
             && let Some(pref) = doc.shown_ref(index)
             && let Some(src) = doc
                 .model
@@ -167,7 +167,6 @@ impl DocView {
         let State::Ready(doc) = &self.state else {
             return Vec::new();
         };
-        let primary = doc.model.primary();
         let st = doc.model.state();
         let matches = |hay: &[&str]| {
             needle.is_empty() || hay.iter().any(|h| h.to_lowercase().contains(needle))
@@ -185,13 +184,12 @@ impl DocView {
                     }
                 }
             }
-            if pref.source == primary {
-                for (i, f) in doc.foreign_annots.iter().enumerate() {
-                    if f.page == pref.index
-                        && matches(&[&f.contents, &f.author, subtype_label(&f.subtype)])
-                    {
-                        page_rows.push(Row::Foreign(i));
-                    }
+            for (i, (source, f)) in doc.foreign_annots.iter().enumerate() {
+                if *source == pref.source
+                    && f.page == pref.index
+                    && matches(&[&f.contents, &f.author, subtype_label(&f.subtype)])
+                {
+                    page_rows.push(Row::Foreign(i));
                 }
             }
             if !page_rows.is_empty() {
@@ -272,7 +270,7 @@ impl DocView {
                 Row::Foreign(ix) => row_h(
                     doc.foreign_annots
                         .get(ix)
-                        .map_or(1, |f| text_lines(&foreign_text(f))),
+                        .map_or(1, |(_, f)| text_lines(&foreign_text(f))),
                 ),
             }
         }))
@@ -353,7 +351,7 @@ impl DocView {
                     );
                 }
                 Row::Foreign(ix) => {
-                    let Some(f) = doc.foreign_annots.get(ix) else {
+                    let Some((_, f)) = doc.foreign_annots.get(ix) else {
                         continue;
                     };
                     let is_sel = selected_foreign == Some(ix);

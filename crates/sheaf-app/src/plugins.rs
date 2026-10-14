@@ -995,6 +995,26 @@ pub fn render_source(
     Arc::new(EngineRender(handles.clone()))
 }
 
+/// Marks a plugin adds without an author are the user's.
+fn sign_marks(edits: &mut [sheaf_doc::Edit], name: &str) {
+    let sign = |a: &mut sheaf_doc::Annot| {
+        if a.author.is_empty() {
+            a.author = name.to_string();
+        }
+    };
+    for e in edits {
+        match e {
+            sheaf_doc::Edit::AnnotAdd { annot, .. }
+            | sheaf_doc::Edit::AnnotUpdate { annot, .. } => sign(annot),
+            sheaf_doc::Edit::ConnectorAdd { a, b } => {
+                sign(&mut a.1);
+                sign(&mut b.1);
+            }
+            _ => {}
+        }
+    }
+}
+
 pub fn ocr_source(
     handles: &HashMap<SourceId, RenderHandle>,
     config: sheaf_ocr::OcrConfig,
@@ -1223,7 +1243,9 @@ pub fn run(
                         let left = d.notice().filter(|n| *n != running).map(str::to_string);
                         let mut last = None;
                         d.edit_source = Some(plugin_id.clone());
-                        for b in out.batches {
+                        let me = crate::prefs::get(cx).identity.name();
+                        for mut b in out.batches {
+                            sign_marks(&mut b.edits, &me);
                             d.apply_batch(b.edits, &b.label, cx);
                             last = Some(b.label);
                         }

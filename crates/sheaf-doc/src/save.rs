@@ -147,6 +147,7 @@ fn prune_outline(nodes: &Vector<OutlineNode>, keep: &HashSet<PageId>) -> Vector<
                 view: target.and(n.view.clone()),
                 target,
                 color: n.color,
+                style: n.style,
                 children,
             })
         })
@@ -902,6 +903,10 @@ pub(crate) fn write_outline(
                     ],
                 );
             }
+            let flags = node.style.italic as i64 | (node.style.bold as i64) << 1;
+            if flags != 0 {
+                dict.set("F", flags);
+            }
             let (first, last, count) = level(pdf, ids[i], &node.children, page_obj, frame);
             if let (Some(f), Some(l)) = (first, last) {
                 dict.set("First", f);
@@ -952,14 +957,6 @@ pub(crate) fn geom_of(dict: &Dictionary, rotate: i32) -> PageGeom {
     }
 }
 
-/// Is this /Annots entry one of ours?
-fn is_sheaf_annot(pdf: &Pdf, entry: &Object) -> bool {
-    pdf.dereference(entry)
-        .ok()
-        .and_then(|(_, o)| o.as_dict().ok().map(|d| d.has(b"SheafAnnot")))
-        .unwrap_or(false)
-}
-
 /// Is this /Annots entry navigation or a form field rather than markup?
 /// Our connectors are links too, but they're markup.
 fn is_link_or_field(pdf: &Pdf, entry: &Object) -> bool {
@@ -1005,7 +1002,7 @@ pub(crate) fn strip_sheaf_annots(pdf: &Pdf, page: &mut Dictionary) {
     };
     let kept: Vec<Object> = existing
         .into_iter()
-        .filter(|e| !is_sheaf_annot(pdf, e))
+        .filter(|e| !crate::file::is_ours(pdf, e))
         .collect();
     if kept.is_empty() {
         page.remove(b"Annots");
@@ -1042,11 +1039,15 @@ pub(crate) fn write_page_annots<'a>(
         .unwrap_or_default();
     let mut connectors = Vec::new();
     for a in annots {
-        let (mut dict, stream) = to_pdf(a, geom);
-        let ap_id = pdf.add_object(Object::Stream(stream));
-        dict.set("AP", dictionary! { "N" => ap_id });
-        let id = pdf.add_object(Object::Dictionary(dict));
+        let written = to_pdf(a, geom, pdf);
+        let id = pdf.add_object(Object::Dictionary(written.main));
         list.push(Object::Reference(id));
+        for mut part in written.companions {
+            part.set("IRT", id);
+            part.set("RT", Object::Name(b"Group".to_vec()));
+            part.set(crate::annot::PART, true);
+            list.push(Object::Reference(pdf.add_object(Object::Dictionary(part))));
+        }
         if let AnnotKind::Connector { rect, partner, .. } = &a.kind {
             let [llx, _, _, ury] = geom.box_to_user(*rect);
             connectors.push(ConnectorRef {
@@ -1345,6 +1346,8 @@ mod tests {
             page: Some(page),
             depth: 0,
             view,
+            color: None,
+            style: Default::default(),
         };
         let mut model = Document::new(
             info(&a, 2),
@@ -1420,12 +1423,16 @@ mod tests {
                     page: Some(0),
                     depth: 0,
                     view: None,
+                    color: None,
+                    style: Default::default(),
                 },
                 FlatOutlineItem {
                     title: "Three".into(),
                     page: Some(2),
                     depth: 0,
                     view: None,
+                    color: None,
+                    style: Default::default(),
                 },
             ],
             Box::new(FixedCount(10)),
@@ -1454,12 +1461,16 @@ mod tests {
                     page: Some(0),
                     depth: 0,
                     view: None,
+                    color: None,
+                    style: Default::default(),
                 },
                 FlatOutlineItem {
                     title: "Child é".into(),
                     page: Some(2),
                     depth: 1,
                     view: None,
+                    color: None,
+                    style: Default::default(),
                 },
             ],
             Box::new(FixedCount(10)),
@@ -1494,6 +1505,7 @@ mod tests {
                     range: 0..2,
                     before: Some(ids[2]),
                     outline: None,
+                    annots: Vec::new(),
                 },
                 "ins",
             )
@@ -1565,6 +1577,8 @@ mod tests {
                 page: Some(2),
                 depth: 0,
                 view: None,
+                color: None,
+                style: Default::default(),
             }],
             Box::new(FixedCount(10)),
         );
@@ -1605,6 +1619,7 @@ mod tests {
                     range: 0..1,
                     before: None,
                     outline: None,
+                    annots: Vec::new(),
                 },
                 "ins",
             )
@@ -1618,6 +1633,7 @@ mod tests {
                     target: Some(Some(ids[2])),
                     color: None,
                     view: None,
+                    style: None,
                 },
                 "bm",
             )
@@ -1657,6 +1673,202 @@ mod tests {
         incremental_case(true);
     }
 
+    /// Put a mark of a kind no build knows on page 0 of `path`, as a newer
+    /// sheaf would have written it.
+    fn plant_unknown_mark(path: &Path) {
+        let mut pdf = Pdf::load(path).unwrap();
+        let page0 = pdf.get_pages()[&1];
+        let json = r#"{"id":77,"kind":{"Hexagon":{"rect":{"x":1,"y":1,"w":5,"h":5}}},"color":[1,2,3],"opacity":1.0,"stroke":1.0,"author":"future","contents":"from a newer sheaf","modified":""}"#;
+        let ap = pdf.add_object(lopdf::Stream::new(
+            dictionary! { "Type" => "XObject", "Subtype" => "Form", "BBox" => vec![0.into(), 0.into(), 60.into(), 60.into()] },
+            b"0 0 60 60 re S".to_vec(),
+        ));
+        let annot = pdf.add_object(dictionary! {
+            "Type" => "Annot",
+            "Subtype" => "Polygon",
+            "Rect" => vec![100.into(), 600.into(), 160.into(), 660.into()],
+            "NM" => Object::string_literal("sheaf:77"),
+            "Contents" => Object::string_literal("from a newer sheaf"),
+            "SheafAnnot" => Object::string_literal(json),
+            "AP" => dictionary! { "N" => ap },
+        });
+        pdf.get_dictionary_mut(page0)
+            .unwrap()
+            .set("Annots", vec![annot.into()]);
+        pdf.save(path).unwrap();
+    }
+
+    #[test]
+    fn a_mark_this_build_cant_read_survives_a_save() {
+        let dir = tempdir();
+        let path = make_pdf(&dir, "a.pdf", "A", 2, &[]);
+        plant_unknown_mark(&path);
+        let found = crate::file::read_annots(&path, None).unwrap();
+        assert!(found.sheaf.is_empty());
+        assert_eq!(found.foreign.len(), 1);
+        assert_eq!(found.foreign[0].subtype, "Polygon");
+        for incremental in [true, false] {
+            let len = std::fs::metadata(&path).unwrap().len() as usize;
+            let mut model = Document::new(
+                {
+                    let mut i = info(&path, 2);
+                    i.bytes = len;
+                    i
+                },
+                &[],
+                Box::new(FixedCount(10)),
+            );
+            let p0 = model.page(0).unwrap().id;
+            let ours = Annot {
+                id: AnnotId(0),
+                kind: AnnotKind::Square {
+                    rect: crate::annot::Box2 {
+                        x: 10.0,
+                        y: 10.0,
+                        w: 20.0,
+                        h: 20.0,
+                    },
+                },
+                color: [255, 0, 0],
+                opacity: 1.0,
+                stroke: 1.0,
+                author: "t".into(),
+                contents: String::new(),
+                modified: String::new(),
+                created: String::new(),
+            };
+            model
+                .apply(
+                    Edit::AnnotAdd {
+                        page: p0,
+                        annot: ours,
+                    },
+                    "add",
+                )
+                .unwrap();
+            let bytes = if incremental {
+                crate::incremental::incremental(&model.snapshot()).unwrap()
+            } else {
+                rewrite(&model.snapshot()).unwrap()
+            };
+            let out = dir.join(format!("out-{incremental}.pdf"));
+            std::fs::write(&out, &bytes).unwrap();
+            let back = crate::file::read_annots(&out, None).unwrap();
+            assert_eq!(back.sheaf[&0].len(), 1, "ours, once ({incremental})");
+            assert_eq!(
+                back.foreign.len(),
+                1,
+                "the unknown mark, kept ({incremental})"
+            );
+            assert_eq!(back.foreign[0].contents, "from a newer sheaf");
+        }
+    }
+
+    #[test]
+    fn bookmark_colors_and_styles_round_trip() {
+        let dir = tempdir();
+        let path = make_pdf(
+            &dir,
+            "a.pdf",
+            "A",
+            3,
+            &[("Red", 0, 0), ("Plain", 1, 0), ("Both", 2, 0)],
+        );
+        // Colored and styled as another tool (PDFlyer, Acrobat) would.
+        {
+            let mut pdf = Pdf::load(&path).unwrap();
+            let first = pdf
+                .catalog()
+                .unwrap()
+                .get(b"Outlines")
+                .unwrap()
+                .as_reference()
+                .unwrap();
+            let first = pdf
+                .get_dictionary(first)
+                .unwrap()
+                .get(b"First")
+                .unwrap()
+                .as_reference()
+                .unwrap();
+            let second = pdf
+                .get_dictionary(first)
+                .unwrap()
+                .get(b"Next")
+                .unwrap()
+                .as_reference()
+                .unwrap();
+            let third = pdf
+                .get_dictionary(second)
+                .unwrap()
+                .get(b"Next")
+                .unwrap()
+                .as_reference()
+                .unwrap();
+            pdf.get_dictionary_mut(first)
+                .unwrap()
+                .set("C", vec![1.0.into(), 0.0.into(), 0.0.into()]);
+            pdf.get_dictionary_mut(third).unwrap().set("F", 3);
+            pdf.save(&path).unwrap();
+        }
+        let styles = crate::file::outline_styles(&Pdf::load(&path).unwrap());
+        assert_eq!(styles.len(), 3);
+        // As PDFium hands them over: no colors or styles.
+        let mut items: Vec<FlatOutlineItem> = ["Red", "Plain", "Both"]
+            .iter()
+            .enumerate()
+            .map(|(i, t)| FlatOutlineItem {
+                title: t.to_string(),
+                page: Some(i as u32),
+                depth: 0,
+                view: None,
+                color: None,
+                style: Default::default(),
+            })
+            .collect();
+        crate::file::style_flat_items(&mut items, &styles);
+        assert_eq!(items[0].color, Some([255, 0, 0]));
+        assert!(items[1].color.is_none() && items[1].style.is_plain());
+        assert!(items[2].style.bold && items[2].style.italic);
+        for incremental in [true, false] {
+            let len = std::fs::metadata(&path).unwrap().len() as usize;
+            let mut model = Document::new(
+                {
+                    let mut i = info(&path, 3);
+                    i.bytes = len;
+                    i
+                },
+                &items,
+                Box::new(FixedCount(10)),
+            );
+            // A bookmark edit, so the incremental save rewrites the outline.
+            let plain = model.state().outline[1].id;
+            model
+                .apply(
+                    Edit::OutlineEdit {
+                        id: plain,
+                        title: Some("Renamed".into()),
+                        target: None,
+                        color: None,
+                        view: None,
+                        style: None,
+                    },
+                    "rename",
+                )
+                .unwrap();
+            let bytes = if incremental {
+                crate::incremental::incremental(&model.snapshot()).unwrap()
+            } else {
+                rewrite(&model.snapshot()).unwrap()
+            };
+            let back = crate::file::outline_styles(&Pdf::load_mem(&bytes).unwrap());
+            assert_eq!(back.len(), 3, "{incremental}");
+            assert_eq!(back[0].color, Some([255, 0, 0]), "{incremental}");
+            assert_eq!(back[1].title, "Renamed");
+            assert!(back[2].style.bold && back[2].style.italic, "{incremental}");
+        }
+    }
+
     #[test]
     fn annots_written_and_read_back() {
         use crate::annot::{AnnotKind, Box2, Pt};
@@ -1682,6 +1894,7 @@ mod tests {
             author: "greg".into(),
             contents: "note".into(),
             modified: "D:20261011000000".into(),
+            created: String::new(),
         };
         model
             .apply(
@@ -1831,6 +2044,7 @@ mod tests {
             author: "greg".into(),
             contents: String::new(),
             modified: "D:20261011000000".into(),
+            created: String::new(),
         };
         model
             .apply(
@@ -1932,12 +2146,16 @@ mod tests {
                     page: Some(0),
                     depth: 0,
                     view: None,
+                    color: None,
+                    style: Default::default(),
                 },
                 FlatOutlineItem {
                     title: "Second".into(),
                     page: Some(1),
                     depth: 0,
                     view: None,
+                    color: None,
+                    style: Default::default(),
                 },
             ],
             Box::new(FixedCount(10)),
@@ -1964,6 +2182,7 @@ mod tests {
                         author: "greg".into(),
                         contents: String::new(),
                         modified: "D:20261011000000".into(),
+                        created: String::new(),
                     },
                 },
                 "tick",
@@ -1989,6 +2208,7 @@ mod tests {
             author: "greg".into(),
             contents: String::new(),
             modified: "D:20261011000000".into(),
+            created: String::new(),
         };
         model
             .apply(
@@ -2123,6 +2343,8 @@ mod tests {
                 page: Some(0),
                 depth: 0,
                 view: None,
+                color: None,
+                style: Default::default(),
             }],
             Box::new(FixedCount(10)),
         );
@@ -2183,24 +2405,32 @@ mod tests {
                     page: Some(0),
                     depth: 0,
                     view: None,
+                    color: None,
+                    style: Default::default(),
                 },
                 FlatOutlineItem {
                     title: "Second".into(),
                     page: Some(1),
                     depth: 1,
                     view: None,
+                    color: None,
+                    style: Default::default(),
                 },
                 FlatOutlineItem {
                     title: "Fourth".into(),
                     page: Some(3),
                     depth: 1,
                     view: None,
+                    color: None,
+                    style: Default::default(),
                 },
                 FlatOutlineItem {
                     title: "Third".into(),
                     page: Some(2),
                     depth: 0,
                     view: None,
+                    color: None,
+                    style: Default::default(),
                 },
             ],
             Box::new(FixedCount(10)),
@@ -2238,6 +2468,7 @@ mod tests {
                             author: "t".into(),
                             contents: String::new(),
                             modified: String::new(),
+                            created: String::new(),
                         },
                     },
                     "a",
@@ -2451,6 +2682,8 @@ mod tests {
                 page: Some(1),
                 depth: 0,
                 view: None,
+                color: None,
+                style: Default::default(),
             }],
             Box::new(FixedCount(10)),
         );
@@ -2475,6 +2708,7 @@ mod tests {
                         author: "t".into(),
                         contents: String::new(),
                         modified: String::new(),
+                        created: String::new(),
                     },
                 },
                 "a",
@@ -2545,6 +2779,7 @@ mod tests {
                         author: "t".into(),
                         contents: String::new(),
                         modified: String::new(),
+                        created: String::new(),
                     },
                 },
                 "sq",
@@ -2918,6 +3153,7 @@ mod tests {
                         author: "t".into(),
                         contents: String::new(),
                         modified: String::new(),
+                        created: String::new(),
                     },
                 },
                 "sq",

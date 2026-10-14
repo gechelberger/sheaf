@@ -255,6 +255,7 @@ impl DocView {
                             target: None,
                             color: None,
                             view: None,
+                            style: None,
                         },
                         "Rename bookmark",
                         cx,
@@ -315,6 +316,7 @@ impl DocView {
                 target: Some(Some(page)),
                 color: None,
                 view: Some(view),
+                style: None,
             },
             "Set destination",
             cx,
@@ -336,6 +338,7 @@ impl DocView {
                 target: None,
                 color: Some(color),
                 view: None,
+                style: None,
             },
             "Bookmark color",
             cx,
@@ -546,6 +549,8 @@ impl DocView {
                     .whitespace_nowrap()
                     .text_ellipsis()
                     .text_color(title_color)
+                    .when(node.style.bold, |d| d.font_weight(gpui::FontWeight::BOLD))
+                    .when(node.style.italic, |d| d.italic())
                     .child(node.title.clone())
                     .into_any_element(),
             };

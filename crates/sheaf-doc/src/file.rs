@@ -78,7 +78,39 @@ impl PdfFile {
 
 use std::collections::HashMap;
 
-use crate::annot::{Annot, Box2, PageGeom, Pt, from_json};
+use crate::annot::{Annot, Box2, PART, PageGeom, Pt, from_json};
+use crate::model::{FlatOutlineItem, TextStyle};
+
+/// The mark an annotation dictionary carries, if this build can read it.
+fn sheaf_mark(dict: &lopdf::Dictionary) -> Option<Annot> {
+    from_json(pdf_text(dict.get(b"SheafAnnot").ok()?).as_bytes())
+}
+
+/// Is this `/Annots` entry one of ours to rewrite: a mark this build can
+/// read, or a companion of one (see `annot::PART`)? A `/SheafAnnot` it
+/// can't read, from a newer sheaf, isn't: it's kept like any other tool's
+/// annotation, so a save here never loses it.
+pub(crate) fn is_ours(pdf: &lopdf::Document, entry: &lopdf::Object) -> bool {
+    let Some(dict) = pdf
+        .dereference(entry)
+        .ok()
+        .and_then(|(_, o)| o.as_dict().ok())
+    else {
+        return false;
+    };
+    if dict.has(b"SheafAnnot") {
+        return sheaf_mark(dict).is_some();
+    }
+    // One step only: a companion's /IRT is its mark, never another companion.
+    dict.has(PART.as_bytes())
+        && dict
+            .get(b"IRT")
+            .ok()
+            .and_then(|irt| pdf.dereference(irt).ok())
+            .and_then(|(_, o)| o.as_dict().ok())
+            .and_then(sheaf_mark)
+            .is_some()
+}
 
 /// An annotation some other tool left in the file. Listed read-only in the
 /// Comments panel; PDFium draws it.
@@ -138,6 +170,96 @@ pub struct FileFacts {
     pub collection: Option<crate::portfolio::Collection>,
     /// Optional content groups, in display order.
     pub layers: Vec<crate::layers::Layer>,
+    /// Each bookmark's color and style, in pre-order; empty when none has
+    /// either (see [`outline_styles`]).
+    pub outline_styles: Vec<OutlineStyle>,
+}
+
+/// A bookmark's `/C` and `/F`, which PDFium's outline doesn't carry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OutlineStyle {
+    pub title: String,
+    pub color: Option<[u8; 3]>,
+    pub style: TextStyle,
+}
+
+/// Each bookmark's title, color and style, in pre-order (the order PDFium
+/// lists them), or nothing when no bookmark has a color or style. Matched to
+/// PDFium's items by position, checked by title.
+pub fn outline_styles(pdf: &lopdf::Document) -> Vec<OutlineStyle> {
+    let first = pdf
+        .catalog()
+        .ok()
+        .and_then(|c| c.get(b"Outlines").ok())
+        .and_then(|o| pdf.dereference(o).ok())
+        .and_then(|(_, o)| o.as_dict().ok())
+        .and_then(|d| d.get(b"First").ok())
+        .and_then(|f| f.as_reference().ok());
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    // (item, depth); children before siblings, as in pre-order.
+    let mut stack: Vec<(lopdf::ObjectId, u16)> = first.into_iter().map(|f| (f, 0)).collect();
+    while let Some((id, depth)) = stack.pop() {
+        if !seen.insert(id) || out.len() >= 100_000 {
+            continue;
+        }
+        let Ok(item) = pdf.get_dictionary(id) else {
+            continue;
+        };
+        let color = item
+            .get(b"C")
+            .ok()
+            .and_then(|c| pdf.dereference(c).ok())
+            .and_then(|(_, c)| c.as_array().ok())
+            .filter(|a| a.len() == 3)
+            .map(|a| {
+                let v = |i: usize| {
+                    (a[i].as_float().unwrap_or(0.0).clamp(0.0, 1.0) * 255.0).round() as u8
+                };
+                [v(0), v(1), v(2)]
+            })
+            // Black is the default; don't call it a color.
+            .filter(|c| *c != [0, 0, 0]);
+        let flags = item
+            .get(b"F")
+            .ok()
+            .and_then(|f| f.as_i64().ok())
+            .unwrap_or(0);
+        out.push(OutlineStyle {
+            title: item.get(b"Title").map(pdf_text).unwrap_or_default(),
+            color,
+            style: TextStyle {
+                italic: flags & 1 != 0,
+                bold: flags & 2 != 0,
+            },
+        });
+        if let Ok(next) = item.get(b"Next").and_then(|n| n.as_reference()) {
+            stack.push((next, depth));
+        }
+        if depth < 64
+            && let Ok(child) = item.get(b"First").and_then(|c| c.as_reference())
+        {
+            stack.push((child, depth + 1));
+        }
+    }
+    if out
+        .iter()
+        .all(|s| s.color.is_none() && s.style == TextStyle::default())
+    {
+        out.clear();
+    }
+    out
+}
+
+/// Give PDFium's flattened bookmarks their colors and styles: the `i`th
+/// takes the `i`th style when their titles agree.
+pub fn style_flat_items(items: &mut [FlatOutlineItem], styles: &[OutlineStyle]) {
+    for (item, s) in items.iter_mut().zip(styles) {
+        if item.title.trim() == s.title.trim() {
+            item.color = s.color;
+            item.style = s.style;
+        }
+    }
 }
 
 /// The facts sheaf reads from an open file's catalog.
@@ -148,6 +270,7 @@ pub fn facts_in(pdf: &lopdf::Document) -> FileFacts {
         attachments: crate::attachments::attachments_in(pdf),
         collection: crate::portfolio::collection(pdf),
         layers: crate::layers::layers_in(pdf),
+        outline_styles: outline_styles(pdf),
     }
 }
 
@@ -234,10 +357,14 @@ fn annots_in(pdf: &lopdf::Document) -> AnnotsInFile {
                 continue;
             };
             let Ok(dict) = obj.as_dict() else { continue };
-            if let Ok(payload) = dict.get(b"SheafAnnot") {
-                if let Some(a) = from_json(pdf_text(payload).as_bytes()) {
-                    out.sheaf.entry(i as u32).or_default().push(a);
-                }
+            if let Some(a) = sheaf_mark(dict) {
+                out.sheaf.entry(i as u32).or_default().push(a);
+                continue;
+            }
+            // A companion of one of ours is part of it. Anything else,
+            // including a mark this build can't read, is listed as another
+            // tool's.
+            if dict.has(PART.as_bytes()) && is_ours(pdf, entry) {
                 continue;
             }
             let subtype = dict
@@ -339,6 +466,73 @@ mod tests {
     /// One page carrying a third-party sticky note, a link (not a comment),
     /// a popup (not a comment), and one of ours.
     #[test]
+    fn a_companion_follows_its_mark() {
+        use lopdf::{Object, Stream, dictionary};
+        let mut pdf = lopdf::Document::with_version("1.7");
+        let pages_id = pdf.new_object_id();
+        let content = pdf.add_object(Stream::new(dictionary! {}, b"".to_vec()));
+        let rect = || Object::Array(vec![10.into(), 10.into(), 20.into(), 20.into()]);
+        let ours = Annot {
+            id: crate::annot::AnnotId(5),
+            kind: crate::annot::AnnotKind::Note {
+                pos: Pt { x: 1.0, y: 2.0 },
+            },
+            color: [1, 2, 3],
+            opacity: 1.0,
+            stroke: 1.0,
+            author: "me".into(),
+            contents: String::new(),
+            modified: String::new(),
+            created: String::new(),
+        };
+        let geom = PageGeom {
+            media: [0.0, 0.0, 612.0, 792.0],
+            rotate: 0,
+        };
+        let main = crate::annot::to_pdf(&ours, &geom, &mut pdf).main;
+        let main = pdf.add_object(main);
+        let part = pdf.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "Caret", "Rect" => rect(),
+            "IRT" => main, PART => true,
+        });
+        // A mark from a newer sheaf, and its companion.
+        let unknown = pdf.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "StrikeOut", "Rect" => rect(),
+            "SheafAnnot" => Object::string_literal(r#"{"id":6,"kind":{"Future":{}}}"#),
+        });
+        let unknown_part = pdf.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "Caret", "Rect" => rect(),
+            "IRT" => unknown, PART => true,
+        });
+        let list: Vec<Object> = [main, part, unknown, unknown_part]
+            .into_iter()
+            .map(Object::Reference)
+            .collect();
+        let page = pdf.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages_id, "Contents" => content,
+            "MediaBox" => Object::Array(vec![0.into(), 0.into(), 612.into(), 792.into()]),
+            "Annots" => list.clone(),
+        });
+        pdf.objects.insert(
+            pages_id,
+            Object::Dictionary(
+                dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 },
+            ),
+        );
+        let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        pdf.trailer.set("Root", catalog);
+
+        let mine: Vec<bool> = list.iter().map(|e| is_ours(&pdf, e)).collect();
+        assert_eq!(mine, vec![true, true, false, false]);
+        let found = annots_in(&pdf);
+        assert_eq!(found.sheaf[&0], vec![ours]);
+        // The newer sheaf's mark and its companion are listed like another
+        // tool's, and kept.
+        let subtypes: Vec<&str> = found.foreign.iter().map(|f| f.subtype.as_str()).collect();
+        assert_eq!(subtypes, vec!["StrikeOut", "Caret"]);
+    }
+
+    #[test]
     fn reads_foreign_and_sheaf_annotations() {
         let mut pdf = lopdf::Document::with_version("1.7");
         let pages_id = pdf.new_object_id();
@@ -372,14 +566,17 @@ mod tests {
             author: "me".into(),
             contents: "mine".into(),
             modified: String::new(),
+            created: String::new(),
         };
-        let (dict, _) = crate::annot::to_pdf(
+        let dict = crate::annot::to_pdf(
             &ours,
             &PageGeom {
                 media: [0.0, 0.0, 612.0, 792.0],
                 rotate: 0,
             },
-        );
+            &mut pdf,
+        )
+        .main;
         let mine = pdf.add_object(dict);
         let page = pdf.add_object(dictionary! {
             "Type" => "Page",

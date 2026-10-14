@@ -355,6 +355,7 @@ impl DocView {
                     target: None,
                     color: Some(want),
                     view: None,
+                    style: None,
                 })
             })
             .collect();

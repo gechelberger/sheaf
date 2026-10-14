@@ -854,6 +854,7 @@ impl DocView {
             author: String::new(),
             contents: String::new(),
             modified: String::new(),
+            created: String::new(),
         };
         ghost.opacity = 0.6;
         Some(

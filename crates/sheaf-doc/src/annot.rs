@@ -10,6 +10,13 @@
 //! Every annotation we write carries `/NM sheaf:<id>` and a `/SheafAnnot`
 //! JSON copy of the model, so a file we saved can be reopened with the marks
 //! editable and PDFium told to hide its rendering of them.
+//!
+//! The JSON is a file format. Changes to it are additive: a new kind is a
+//! new variant and a new field has `#[serde(default)]`, so older files keep
+//! reading. A mark this build can't read (a kind from a newer sheaf) isn't
+//! ours to rewrite: it's kept and shown like another tool's (see
+//! `file::is_ours`). Every mark also writes a full appearance, so other
+//! viewers, and older sheaf builds, draw it.
 
 use lopdf::{Dictionary, Object, Stream, StringFormat, dictionary};
 use serde::{Deserialize, Serialize};
@@ -214,8 +221,12 @@ pub struct Annot {
     pub author: String,
     /// Note/FreeText text, or a comment on any other kind.
     pub contents: String,
-    /// PDF date string, e.g. `D:20261011153000`.
+    /// PDF date string, e.g. `D:20261011153000`: when it last changed.
     pub modified: String,
+    /// When it was made (`/CreationDate`); moving or editing it doesn't
+    /// change this. Empty for marks made before sheaf kept it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub created: String,
 }
 
 impl Annot {
@@ -263,6 +274,40 @@ impl Annot {
 
     pub fn name(&self) -> String {
         format!("sheaf:{}", self.id.0)
+    }
+
+    /// The `/NM` of every annotation this mark writes: its own, then any
+    /// companions' (see [`Written`]). sheaf draws these itself, so PDFium
+    /// is told to hide exactly these.
+    pub fn pdf_names(&self) -> Vec<String> {
+        vec![self.name()]
+    }
+}
+
+/// Marks a companion annotation: one sheaf writes beside a mark's own,
+/// pointing at it with `/IRT` (the Caret of a replace-text edit, say). It
+/// belongs to that mark, and goes when the mark is rewritten.
+pub const PART: &str = "SheafPart";
+
+/// A mark as PDF objects: its annotation dictionary, with `/AP` set, and
+/// any companions. Objects they point at (appearance streams, images,
+/// embedded files) are already in the document. The writer gives each
+/// companion `/IRT` to the main annotation, `/RT /Group` and [`PART`].
+pub struct Written {
+    pub main: Dictionary,
+    pub companions: Vec<Dictionary>,
+}
+
+/// Write `a` into `pdf` as it appears on a page with geometry `geom`. The
+/// caller adds [`Written::main`] (and the companions) to the page's
+/// `/Annots`.
+pub fn to_pdf(a: &Annot, geom: &PageGeom, pdf: &mut lopdf::Document) -> Written {
+    let (mut main, appearance) = annotation(a, geom);
+    let ap = pdf.add_object(Object::Stream(appearance));
+    main.set("AP", dictionary! { "N" => ap });
+    Written {
+        main,
+        companions: Vec::new(),
     }
 }
 
@@ -546,10 +591,9 @@ fn font_resources() -> Dictionary {
     }
 }
 
-/// The annotation dictionary (without `/P`) and its appearance stream,
-/// ready to be added to a page's `/Annots`. The caller adds `/AP << /N ref >>`
-/// after inserting the stream and sets `/P`.
-pub fn to_pdf(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
+/// The main annotation dictionary (without `/AP` or `/P`) and its
+/// appearance stream.
+fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
     let bounds = a.bounds();
     // Pad so strokes aren't clipped by the BBox.
     let pad = a.stroke.max(1.0) + 1.0;
@@ -583,6 +627,9 @@ pub fn to_pdf(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
     };
     if !a.contents.is_empty() {
         dict.set("Contents", pdf_text_string(&a.contents));
+    }
+    if !a.created.is_empty() {
+        dict.set("CreationDate", pdf_text_string(&a.created));
     }
     let c = a.color;
     let color_arr = Object::Array(c.iter().map(|v| Object::Real(*v as f32 / 255.0)).collect());
@@ -945,6 +992,15 @@ mod tests {
     }
 
     #[test]
+    fn marks_saved_before_creation_dates_still_read() {
+        let old = br#"{"id":3,"kind":{"Note":{"pos":{"x":1.0,"y":2.0}}},"color":[1,2,3],"opacity":1.0,"stroke":1.0,"author":"me","contents":"hi","modified":"D:20261011000000"}"#;
+        let a = from_json(old).unwrap();
+        assert_eq!(a.created, "");
+        // And an empty one isn't written.
+        assert!(!serde_json::to_string(&a).unwrap().contains("created"));
+    }
+
+    #[test]
     fn to_pdf_round_trips_through_json() {
         let a = Annot {
             id: AnnotId(7),
@@ -963,8 +1019,21 @@ mod tests {
             author: "greg".into(),
             contents: "Hello (world) é".into(),
             modified: "D:20261011000000".into(),
+            created: "D:20261010000000".into(),
         };
-        let (dict, stream) = to_pdf(&a, &geom(0));
+        let mut pdf = lopdf::Document::with_version("1.7");
+        let Written { main: dict, .. } = to_pdf(&a, &geom(0), &mut pdf);
+        let ap = dict.get(b"AP").unwrap().as_dict().unwrap();
+        let stream = pdf
+            .get_object(ap.get(b"N").unwrap().as_reference().unwrap())
+            .unwrap()
+            .as_stream()
+            .unwrap()
+            .clone();
+        assert_eq!(
+            dict.get(b"CreationDate").unwrap().as_str().unwrap(),
+            b"D:20261010000000"
+        );
         assert_eq!(
             dict.get(b"Subtype").unwrap().as_name().unwrap(),
             b"FreeText"

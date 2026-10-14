@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+# Random mark ids, so copies of a file never hand out the same one.
+fastrand = "2"
 sheaf-core.workspace = true
 lopdf.workspace = true
 anyhow.workspace = true

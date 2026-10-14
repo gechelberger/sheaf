@@ -151,8 +151,9 @@ pub(crate) struct Doc {
     pub(crate) selected_annot: Option<(PageId, AnnotId)>,
     pub(crate) annot_editor: Option<AnnotEditor>,
     pub(crate) pending_connector: Option<crate::markup_tools::PendingConnector>,
-    /// Comments other tools left in the primary file (read-only).
-    pub(crate) foreign_annots: Vec<sheaf_doc::file::ForeignAnnot>,
+    /// Comments other tools left in the files the pages come from
+    /// (read-only), with the source each is in.
+    pub(crate) foreign_annots: Vec<(SourceId, sheaf_doc::file::ForeignAnnot)>,
     pub(crate) selected_foreign: Option<usize>,
     /// Files embedded in the primary file, and its portfolio schema if it
     /// is one (see attachments_panel.rs). `facts_loaded` once read.
@@ -165,9 +166,13 @@ pub(crate) struct Doc {
     pub(crate) layers_hidden: HashSet<sheaf_doc::layers::LayerId>,
     pub(crate) layers_default: HashSet<sheaf_doc::layers::LayerId>,
     pub(crate) layers_generation: u64,
-    /// Pages of the primary file whose sheaf-written marks PDFium is told
-    /// not to draw; repeated when its renderer is reopened.
-    pub(crate) sheaf_pages: Vec<u32>,
+    /// The primary file's marks that sheaf draws itself, as `/NM`s by page
+    /// index: PDFium is told not to draw them, again whenever its renderer
+    /// is reopened.
+    pub(crate) drawn_marks: Vec<(u32, Vec<String>)>,
+    /// Bookmark colors and styles from the file, when they arrived before
+    /// the outline did.
+    pub(crate) pending_outline_styles: Option<Vec<sheaf_doc::file::OutlineStyle>>,
     /// Every page's label (from the model), and the version it's for.
     pub(crate) labels: std::cell::RefCell<(u64, Option<std::sync::Arc<Vec<String>>>)>,
     /// With two panes: the top pane's share of the height.
@@ -176,7 +181,49 @@ pub(crate) struct Doc {
     pub(crate) split_drag: bool,
 }
 
+/// What an inserted or replacing file brings besides its pages, read on
+/// a background thread: sheaf's own marks (which the edit carries in),
+/// other tools' comments, and its bookmarks' colors and styles.
+#[derive(Default)]
+pub(crate) struct Incoming {
+    pub marks: HashMap<u32, Vec<sheaf_doc::Annot>>,
+    pub foreign: Vec<sheaf_doc::file::ForeignAnnot>,
+    pub outline_styles: Vec<sheaf_doc::file::OutlineStyle>,
+}
+
+impl Incoming {
+    pub(crate) fn read(path: &std::path::Path) -> Incoming {
+        match sheaf_doc::file::read_open(path, None) {
+            Ok((annots, facts)) => Incoming {
+                marks: annots.sheaf,
+                foreign: annots.foreign,
+                outline_styles: facts.outline_styles,
+            },
+            Err(e) => {
+                log::warn!("reading marks in {}: {e:#}", path.display());
+                Incoming::default()
+            }
+        }
+    }
+
+    /// The marks, as `Edit::InsertPages` and `ReplacePages` carry them.
+    pub(crate) fn edit_marks(&self) -> Vec<(u32, Vec<sheaf_doc::Annot>)> {
+        self.marks.iter().map(|(i, l)| (*i, l.clone())).collect()
+    }
+}
+
 impl Doc {
+    /// After `source`'s pages came in with `incoming`: PDFium stops drawing
+    /// the marks sheaf now draws, and the file's other comments are listed.
+    pub(crate) fn take_in(&mut self, source: SourceId, incoming: Incoming) {
+        if !incoming.marks.is_empty()
+            && let Some(handle) = self.handles.get(&source)
+        {
+            drop(handle.hide_annots(marks_by_page(&incoming.marks)));
+        }
+        self.foreign_annots
+            .extend(incoming.foreign.into_iter().map(|f| (source, f)));
+    }
     pub(crate) fn primary(&self) -> &RenderHandle {
         &self.handles[&self.model.primary()]
     }
@@ -211,6 +258,15 @@ impl Doc {
 
     /// Display index of the primary source's page `index`, if it's still in
     /// the document (search hits are reported in source pages).
+    /// Where page `index` of `source` is shown, if it is.
+    pub(crate) fn index_of_page_in(&self, source: SourceId, index: u32) -> Option<usize> {
+        self.model
+            .state()
+            .pages
+            .iter()
+            .position(|p| p.source == source && p.index == index)
+    }
+
     pub(crate) fn index_of_source_page(&self, index: u32) -> Option<usize> {
         let primary = self.model.primary();
         self.model
@@ -737,7 +793,8 @@ impl DocView {
             layers_hidden: HashSet::new(),
             layers_default: HashSet::new(),
             layers_generation: 0,
-            sheaf_pages: Vec::new(),
+            drawn_marks: Vec::new(),
+            pending_outline_styles: None,
             split: 0.5,
             split_drag: false,
         }));
@@ -997,7 +1054,10 @@ impl DocView {
                                 t.elapsed()
                             );
                         }
-                        let flat: Vec<FlatOutlineItem> = items.iter().map(flat_item).collect();
+                        let mut flat: Vec<FlatOutlineItem> = items.iter().map(flat_item).collect();
+                        if let Some(styles) = doc.pending_outline_styles.take() {
+                            sheaf_doc::file::style_flat_items(&mut flat, &styles);
+                        }
                         match doc.model.set_initial_outline(&flat) {
                             Ok(()) => {
                                 // Start with the top level expanded.
@@ -1422,18 +1482,23 @@ impl DocView {
                         };
                         let sid = doc.model.rebase_to_saved(saved);
                         // Our marks are now in the file; keep PDFium from drawing them.
-                        let pages: Vec<u32> = doc
-                            .model
-                            .state()
+                        let st = doc.model.state();
+                        let pages: Vec<(u32, Vec<String>)> = st
                             .pages
                             .iter()
                             .enumerate()
-                            .filter(|(_, p)| doc.model.state().annots.contains_key(&p.id))
-                            .map(|(i, _)| i as u32)
+                            .filter_map(|(i, p)| {
+                                let list = st.annots.get(&p.id)?;
+                                Some((i as u32, list.iter().flat_map(|a| a.pdf_names()).collect()))
+                            })
                             .collect();
-                        doc.sheaf_pages = pages.clone();
+                        doc.drawn_marks = pages.clone();
+                        // The saved file's third-party comments, at their
+                        // new page numbers.
+                        doc.foreign_annots.clear();
+                        reread_foreign(sid, path.clone(), cx);
                         if !pages.is_empty() {
-                            let rx = handle.hide_sheaf_annots(pages);
+                            let rx = handle.hide_annots(pages);
                             cx.spawn(async move |this, cx| {
                                 let _ = rx.await;
                                 this.update(cx, |view, cx| {
@@ -1552,7 +1617,18 @@ impl DocView {
                         t.elapsed()
                     );
                 }
-                doc.foreign_annots = foreign;
+                let primary = doc.model.primary();
+                doc.foreign_annots = foreign.into_iter().map(|f| (primary, f)).collect();
+                if !facts.outline_styles.is_empty() {
+                    if doc.outline_loaded {
+                        if let Err(e) = doc.model.set_initial_outline_styles(&facts.outline_styles)
+                        {
+                            log::warn!("bookmark colors arrived after edits; ignored: {e:#}");
+                        }
+                    } else {
+                        doc.pending_outline_styles = Some(facts.outline_styles.clone());
+                    }
+                }
                 if let Some(ranges) = &facts.label_ranges
                     && let Err(e) = doc.model.set_initial_labels(ranges)
                 {
@@ -1577,19 +1653,19 @@ impl DocView {
                     cx.notify();
                     return;
                 }
-                let pages: Vec<u32> = by_index.keys().copied().collect();
+                let drawn = marks_by_page(&by_index);
                 let n: usize = by_index.values().map(|v| v.len()).sum();
                 match doc.model.set_initial_annots(by_index) {
                     Ok(()) => {
                         if timing {
                             eprintln!(
                                 "[timing] loaded {n} sheaf annotations on {} pages in {:?}",
-                                pages.len(),
+                                drawn.len(),
                                 t.elapsed()
                             );
                         }
-                        doc.sheaf_pages = pages.clone();
-                        let rx = doc.primary().hide_sheaf_annots(pages);
+                        doc.drawn_marks = drawn.clone();
+                        let rx = doc.primary().hide_annots(drawn);
                         doc.touched();
                         cx.spawn(async move |this, cx| {
                             let _ = rx.await;
@@ -1624,6 +1700,7 @@ impl DocView {
             author: crate::prefs::get(cx).identity.name(),
             contents: String::new(),
             modified: sheaf_doc::pdf_date_now(),
+            created: sheaf_doc::pdf_date_now(),
         }
     }
 
@@ -2281,12 +2358,18 @@ impl DocView {
                         let bytes = std::fs::metadata(&path)
                             .map(|m| m.len() as usize)
                             .unwrap_or(0);
+                        // Pages sheaf made (blank, images) carry nothing more.
+                        let incoming = if bookmarks {
+                            Incoming::read(&path)
+                        } else {
+                            Incoming::default()
+                        };
                         let handle = RenderHandle::open(path, None)?;
-                        anyhow::Ok((handle, bytes))
+                        anyhow::Ok((handle, bytes, incoming))
                     }
                 })
                 .await;
-            let (handle, bytes) = match opened {
+            let (handle, bytes, incoming) = match opened {
                 Ok(v) => v,
                 Err(e) => {
                     this.update(cx, |view, cx| {
@@ -2322,11 +2405,12 @@ impl DocView {
                     password: None,
                 });
                 doc.handles.insert(sid, handle);
-                let flat: Vec<FlatOutlineItem> = if bookmarks {
+                let mut flat: Vec<FlatOutlineItem> = if bookmarks {
                     outline.iter().map(flat_item).collect()
                 } else {
                     Vec::new()
                 };
+                sheaf_doc::file::style_flat_items(&mut flat, &incoming.outline_styles);
                 let label = format!("Insert {name}");
                 let mut outcome = None;
                 match doc.model.apply(
@@ -2335,11 +2419,13 @@ impl DocView {
                         range: 0..page_count,
                         before,
                         outline: Some(flat),
+                        annots: incoming.edit_marks(),
                     },
                     &label,
                 ) {
                     Ok(out) => {
                         outcome = Some(out.clone());
+                        doc.take_in(sid, incoming);
                         doc.notice = Some(if !bookmarks {
                             // Pages sheaf made (blank, images): name says it all.
                             format!("Inserted {name}")
@@ -3163,12 +3249,54 @@ impl DocView {
     }
 }
 
+/// Each page's marks as the `/NM`s PDFium should hide, by page index.
+pub(crate) fn marks_by_page(
+    by_index: &std::collections::HashMap<u32, Vec<sheaf_doc::Annot>>,
+) -> Vec<(u32, Vec<String>)> {
+    by_index
+        .iter()
+        .map(|(i, list)| (*i, list.iter().flat_map(|a| a.pdf_names()).collect()))
+        .collect()
+}
+
+/// Read `path`'s third-party comments in the background and list them as
+/// `source`'s (after a save, the file's pages have new numbers).
+fn reread_foreign(source: SourceId, path: PathBuf, cx: &mut Context<DocView>) {
+    cx.spawn(async move |this, cx| {
+        let found = cx
+            .background_executor()
+            .spawn(async move { sheaf_doc::file::read_annots(&path, None) })
+            .await;
+        let foreign = match found {
+            Ok(a) => a.foreign,
+            Err(e) => {
+                log::warn!("reading third-party comments: {e:#}");
+                return;
+            }
+        };
+        this.update(cx, |view, cx| {
+            if let State::Ready(doc) = &mut view.state
+                && doc.model.primary() == source
+            {
+                doc.foreign_annots.retain(|(s, _)| *s != source);
+                doc.foreign_annots
+                    .extend(foreign.into_iter().map(|f| (source, f)));
+                cx.notify();
+            }
+        })
+        .ok();
+    })
+    .detach();
+}
+
 fn flat_item(i: &OutlineItem) -> FlatOutlineItem {
     FlatOutlineItem {
         title: i.title.clone(),
         page: i.page,
         depth: i.depth,
         view: i.view.clone(),
+        color: None,
+        style: Default::default(),
     }
 }
 
@@ -3781,8 +3909,8 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
                 .child(ed.input.clone()),
         );
     }
-    if let Some(f) = doc.selected_foreign.and_then(|i| doc.foreign_annots.get(i))
-        && pl.pref.source == doc.model.primary()
+    if let Some((source, f)) = doc.selected_foreign.and_then(|i| doc.foreign_annots.get(i))
+        && pl.pref.source == *source
         && f.page == pl.pref.index
     {
         page_div = page_div.child(crate::comments_panel::foreign_outline(f, src, rot, k));
@@ -4902,6 +5030,7 @@ mod tests {
             target: None,
             view: None,
             color: None,
+            style: Default::default(),
             children: children.into(),
         }
     }

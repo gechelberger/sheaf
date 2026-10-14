@@ -205,6 +205,8 @@ fn insert_runs(d: &mut Document, sid: SourceId, wanted: &[u32]) -> Result<Vec<(u
                 range: wanted[i]..wanted[j - 1] + 1,
                 before: None,
                 outline: None,
+                // `combine` adds each file's marks itself, afterwards.
+                annots: Vec::new(),
             },
             "Combine",
         )?;

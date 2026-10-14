@@ -68,6 +68,8 @@ fn positions_round_trip_through_pdfium() {
         page: Some(page),
         depth: 0,
         view,
+        color: None,
+        style: Default::default(),
     };
     let fit_h = Some(DestView::Other {
         kind: "FitH".into(),

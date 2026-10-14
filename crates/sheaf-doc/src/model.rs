@@ -67,7 +67,23 @@ pub struct OutlineNode {
     /// Where on `target` it lands; None is the top of the page.
     pub view: Option<DestView>,
     pub color: Option<[u8; 3]>,
+    pub style: TextStyle,
     pub children: Vector<OutlineNode>,
+}
+
+/// How a bookmark's title is drawn (its `/F`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TextStyle {
+    #[serde(default)]
+    pub bold: bool,
+    #[serde(default)]
+    pub italic: bool,
+}
+
+impl TextStyle {
+    pub fn is_plain(&self) -> bool {
+        !self.bold && !self.italic
+    }
 }
 
 /// A bookmark as read from a file: pre-order with depth.
@@ -79,6 +95,12 @@ pub struct FlatOutlineItem {
     /// Where on `page` it lands (see [`OutlineNode::view`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view: Option<DestView>,
+    /// `/C` and `/F`, which PDFium's outline leaves out (see
+    /// `file::style_flat_items`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<[u8; 3]>,
+    #[serde(default, skip_serializing_if = "TextStyle::is_plain")]
+    pub style: TextStyle,
 }
 
 /// One bookmark of a subtree inserted by [`Edit::OutlineInsertTree`], in
@@ -239,6 +261,10 @@ pub enum Edit {
         range: Range<u32>,
         before: Option<PageId>,
         outline: Option<Vec<FlatOutlineItem>>,
+        /// sheaf's own marks in the file, by source page index. They come
+        /// in on the new pages with fresh ids (see `import_marks`).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        annots: Vec<(u32, Vec<Annot>)>,
     },
     /// Copies inserted directly after each original.
     DuplicatePages {
@@ -251,6 +277,10 @@ pub enum Edit {
         ids: Vec<PageId>,
         source: SourceId,
         range: Range<u32>,
+        /// sheaf's own marks on the replacement pages, by source page
+        /// index; added beside the marks the kept pages already have.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        annots: Vec<(u32, Vec<Annot>)>,
     },
     OutlineInsert {
         parent: Option<OutlineId>,
@@ -301,6 +331,8 @@ pub enum Edit {
             with = "double_option"
         )]
         view: Option<Option<DestView>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        style: Option<TextStyle>,
     },
     /// Delete a bookmark and its subtree.
     OutlineDelete {
@@ -442,7 +474,6 @@ pub struct Document {
     next_outline: u64,
     next_source: u32,
     policy: Box<dyn HistoryPolicy>,
-    next_annot: u64,
     next_job: u64,
     /// Outline as it exists in the primary file on disk.
     saved_outline: Vector<OutlineNode>,
@@ -471,7 +502,6 @@ impl Document {
             next_outline: 0,
             next_source: 1,
             policy,
-            next_annot: 1,
             next_job: 1,
             saved_outline: Vector::new(),
             saved_labels: None,
@@ -592,9 +622,6 @@ impl Document {
         let mut map = im::HashMap::new();
         for (index, list) in by_index {
             if let Some(&pid) = ids.get(index as usize) {
-                for a in &list {
-                    self.next_annot = self.next_annot.max(a.id.0 + 1);
-                }
                 map.insert(pid, list.into_iter().collect());
             }
         }
@@ -619,10 +646,42 @@ impl Document {
         dirty
     }
 
-    pub fn fresh_annot_id(&mut self) -> AnnotId {
-        let id = AnnotId(self.next_annot);
-        self.next_annot += 1;
-        id
+    /// Bookmark colors and styles read from the file (which PDFium's
+    /// outline leaves out), matched to the loaded bookmarks in pre-order by
+    /// title. Only before any edit, like the other `set_initial_*`.
+    pub fn set_initial_outline_styles(
+        &mut self,
+        styles: &[crate::file::OutlineStyle],
+    ) -> Result<()> {
+        if self.history.len() != 1 {
+            bail!("bookmark styles can only be loaded before editing");
+        }
+        if styles.is_empty() {
+            return Ok(());
+        }
+        fn walk(
+            nodes: &Vector<OutlineNode>,
+            styles: &mut std::slice::Iter<crate::file::OutlineStyle>,
+        ) -> Vector<OutlineNode> {
+            nodes
+                .iter()
+                .map(|n| {
+                    let mut n = n.clone();
+                    if let Some(s) = styles.next()
+                        && s.title.trim() == n.title.trim()
+                    {
+                        n.color = s.color;
+                        n.style = s.style;
+                    }
+                    n.children = walk(&n.children, styles);
+                    n
+                })
+                .collect()
+        }
+        let styled = walk(&self.history[0].state.outline, &mut styles.iter());
+        self.history[0].state.outline = styled.clone();
+        self.saved_outline = styled;
+        Ok(())
     }
 
     pub fn state(&self) -> &DocState {
@@ -958,6 +1017,7 @@ impl Document {
                 target: item.target,
                 view: item.target.and(item.view.clone()),
                 color: None,
+                style: TextStyle::default(),
                 children: Vector::new(),
             };
             stack.push((item.depth, node));
@@ -993,7 +1053,8 @@ impl Document {
                 title: item.title.clone(),
                 target: item.page.and_then(|p| by_index.get(p as usize).copied()),
                 view: item.view.clone(),
-                color: None,
+                color: item.color,
+                style: item.style,
                 children: Vector::new(),
             };
             stack.push((item.depth, node));
@@ -1078,6 +1139,7 @@ impl Document {
                 range,
                 before,
                 outline,
+                annots,
             } => {
                 let info = self.sources.get(&source).context("unknown source")?.clone();
                 if range.end > info.page_count {
@@ -1114,6 +1176,14 @@ impl Document {
                     st.outline = merged;
                     out.bookmarks_added = added;
                 }
+                let incoming = annots
+                    .into_iter()
+                    .filter_map(|(index, list)| {
+                        let page = *by_index.get(index as usize)?;
+                        (page != PageId(u64::MAX)).then_some((page, list))
+                    })
+                    .collect();
+                import_marks(&mut st, incoming);
             }
             Edit::DuplicatePages { ids } => {
                 let set: HashSet<PageId> = ids.into_iter().collect();
@@ -1123,10 +1193,11 @@ impl Document {
                     if set.contains(&p.id) {
                         let copy = self.fresh_page_id();
                         if let Some(list) = st.annots.get(&p.id).cloned() {
+                            let mut taken = HashSet::new();
                             let list: Vector<Annot> = list
                                 .into_iter()
                                 .map(|mut a| {
-                                    a.id = self.fresh_annot_id();
+                                    a.id = fresh_annot_id(&st, &mut taken);
                                     a
                                 })
                                 .collect();
@@ -1141,7 +1212,12 @@ impl Document {
                 }
                 st.pages = pages;
             }
-            Edit::ReplacePages { ids, source, range } => {
+            Edit::ReplacePages {
+                ids,
+                source,
+                range,
+                annots,
+            } => {
                 let info = self.sources.get(&source).context("unknown source")?.clone();
                 if range.end > info.page_count {
                     bail!("range exceeds source page count");
@@ -1149,6 +1225,8 @@ impl Document {
                 let mut replacements = range.clone();
                 let mut last_pos = None;
                 let mut extra_old = HashSet::new();
+                // Which page now shows each replacement, for its marks.
+                let mut shown_by: HashMap<u32, PageId> = HashMap::new();
                 let pos = st.page_positions();
                 let mut pages = st.pages.clone();
                 for id in &ids {
@@ -1166,6 +1244,7 @@ impl Document {
                                     rotation: Rotation::R0,
                                 },
                             );
+                            shown_by.insert(index, *id);
                             last_pos = Some(i);
                         }
                         None => {
@@ -1176,15 +1255,17 @@ impl Document {
                 // Extra replacements go after the last replaced page.
                 let at = last_pos.map(|i| i + 1).unwrap_or(pages.len());
                 for (k, index) in replacements.enumerate() {
+                    let id = self.fresh_page_id();
                     pages.insert(
                         at + k,
                         PageRef {
-                            id: self.fresh_page_id(),
+                            id,
                             source,
                             index,
                             rotation: Rotation::R0,
                         },
                     );
+                    shown_by.insert(index, id);
                     out.pages_added += 1;
                 }
                 if !extra_old.is_empty() {
@@ -1194,11 +1275,20 @@ impl Document {
                         .filter(|p| !extra_old.contains(&p.id))
                         .copied()
                         .collect();
+                    for id in &extra_old {
+                        st.annots.remove(id);
+                        st.text_layers.remove(id);
+                    }
                     let (outline, removed) = cascade_delete(&st.outline, &extra_old);
                     st.outline = outline;
                     out.bookmarks_removed = removed;
                 }
                 st.pages = pages;
+                let incoming = annots
+                    .into_iter()
+                    .filter_map(|(index, list)| Some((*shown_by.get(&index)?, list)))
+                    .collect();
+                import_marks(&mut st, incoming);
             }
             Edit::OutlineInsert {
                 parent,
@@ -1213,6 +1303,7 @@ impl Document {
                     view: target.and(view),
                     target,
                     color: None,
+                    style: TextStyle::default(),
                     children: Vector::new(),
                 };
                 st.outline = outline_insert(&st.outline, parent, after, node)?;
@@ -1305,6 +1396,7 @@ impl Document {
                 target,
                 color,
                 view,
+                style,
             } => {
                 let updated = outline_update(&st.outline, id, |n| {
                     if let Some(t) = &title {
@@ -1326,6 +1418,9 @@ impl Document {
                     if let Some(c) = color {
                         n.color = c;
                     }
+                    if let Some(s) = style {
+                        n.style = s;
+                    }
                 });
                 st.outline = updated.context("bookmark not found")?;
             }
@@ -1339,7 +1434,7 @@ impl Document {
                 if st.index_of(page).is_none() {
                     bail!("page not found");
                 }
-                annot.id = self.fresh_annot_id();
+                annot.id = fresh_annot_id(&st, &mut HashSet::new());
                 let mut list = st.annots.get(&page).cloned().unwrap_or_default();
                 list.push_back(annot);
                 st.annots.insert(page, list);
@@ -1393,8 +1488,9 @@ impl Document {
                 if st.index_of(page_a).is_none() || st.index_of(page_b).is_none() {
                     bail!("page not found");
                 }
-                a.id = self.fresh_annot_id();
-                b.id = self.fresh_annot_id();
+                let mut taken = HashSet::new();
+                a.id = fresh_annot_id(&st, &mut taken);
+                b.id = fresh_annot_id(&st, &mut taken);
                 if let AnnotKind::Connector { partner, .. } = &mut a.kind {
                     *partner = Some(b.id);
                 }
@@ -1594,6 +1690,46 @@ fn outline_insert(
     }
 }
 
+/// A mark id no mark in `st` has, and not in `taken` (ids handed out
+/// earlier in the same edit, which records this one). Random rather than
+/// counted, so two copies of a file never give different marks the same
+/// `/NM`; 53 bits, so the JSON is exact in any reader.
+fn fresh_annot_id(st: &DocState, taken: &mut HashSet<AnnotId>) -> AnnotId {
+    loop {
+        let id = AnnotId(fastrand::u64(1..1 << 53));
+        if !taken.contains(&id) && st.find_annot(id).is_none() {
+            taken.insert(id);
+            return id;
+        }
+    }
+}
+
+/// Marks that came with pages from another file, onto their new pages in
+/// `st`. They get fresh ids (the file's could clash with ours), and a
+/// connector keeps its partner only if the partner came too.
+fn import_marks(st: &mut DocState, incoming: Vec<(PageId, Vec<Annot>)>) {
+    let mut taken = HashSet::new();
+    let mut ids = HashMap::new();
+    for (_, list) in &incoming {
+        for a in list {
+            ids.insert(a.id, fresh_annot_id(st, &mut taken));
+        }
+    }
+    for (page, list) in incoming {
+        let mut on_page = st.annots.get(&page).cloned().unwrap_or_default();
+        for mut a in list {
+            a.id = ids[&a.id];
+            if let AnnotKind::Connector { partner, .. } = &mut a.kind {
+                *partner = partner.and_then(|p| ids.get(&p).copied());
+            }
+            on_page.push_back(a);
+        }
+        if !on_page.is_empty() {
+            st.annots.insert(page, on_page);
+        }
+    }
+}
+
 /// Remove nodes targeting deleted pages, promoting their children.
 fn cascade_delete(
     nodes: &Vector<OutlineNode>,
@@ -1730,6 +1866,8 @@ mod tests {
                 page: *p,
                 depth: *d,
                 view: None,
+                color: None,
+                style: Default::default(),
             })
             .collect()
     }
@@ -1874,6 +2012,7 @@ mod tests {
                         ("A3", Some(1), 1),
                         ("D", Some(2), 0),
                     ])),
+                    annots: Vec::new(),
                 },
                 "insert",
             )
@@ -1921,6 +2060,7 @@ mod tests {
                 ids: vec![p3],
                 source: s,
                 range: 0..2,
+                annots: Vec::new(),
             },
             "replace",
         )
@@ -1964,6 +2104,7 @@ mod tests {
                 target: None,
                 color: Some(Some([255, 0, 0])),
                 view: None,
+                style: None,
             },
             "e",
         )
@@ -2127,6 +2268,7 @@ mod tests {
             author: "t".into(),
             contents: String::new(),
             modified: String::new(),
+            created: String::new(),
         };
         assert_eq!(d.state().next_connector_label(), "1");
         d.apply(
@@ -2153,6 +2295,189 @@ mod tests {
         assert_eq!(d.state().annots_on(p2).unwrap().len(), 1);
     }
 
+    fn mark(id: u64, kind: crate::annot::AnnotKind) -> Annot {
+        Annot {
+            id: AnnotId(id),
+            kind,
+            color: [255, 0, 0],
+            opacity: 1.0,
+            stroke: 1.0,
+            author: "t".into(),
+            contents: String::new(),
+            modified: String::new(),
+            created: String::new(),
+        }
+    }
+
+    fn square(id: u64) -> Annot {
+        use crate::annot::{AnnotKind, Box2};
+        mark(
+            id,
+            AnnotKind::Square {
+                rect: Box2 {
+                    x: 1.0,
+                    y: 1.0,
+                    w: 5.0,
+                    h: 5.0,
+                },
+            },
+        )
+    }
+
+    fn connector(id: u64, partner: u64) -> Annot {
+        use crate::annot::{AnnotKind, Box2};
+        mark(
+            id,
+            AnnotKind::Connector {
+                rect: Box2 {
+                    x: 1.0,
+                    y: 1.0,
+                    w: 22.0,
+                    h: 22.0,
+                },
+                label: "1".into(),
+                partner: Some(AnnotId(partner)),
+            },
+        )
+    }
+
+    #[test]
+    fn bookmark_styles_arriving_after_the_outline_are_matched_by_title() {
+        use crate::file::OutlineStyle;
+        let mut d = doc();
+        let style = |title: &str, bold| OutlineStyle {
+            title: title.into(),
+            color: Some([0, 0, 255]),
+            style: TextStyle {
+                bold,
+                italic: false,
+            },
+        };
+        // In pre-order: A, A1, A2, B, C. The third doesn't match its title.
+        d.set_initial_outline_styles(&[
+            style("A", true),
+            style("A1", false),
+            style("Not A2", false),
+            style("B", false),
+        ])
+        .unwrap();
+        let flat = d.state().outline_flat();
+        let by = |t: &str| flat.iter().find(|(_, n)| n.title == t).unwrap().1.clone();
+        assert!(by("A").style.bold);
+        assert_eq!(by("A1").color, Some([0, 0, 255]));
+        assert_eq!(by("A2").color, None);
+        assert_eq!(by("B").color, Some([0, 0, 255]));
+        assert_eq!(by("C").color, None);
+        // Loaded, not edited: nothing to save.
+        assert!(!d.is_dirty());
+    }
+
+    #[test]
+    fn inserted_pages_bring_their_marks_with_fresh_ids() {
+        let mut d = doc();
+        let mine = d.apply(
+            Edit::AnnotAdd {
+                page: id_at(&d, 0),
+                annot: square(0),
+            },
+            "add",
+        );
+        assert!(mine.is_ok());
+        let sid = d.add_source(src(3));
+        d.apply(
+            Edit::InsertPages {
+                source: sid,
+                range: 0..2,
+                before: None,
+                outline: None,
+                annots: vec![
+                    // Page 0: a square and one end of a pair whose other end
+                    // is on page 1; page 2 isn't inserted.
+                    (0, vec![square(1), connector(2, 3)]),
+                    (1, vec![connector(3, 2), connector(4, 9)]),
+                    (2, vec![square(5)]),
+                ],
+            },
+            "insert",
+        )
+        .unwrap();
+        let (new0, new1) = (id_at(&d, 6), id_at(&d, 7));
+        let on0 = d.state().annots_on(new0).unwrap().clone();
+        let on1 = d.state().annots_on(new1).unwrap().clone();
+        assert_eq!((on0.len(), on1.len()), (2, 2));
+        let all: Vec<AnnotId> = on0.iter().chain(on1.iter()).map(|a| a.id).collect();
+        // Fresh ids, none of the file's, all distinct.
+        assert!(all.iter().all(|id| id.0 > 9), "{all:?}");
+        let unique: HashSet<_> = all.iter().collect();
+        assert_eq!(unique.len(), 4);
+        // The pair still points at each other; a partner left behind is dropped.
+        assert_eq!(on0[1].partner(), Some(on1[0].id));
+        assert_eq!(on1[0].partner(), Some(on0[1].id));
+        assert_eq!(on1[1].partner(), None);
+        // Undo takes them away with the pages.
+        d.undo();
+        assert!(d.state().annots_on(new0).is_none());
+    }
+
+    #[test]
+    fn replacing_pages_drops_the_marks_of_pages_removed() {
+        let mut d = doc();
+        let (p1, p2) = (id_at(&d, 1), id_at(&d, 2));
+        for p in [p1, p2] {
+            d.apply(
+                Edit::AnnotAdd {
+                    page: p,
+                    annot: square(0),
+                },
+                "add",
+            )
+            .unwrap();
+        }
+        let sid = d.add_source(src(1));
+        d.apply(
+            Edit::ReplacePages {
+                ids: vec![p1, p2],
+                source: sid,
+                range: 0..1,
+                annots: vec![(0, vec![square(7)])],
+            },
+            "replace",
+        )
+        .unwrap();
+        // p1 keeps its mark and gains the replacement's; p2 is gone, and so
+        // are its marks.
+        assert_eq!(d.state().annots_on(p1).unwrap().len(), 2);
+        assert!(d.state().annots.get(&p2).is_none());
+    }
+
+    #[test]
+    fn mark_ids_are_random_and_distinct() {
+        let mut d = doc();
+        let p = id_at(&d, 0);
+        for _ in 0..50 {
+            d.apply(
+                Edit::AnnotAdd {
+                    page: p,
+                    annot: square(0),
+                },
+                "add",
+            )
+            .unwrap();
+        }
+        let ids: Vec<u64> = d
+            .state()
+            .annots_on(p)
+            .unwrap()
+            .iter()
+            .map(|a| a.id.0)
+            .collect();
+        let unique: HashSet<_> = ids.iter().collect();
+        assert_eq!(unique.len(), 50);
+        assert!(ids.iter().all(|&id| id > 0 && id < 1 << 53));
+        // Not handed out in order, as two copies of a file would.
+        assert_ne!(ids, (ids[0]..ids[0] + 50).collect::<Vec<_>>());
+    }
+
     #[test]
     fn annot_add_update_delete_and_cascade() {
         use crate::annot::{AnnotKind, Box2};
@@ -2174,6 +2499,7 @@ mod tests {
             author: "t".into(),
             contents: String::new(),
             modified: String::new(),
+            created: String::new(),
         };
         d.apply(
             Edit::AnnotAdd {
@@ -2357,6 +2683,7 @@ mod tests {
                 ids: vec![copy],
                 source: other,
                 range: 0..1,
+                annots: Vec::new(),
             },
             "replace",
         )
@@ -2661,6 +2988,7 @@ mod tests {
             author: "me".into(),
             contents: String::new(),
             modified: "D:20261013000000".into(),
+            created: String::new(),
         };
         let edits = vec![
             Edit::MovePages {
@@ -2676,6 +3004,7 @@ mod tests {
                 range: 0..3,
                 before: Some(PageId(4)),
                 outline: Some(flat(&[("X", Some(0), 0)])),
+                annots: Vec::new(),
             },
             Edit::OutlineEdit {
                 id: OutlineId(3),
@@ -2683,6 +3012,7 @@ mod tests {
                 target: Some(None),
                 color: Some(Some([1, 2, 3])),
                 view: None,
+                style: None,
             },
             Edit::ConnectorAdd {
                 a: (PageId(0), annot.clone()),
@@ -2705,6 +3035,7 @@ mod tests {
                 target: Some(None),
                 color: None,
                 view: None,
+                style: None,
             }
         );
     }

@@ -253,13 +253,11 @@ pub fn annot_from_wit(a: w::Annot) -> Annot {
         color: rgb_from_wit(a.color),
         opacity: a.opacity.clamp(0.0, 1.0),
         stroke: a.stroke.max(0.0),
-        author: if a.author.trim().is_empty() {
-            sheaf_doc::default_author()
-        } else {
-            a.author
-        },
+        // Empty means the user, whom the app names (`settings.toml`).
+        author: a.author.trim().to_string(),
         contents: a.contents,
         modified: sheaf_doc::pdf_date_now(),
+        created: sheaf_doc::pdf_date_now(),
     }
 }
 
@@ -313,6 +311,7 @@ pub fn edit_from_wit(e: w::Edit) -> Edit {
             target: o.target.map(|t| t.map(PageId)),
             color: o.color.map(|c| c.map(rgb_from_wit)),
             view: o.view.map(|v| v.map(dest_from_wit)),
+            style: None,
         },
         w::Edit::OutlineDelete(id) => Edit::OutlineDelete { id: OutlineId(id) },
         w::Edit::AnnotAdd(pa) => {
@@ -457,12 +456,14 @@ mod tests {
             author: "Greg".into(),
             contents: "c".into(),
             modified: "D:20260101000000".into(),
+            created: "D:20260101000000".into(),
         };
         let back = annot_from_wit(annot_to_wit(&a));
         assert_eq!(
             back,
             Annot {
                 modified: back.modified.clone(),
+                created: back.created.clone(),
                 ..a
             }
         );
@@ -485,6 +486,7 @@ mod tests {
                 target: Some(None),
                 color: None,
                 view: None,
+                style: None,
             }
         );
     }

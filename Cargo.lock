@@ -6512,6 +6512,7 @@ version = "0.1.0-alpha.1"
 dependencies = [
  "anyhow",
  "env_logger",
+ "fastrand",
  "flate2",
  "im",
  "image",

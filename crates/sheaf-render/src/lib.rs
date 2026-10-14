@@ -107,9 +107,10 @@ pub trait Renderer {
     /// All matches of a regular expression on one page, run over the
     /// page's extracted text.
     fn pattern_search_page(&self, page: PageIndex, re: &regex::Regex) -> Result<Vec<SearchHit>>;
-    /// Hide (from rendering) every annotation on `page` whose /NM starts
-    /// with `sheaf:`; the app draws those itself. Returns how many.
-    fn hide_sheaf_annots(&self, page: PageIndex) -> Result<usize>;
+    /// Hide (from rendering) the annotations on `page` whose /NM is in
+    /// `names`: marks the app draws itself. Returns how many. Only those:
+    /// a mark this build can't read (`sheaf:` too) is still drawn here.
+    fn hide_annots(&self, page: PageIndex, names: &[String]) -> Result<usize>;
     /// Glyph boxes (merged per line) of text intersecting `rect`, in the
     /// page's displayed space. Used to turn a drag into a text highlight.
     fn text_boxes_in_rect(&self, page: PageIndex, rect: Rect) -> Result<Vec<Rect>>;
@@ -547,13 +548,13 @@ pub mod pdfium {
             Ok(rects)
         }
 
-        fn hide_sheaf_annots(&self, page: PageIndex) -> Result<usize> {
+        fn hide_annots(&self, page: PageIndex, names: &[String]) -> Result<usize> {
             let mut p = self.doc.pages().get(page.0 as i32)?;
             let annots = p.annotations_mut();
             let mut n = 0;
             for i in 0..annots.len() {
                 if let Ok(mut a) = annots.get(i)
-                    && a.name().is_some_and(|name| name.starts_with("sheaf:"))
+                    && a.name().is_some_and(|name| names.contains(&name))
                     && a.set_is_hidden(true).is_ok()
                 {
                     n += 1;
@@ -797,7 +798,7 @@ enum Msg {
         reply: oneshot::Sender<Result<PageSize>>,
     },
     HideAnnots {
-        pages: Vec<u32>,
+        pages: Vec<(u32, Vec<String>)>,
         reply: oneshot::Sender<Result<usize>>,
     },
     Search {
@@ -875,9 +876,9 @@ impl RenderHandle {
         rx
     }
 
-    /// Hide sheaf-written annotations on these pages so they aren't drawn
-    /// twice (the app overlays its own). Resolves with the count hidden.
-    pub fn hide_sheaf_annots(&self, pages: Vec<u32>) -> oneshot::Receiver<Result<usize>> {
+    /// Hide the marks the app draws itself (by `/NM`, per page index) so
+    /// they aren't drawn twice. Resolves with the count hidden.
+    pub fn hide_annots(&self, pages: Vec<(u32, Vec<String>)>) -> oneshot::Receiver<Result<usize>> {
         let (tx, rx) = oneshot::channel();
         self.send(Msg::HideAnnots { pages, reply: tx });
         rx
@@ -1087,8 +1088,8 @@ fn worker_loop(engine: impl Renderer, rx: mpsc::Receiver<Msg>) {
                 Msg::HideAnnots { pages, reply } => {
                     let mut n = 0;
                     let mut err = None;
-                    for p in pages {
-                        match engine.hide_sheaf_annots(PageIndex(p)) {
+                    for (p, names) in pages {
+                        match engine.hide_annots(PageIndex(p), &names) {
                             Ok(k) => n += k,
                             Err(e) => err = Some(e),
                         }

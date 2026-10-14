@@ -44,7 +44,7 @@ pub fn describe(path: &Path, password: Option<&str>) -> Result<(SourceInfo, Vec<
             .unwrap_or(0),
         password: password.map(str::to_string),
     };
-    let outline = engine
+    let mut outline: Vec<FlatOutlineItem> = engine
         .outline()
         .unwrap_or_else(|e| {
             log::warn!("{}: bookmarks: {e:#}", path.display());
@@ -56,7 +56,15 @@ pub fn describe(path: &Path, password: Option<&str>) -> Result<(SourceInfo, Vec<
             page: i.page,
             depth: i.depth,
             view: i.view,
+            color: None,
+            style: Default::default(),
         })
         .collect();
+    // PDFium doesn't report bookmark colors and styles; lopdf does.
+    if !outline.is_empty()
+        && let Ok(pdf) = sheaf_doc::file::load_pdf(path, password)
+    {
+        sheaf_doc::file::style_flat_items(&mut outline, &sheaf_doc::file::outline_styles(&pdf));
+    }
     Ok((source, outline))
 }
