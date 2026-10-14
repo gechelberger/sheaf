@@ -6463,6 +6463,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "sheaf-cli",
  "sheaf-core",
  "sheaf-doc",
  "sheaf-ocr",
@@ -6474,6 +6475,22 @@ dependencies = [
  "smallvec",
  "unicode-segmentation",
  "zip 9.0.2",
+]
+
+[[package]]
+name = "sheaf-cli"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "ctrlc",
+ "env_logger",
+ "indicatif",
+ "log",
+ "lopdf",
+ "sheaf-doc",
+ "sheaf-ops",
+ "sheaf-progress",
 ]
 
 [[package]]

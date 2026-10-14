@@ -276,6 +276,13 @@ fn parse_cli() -> Cli {
 
 fn main() {
     env_logger::init();
+    // `sheaf export …` and the other subcommands run headless.
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|a| sheaf_cli::is_subcommand(&a))
+    {
+        std::process::exit(sheaf_cli::run(std::env::args_os()).into());
+    }
     let launched = Instant::now();
     let cli = parse_cli();
 

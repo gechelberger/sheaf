@@ -256,3 +256,15 @@ handwritten notes (an MIT algorithm, about 150 lines), and blank-page removal.
    files already written stay, and a TIFF's `.part` file is removed. The GUI
    gained what it lacked before: Esc stops a running Export Pages, and the
    OCR progress strip shows export progress too.
+2. Done. `sheaf_ops::open` loads a file headlessly: pages, bookmarks and
+   sheaf's own marks, as the app does on open. The page-range parser moved
+   from `sheaf_ocr::page_range` to `sheaf_ops::pages`, which also accepts an
+   open start (`-3`). `sheaf_plugin::ui::parse_page_range` stays separate:
+   its empty input means every page, and the plugin crate shouldn't pull in
+   the renderer. `sheaf_cli::run` returns the exit status (0, 1, 2 for bad
+   arguments, 130 when cancelled), so the app's hand-off keeps it.
+   `scripts/package.sh` ships `sheaf-cli` beside `sheaf`. A file named like
+   a subcommand opens in the app as `./export`. None of the `--selftest-*`
+   flags moved: each drives `DocView` (adding marks through the view, then
+   saving), so each needs a window. They can move when their ops (clean,
+   flatten, extract) do.

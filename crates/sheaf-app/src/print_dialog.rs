@@ -317,7 +317,7 @@ impl PrintDialog {
                 Some((_, pages)) if !pages.is_empty() => Ok(pages.clone()),
                 _ => Err("The selected bookmark has no pages".into()),
             },
-            Pages::Range => sheaf_ocr::page_range::parse(self.range.read(cx).text(), n),
+            Pages::Range => sheaf_ops::pages::parse(self.range.read(cx).text(), n),
         }
     }
 

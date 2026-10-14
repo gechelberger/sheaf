@@ -214,7 +214,7 @@ impl ExportDialog {
             Pages::All => Ok((0..n).collect()),
             Pages::Current => Ok(vec![self.ctx.current.min(n.saturating_sub(1))]),
             Pages::Selected => Ok(self.ctx.selected.clone()),
-            Pages::Range => sheaf_ocr::page_range::parse(self.range.read(cx).text(), n),
+            Pages::Range => sheaf_ops::pages::parse(self.range.read(cx).text(), n),
         }
     }
 

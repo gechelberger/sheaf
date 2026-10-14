@@ -9,7 +9,8 @@ use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, MouseButton,
     Subscription, Window, div, prelude::*, px,
 };
-use sheaf_ocr::{EngineKind, OcrConfig, Scope, page_range};
+use sheaf_ocr::{EngineKind, OcrConfig, Scope};
+use sheaf_ops::pages as page_range;
 use sheaf_ui::button::{Button, Chip};
 use sheaf_ui::text_input::{TextInput, TextInputEvent};
 use sheaf_ui::{dialog, theme};

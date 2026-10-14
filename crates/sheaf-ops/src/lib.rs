@@ -6,5 +6,9 @@
 //! command line needs them.
 
 pub mod export;
+pub mod open;
+pub mod pages;
+
+pub use open::open;
 
 pub use sheaf_progress::{Cancelled, NoProgress, Progress, Tracker};
