@@ -16,11 +16,11 @@ use gpui::{
     RenderImage, Task, Window, div, img, prelude::*, px, relative,
 };
 use image::RgbImage;
+use sheaf_image::clean::{Mode, Stage};
 use sheaf_ocr::OcrConfig;
 use sheaf_ops::images::Paper;
 use sheaf_ops::scan::ScanOptions;
 use sheaf_ops::{Cancelled, NoProgress, Tracker};
-use sheaf_scan::{Mode, Stage};
 use sheaf_ui::button::{Button, Chip};
 use sheaf_ui::{dialog, theme};
 
@@ -292,7 +292,7 @@ impl ScanDialog {
                 .spawn(async move {
                     let image = match loaded {
                         Some(im) => im,
-                        None => Arc::new(shrink(sheaf_scan::load(&path)?)),
+                        None => Arc::new(shrink(sheaf_image::clean::load(&path)?)),
                     };
                     let views = preview(&image, &params)?;
                     anyhow::Ok((image, views))
@@ -492,11 +492,11 @@ fn shrink(image: RgbImage) -> RgbImage {
 #[allow(clippy::type_complexity)]
 fn preview(
     image: &RgbImage,
-    params: &sheaf_scan::ScanParams,
+    params: &sheaf_image::clean::ScanParams,
 ) -> anyhow::Result<(Vec<(View, Arc<RenderImage>)>, bool)> {
     let mut photo = image.clone();
     if params.crop
-        && let Some(q) = sheaf_scan::find_page(image)
+        && let Some(q) = sheaf_image::clean::find_page(image)
     {
         outline(&mut photo, q);
     }
@@ -511,7 +511,7 @@ fn preview(
 }
 
 /// Draw `q` on `img` in the accent color.
-fn outline(img: &mut RgbImage, q: sheaf_scan::Quad) {
+fn outline(img: &mut RgbImage, q: sheaf_image::clean::Quad) {
     let (w, h) = img.dimensions();
     let t = (w.max(h) / 300).max(2) as i32;
     for i in 0..4 {

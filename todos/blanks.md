@@ -3,6 +3,7 @@
 Status: **done** (2026-10-14), as M8 slices 9–12. See [`m8.md`](m8.md) for notes.
 The detector lives in `sheaf_ops::blank`, not a crate of its own, and the scan option is
 `ScanOptions::drop_blanks` (in `sheaf-ops`, where the detector is), not `ScanParams`.
+The pixel check has since moved to `sheaf_image::blank` ([`m8-sheaf-image.md`](m8-sheaf-image.md)).
 
 ## Context
 We want a way to scan a document and remove its blank pages: duplex backs, scanner

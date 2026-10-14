@@ -1,6 +1,7 @@
 # Plan: ops layer, CLI, shared progress, scan cleanup
 
 Status: **done** (2026-10-14), branch `cleanup-cli`. See "Slice notes" at the end.
+`sheaf-scan` has since become `sheaf_image::clean` ([`m8-sheaf-image.md`](m8-sheaf-image.md)).
 
 ## Why
 

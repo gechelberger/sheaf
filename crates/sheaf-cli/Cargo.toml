@@ -17,7 +17,7 @@ ocr-oar = ["sheaf-ocr/oar"]
 
 [dependencies]
 sheaf-ocr.workspace = true
-sheaf-scan.workspace = true
+sheaf-image.workspace = true
 sheaf-ops.workspace = true
 sheaf-progress.workspace = true
 sheaf-doc.workspace = true

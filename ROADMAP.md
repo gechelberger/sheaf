@@ -49,11 +49,12 @@ below are a first cut.
   engines, Tesseract 5 (static) and PaddleOCR PP-OCRv5 on ONNX Runtime
   (`oar-ocr`); Document > Recognize Text (OCR)…; one undo step; Find and
   Patterns search unsaved layers. Design in [`todos/ocr.md`](todos/ocr.md).
-- ✅ Scan cleanup (`sheaf-scan`): deskew, despeckle, auto-rotate by detected
+- ✅ Scan cleanup (`sheaf_image::clean`): deskew, despeckle, auto-rotate by detected
   text orientation (word shape, plus PaddleOCR's orientation model when
   present), black-and-white by Sauvola thresholding. Blank-page removal
-  (M8, `sheaf_ops::blank`): "Leave out blank pages" when scanning, Document >
-  Find Blank Pages… with a review before deleting, and `sheaf remove-blanks`.
+  (M8, `sheaf_ops::blank` over `sheaf_image::blank`): "Leave out blank
+  pages" when scanning, Document > Find Blank Pages… with a review before
+  deleting, and `sheaf remove-blanks`.
 - ✅ Camera capture: phone photos of paper. Find the page and correct the
   perspective, clear the background left at its edges, even out shadows,
   lighting and white balance, and optionally flatten curled pages (UVDoc,

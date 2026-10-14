@@ -4,9 +4,9 @@ use std::path::PathBuf;
 
 use anyhow::bail;
 use clap::{Args, ValueEnum};
+use sheaf_image::clean::Mode;
 use sheaf_ocr::{EngineKind, OcrConfig};
 use sheaf_ops::scan::ScanOptions;
-use sheaf_scan::Mode;
 
 use crate::images::PaperArg;
 

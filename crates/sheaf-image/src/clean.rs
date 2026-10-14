@@ -1,5 +1,4 @@
-//! Cleaning up scans and phone photos of paper: image in, image out. It
-//! knows nothing about PDFs.
+//! Cleaning up scans and phone photos of paper.
 //!
 //! [`clean`] runs the whole pipeline; each step is also a function of its
 //! own so a preview can show them one by one:

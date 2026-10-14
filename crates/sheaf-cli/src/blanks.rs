@@ -5,7 +5,8 @@ use std::path::PathBuf;
 
 use anyhow::bail;
 use clap::{Args, ValueEnum};
-use sheaf_ops::blank::{BlankParams, Sensitivity};
+use sheaf_image::blank::Sensitivity;
+use sheaf_ops::blank::BlankParams;
 use sheaf_ops::export::stem_of;
 
 #[derive(Args)]

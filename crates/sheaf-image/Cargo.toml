@@ -1,9 +1,9 @@
 [package]
-name = "sheaf-scan"
+name = "sheaf-image"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Scan and phone-photo cleanup for sheaf: find the page, straighten it, even out the light"
+description = "Image in, image out: scan cleanup, blank pages and other pixel work for sheaf, with no PDFs"
 
 [dependencies]
 sheaf-progress.workspace = true
