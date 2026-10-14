@@ -1,9 +1,12 @@
-//! Reusable GPUI widgets: text fields, prompts, tooltips, the title bar
-//! and menu bar, and the named colors they share. The page canvas, tiled
-//! viewport, sidebars and palette are to follow.
+//! Reusable GPUI widgets: text fields, buttons and chips, dialogs and
+//! prompts, tooltips, the title bar and menu bar, and the named colors
+//! they share. The page canvas, tiled viewport, sidebars and palette are
+//! to follow.
 
 use gpui::{App, KeyBinding};
 
+pub mod button;
+pub mod dialog;
 pub mod frame;
 pub mod menu_bar;
 pub mod prompts;

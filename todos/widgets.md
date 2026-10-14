@@ -80,3 +80,13 @@ check them with screenshots (the `--script` UI harness).
    `platform_label`) moved to `sheaf_ui::menu_bar`. `frame::title_bar`
    takes the icon as its first argument. Checked with `--script`: renaming
    a bookmark through the field gives the same result as main.
+3. Done. `sheaf_ui::dialog` (backdrop, card, header, subtitle,
+   field_row, message, footer, hint, spacer) and `sheaf_ui::button`
+   (`Button` with primary/focused/compact, `Chip`) replace the copies in
+   the OCR dialog, plugin form, plugin manager and prompt; the password
+   card's Open button uses `Button` too. One button style now: secondary
+   buttons got a 1px border (they were 2px shorter than primary ones), the
+   plugin manager's footer buttons are full size like the other dialogs',
+   its primary button hovers in accent rather than gray, and the prompt's
+   selected answer no longer has a light-blue outline (it's the accent
+   one). Checked with before/after screenshots of all four.

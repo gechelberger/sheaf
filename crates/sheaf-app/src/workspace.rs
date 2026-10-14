@@ -11,6 +11,8 @@ use gpui::{
     MouseMoveEvent, PathPromptOptions, Pixels, Point, PromptButton, PromptLevel, SharedString,
     Subscription, Task, Window, WindowHandle, anchored, deferred, div, prelude::*, px,
 };
+use sheaf_ui::frame;
+use sheaf_ui::menu_bar::MenuBar;
 use sheaf_ui::theme;
 
 use crate::commands::{PanelAction, Run, ShowPluginPanel};
@@ -24,8 +26,6 @@ use crate::{
     ShowOutline, ShowPatterns, ShowThumbnails, ToggleBottomDock, ToggleLeftDock, ToggleRightDock,
     ToggleSidebar,
 };
-use sheaf_ui::frame;
-use sheaf_ui::menu_bar::MenuBar;
 
 pub const KEY_CONTEXT: &str = "Workspace";
 

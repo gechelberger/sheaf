@@ -14,9 +14,9 @@ use sheaf_core::{PageSize, Rotation};
 use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, Edit, PageId, Pt, annot::CONNECTOR_SIZE};
 use sheaf_render::Rect;
 use sheaf_ui::theme;
+use sheaf_ui::tooltip::Tooltip;
 
 use crate::docview::{DocView, State, rotate_rect};
-use sheaf_ui::tooltip::Tooltip;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {

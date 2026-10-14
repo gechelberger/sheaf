@@ -10,10 +10,10 @@ use sheaf_doc::{
     AnnotKind, Box2, PageId, Pt,
     annot::{TAPE_LINE, TAPE_OP_W, TAPE_PAD, helv_width, tape_lines},
 };
+use sheaf_ui::text_input::{TextInput, TextInputEvent};
 use sheaf_ui::theme;
 
 use crate::docview::{DocView, State};
-use sheaf_ui::text_input::{TextInput, TextInputEvent};
 
 const ROW_H: f32 = 22.0;
 /// Point size of a placed tape.

@@ -7,11 +7,11 @@ use gpui::{AnyElement, Context, Entity, FocusHandle, Subscription, Window, div, 
 use sheaf_core::PageSize;
 use sheaf_doc::{Annot, AnnotId, AnnotKind, PageId, file::ForeignAnnot};
 use sheaf_render::Rect;
+use sheaf_ui::text_input::{TextInput, TextInputEvent};
 use sheaf_ui::theme;
 
 use crate::docview::{DocView, ScrollTo, State, rotate_rect};
 use crate::{DeleteComment, EditComment, Redo, Save, Undo};
-use sheaf_ui::text_input::{TextInput, TextInputEvent};
 
 pub const KEY_CONTEXT: &str = "Comments";
 

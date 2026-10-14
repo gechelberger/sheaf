@@ -23,6 +23,9 @@ use gpui::{
 use sheaf_core::{PageIndex, PageSize, Rotation};
 use sheaf_doc::save;
 use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, Pt};
+use sheaf_ui::button::Button;
+use sheaf_ui::text_area::{TextArea, TextAreaEvent};
+use sheaf_ui::text_input::{TextInput, TextInputEvent};
 use sheaf_ui::theme;
 
 use crate::markup_tools::{Drag, Tool, arrow_head, rotate_pt, stroke_canvas};
@@ -42,8 +45,6 @@ use crate::{
     ToolInk, ToolLine, ToolNote, ToolSelect, ToolSquare, ToolTick, Undo, ZoomActual, ZoomFitPage,
     ZoomFitWidth, ZoomIn, ZoomOut,
 };
-use sheaf_ui::text_area::{TextArea, TextAreaEvent};
-use sheaf_ui::text_input::{TextInput, TextInputEvent};
 
 pub const KEY_CONTEXT: &str = "DocView";
 
@@ -4014,24 +4015,15 @@ fn locked_card(path: &std::path::Path, l: &Locked, cx: &mut Context<DocView>) ->
                 .child(input.clone())
                 .child(
                     div().flex().justify_end().child(
-                        div()
-                            .id("unlock")
-                            .px_3()
-                            .py_1()
-                            .rounded_sm()
-                            .text_sm()
-                            .cursor_pointer()
-                            .bg(theme::ACCENT)
-                            .text_color(theme::TEXT_BRIGHT)
-                            .hover(|s| s.bg(theme::ACCENT_HOVER))
+                        Button::new("unlock", "Open")
+                            .primary()
                             .on_click(cx.listener(move |v, _, _, cx| {
                                 let pw = input.read(cx).text().to_string();
                                 if !pw.is_empty() {
                                     v.password = Some(pw);
                                     v.open(cx);
                                 }
-                            }))
-                            .child("Open"),
+                            })),
                     ),
                 ),
         )

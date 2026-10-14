@@ -7,12 +7,12 @@ use gpui::{
     Action, AnyElement, App, Context, Entity, EventEmitter, Focusable, MouseButton, Subscription,
     Window, div, prelude::*, px,
 };
+use sheaf_ui::menu_bar::parse_label;
+use sheaf_ui::text_input::{TextInput, TextInputEvent};
 use sheaf_ui::theme;
 
 use crate::commands::CommandRegistry;
 use crate::{PaletteDown, PalettePageDown, PalettePageUp, PaletteUp};
-use sheaf_ui::menu_bar::parse_label;
-use sheaf_ui::text_input::{TextInput, TextInputEvent};
 
 pub const KEY_CONTEXT: &str = "Palette";
 

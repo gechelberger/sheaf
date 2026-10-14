@@ -11,7 +11,9 @@ use gpui::{
     PromptLevel, ScrollHandle, Window, div, prelude::*, px,
 };
 use sheaf_plugin::Status;
-use sheaf_ui::theme;
+use sheaf_ui::button::Button;
+use sheaf_ui::tooltip::Tooltip;
+use sheaf_ui::{dialog, theme};
 
 use crate::DialogCancel;
 use crate::plugins::{self, PluginHost};
@@ -52,6 +54,7 @@ struct Row {
     allowed: bool,
 }
 
+/// A small button inside a plugin's row.
 fn button(
     id: impl Into<gpui::ElementId>,
     label: &str,
@@ -59,20 +62,10 @@ fn button(
     on_click: impl Fn(&mut PluginManager, &mut Window, &mut Context<PluginManager>) + 'static,
     cx: &mut Context<PluginManager>,
 ) -> AnyElement {
-    div()
-        .id(id.into())
-        .px_2()
-        .py_0p5()
-        .rounded_sm()
-        .text_xs()
-        .cursor_pointer()
-        .when(primary, |d| {
-            d.bg(theme::ACCENT).text_color(theme::TEXT_BRIGHT)
-        })
-        .when(!primary, |d| d.bg(theme::CONTROL))
-        .hover(|s| s.bg(theme::CONTROL_HOVER_STRONG))
+    Button::new(id, label.to_string())
+        .compact()
+        .when(primary, Button::primary)
         .on_click(cx.listener(move |this, _, window, cx| on_click(this, window, cx)))
-        .child(label.to_string())
         .into_any_element()
 }
 
@@ -337,70 +330,31 @@ impl Render for PluginManager {
         let empty = list.is_empty();
         let dir = plugins::dir();
 
-        div()
-            .id("plugins-backdrop")
+        dialog::backdrop("plugins-backdrop")
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)
             .on_action(
                 cx.listener(|_, _: &DialogCancel, _, cx| cx.emit(PluginManagerEvent::Dismiss)),
             )
-            .absolute()
-            .inset_0()
-            .bg(theme::BACKDROP)
-            .flex()
-            .justify_center()
-            .items_start()
             .pt(px(60.0))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|_, _, _, cx| cx.emit(PluginManagerEvent::Dismiss)),
             )
             .child(
-                div()
-                    .id("plugins")
-                    .w(px(640.0))
+                dialog::card("plugins", px(640.0))
                     .max_h(px(620.0))
-                    .p_3()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .bg(theme::CARD)
-                    .border_1()
-                    .border_color(theme::BORDER_CARD)
-                    .rounded_md()
-                    .shadow_lg()
-                    .text_color(theme::TEXT_SOFT)
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(
-                        div()
-                            .pb_2()
-                            .border_b_1()
-                            .border_color(theme::DIVIDER)
-                            .flex()
-                            .items_baseline()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .flex_shrink_0()
-                                    .text_sm()
-                                    .text_color(theme::TEXT_STRONG)
-                                    .child("Plugins"),
-                            )
-                            .child(
-                                div()
-                                    .id("plugins-dir")
-                                    .flex_1()
-                                    .min_w(px(0.0))
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_ellipsis()
-                                    .text_xs()
-                                    .text_color(theme::TEXT_FAINT)
-                                    .tooltip(sheaf_ui::tooltip::Tooltip::text(
-                                        dir.display().to_string(),
-                                    ))
-                                    .child(short_path(&dir)),
-                            ),
+                        dialog::header("Plugins").child(
+                            dialog::subtitle(short_path(&dir))
+                                .id("plugins-dir")
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .tooltip(Tooltip::text(dir.display().to_string())),
+                        ),
                     )
                     .children(problems.into_iter().map(|p| {
                         div()
@@ -429,41 +383,21 @@ impl Render for PluginManager {
                             .children(list),
                     )
                     .when_some(self.message.clone(), |d, (ok, m)| {
-                        d.child(
-                            div()
-                                .px_2()
-                                .pt_1()
-                                .text_xs()
-                                .text_color(if ok { theme::SUCCESS } else { theme::ERROR })
-                                .child(m),
-                        )
+                        d.child(dialog::message(m, !ok))
                     })
                     .child(
-                        div()
-                            .pt_2()
-                            .flex()
-                            .gap_2()
-                            .child(button(
-                                "install-folder",
-                                "Install from Folder…",
-                                false,
-                                |m, _, cx| m.install(false, cx),
-                                cx,
-                            ))
-                            .child(button(
-                                "install-file",
-                                "Install from File…",
-                                false,
-                                |m, _, cx| m.install(true, cx),
-                                cx,
-                            ))
-                            .child(div().flex_1())
-                            .child(button(
-                                "plugins-close",
-                                "Close",
-                                true,
-                                |_, _, cx| cx.emit(PluginManagerEvent::Dismiss),
-                                cx,
+                        dialog::footer()
+                            .child(
+                                Button::new("install-folder", "Install from Folder…")
+                                    .on_click(cx.listener(|m, _, _, cx| m.install(false, cx))),
+                            )
+                            .child(
+                                Button::new("install-file", "Install from File…")
+                                    .on_click(cx.listener(|m, _, _, cx| m.install(true, cx))),
+                            )
+                            .child(dialog::spacer())
+                            .child(Button::new("plugins-close", "Close").primary().on_click(
+                                cx.listener(|_, _, _, cx| cx.emit(PluginManagerEvent::Dismiss)),
                             )),
                     ),
             )

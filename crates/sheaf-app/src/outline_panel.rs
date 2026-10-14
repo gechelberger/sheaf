@@ -12,6 +12,7 @@ use gpui::{
 };
 use sheaf_core::Rotation;
 use sheaf_doc::{DestView, Edit, OutlineId, OutlineNode, PageId, Pt};
+use sheaf_ui::text_input::{TextInput, TextInputEvent};
 use sheaf_ui::theme;
 
 use crate::docview::{DocView, ScrollTo, State};
@@ -20,7 +21,6 @@ use crate::{
     CollapseAllBookmarks, DeleteBookmark, DeselectBookmark, ExpandAllBookmarks, NewBookmark, Redo,
     RenameBookmark, Save, SetBookmarkDestination, Undo,
 };
-use sheaf_ui::text_input::{TextInput, TextInputEvent};
 
 pub const KEY_CONTEXT: &str = "Outline";
 

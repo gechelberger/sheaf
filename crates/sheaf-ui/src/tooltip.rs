@@ -1,8 +1,9 @@
 //! Hover tooltip for toolbar buttons: a title, an optional shortcut, and a
 //! line of description.
 
-use crate::theme;
 use gpui::{Action, AnyView, App, Context, IntoElement, SharedString, Window, div, prelude::*, px};
+
+use crate::theme;
 
 pub struct Tooltip {
     title: SharedString,

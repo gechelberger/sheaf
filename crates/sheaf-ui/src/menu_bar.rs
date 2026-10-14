@@ -11,12 +11,13 @@
 //! that is remembered: items are enabled and dispatched as if it still had
 //! focus, and it gets focus back when the bar closes.
 
-use crate::theme;
 use gpui::{
     Action, App, Bounds, Context, FocusHandle, HighlightStyle, KeyDownEvent, Keystroke,
     MouseButton, OwnedMenu, OwnedMenuItem, Pixels, SharedString, StyledText, Subscription,
     UnderlineStyle, Window, actions, anchored, canvas, deferred, div, prelude::*, px,
 };
+
+use crate::theme;
 
 pub const KEY_CONTEXT: &str = "MenuBar";
 

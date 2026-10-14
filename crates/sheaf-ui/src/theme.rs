@@ -50,7 +50,7 @@ pub const HOVER: Rgba = hex(0x3a3a3a);
 /// Buttons, chips and tool buttons.
 pub const CONTROL: Rgba = hex(0x3a3a3a);
 pub const CONTROL_HOVER: Rgba = hex(0x4a4a4a);
-/// Hover for controls that sit on `CONTROL`-colored surfaces.
+/// Hover on a tab's close button.
 pub const CONTROL_HOVER_STRONG: Rgba = hex(0x5a5a5a);
 
 // ----- borders and separators ------------------------------------------------
@@ -102,8 +102,6 @@ pub const TEXT_ORPHAN: Rgba = hex(0x8a6a6a);
 
 pub const ACCENT: Rgba = hex(0x4a9eff);
 pub const ACCENT_HOVER: Rgba = hex(0x5aaeff);
-/// The default button's outline in a prompt.
-pub const ACCENT_BORDER: Rgba = hex(0x9ccaff);
 /// The keyboard-focus ring on an `ACCENT` button.
 pub const FOCUS_RING: Rgba = hex(0xffffff);
 /// Selected text; a drop target ("move into").

@@ -10,10 +10,11 @@ use gpui::{
     Subscription, Window, div, prelude::*, px,
 };
 use sheaf_ocr::{EngineKind, OcrConfig, Scope, page_range};
-use sheaf_ui::theme;
+use sheaf_ui::button::{Button, Chip};
+use sheaf_ui::text_input::{TextInput, TextInputEvent};
+use sheaf_ui::{dialog, theme};
 
 use crate::{DialogCancel, DialogLeft, DialogNext, DialogPrev, DialogRight, DialogRun};
-use sheaf_ui::text_input::{TextInput, TextInputEvent};
 
 pub const KEY_CONTEXT: &str = "OcrDialog";
 
@@ -332,55 +333,15 @@ impl OcrDialog {
         pick: Pick,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let base = div()
-            .id(id)
-            .px_2()
-            .py_1()
-            .rounded_sm()
-            .text_sm()
-            .border_1()
-            .border_color(if selected {
-                theme::ACCENT
-            } else {
-                theme::BORDER
-            })
-            .when(selected, |d| d.bg(theme::SELECTED))
-            .text_color(if enabled {
-                theme::TEXT_STRONG
-            } else {
-                theme::TEXT_DISABLED
-            });
-        if enabled {
-            base.cursor_pointer()
-                .hover(|s| s.bg(theme::HOVER))
-                .on_click(cx.listener(move |this, _, window, cx| this.pick(pick, window, cx)))
-                .child(label)
-                .into_any_element()
-        } else {
-            base.child(label).into_any_element()
-        }
+        Chip::new(id, label)
+            .selected(selected)
+            .disabled(!enabled)
+            .on_click(cx.listener(move |this, _, window, cx| this.pick(pick, window, cx)))
+            .into_any_element()
     }
 
     fn row(&self, index: usize, label: &str, content: AnyElement) -> AnyElement {
-        let focused = self.row == index;
-        div()
-            .flex()
-            .items_start()
-            .gap_3()
-            .py_1()
-            .px_2()
-            .rounded_sm()
-            .when(focused, |d| d.bg(theme::ROW_FOCUS))
-            .child(
-                div()
-                    .w(px(110.0))
-                    .flex_shrink_0()
-                    .pt_1()
-                    .text_sm()
-                    .text_color(theme::TEXT_MUTED)
-                    .child(label.to_string()),
-            )
-            .child(div().flex_1().child(content))
+        dialog::field_row(label.to_string(), px(110.0), self.row == index, content)
             .into_any_element()
     }
 
@@ -500,47 +461,16 @@ impl Render for OcrDialog {
             )))
             .into_any_element();
         let run_focused = self.row == ROW_RUN;
-        let buttons = div()
-            .flex()
-            .gap_2()
-            .justify_end()
-            .child(
-                div()
-                    .id("ocr-cancel")
-                    .px_3()
-                    .py_1()
-                    .rounded_sm()
-                    .text_sm()
-                    .cursor_pointer()
-                    .bg(theme::CONTROL)
-                    .hover(|s| s.bg(theme::CONTROL_HOVER))
-                    .on_click(cx.listener(|_, _, _, cx| cx.emit(OcrDialogEvent::Dismiss)))
-                    .child("Cancel"),
-            )
-            .child(
-                div()
-                    .id("ocr-run")
-                    .px_3()
-                    .py_1()
-                    .rounded_sm()
-                    .text_sm()
-                    .cursor_pointer()
-                    .bg(theme::ACCENT)
-                    .text_color(theme::TEXT_BRIGHT)
-                    .border_1()
-                    .border_color(if run_focused {
-                        theme::FOCUS_RING
-                    } else {
-                        theme::ACCENT
-                    })
-                    .hover(|s| s.bg(theme::ACCENT_HOVER))
-                    .on_click(cx.listener(|this, _, _, cx| this.run(cx)))
-                    .child("Recognize"),
-            )
-            .into_any_element();
+        let buttons = [
+            Button::new("ocr-cancel", "Cancel")
+                .on_click(cx.listener(|_, _, _, cx| cx.emit(OcrDialogEvent::Dismiss))),
+            Button::new("ocr-run", "Recognize")
+                .primary()
+                .focused(run_focused)
+                .on_click(cx.listener(|this, _, _, cx| this.run(cx))),
+        ];
 
-        div()
-            .id("ocr-backdrop")
+        dialog::backdrop("ocr-backdrop")
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &DialogNext, window, cx| this.step_row(1, window, cx)))
@@ -551,71 +481,26 @@ impl Render for OcrDialog {
             .on_action(cx.listener(|this, _: &DialogRight, _, cx| this.adjust(1, cx)))
             .on_action(cx.listener(|this, _: &DialogRun, _, cx| this.run(cx)))
             .on_action(cx.listener(|_, _: &DialogCancel, _, cx| cx.emit(OcrDialogEvent::Dismiss)))
-            .absolute()
-            .inset_0()
-            .bg(theme::BACKDROP)
-            .flex()
-            .justify_center()
-            .items_start()
-            .pt(px(80.0))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|_, _, _, cx| cx.emit(OcrDialogEvent::Dismiss)),
             )
             .child(
-                div()
-                    .id("ocr-dialog")
-                    .w(px(560.0))
-                    .p_3()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .bg(theme::CARD)
-                    .border_1()
-                    .border_color(theme::BORDER_CARD)
-                    .rounded_md()
-                    .shadow_lg()
-                    .text_color(theme::TEXT_SOFT)
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(
-                        div()
-                            .pb_2()
-                            .mb_1()
-                            .border_b_1()
-                            .border_color(theme::DIVIDER)
-                            .text_sm()
-                            .text_color(theme::TEXT_STRONG)
-                            .child("Recognize Text (OCR)"),
-                    )
+                dialog::card("ocr-dialog", px(560.0))
+                    .child(dialog::header("Recognize Text (OCR)"))
                     .child(self.row(ROW_PAGES, "Pages", pages))
                     .child(self.row(ROW_RANGE, "Range", range))
                     .child(self.row(ROW_SKIP, "", skip))
                     .child(self.row(ROW_ENGINE, "Engine", engines))
                     .child(self.row(ROW_LANG, "Language", language))
                     .child(self.row(ROW_DPI, "Resolution", dpi))
-                    .when_some(self.error.clone(), |d, e| {
-                        d.child(
-                            div()
-                                .px_2()
-                                .pt_1()
-                                .text_xs()
-                                .text_color(theme::ERROR)
-                                .child(e),
-                        )
-                    })
+                    .when_some(self.error.clone(), |d, e| d.child(dialog::message(e, true)))
                     .child(
-                        div()
-                            .pt_2()
-                            .flex()
-                            .items_center()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .text_xs()
-                                    .text_color(theme::TEXT_FAINT)
-                                    .child("Tab moves, ←/→ change, Enter runs, Esc cancels"),
-                            )
-                            .child(buttons),
+                        dialog::footer()
+                            .child(dialog::hint(
+                                "Tab moves, ←/→ change, Enter runs, Esc cancels",
+                            ))
+                            .children(buttons),
                     ),
             )
     }

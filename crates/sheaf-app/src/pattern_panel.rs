@@ -13,11 +13,11 @@ use gpui::{
     Subscription, Task, Window, anchored, deferred, div, prelude::*, px,
 };
 use sheaf_render::SearchEvent;
+use sheaf_ui::text_input::{TextInput, TextInputEvent};
 use sheaf_ui::theme;
 
 use crate::docview::{DocView, Hit, ScrollTo, State};
 use crate::patterns::{self, Preset};
-use sheaf_ui::text_input::{TextInput, TextInputEvent};
 
 const ROW_H: f32 = 22.0;
 const PAD: f32 = 8.0;

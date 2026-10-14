@@ -4,12 +4,13 @@
 //! Wayland compositors such as WSLg's do. Adapted from GPUI's
 //! `window_shadow` example and Zed's workspace frame.
 
-use crate::theme;
 use gpui::{
     AnyElement, App, Bounds, CursorStyle, Decorations, HitboxBehavior, Hsla, MouseButton, Pixels,
     Point, ResizeEdge, SharedString, Size, Stateful, Styled, Tiling, Window, WindowControlArea,
     canvas, div, point, prelude::*, px, size, transparent_black,
 };
+
+use crate::theme;
 
 pub const TITLE_H: f32 = 34.0;
 const SHADOW: Pixels = px(10.0);

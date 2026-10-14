@@ -5,13 +5,15 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::theme;
 use futures::channel::oneshot;
 use gpui::{
     App, AppContext as _, Context, EventEmitter, FocusHandle, Focusable, Global, IntoElement,
     KeyDownEvent, PromptButton, PromptLevel, PromptResponse, Render, SharedString, Window,
     WindowId, div, prelude::*, px, relative,
 };
+
+use crate::button::Button;
+use crate::{dialog, theme};
 
 struct Pending {
     level: PromptLevel,
@@ -185,32 +187,11 @@ impl Render for PromptView {
             PromptLevel::Warning => Some(("⚠", theme::WARNING)),
             PromptLevel::Critical => Some(("⚠", theme::CRITICAL)),
         };
+        // The selected answer (Enter's) is the accent one; arrows move it.
         let buttons = self.answers.iter().enumerate().map(|(ix, a)| {
-            let selected = ix == self.selected;
-            div()
-                .id(("prompt-answer", ix))
-                .px_3()
-                .py_1()
-                .rounded_sm()
-                .text_sm()
-                .cursor_pointer()
-                .border_1()
-                .when(selected, |d| {
-                    d.bg(theme::ACCENT)
-                        .text_color(theme::TEXT_BRIGHT)
-                        .border_color(theme::ACCENT_BORDER)
-                        .hover(|s| s.bg(theme::ACCENT_HOVER))
-                })
-                .when(!selected, |d| {
-                    d.bg(theme::CONTROL)
-                        .border_color(theme::BORDER)
-                        .hover(|s| s.bg(theme::CONTROL_HOVER))
-                })
-                .on_click(cx.listener(move |_, _, _, cx| {
-                    cx.emit(PromptResponse(ix));
-                    cx.stop_propagation();
-                }))
-                .child(a.label().clone())
+            Button::new(("prompt-answer", ix), a.label().clone())
+                .when(ix == self.selected, Button::primary)
+                .on_click(cx.listener(move |_, _, _, cx| cx.emit(PromptResponse(ix))))
         });
         div()
             .id("prompt-backdrop")
@@ -223,19 +204,10 @@ impl Render for PromptView {
             .justify_center()
             .items_center()
             .child(
-                div()
-                    .w(px(440.0))
+                dialog::card("prompt", px(440.0))
                     .max_w(relative(0.9))
                     .p_4()
-                    .flex()
-                    .flex_col()
                     .gap_3()
-                    .bg(theme::CARD)
-                    .border_1()
-                    .border_color(theme::BORDER_CARD)
-                    .rounded_md()
-                    .shadow_lg()
-                    .text_color(theme::TEXT_SOFT)
                     .child(
                         div()
                             .flex()

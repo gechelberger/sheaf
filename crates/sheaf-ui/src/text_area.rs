@@ -6,7 +6,6 @@
 
 use std::ops::Range;
 
-use crate::theme;
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, FocusHandle, Focusable, GlobalElementId, LayoutId, MouseButton,
@@ -15,6 +14,8 @@ use gpui::{
     prelude::*, px, relative, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
+
+use crate::theme;
 
 actions!(
     text_area,
