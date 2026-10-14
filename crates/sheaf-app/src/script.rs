@@ -203,7 +203,7 @@ async fn run_step(
         let page = step.get("page").and_then(Value::as_u64).unwrap_or(0) as usize;
         let (a, b) = handle
             .update(cx, |ws, _, cx| {
-                let doc = ws.active_doc()?.clone();
+                let doc = ws.doc()?.clone();
                 let a = doc.read(cx).window_point(page, c[0], c[1])?;
                 let b = doc.read(cx).window_point(page, c[2], c[3])?;
                 Some((a, b))
@@ -347,7 +347,7 @@ impl Workspace {
             }
             return;
         }
-        let Some(doc) = self.active_doc().cloned() else {
+        let Some(doc) = self.doc().cloned() else {
             eprintln!("SCRIPT {what}: no document");
             return;
         };

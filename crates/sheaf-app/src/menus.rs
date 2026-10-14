@@ -96,14 +96,14 @@ fn builtin_menus() -> Vec<(&'static str, Vec<Item>)> {
             vec![
                 item("&New Window", NewWindow),
                 item("&Open…", OpenFile),
-                item("Open in Separate &Windows…", OpenInWindows),
                 sep(),
                 item("&Save", Save),
                 item("Save &As…", SaveAs),
                 item("&Export Clean Copy…", ExportCleanCopy),
                 item("Export &Flattened Copy…", ExportFlattened),
                 sep(),
-                item("&Close", CloseTab),
+                item("&Close", CloseDocument),
+                item("Close &Window", CloseWindow),
                 sep(),
                 item("E&xit", Quit),
             ],
@@ -187,18 +187,6 @@ fn builtin_menus() -> Vec<(&'static str, Vec<Item>)> {
             ],
         ),
         menu("&Plugins", vec![item("&Manage Plugins…", ManagePlugins)]),
-        menu(
-            "&Window",
-            vec![
-                item("&Next Tab", NextTab),
-                item("&Previous Tab", PrevTab),
-                sep(),
-                item("&Move Tab to New Window", MoveTabToNewWindow),
-                sep(),
-                item("&Close Tab", CloseTab),
-                item("Close &Window", CloseWindow),
-            ],
-        ),
         menu("&Help", vec![item("&About sheaf", About)]),
     ]);
     menus

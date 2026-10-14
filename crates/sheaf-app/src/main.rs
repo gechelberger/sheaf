@@ -1,6 +1,8 @@
 //! sheaf — a fast PDF editor. Currently: a fast PDF viewer.
 //!
-//!     sheaf [--timing] [--separate-windows] [file.pdf ...]
+//!     sheaf [--timing] [file.pdf ...]
+//!
+//! Each file opens in its own window.
 
 mod assets;
 mod brand;
@@ -119,14 +121,10 @@ actions!(
         ShowPatterns,
         ShowCalc,
         ShowComments,
-        NextTab,
-        PrevTab,
-        CloseTab,
+        CloseDocument,
         OpenFile,
         NewWindow,
-        OpenInWindows,
         CloseWindow,
-        MoveTabToNewWindow,
         Quit,
         ActivateMenuBar,
         About,
@@ -148,7 +146,6 @@ actions!(
 );
 
 struct Cli {
-    separate_windows: bool,
     paths: Vec<PathBuf>,
     timing: bool,
     /// Open the search bar with this query once the first document loads.
@@ -183,7 +180,6 @@ struct Cli {
 
 fn parse_cli() -> Cli {
     let mut cli = Cli {
-        separate_windows: false,
         paths: Vec::new(),
         timing: false,
         find: None,
@@ -212,7 +208,6 @@ fn parse_cli() -> Cli {
                 std::process::exit(0);
             }
             Some("--timing") => cli.timing = true,
-            Some("--separate-windows") => cli.separate_windows = true,
             Some("--find") => cli.find = args.next().and_then(|q| q.to_str().map(String::from)),
             Some("--selftest-save") => cli.selftest_save = args.next().map(PathBuf::from),
             Some("--selftest-insert") => cli.selftest_insert = args.next().map(PathBuf::from),
@@ -329,14 +324,9 @@ fn main() {
                 KeyBinding::new("ctrl-alt-r", ToggleRightDock, ws),
                 KeyBinding::new("ctrl-alt-j", ToggleBottomDock, ws),
                 KeyBinding::new("ctrl-shift-f", ShowPatterns, ws),
-                KeyBinding::new("ctrl-tab", NextTab, ws),
-                KeyBinding::new("ctrl-shift-tab", PrevTab, ws),
-                KeyBinding::new("ctrl-pagedown", NextTab, ws),
-                KeyBinding::new("ctrl-pageup", PrevTab, ws),
-                KeyBinding::new("ctrl-w", CloseTab, ws),
+                KeyBinding::new("ctrl-w", CloseDocument, ws),
                 KeyBinding::new("ctrl-o", OpenFile, ws),
                 KeyBinding::new("ctrl-n", NewWindow, ws),
-                KeyBinding::new("ctrl-shift-o", OpenInWindows, ws),
                 KeyBinding::new("ctrl-shift-w", CloseWindow, ws),
                 KeyBinding::new("ctrl-q", Quit, None),
                 // Acrobat has no palette; Ctrl+Shift+P is its Page Setup, so not that.
@@ -378,11 +368,11 @@ fn main() {
             cx.set_menus(menus::app_menus(cx));
             sheaf_ui::prompts::install(cx);
 
-            let mut groups = window_paths(cli.paths, cli.separate_windows).into_iter();
+            let mut windows = window_paths(cli.paths).into_iter();
             let password = cli.password.clone();
             let first = open_workspace(
                 Launch {
-                    paths: groups.next().expect("at least one window"),
+                    path: windows.next().expect("at least one window"),
                     timing: cli.timing,
                     find: cli.find,
                     selftest_save: cli.selftest_save,
@@ -405,8 +395,8 @@ fn main() {
             if let Some(path) = cli.script.take() {
                 script::start(path, first, cx);
             }
-            for paths in groups {
-                let mut launch = Launch::files(paths);
+            for path in windows {
+                let mut launch = Launch::file(path);
                 launch.timing = cli.timing;
                 launch.launched = launched;
                 launch.password = password.clone();
@@ -515,9 +505,8 @@ fn close_next_window(cx: &mut App) {
     }
 }
 
-/// An empty invocation still opens a workspace. Otherwise the caller chooses
-/// one tab group or one window per file, without imposing a document limit.
-fn window_paths(paths: Vec<PathBuf>, separate: bool) -> Vec<Vec<PathBuf>> {
+/// One window per file; an empty invocation still opens one, empty.
+fn window_paths(paths: Vec<PathBuf>) -> Vec<Option<PathBuf>> {
     // One view per file, as when opening from the dialog.
     let mut unique: Vec<PathBuf> = Vec::new();
     for p in paths {
@@ -525,12 +514,10 @@ fn window_paths(paths: Vec<PathBuf>, separate: bool) -> Vec<Vec<PathBuf>> {
             unique.push(p);
         }
     }
-    let paths = unique;
-    if separate && !paths.is_empty() {
-        paths.into_iter().map(|p| vec![p]).collect()
-    } else {
-        vec![paths]
+    if unique.is_empty() {
+        return vec![None];
     }
+    unique.into_iter().map(Some).collect()
 }
 
 #[cfg(test)]
@@ -538,14 +525,10 @@ mod window_tests {
     use super::*;
 
     #[test]
-    fn five_pdfs_can_open_as_tabs_or_windows() {
+    fn five_pdfs_open_five_windows() {
         let paths: Vec<_> = (1..=5).map(|n| PathBuf::from(format!("{n}.pdf"))).collect();
-        assert_eq!(window_paths(paths.clone(), false), vec![paths.clone()]);
-        let windows = window_paths(paths.clone(), true);
-        assert_eq!(windows.len(), 5);
-        for (window, path) in windows.iter().zip(paths) {
-            assert_eq!(window, &vec![path]);
-        }
+        let windows = window_paths(paths.clone());
+        assert_eq!(windows, paths.into_iter().map(Some).collect::<Vec<_>>());
     }
 
     #[test]
@@ -556,18 +539,13 @@ mod window_tests {
             PathBuf::from("a.pdf"),
         ];
         assert_eq!(
-            window_paths(paths, true),
-            vec![vec![PathBuf::from("a.pdf")], vec![PathBuf::from("b.pdf")]]
+            window_paths(paths),
+            vec![Some(PathBuf::from("a.pdf")), Some(PathBuf::from("b.pdf"))]
         );
     }
 
     #[test]
     fn no_files_opens_one_empty_workspace() {
-        for separate in [false, true] {
-            assert_eq!(
-                window_paths(Vec::new(), separate),
-                vec![Vec::<PathBuf>::new()]
-            );
-        }
+        assert_eq!(window_paths(Vec::new()), vec![None]);
     }
 }

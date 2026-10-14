@@ -10,20 +10,23 @@ calculator tapes, bookmark-driven page management) — without the bloat.
 
 > **Status:** pre-alpha. Nothing works yet. This README is the design doc.
 
-## Opening PDFs in windows or tabs
+## One document per window
 
-- **File → Open…** (`Ctrl+O`): select multiple PDFs to open them as tabs in
-  the current window. `Ctrl+Tab` / `Ctrl+Shift+Tab` switch tabs.
-- **File → Open in Separate Windows…** (`Ctrl+Shift+O`): select multiple PDFs
-  to open each in its own window.
-- **File → New Window** (`Ctrl+N`): open an empty window, then use Open to add tabs.
-- `Ctrl+W` closes a tab; `Ctrl+Shift+W` or the window close button closes just
-  that window. `Ctrl+Q` quits across all windows. Unsaved documents prompt
-  before closing; Cancel or a failed save stops the close/quit sequence.
+Every open PDF gets its own window; there are no document tabs. Switching
+and arranging documents is left to the OS window manager, and sheaf
+spends its effort on PDF features instead.
 
-From the command line, `sheaf one.pdf two.pdf three.pdf four.pdf five.pdf`
-opens five tabs. Add `--separate-windows` to open five separate windows.
-Each window has its own active tab and document editing state.
+- **File → Open…** (`Ctrl+O`): select one or more PDFs. The first fills the
+  current window if it's empty; each of the rest opens in a new window. A
+  file that's already open brings its window forward instead.
+- **File → New Window** (`Ctrl+N`): open an empty window.
+- **File → Close** (`Ctrl+W`) closes the document and its window; the last
+  window stays open, empty. **Close Window** (`Ctrl+Shift+W`) or the window
+  close button always closes the window. `Ctrl+Q` quits across all windows.
+  Unsaved documents prompt before closing; Cancel or a failed save stops
+  the close/quit sequence.
+
+From the command line, `sheaf one.pdf two.pdf three.pdf` opens three windows.
 
 ## Why
 
@@ -131,7 +134,7 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 | Text search (find in document) | ✅ progressive; ~6 ms/page |
 | Pattern search (regex: SSNs, EINs, amounts, dates) — separate tool from Find, shared engine with redaction | ✅ Patterns panel, Ctrl+Shift+F |
 | User-defined patterns: add, save, and delete presets; several date formats built in | ✅ `patterns.json`; right-click a preset |
-| Tabs / multiple documents / multiple windows | ✅ |
+| Multiple documents, one window each | ✅ |
 | Split view (same doc, two positions) | 📋 |
 | Attachments panel | 📋 |
 | Open PDF Portfolios (browse and extract embedded files) | 📋 |
@@ -256,7 +259,7 @@ rest of the path to parity in [ROADMAP.md](ROADMAP.md).
 | # | Milestone | Proves |
 |---|---|---|
 | M0 | **Spikes**: GPUI window on Windows and Linux (both tier 1); pdfium-render renders a page; lopdf round-trips a PDF. *All three pass on Linux and Windows (2026-10-11).* | The stack is viable |
-| M1 | **Viewer**: tiled async rendering, continuous scroll, zoom, thumbnails, outline, tabs, search. *Done 2026-10-11 (Linux).* | The performance thesis |
+| M1 | **Viewer**: tiled async rendering, continuous scroll, zoom, thumbnails, outline, multiple windows, search. *Done 2026-10-11 (Linux).* | The performance thesis |
 | M2 | **Organizer**: page reorder/rotate/delete/insert, bookmark tree editing, incremental save, undo; pattern (regex) search as its own tool. *Done 2026-10-11 (Linux).* | The document model |
 | M3 | **Markup**: standard annotations, stamps, tickmarks, connectors, calc tape, comments panel, clean copy export. *Done 2026-10-11 (Linux).* | The PDFlyer workflow |
 | M4 | **Polish → v0.1**: unsaved-changes prompts, settings with persisted layout, command palette, user keymap, crash-recovery autosave, packaging + CI. *Done 2026-10-11 (Linux; Windows bundle and CI workflows not yet exercised).* | Daily-driver readiness |
