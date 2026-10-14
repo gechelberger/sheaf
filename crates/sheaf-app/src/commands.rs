@@ -226,8 +226,13 @@ impl CommandRegistry {
     /// their menu items, along with submenus and menus left empty and the
     /// separators that set them off.
     pub fn remove_plugin(&mut self, plugin: &str) {
-        let prefix = format!("{plugin}::");
-        self.commands.retain(|c| !c.id.starts_with(&prefix));
+        self.remove_prefix(&format!("{plugin}::"));
+    }
+
+    /// Take out every command whose id starts with `prefix`, and their menu
+    /// items, as [`remove_plugin`](Self::remove_plugin) describes.
+    pub fn remove_prefix(&mut self, prefix: &str) {
+        self.commands.retain(|c| !c.id.starts_with(prefix));
         self.index = self
             .commands
             .iter()
@@ -258,9 +263,32 @@ impl CommandRegistry {
             *entries = out;
         }
         for m in &mut self.menus {
-            prune(&mut m.entries, &prefix);
+            prune(&mut m.entries, prefix);
         }
         self.menus.retain(|m| !m.entries.is_empty());
+    }
+
+    /// Replace the entries of the submenu at `path` (a top-level menu name,
+    /// then submenu names; matched ignoring case and `&`). Every command in
+    /// `entries` must be registered. Does nothing if there's no such menu.
+    pub fn set_submenu(&mut self, path: &[&str], entries: Vec<MenuEntry>) {
+        let Some((top, rest)) = path.split_first() else {
+            return;
+        };
+        let Some(menu) = self.menus.iter_mut().find(|m| same_name(&m.name, top)) else {
+            return;
+        };
+        let mut list = &mut menu.entries;
+        for name in rest {
+            let Some(MenuEntry::Submenu(m)) = list
+                .iter_mut()
+                .find(|e| matches!(e, MenuEntry::Submenu(m) if same_name(&m.name, name)))
+            else {
+                return;
+            };
+            list = &mut m.entries;
+        }
+        *list = entries;
     }
 
     /// Put a command in the menu at `path`, creating menus as needed. Names

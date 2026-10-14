@@ -823,6 +823,33 @@ impl Workspace {
 
     /// Document > Recognize Text (OCR)…: open the options card for the
     /// active document (or close it if it's open).
+    /// File > Open Recent: open it like File > Open, or say it's gone.
+    fn open_recent(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if path.exists() {
+            let origin = window.window_handle().downcast::<Workspace>();
+            if let Some(origin) = origin {
+                cx.defer(move |cx| open_paths(origin, vec![path], cx));
+            }
+            return;
+        }
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        drop(sheaf_ui::prompts::ask(
+            window,
+            cx,
+            PromptLevel::Warning,
+            &format!("\"{name}\" can't be found"),
+            Some(&format!(
+                "It may have been moved, renamed or deleted. It's been taken off the recent files list.\n\n{}",
+                path.display()
+            )),
+            &["OK"],
+        ));
+        crate::recent::forget(&path, cx);
+    }
+
     fn toggle_properties(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.properties.take().is_some() {
             self.focus_active(window, cx);
@@ -1364,6 +1391,12 @@ impl Render for Workspace {
             .on_action(
                 cx.listener(|ws, _: &RecognizeText, window, cx| ws.toggle_ocr_dialog(window, cx)),
             )
+            .on_action(
+                cx.listener(|ws, a: &crate::recent::OpenRecent, window, cx| {
+                    ws.open_recent(a.path.clone(), window, cx)
+                }),
+            )
+            .on_action(|_: &crate::ClearRecent, _, cx| crate::recent::clear(cx))
             .on_action(
                 cx.listener(|ws, _: &crate::DocumentProperties, window, cx| {
                     ws.toggle_properties(window, cx)

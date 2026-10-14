@@ -44,11 +44,17 @@ pub struct MenuBar {
     open: bool,
     /// The highlighted dropdown item.
     item: Option<usize>,
+    /// The open submenu: its item index in the dropdown, and the
+    /// highlighted item in it.
+    sub: Option<usize>,
+    sub_item: Option<usize>,
     /// Activated from the keyboard: show mnemonic underlines.
     keyboard: bool,
     /// Bounds of the bar from the last frame, so a click on a title isn't
     /// also treated as a click outside the open dropdown.
     bounds: Bounds<Pixels>,
+    /// Bounds of the open submenu, likewise.
+    sub_bounds: Bounds<Pixels>,
     _blur: Subscription,
 }
 
@@ -67,8 +73,11 @@ impl MenuBar {
             active: None,
             open: false,
             item: None,
+            sub: None,
+            sub_item: None,
             keyboard: false,
             bounds: Bounds::default(),
+            sub_bounds: Bounds::default(),
             _blur: blur,
         }
     }
@@ -118,6 +127,8 @@ impl MenuBar {
         self.active = Some(ix);
         self.open = true;
         self.keyboard = keyboard;
+        self.sub = None;
+        self.sub_item = None;
         self.item = if keyboard {
             self.step_item(None, 1, window, cx)
         } else {
@@ -138,6 +149,8 @@ impl MenuBar {
             self.active = None;
             self.open = false;
             self.item = None;
+            self.sub = None;
+            self.sub_item = None;
             cx.notify();
         }
     }
@@ -157,6 +170,14 @@ impl MenuBar {
             .map_or(&[], |m| &m.items)
     }
 
+    /// The open submenu's items.
+    fn sub_items(&self) -> &[OwnedMenuItem] {
+        match self.sub.and_then(|i| self.items().get(i)) {
+            Some(OwnedMenuItem::Submenu(m)) => &m.items,
+            _ => &[],
+        }
+    }
+
     fn enabled(&self, action: &dyn Action, window: &Window, cx: &App) -> bool {
         match &self.restore {
             Some(prev) => window.is_action_available_in(action, prev),
@@ -169,6 +190,7 @@ impl MenuBar {
             OwnedMenuItem::Action {
                 action, disabled, ..
             } => !disabled && self.enabled(action.as_ref(), window, cx),
+            OwnedMenuItem::Submenu(m) => m.items.iter().any(|i| self.item_enabled(i, window, cx)),
             _ => false,
         }
     }
@@ -181,7 +203,17 @@ impl MenuBar {
         window: &Window,
         cx: &App,
     ) -> Option<usize> {
-        let items = self.items();
+        self.step_in(self.items(), from, dir, window, cx)
+    }
+
+    fn step_in(
+        &self,
+        items: &[OwnedMenuItem],
+        from: Option<usize>,
+        dir: isize,
+        window: &Window,
+        cx: &App,
+    ) -> Option<usize> {
         let n = items.len() as isize;
         let mut i = from.map_or(if dir > 0 { -1 } else { n }, |i| i as isize);
         for _ in 0..n {
@@ -195,6 +227,39 @@ impl MenuBar {
 
     fn run(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(item) = self.items().get(ix) else {
+            return;
+        };
+        if !self.item_enabled(item, window, cx) {
+            return;
+        }
+        if let OwnedMenuItem::Submenu(_) = item {
+            self.open_sub(ix, true, window, cx);
+            return;
+        }
+        let OwnedMenuItem::Action { action, .. } = item else {
+            return;
+        };
+        let action = action.boxed_clone();
+        // Restore focus first: dispatch targets whatever is focused now.
+        self.close(window, cx);
+        window.dispatch_action(action, cx);
+    }
+
+    /// Show the submenu at dropdown item `ix`; from the keyboard, with its
+    /// first item highlighted.
+    fn open_sub(&mut self, ix: usize, keyboard: bool, window: &Window, cx: &mut Context<Self>) {
+        self.item = Some(ix);
+        self.sub = Some(ix);
+        self.sub_item = if keyboard {
+            self.step_in(self.sub_items(), None, 1, window, cx)
+        } else {
+            None
+        };
+        cx.notify();
+    }
+
+    fn run_sub(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(item) = self.sub_items().get(ix) else {
             return;
         };
         if !self.item_enabled(item, window, cx) {
@@ -230,11 +295,44 @@ impl MenuBar {
             self.item = None;
         }
         self.keyboard = true;
-        self.item = self.step_item(self.item, dir, window, cx);
+        if self.sub.is_some() {
+            self.sub_item = self.step_in(self.sub_items(), self.sub_item, dir, window, cx);
+        } else {
+            self.item = self.step_item(self.item, dir, window, cx);
+        }
         cx.notify();
     }
 
+    /// Right: into the highlighted submenu, else on to the next menu.
+    fn right(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.open
+            && self.sub.is_none()
+            && let Some(ix) = self.item
+            && matches!(self.items().get(ix), Some(OwnedMenuItem::Submenu(_)))
+        {
+            self.open_sub(ix, true, window, cx);
+            return;
+        }
+        self.move_title(1, window, cx);
+    }
+
+    /// Left: out of a submenu, else to the previous menu.
+    fn left(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sub.take().is_some() {
+            self.sub_item = None;
+            cx.notify();
+            return;
+        }
+        self.move_title(-1, window, cx);
+    }
+
     fn confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sub.is_some() {
+            if let Some(ix) = self.sub_item {
+                self.run_sub(ix, window, cx);
+            }
+            return;
+        }
         match (self.active, self.open, self.item) {
             (Some(_), true, Some(ix)) => self.run(ix, window, cx),
             (Some(ix), false, _) => self.open_menu(ix, true, window, cx),
@@ -245,7 +343,10 @@ impl MenuBar {
     /// Esc closes the dropdown but leaves the title highlighted, as Windows
     /// does; a second Esc leaves the bar.
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.open {
+        if self.sub.take().is_some() {
+            self.sub_item = None;
+            cx.notify();
+        } else if self.open {
             self.open = false;
             self.item = None;
             cx.notify();
@@ -267,12 +368,20 @@ impl MenuBar {
             return;
         };
         let ch = ch.to_ascii_lowercase();
-        if self.open {
-            let hit = self.items().iter().position(|item| match item {
+        let hit = |items: &[OwnedMenuItem]| {
+            items.iter().position(|item| match item {
                 OwnedMenuItem::Action { name, .. } => mnemonic(name) == Some(ch),
+                OwnedMenuItem::Submenu(m) => mnemonic(&m.name) == Some(ch),
                 _ => false,
-            });
-            if let Some(ix) = hit {
+            })
+        };
+        if self.sub.is_some() {
+            if let Some(ix) = hit(self.sub_items()) {
+                cx.stop_propagation();
+                self.run_sub(ix, window, cx);
+            }
+        } else if self.open {
+            if let Some(ix) = hit(self.items()) {
                 cx.stop_propagation();
                 self.run(ix, window, cx);
             }
@@ -281,68 +390,132 @@ impl MenuBar {
         }
     }
 
-    fn render_dropdown(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let rows = self
-            .items()
+    /// One dropdown's rows. `sub`: these are the open submenu's.
+    fn rows(
+        &self,
+        items: &[OwnedMenuItem],
+        sub: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui::AnyElement> {
+        let highlighted_ix = if sub { self.sub_item } else { self.item };
+        items
             .iter()
             .enumerate()
-            .map(|(ix, item)| match item {
-                OwnedMenuItem::Action { name, action, .. } => {
-                    let enabled = self.item_enabled(item, window, cx);
-                    let highlighted = self.item == Some(ix);
-                    div()
-                        .id(("menu-item", ix))
-                        .px_3()
-                        .py_1()
-                        .flex()
-                        .justify_between()
-                        .gap_6()
-                        .text_sm()
-                        .when(highlighted && enabled, |d| d.bg(theme::HOVER))
-                        .text_color(if enabled {
-                            theme::TEXT_SOFT
-                        } else {
-                            theme::TEXT_DISABLED
-                        })
+            .map(|(ix, item)| {
+                let enabled = self.item_enabled(item, window, cx);
+                let highlighted = highlighted_ix == Some(ix);
+                let row = div()
+                    .id(("menu-item", ix + if sub { 1000 } else { 0 }))
+                    .px_3()
+                    .py_1()
+                    .flex()
+                    .justify_between()
+                    .gap_6()
+                    .text_sm()
+                    .when(highlighted && enabled, |d| d.bg(theme::HOVER))
+                    .text_color(if enabled {
+                        theme::TEXT_SOFT
+                    } else {
+                        theme::TEXT_DISABLED
+                    });
+                let dim = if enabled {
+                    theme::TEXT_DIM
+                } else {
+                    theme::TEXT_DISABLED_DIM
+                };
+                match item {
+                    OwnedMenuItem::Action { name, action, .. } => row
                         .on_mouse_move(cx.listener(move |bar, _, _, cx| {
-                            if bar.item != Some(ix) {
+                            if sub {
+                                if bar.sub_item != Some(ix) {
+                                    bar.sub_item = Some(ix);
+                                    cx.notify();
+                                }
+                            } else if bar.item != Some(ix) || bar.sub.is_some() {
                                 bar.item = Some(ix);
+                                bar.sub = None;
+                                bar.sub_item = None;
                                 cx.notify();
                             }
                         }))
-                        .on_click(cx.listener(move |bar, _, window, cx| bar.run(ix, window, cx)))
-                        .child(label(name, self.keyboard))
-                        .children(shortcut(action.as_ref(), cx).map(|s| {
-                            div()
-                                .text_color(if enabled {
-                                    theme::TEXT_DIM
-                                } else {
-                                    theme::TEXT_DISABLED_DIM
-                                })
-                                .child(s)
+                        .on_click(cx.listener(move |bar, _, window, cx| {
+                            if sub {
+                                bar.run_sub(ix, window, cx)
+                            } else {
+                                bar.run(ix, window, cx)
+                            }
                         }))
-                        .into_any_element()
+                        .child(label(name, self.keyboard))
+                        .children(
+                            shortcut(action.as_ref(), cx).map(|s| div().text_color(dim).child(s)),
+                        )
+                        .into_any_element(),
+                    OwnedMenuItem::Submenu(m) if !sub => {
+                        let open = self.sub == Some(ix);
+                        row.relative()
+                            .when(open && enabled, |d| d.bg(theme::HOVER))
+                            .on_mouse_move(cx.listener(move |bar, _, window, cx| {
+                                if bar.sub != Some(ix) {
+                                    bar.open_sub(ix, false, window, cx);
+                                }
+                            }))
+                            .on_click(cx.listener(move |bar, _, window, cx| {
+                                bar.open_sub(ix, true, window, cx)
+                            }))
+                            .child(label(&m.name, self.keyboard))
+                            .child(div().text_color(dim).child("›"))
+                            .when(open, |d| {
+                                d.child(
+                                    div()
+                                        .absolute()
+                                        .left_full()
+                                        .top(px(-4.0))
+                                        .child(self.render_list(&m.items, true, window, cx)),
+                                )
+                            })
+                            .into_any_element()
+                    }
+                    _ => div()
+                        .my_1()
+                        .h(px(1.0))
+                        .bg(theme::SEPARATOR)
+                        .into_any_element(),
                 }
-                _ => div()
-                    .my_1()
-                    .h(px(1.0))
-                    .bg(theme::SEPARATOR)
-                    .into_any_element(),
-            });
+            })
+            .collect()
+    }
+
+    /// A dropdown (or, with `sub`, the open submenu) floating over the window.
+    fn render_list(
+        &self,
+        items: &[OwnedMenuItem],
+        sub: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let rows = self.rows(items, sub, window, cx);
         let bar_bounds = self.bounds;
+        let this = cx.entity().downgrade();
         deferred(
             anchored().snap_to_window().child(
                 div()
-                    .id("menu-dropdown")
+                    .id(if sub { "menu-submenu" } else { "menu-dropdown" })
                     .occlude()
-                    .on_mouse_down_out(cx.listener(
-                        move |bar, e: &gpui::MouseDownEvent, window, cx| {
-                            // Clicks on the bar's titles are handled there.
-                            if !bar_bounds.contains(&e.position) {
-                                bar.close(window, cx);
-                            }
-                        },
-                    ))
+                    .when(!sub, |d| {
+                        d.on_mouse_down_out(cx.listener(
+                            move |bar, e: &gpui::MouseDownEvent, window, cx| {
+                                // Clicks on the bar's titles are handled
+                                // there, and the submenu's in it.
+                                let in_sub =
+                                    bar.sub.is_some() && bar.sub_bounds.contains(&e.position);
+                                if !bar_bounds.contains(&e.position) && !in_sub {
+                                    bar.close(window, cx);
+                                }
+                            },
+                        ))
+                    })
+                    .relative()
                     .min_w(px(220.0))
                     .py_1()
                     .rounded_md()
@@ -352,10 +525,26 @@ impl MenuBar {
                     .shadow_lg()
                     .flex()
                     .flex_col()
+                    .when(sub, |d| {
+                        d.child(
+                            canvas(
+                                move |bounds, _, cx| {
+                                    this.update(cx, |bar, _| bar.sub_bounds = bounds).ok();
+                                },
+                                |_, _, _, _| {},
+                            )
+                            .absolute()
+                            .size_full(),
+                        )
+                    })
                     .children(rows),
             ),
         )
-        .with_priority(1)
+        .with_priority(if sub { 2 } else { 1 })
+    }
+
+    fn render_dropdown(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.render_list(self.items(), false, window, cx)
     }
 }
 
@@ -420,8 +609,8 @@ impl Render for MenuBar {
             .flex()
             .items_stretch()
             .text_color(theme::TEXT_SOFT)
-            .on_action(cx.listener(|bar, _: &MenuLeft, window, cx| bar.move_title(-1, window, cx)))
-            .on_action(cx.listener(|bar, _: &MenuRight, window, cx| bar.move_title(1, window, cx)))
+            .on_action(cx.listener(|bar, _: &MenuLeft, window, cx| bar.left(window, cx)))
+            .on_action(cx.listener(|bar, _: &MenuRight, window, cx| bar.right(window, cx)))
             .on_action(cx.listener(|bar, _: &MenuUp, window, cx| bar.move_item(-1, window, cx)))
             .on_action(cx.listener(|bar, _: &MenuDown, window, cx| bar.move_item(1, window, cx)))
             .on_action(cx.listener(|bar, _: &MenuConfirm, window, cx| bar.confirm(window, cx)))
@@ -518,16 +707,26 @@ fn keystroke_text(k: &Keystroke) -> String {
 
 /// Split a `&`-marked label into display text and the byte offset of its
 /// mnemonic character, if any.
+/// `&&` is a literal `&`, as in Win32 menus.
 pub fn parse_label(label: &str) -> (String, Option<usize>) {
-    match label.find('&') {
-        Some(i) if i + 1 < label.len() => {
-            let mut text = String::with_capacity(label.len() - 1);
-            text.push_str(&label[..i]);
-            text.push_str(&label[i + 1..]);
-            (text, Some(i))
+    let mut text = String::with_capacity(label.len());
+    let mut at = None;
+    let mut chars = label.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '&' {
+            match chars.peek() {
+                Some('&') => {
+                    chars.next();
+                    text.push('&');
+                }
+                Some(_) if at.is_none() => at = Some(text.len()),
+                _ => {}
+            }
+        } else {
+            text.push(c);
         }
-        _ => (label.to_string(), None),
     }
+    (text, at)
 }
 
 /// The mnemonic letter of a `&`-marked label, lowercased.
@@ -542,5 +741,22 @@ pub fn platform_label(s: &str) -> String {
         parse_label(s).0
     } else {
         s.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn labels_take_the_first_marker_and_unescape_doubles() {
+        assert_eq!(parse_label("&File"), ("File".to_string(), Some(0)));
+        assert_eq!(parse_label("Save &As…"), ("Save As…".to_string(), Some(5)));
+        assert_eq!(
+            parse_label("&1 A&&B.pdf"),
+            ("1 A&B.pdf".to_string(), Some(0))
+        );
+        assert_eq!(parse_label("Q&&A"), ("Q&A".to_string(), None));
+        assert_eq!(mnemonic("1&0 x.pdf"), Some('0'));
     }
 }

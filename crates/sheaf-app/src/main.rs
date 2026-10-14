@@ -34,6 +34,7 @@ mod plugin_panel;
 mod plugins;
 mod presentation;
 mod properties_dialog;
+mod recent;
 mod region;
 mod rulers;
 mod script;
@@ -155,7 +156,8 @@ actions!(
         CommandPalette,
         RecognizeText,
         ManagePlugins,
-        DocumentProperties
+        DocumentProperties,
+        ClearRecent
     ]
 );
 actions!(
@@ -402,6 +404,7 @@ fn main() {
             ]);
             sheaf_ui::bind_keys(cx);
             cx.set_global(commands::CommandRegistry::builtin());
+            recent::init(cx);
             cx.set_global(contrib::Contributions::load());
             // Plugin bindings first, so the user's keymap can override them.
             #[cfg(feature = "plugins")]

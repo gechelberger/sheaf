@@ -17,7 +17,6 @@ pub fn app_menus(cx: &App) -> Vec<Menu> {
 
 /// After the registry changes (a plugin turned on or off): set the menus
 /// again and redraw every window's title-bar menus.
-#[cfg_attr(not(feature = "plugins"), allow(dead_code))]
 pub fn refresh(cx: &mut App) {
     cx.set_menus(app_menus(cx));
     for w in cx.windows() {
@@ -37,10 +36,8 @@ pub fn register_builtins(reg: &mut CommandRegistry) {
         .filter(|m| m.0 != APP_MENU)
         .chain(menus.iter().filter(|m| m.0 == APP_MENU));
     for (name, items) in app_menu_last {
-        for it in items {
-            if let Item::Action(label, action) = it
-                && reg.get(action.name()).is_none()
-            {
+        for (label, action) in actions(items) {
+            if reg.get(action.name()).is_none() {
                 reg.add(Command {
                     id: action.name().to_string(),
                     label: label.to_string(),
@@ -52,16 +49,7 @@ pub fn register_builtins(reg: &mut CommandRegistry) {
         }
     }
     for (name, items) in menus {
-        let entries = items
-            .into_iter()
-            .map(|it| match it {
-                Item::Action(label, action) => MenuEntry::Command {
-                    id: action.name().to_string(),
-                    label: label.to_string(),
-                },
-                Item::Sep => MenuEntry::Separator,
-            })
-            .collect();
+        let entries = items.into_iter().map(entry).collect();
         reg.add_menu(MenuSpec {
             name: name.to_string(),
             entries,
@@ -75,6 +63,35 @@ const APP_MENU: &str = "sheaf";
 enum Item {
     Action(&'static str, Box<dyn Action>),
     Sep,
+    /// A submenu; File > Open Recent fills its own (see recent.rs).
+    Sub(&'static str, Vec<Item>),
+}
+
+fn entry(it: Item) -> MenuEntry {
+    match it {
+        Item::Action(label, action) => MenuEntry::Command {
+            id: action.name().to_string(),
+            label: label.to_string(),
+        },
+        Item::Sep => MenuEntry::Separator,
+        Item::Sub(name, items) => MenuEntry::Submenu(MenuSpec {
+            name: name.to_string(),
+            entries: items.into_iter().map(entry).collect(),
+        }),
+    }
+}
+
+/// Every action in a menu's items, submenus included.
+fn actions(items: &[Item]) -> Vec<(&'static str, &dyn Action)> {
+    let mut out = Vec::new();
+    for it in items {
+        match it {
+            Item::Action(label, action) => out.push((*label, action.as_ref())),
+            Item::Sub(_, sub) => out.extend(actions(sub)),
+            Item::Sep => {}
+        }
+    }
+    out
 }
 
 fn builtin_menus() -> Vec<(&'static str, Vec<Item>)> {
@@ -96,6 +113,10 @@ fn builtin_menus() -> Vec<(&'static str, Vec<Item>)> {
             vec![
                 item("&New Window", NewWindow),
                 item("&Open…", OpenFile),
+                Item::Sub(
+                    "Open &Recent",
+                    vec![item("&Clear Recent Files", ClearRecent)],
+                ),
                 sep(),
                 item("&Save", Save),
                 item("Save &As…", SaveAs),

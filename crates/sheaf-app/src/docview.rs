@@ -632,6 +632,8 @@ impl DocView {
             password: self.password.clone(),
         };
         let model = Document::new(source, &[], sheaf_doc::history::default_policy());
+        let opened = self.path.clone();
+        cx.defer(move |cx| crate::recent::add(&opened, cx));
         let mut handles = HashMap::new();
         handles.insert(model.primary(), handle);
         self.state = State::Ready(Box::new(Doc {
@@ -1388,6 +1390,8 @@ impl DocView {
                         view.autosave = None;
                         view.autosave_since = None;
                         view.path = path.clone();
+                        let saved_path = path.clone();
+                        cx.defer(move |cx| crate::recent::add(&saved_path, cx));
                         let was_encrypted = view.password.take().is_some();
                         doc.notice = Some(format!(
                             "Saved {} ({strategy:?}) in {:?}{}",

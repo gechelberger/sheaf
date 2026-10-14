@@ -81,9 +81,12 @@ async fn run_step(
     if let Some(name) = step.get("checkpoint").and_then(Value::as_str) {
         // Synthetic input doesn't always schedule a frame; make sure the
         // screenshot sees the current state.
-        cx.update_window(handle.into(), |_, window, _| window.refresh())
-            .map_err(|e| e.to_string())?;
-        pause(cx, 300).await;
+        // A grab can show the frame before the last; draw twice.
+        for _ in 0..2 {
+            cx.update_window(handle.into(), |_, window, _| window.refresh())
+                .map_err(|e| e.to_string())?;
+            pause(cx, 300).await;
+        }
         eprintln!("SCRIPT checkpoint {name}");
         let started = Instant::now();
         while started.elapsed() < Duration::from_secs(120) {
