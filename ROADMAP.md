@@ -28,7 +28,7 @@ New proposals not yet placed in a milestone go under [Pending](#pending).
 | M6 | **Plugins**: WASM components, declarative UI, command registry | Extensibility without forking | — |
 | M7 | **Viewing & output**: page modes, split view, panels, print, image/TIFF/text export | Viewing and printing never need Acrobat | v0.3 |
 | M8 | **Page tools**: split, insert/replace, crop, labels, headers/footers, Bates, watermarks | Binder assembly is complete | v0.4 |
-| M9 | **Markup completion**: remaining annotation types, custom stamps, replies, FDF/XFDF, measurement | Review workflow parity | v0.5 |
+| M9 | **Markup completion**: mark editing, remaining annotation types, custom stamps, replies and status, PDFlyer stamps/connectors/tape, FDF/XFDF, measurement | Review workflow parity | v0.5 |
 | M10 | **Forms**: fill, calculate, create, import/export, flatten | Tax forms are filled and calculated in sheaf | v0.6 |
 | M11 | **Security & redaction**: true redaction, sanitize, passwords and permissions | Client data can be sent out safely | v0.7 |
 | M12 | **Signatures**: Fill & Sign, digital signatures, verification, timestamps | Engagement letters and 8879s are signed in-app | v0.8 |
@@ -67,7 +67,9 @@ below are a first cut.
 - Scanner intake: WIA/TWAIN on Windows, SANE on Linux.
 - Separator sheet → bookmark: a generic barcode/patch-code/keyword separator
   that splits or bookmarks a scanned batch. This replaces PDFlyer/CCH Scan
-  "Target Sheets".
+  "Target Sheets". Includes inserting separator sheets into an existing
+  PDF above chosen pages, so it can be re-run (PDFlyer's Insert Target
+  Sheets; moved here from Pending 2026-10-14).
 
 Slices: OCR engine + text layer ✅ → batch OCR over binder ✅ → image import ✅
 → cleanup filters ✅ (with camera capture) → scanner intake → separator sheets.
@@ -160,24 +162,57 @@ Acrobat writes them, so Acrobat can update or remove them later and so can we.
 
 ### M9: Markup completion
 
+Started 2026-10-14; the plan, with the decisions made at kickoff and the
+bugs found while planning, is in [`todos/m9.md`](todos/m9.md).
+
+- Infrastructure first (decided 2026-10-14):
+  - **Single instance:** one sheaf process per user on each machine, and
+    a second launch hands its files to it. Today two launches can open the
+    same PDF in two processes, and each save discards the other's edits.
+  - **Preferences split from state:** `settings.toml` (preferences, edited
+    by hand, only read by sheaf) and `state.json` (window layout and
+    last-used choices; disposable). Today every window saves its own copy
+    of `settings.json` over the others'.
+  - **Edit history:** every version keeps the commands that made it, in a
+    tree so undone work isn't lost, and a History panel jumps to any
+    version. It's also the base for merging conflicting edits later.
+- Editing placed marks: resize and vertex handles, color, fill, opacity,
+  line width and style, multi-select, copy and paste.
+- Text selection and Copy, which text markup then acts on.
 - Underline, strikethrough, squiggly, replace-text / insert-text marks.
 - Polygon, polyline, cloud, callout (free text with leader).
-- Custom stamps: from image or PDF page; dynamic stamps (date, time, user name).
-- Sign-off / review stamps (preparer and reviewer initials + date). A sheaf
-  extension, not PDFlyer: PDFlyer's nearest tool is Set Status, and real
-  sign-off lives in ProSystem fx Engagement's binder. See
-  [PDFlyer parity gaps](#pdflyer-parity-gaps); Set Status may replace this.
-- Comment status (accepted/rejected/completed), replies, author and
-  date filters, sorting.
-- Import / export comments as FDF and XFDF.
-- Comment summary report (comments with page thumbnails, to PDF).
+- Custom stamps: from image or PDF page, in a shareable library (PDFlyer's
+  user stamp export/import), with Recent and Favorites; dynamic stamps
+  (date, time, name, initials) from a new identity entry in
+  `settings.toml`.
+- **(PDFlyer)** Set Status: bookmark color, page border and status stamp,
+  and Reset Status. With dynamic stamps this replaces the planned
+  "sign-off / review stamps", which PDFlyer doesn't have (real sign-off
+  lives in ProSystem fx Engagement's binder).
+- **(PDFlyer)** Connector groups: every connector with a label is one
+  group, with Previous/Next and "pages with / without" navigation. Pairs
+  keep working as groups of two.
+- Comment status (accepted/rejected/cancelled/completed), checkmarks,
+  replies, on third-party comments too; filters by type, author, status,
+  color and page, sorting, hiding. PDFlyer's Stamp Summary and Note
+  Summary are filter presets.
+- Import / export comments as FDF and XFDF, or from another PDF; editing
+  a third-party comment makes it a sheaf mark.
+- Comment summary report (to PDF), and the list as CSV or text.
 - File-attachment annotations.
-- Measurement: distance, perimeter, area, with page scale and calibration.
+- **(PDFlyer)** Calculator tape: sections and row numbers (`1-0`, `1-1`…,
+  `1-T`, `GT`), a note column, editing a placed tape in place, rotating
+  and resizing it.
 - Calculator tape that picks up numbers by clicking page text. A sheaf
   extension: PDFlyer's tape numbers are typed.
+- Measurement: distance, perimeter, area, with page scale and calibration.
+  The cut line: it can move later without holding up v0.5.
 
-Slices: text-markup types → shape types → custom/dynamic stamps → replies and
-status → FDF/XFDF + summary → measurement → calc tape from page text.
+Slices: single instance → preferences and state → groundwork and bug
+fixes → edit history → editing marks → text selection → text markup →
+replies and status → comment filters → stamps → connector groups → Set
+Status → tape format → tape from page text → shapes → file attachments →
+summary and CSV → FDF/XFDF → measurement → plugin API 0.3 and docs.
 
 ### M10: Forms
 
@@ -400,29 +435,57 @@ and [prior-art/README.md](docs/prior-art/README.md#what-the-prior-art-says-about
 (researched 2026-10-13). Multi-page TIFF with marks rendered in is left
 out: M7's TIFF export already renders sheaf's marks.
 
-| Gap | Overlap |
-|---|---|
-| **Connector groups**: every instance of a label (1–50, A–ZZ) linked, with Prev/Next and "all pages with / without" navigation | M3 connectors are pairwise Link annotations. Keep those so links still work in Acrobat, and add groups on top. |
-| **Set Status**: bookmark color + page border + text/date stamp | Partial duplicate of M9 "Sign-off / review stamps", which PDFlyer doesn't have. Probably replaces it. |
-| Split Bookmark | M8 split document splits files, not bookmarks. New. |
-| Delete Bookmark *with its pages* | M2 move-with-pages (Shift+drag); same machinery. |
-| Delete Page re-attaches its bookmark to the next page | M2 delete pages. Check today's behavior first. |
-| Hide/Show empty bookmarks; colorize by populated vs empty | M8 colorize by level. |
-| Insert PDF modes: merge by parent bookmarks / append as one bookmark at a chosen level / one bookmark per page / none; offer to delete the source | M2 Insert Pages (merge only) and M8 Combine Files (bookmark per file). Mostly options on the existing dialog. |
-| Stamp Summary (page, author, time; export) and Note Summary | M9 comment summary report and comment filters. Likely the same feature. |
-| Recent and Favorite stamps; sticky stamp mode; user stamps from images, exported/imported to share across staff | M9 custom stamps. Sharing is new. |
-| Calculator tape: section/row format (`1-0` title, `1-1`…, `1-T`, `GT`), re-editable after placing, rotatable and resizable, PDFlyer's calculator keys | M3 Calculator panel. M9's "picks up numbers from page text" is a sheaf extension, not PDFlyer. |
-| Insert Target Sheets | M5 separator sheets (planned as a generic replacement). |
-| **Read existing PDFlyer workpapers** (stamps, connectors, tapes) | None. Blocked on getting a PDFlyer-marked sample file. Highest value. |
+**Placed 2026-10-14** (M9 planning):
+- Into M9: connector groups; Set Status (replacing sign-off stamps); Stamp
+  Summary and Note Summary; Recent and Favorite stamps, sticky stamp mode,
+  user stamps shared across staff; the tape's section/row format, editing
+  a placed tape, rotating and resizing it.
+- Into M5: Insert Target Sheets, as part of separator sheets.
+
+What's left is bookmark and page work. Each row was checked against sheaf
+on 2026-10-14:
+
+| Gap | sheaf today | Size |
+|---|---|---|
+| Split Bookmark: split a multi-page bookmark into same-level bookmarks, moving pages between them | Nothing. Split Document splits files. The model already has the edits it needs and the bookmark page-span helper (`DocState::bookmark_pages`). | Medium: a new dialog |
+| Delete Bookmark *with its pages* | Delete removes the bookmark and its children; the pages stay. Shift+drag moves a bookmark with its pages. | Small: an option, one undo step (delete the bookmark first, then the pages) |
+| Delete Page re-attaches its bookmark to the next page | Every bookmark pointing at a deleted page is removed and its children move up a level; nothing is re-pointed. The test `delete_cascades_and_promotes_children` asserts this, so it changes too. | Small: in `cascade_delete`, point the bookmark at its first surviving page |
+| Hide/Show empty bookmarks; colorize by populated vs empty | No hide. The panel dims bookmarks with no destination, which isn't the same as no pages under them. Color Bookmarks by Level colors by depth. | Small to medium. "Empty" is undefined in PDFlyer's help; probably "neither it nor anything under it points at a page". |
+| Insert PDF modes: merge by parent bookmarks / append as one bookmark at a chosen level / one bookmark per page / none; offer to delete the source | No dialog. From File… opens a picker and always merges: matching top-level titles take the new children, but the pages aren't moved under them. | Medium: a dialog; modes 2 and 3 are existing edits, mode 1 with real repagination is new |
+| **Read existing PDFlyer workpapers** (stamps, connectors, tapes) | No sample. Third-party marks are read-only records that keep only page, subtype, author, text, date and rect. | Large; blocked on a PDFlyer-marked sample. Highest value. M9 slice 3 reads bookmark colors, a prerequisite. |
 
 **Open:**
-- Most rows are follow-up slices to done milestones (M2, M3, M8) rather
-  than new work. One "PDFlyer parity" milestone before M9 may be cleaner
-  than scattering them.
-- Check each row against current sheaf before slicing. The research
-  predates M7–M8.
+- These rows fit one short "PDFlyer binder" milestone better than M9.
 - The doc corrections from the same §6 were applied to README.md and
   this file on 2026-10-14.
+
+### Follow links in the page view
+
+Clicking a link annotation does nothing today. That covers internal
+destinations, URLs (which should get a warning before opening, like the
+attachments panel's) and links in files from other tools. Connectors jump
+only through sheaf's own code. Found while planning M9.
+- **Overlap:** M13 link editing (create, edit, delete) builds on this.
+  M9 connector groups write `/Dest` cycles that Acrobat follows; sheaf
+  doesn't follow them.
+- **Open:** small enough to ride along an M9 slice (connector groups), or
+  an M7 follow-up.
+
+### File contention: more than one process editing a PDF
+
+**A known bug, deferred (2026-10-14).** Suppose another process changes a
+PDF while sheaf has it open: a colleague's sheaf on a file server,
+Acrobat, or a sync client. sheaf's next save then silently overwrites or
+mangles those changes, and the recovery file beside the PDF is offered to
+the wrong person. It only happens when more than one process edits the
+same file. The bug, and the design so far (detect changes before saving,
+a lock file, merge later), are in
+[`todos/file-contention.md`](todos/file-contention.md).
+- **Overlap:** M9 slice 1 (single instance) removes one user's two sheaf
+  processes. Slice 2 creates the local state folder the recovery files
+  would move to. Slice 3 makes mark ids unique. Slice 4 keeps every
+  version's commands back to the last save, which a merge would replay.
+  Slice 18's comment import is a manual merge path.
 
 ## Not planned
 
