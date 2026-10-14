@@ -144,7 +144,7 @@ portal. Reasons in [`todos/m7.md`](todos/m7.md).
 - ✅ Page labels: edit numbering style, prefix, start.
 - ✅ Headers / footers: add, update, remove (with date, page number, file name).
 - ✅ Bates numbering.
-- Watermarks and backgrounds (text or image, opacity, behind/in front).
+- ✅ Watermarks and backgrounds (text or image, opacity, behind/in front).
 - Bookmarks: create from a page range; colorize by level; auto-bookmark from
   a text pattern (reuses the Patterns engine).
 

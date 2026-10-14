@@ -77,6 +77,8 @@ an image element does not inherit the parent element's color.
 | [page-labels](page-labels/icon.svg) | Page labels | `PageLabels` |
 | [header-footer](header-footer/icon.svg) | Header & footer | `HeaderFooter` |
 | [bates](bates/icon.svg) | Bates numbering | `BatesNumbering` |
+| [watermark](watermark/icon.svg) | Watermark | `AddWatermark` |
+| [background](background/icon.svg) | Background | `AddBackground` |
 | [create-from-scans](create-from-scans/icon.svg) | Create from scans/photos | `CreateFromScans` |
 | [export-pages](export-pages/icon.svg) | Export pages | `ExportPages` |
 | [print](print/icon.svg) | Print | `Print` |

@@ -25,6 +25,7 @@ const FILES: &[(&str, &[u8])] = icons![
     "actual-size",
     "arrow",
     "attachments",
+    "background",
     "bates",
     "bookmark",
     "bottom-dock",
@@ -105,6 +106,7 @@ const FILES: &[(&str, &[u8])] = icons![
     "two-up-continuous",
     "two-up",
     "undo",
+    "watermark",
     "zoom-in",
     "zoom-out",
 ];

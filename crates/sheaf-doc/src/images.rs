@@ -459,7 +459,7 @@ pub fn to_pdf(pages: &[PageImage], fit: PageFit) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-fn image_stream(page: &PageImage) -> Result<Stream> {
+pub(crate) fn image_stream(page: &PageImage) -> Result<Stream> {
     let (w, h) = (page.width as i64, page.height as i64);
     let base = |cs: &str, bits: i64| {
         dictionary! {

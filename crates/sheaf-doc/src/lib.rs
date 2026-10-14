@@ -21,6 +21,7 @@ pub mod recovery;
 pub mod save;
 pub mod stamps;
 pub mod text_layer;
+pub mod watermark;
 
 pub use sheaf_core::{DestView, PageFrame};
 

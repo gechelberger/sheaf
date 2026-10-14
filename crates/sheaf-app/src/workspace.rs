@@ -345,6 +345,10 @@ pub struct Workspace {
         Entity<crate::header_footer_dialog::HeaderFooterDialog>,
         Subscription,
     )>,
+    watermark: Option<(
+        Entity<crate::watermark_dialog::WatermarkDialog>,
+        Subscription,
+    )>,
     /// File > Print, while open.
     print: Option<(Entity<crate::print_dialog::PrintDialog>, Subscription)>,
     /// File > Properties, while open.
@@ -446,6 +450,7 @@ impl Workspace {
             crop: None,
             labels: None,
             header_footer: None,
+            watermark: None,
             print: None,
             properties: None,
             ocr_dialog: None,
@@ -1254,6 +1259,66 @@ impl Workspace {
                     ws.on_insert_event(ev, window, cx)
                 });
                 ws.replace_dialog = Some((dialog, sub));
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Watermark… or Background…: read what's there (in the background,
+    /// since it means opening the files), then the dialog.
+    fn open_watermark(&mut self, behind: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.watermark.is_some() {
+            return;
+        }
+        let Some(doc) = self.doc().cloned() else {
+            return;
+        };
+        let Some(snapshot) = doc.read(cx).model_snapshot() else {
+            return;
+        };
+        let page_count = snapshot.state.pages.len();
+        cx.spawn_in(window, async move |ws, cx| {
+            let current = cx
+                .background_executor()
+                .spawn(async move { sheaf_ops::derive::current_watermark(&snapshot, behind) })
+                .await;
+            ws.update_in(cx, |ws, window, cx| {
+                let ctx = crate::watermark_dialog::WatermarkContext {
+                    behind,
+                    current,
+                    page_count,
+                };
+                let dialog =
+                    cx.new(|cx| crate::watermark_dialog::WatermarkDialog::new(ctx, window, cx));
+                let sub = cx.subscribe_in(
+                    &dialog,
+                    window,
+                    move |ws, _, ev: &crate::watermark_dialog::WatermarkEvent, window, cx| {
+                        use crate::watermark_dialog::WatermarkEvent;
+                        ws.watermark = None;
+                        ws.focus_active(window, cx);
+                        if let Some(doc) = ws.doc().cloned() {
+                            match ev {
+                                WatermarkEvent::Apply(wm, pages) => {
+                                    let (wm, pages) = ((**wm).clone(), pages.clone());
+                                    doc.update(cx, |d, cx| {
+                                        d.apply_watermark(behind, Some(wm), pages, cx)
+                                    });
+                                }
+                                WatermarkEvent::Remove => {
+                                    doc.update(cx, |d, cx| {
+                                        d.apply_watermark(behind, None, None, cx)
+                                    });
+                                }
+                                WatermarkEvent::Dismiss => {}
+                            }
+                        }
+                        cx.notify();
+                    },
+                );
+                ws.watermark = Some((dialog, sub));
                 cx.notify();
             })
             .ok();
@@ -2507,6 +2572,12 @@ impl Render for Workspace {
             .on_action(cx.listener(|ws, _: &crate::BatesNumbering, window, cx| {
                 ws.open_header_footer(true, window, cx)
             }))
+            .on_action(cx.listener(|ws, _: &crate::AddWatermark, window, cx| {
+                ws.open_watermark(false, window, cx)
+            }))
+            .on_action(cx.listener(|ws, _: &crate::AddBackground, window, cx| {
+                ws.open_watermark(true, window, cx)
+            }))
             .on_action(
                 cx.listener(|ws, a: &crate::recent::OpenRecent, window, cx| {
                     ws.open_recent(a.path.clone(), window, cx)
@@ -2653,6 +2724,11 @@ impl Render for Workspace {
             )
             .children(
                 self.header_footer
+                    .as_ref()
+                    .map(|(d, _)| deferred(d.clone()).with_priority(2)),
+            )
+            .children(
+                self.watermark
                     .as_ref()
                     .map(|(d, _)| deferred(d.clone()).with_priority(2)),
             )

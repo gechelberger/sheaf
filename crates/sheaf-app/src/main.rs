@@ -55,6 +55,7 @@ mod settings;
 mod split_dialog;
 mod toolbar;
 mod toolbar_dialog;
+mod watermark_dialog;
 mod workspace;
 
 use std::path::PathBuf;
@@ -186,6 +187,8 @@ actions!(
         PageLabels,
         HeaderFooter,
         BatesNumbering,
+        AddWatermark,
+        AddBackground,
         ToggleToolbar,
         CustomizeToolbar
     ]
@@ -335,6 +338,7 @@ fn main() {
             let crd = Some(crop_dialog::KEY_CONTEXT);
             let lbd = Some(labels_dialog::KEY_CONTEXT);
             let hfd = Some(header_footer_dialog::KEY_CONTEXT);
+            let wmd = Some(watermark_dialog::KEY_CONTEXT);
             let lbd_keys = Some("LabelsDialog && !TextInput");
             let crd_keys = Some("CropDialog && !TextInput");
             let ind_keys = Some("InsertDialog && !TextInput");
@@ -474,6 +478,9 @@ fn main() {
                 KeyBinding::new("tab", DialogNext, hfd),
                 KeyBinding::new("shift-tab", DialogPrev, hfd),
                 KeyBinding::new("escape", DialogCancel, hfd),
+                KeyBinding::new("tab", DialogNext, wmd),
+                KeyBinding::new("shift-tab", DialogPrev, wmd),
+                KeyBinding::new("escape", DialogCancel, wmd),
                 KeyBinding::new("tab", DialogNext, pd),
                 KeyBinding::new("shift-tab", DialogPrev, pd),
                 KeyBinding::new("left", DialogLeft, pd_keys),

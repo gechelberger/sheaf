@@ -347,20 +347,25 @@ pub fn install(
     page.set("Resources", Object::Dictionary(resources));
 }
 
-/// Is this a header/footer artifact's property list (ours or Acrobat's)?
-fn is_pagination(props: &Object, pdf: &Pdf) -> bool {
+/// Artifact subtypes, by what they are.
+pub const HEADER_FOOTER: &[&[u8]] = &[b"Header", b"Footer"];
+pub const WATERMARK: &[&[u8]] = &[b"Watermark"];
+pub const BACKGROUND: &[&[u8]] = &[b"Background"];
+
+/// Is this the property list of a pagination artifact of one of `kinds`
+/// (ours or Acrobat's)?
+fn is_kind(props: &Object, pdf: &Pdf, kinds: &[&[u8]]) -> bool {
     let Ok((_, Object::Dictionary(d))) = pdf.dereference(props) else {
         return false;
     };
     let name = |k: &[u8]| d.get(k).ok().and_then(|o| o.as_name().ok());
-    d.has(MARKER.as_bytes())
-        || (name(b"Type") == Some(b"Pagination")
-            && matches!(name(b"Subtype"), Some(b"Header") | Some(b"Footer")))
+    (name(b"Type") == Some(b"Pagination") || d.has(MARKER.as_bytes()))
+        && name(b"Subtype").is_some_and(|s| kinds.contains(&s))
 }
 
-/// Remove header/footer artifacts from one content stream's operations.
+/// Remove artifacts of `kinds` from one content stream's operations.
 /// Returns whether any went.
-fn strip_ops(ops: &mut Vec<Operation>, pdf: &Pdf) -> bool {
+fn strip_ops(ops: &mut Vec<Operation>, pdf: &Pdf, kinds: &[&[u8]]) -> bool {
     let mut out = Vec::with_capacity(ops.len());
     // Depth of marked content inside a stripped artifact, or none.
     let mut skipping: Option<usize> = None;
@@ -378,7 +383,7 @@ fn strip_ops(ops: &mut Vec<Operation>, pdf: &Pdf) -> bool {
             (Some(_), _) => {}
             (None, "BDC")
                 if op.operands.first().and_then(|o| o.as_name().ok()) == Some(b"Artifact")
-                    && op.operands.get(1).is_some_and(|p| is_pagination(p, pdf)) =>
+                    && op.operands.get(1).is_some_and(|p| is_kind(p, pdf, kinds)) =>
             {
                 skipping = Some(0);
                 removed = true;
@@ -390,9 +395,10 @@ fn strip_ops(ops: &mut Vec<Operation>, pdf: &Pdf) -> bool {
     removed
 }
 
-/// Remove header/footer artifacts from `page`'s content, rewriting the
-/// streams that had any. Returns whether any were found.
-pub fn strip(pdf: &mut Pdf, page: &Dictionary) -> bool {
+/// Remove artifacts of `kinds` ([`HEADER_FOOTER`], [`WATERMARK`],
+/// [`BACKGROUND`]) from `page`'s content, rewriting the streams that had
+/// any. Returns whether any were found.
+pub fn strip(pdf: &mut Pdf, page: &Dictionary, kinds: &[&[u8]]) -> bool {
     let ids: Vec<ObjectId> = match page.get(b"Contents") {
         Ok(Object::Reference(r)) => match pdf.get_object(*r) {
             Ok(Object::Array(a)) => a.iter().filter_map(|o| o.as_reference().ok()).collect(),
@@ -416,7 +422,7 @@ pub fn strip(pdf: &mut Pdf, page: &Dictionary) -> bool {
         let Ok(mut content) = Content::decode(&bytes) else {
             continue;
         };
-        if strip_ops(&mut content.operations, pdf)
+        if strip_ops(&mut content.operations, pdf, kinds)
             && let Ok(encoded) = content.encode()
         {
             let mut stream = Stream::new(dictionary! {}, encoded);
@@ -428,8 +434,9 @@ pub fn strip(pdf: &mut Pdf, page: &Dictionary) -> bool {
     any
 }
 
-/// Whether `page`'s content has header/footer artifacts.
-pub fn has_artifacts(pdf: &Pdf, page: &Dictionary) -> bool {
+/// Whether `page`'s content may have artifacts of `kinds` (a quick look
+/// at the bytes: a false yes only costs an unneeded copy).
+pub fn has_artifacts(pdf: &Pdf, page: &Dictionary, kinds: &[&[u8]]) -> bool {
     let streams: Vec<&Stream> = match page.get(b"Contents") {
         Ok(Object::Reference(r)) => match pdf.get_object(*r) {
             Ok(Object::Array(a)) => a
@@ -451,7 +458,12 @@ pub fn has_artifacts(pdf: &Pdf, page: &Dictionary) -> bool {
         let bytes = s
             .decompressed_content()
             .unwrap_or_else(|_| s.content.clone());
-        contains(&bytes, b"/Pagination") || contains(&bytes, MARKER.as_bytes())
+        contains(&bytes, b"/Artifact")
+            && kinds.iter().any(|k| {
+                let mut tag = b"/".to_vec();
+                tag.extend_from_slice(k);
+                contains(&bytes, &tag)
+            })
     })
 }
 
@@ -583,13 +595,14 @@ mod tests {
             .to_vec();
         let id = pdf.add_object(Stream::new(dictionary! {}, content));
         let page = dictionary! { "Contents" => id };
-        assert!(has_artifacts(&pdf, &page));
-        assert!(strip(&mut pdf, &page));
+        assert!(has_artifacts(&pdf, &page, HEADER_FOOTER));
+        assert!(!has_artifacts(&pdf, &page, WATERMARK));
+        assert!(strip(&mut pdf, &page, HEADER_FOOTER));
         let s = pdf.get_object(id).unwrap().as_stream().unwrap();
         let out = String::from_utf8(s.decompressed_content().unwrap()).unwrap();
         assert!(!out.contains("Acrobat") && !out.contains("nested"), "{out}");
         // Other artifacts and the page's own drawing stay.
         assert!(out.contains("Layout") && out.contains("re") && out.contains("rg"));
-        assert!(!has_artifacts(&pdf, &page));
+        assert!(!has_artifacts(&pdf, &page, HEADER_FOOTER));
     }
 }

@@ -452,6 +452,7 @@ impl DocView {
                     Ok(out) => {
                         doc.touched();
                         v.after_model_change(label.to_string(), out, cx);
+                        v.set_notice(format!("{label}: shown now, written when you save"), cx);
                     }
                     Err(e) => v.set_notice(format!("{label} failed: {e:#}"), cx),
                 }
@@ -484,5 +485,94 @@ impl DocView {
             .filter(|(_, p)| ids.contains(&p.id))
             .map(|(i, _)| i)
             .collect()
+    }
+}
+
+impl DocView {
+    /// Document > Watermark / Background: draw `wm` on `pages` (0-based;
+    /// None: all), stripping the old one of its kind everywhere; with
+    /// `wm` None, remove it. Pages show generated copies, as cropped pages
+    /// do, so what's on screen is what's saved.
+    pub(crate) fn apply_watermark(
+        &mut self,
+        behind: bool,
+        wm: Option<sheaf_doc::watermark::Watermark>,
+        pages: Option<Vec<usize>>,
+        cx: &mut Context<Self>,
+    ) {
+        let State::Ready(doc) = &self.state else {
+            return;
+        };
+        let snapshot = doc.model.snapshot();
+        let scope: Vec<PageId> = match pages {
+            Some(ix) => self.page_ids_at(&ix),
+            None => snapshot.state.pages.iter().map(|p| p.id).collect(),
+        };
+        let what = if behind { "Background" } else { "Watermark" };
+        let label = if wm.is_some() {
+            what.to_string()
+        } else {
+            format!("Remove {}", what.to_lowercase())
+        };
+        self.set_notice(format!("{label}…"), cx);
+        cx.spawn(async move |this, cx| {
+            let planned = cx
+                .background_executor()
+                .spawn(async move {
+                    let plan = sheaf_ops::derive::watermark(
+                        &snapshot,
+                        behind,
+                        wm.as_ref(),
+                        &scope,
+                        &sheaf_ops::NoProgress,
+                    )?;
+                    let mut opened = Vec::new();
+                    for c in plan {
+                        let handle = RenderHandle::open(c.info.path.clone(), None)?;
+                        opened.push((c, handle));
+                    }
+                    anyhow::Ok(opened)
+                })
+                .await;
+            this.update(cx, |v, cx| {
+                let opened = match planned {
+                    Ok(o) => o,
+                    Err(e) => {
+                        v.set_notice(format!("{label} failed: {e:#}"), cx);
+                        return;
+                    }
+                };
+                let State::Ready(doc) = &mut v.state else {
+                    return;
+                };
+                if opened.is_empty() {
+                    v.set_notice(format!("No {} to remove", what.to_lowercase()), cx);
+                    return;
+                }
+                let mut rebases = Vec::new();
+                for (c, handle) in opened {
+                    let sid = doc.model.add_source(c.info.clone());
+                    doc.handles.insert(sid, handle);
+                    rebases.extend(c.rebases(sid));
+                }
+                let n = rebases.len();
+                match doc
+                    .model
+                    .apply(Edit::RebasePages { pages: rebases }, &label)
+                {
+                    Ok(out) => {
+                        doc.touched();
+                        v.after_model_change(label.clone(), out, cx);
+                        v.set_notice(
+                            format!("{label}: {n} page{}", if n == 1 { "" } else { "s" }),
+                            cx,
+                        );
+                    }
+                    Err(e) => v.set_notice(format!("{label} failed: {e:#}"), cx),
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 }

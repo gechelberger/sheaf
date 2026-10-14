@@ -236,6 +236,8 @@ fn builtin_menus() -> Vec<(&'static str, Vec<Item>)> {
                 item("Page &Labels…", PageLabels),
                 item("&Header && Footer…", HeaderFooter),
                 item("Bates &Numbering…", BatesNumbering),
+                item("&Watermark…", AddWatermark),
+                item("Back&ground…", AddBackground),
                 item("Du&plicate Pages", DuplicatePages),
                 item("E&xtract Pages…", ExtractPages),
                 item("&Split Document…", SplitDocument),

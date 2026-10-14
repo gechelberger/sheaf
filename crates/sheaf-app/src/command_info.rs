@@ -297,6 +297,16 @@ pub fn info(id: &str) -> Option<Info> {
                 "control number",
             ],
         ),
+        "workspace::AddWatermark" => (
+            "watermark",
+            "Add, update or remove a watermark: text like DRAFT, or an image, across the pages in front of their content.",
+            &["draft", "confidential", "stamp", "copy", "overlay"],
+        ),
+        "workspace::AddBackground" => (
+            "background",
+            "Add, update or remove a background: text or an image behind the pages' content.",
+            &["letterhead", "underlay", "behind", "stationery"],
+        ),
         "workspace::PageLabels" => (
             "page-labels",
             "Number pages your way: roman numerals for the front matter, a prefix like A- for exhibits, or a new start.",

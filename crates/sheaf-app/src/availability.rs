@@ -219,6 +219,8 @@ pub fn builtin(id: &str) -> Builtin {
         | "workspace::PageLabels"
         | "workspace::HeaderFooter"
         | "workspace::BatesNumbering"
+        | "workspace::AddWatermark"
+        | "workspace::AddBackground"
         | "workspace::Print"
         | "workspace::DocumentProperties"
         | "workspace::CloseDocument"

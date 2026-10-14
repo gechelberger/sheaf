@@ -568,17 +568,18 @@ fn build_rewrite(model: &Snapshot, clean: bool) -> Result<Pdf> {
 /// are files. See [`derived_copy`].
 pub fn cropped_copy(src: &SourceInfo, pages: &[(u32, [f32; 4])]) -> Result<Vec<u8>> {
     let pages: Vec<(u32, Option<[f32; 4]>)> = pages.iter().map(|&(i, c)| (i, Some(c))).collect();
-    derived_copy(src, &pages, false)
+    derived_copy(src, &pages, &mut |_, _, _, _| Ok(()))
 }
 
 /// Pages of `src` as a new PDF, each with a new `/CropBox` when given,
-/// and without header/footer artifacts when `strip_stamps`. sheaf's own
-/// marks are left out, since the model keeps them; other annotations,
-/// links and fields come along.
+/// then passed to `fix` (with the new PDF, the page's dictionary, its
+/// geometry, and its position in `pages`) to change its content. sheaf's
+/// own marks are left out, since the model keeps them; other
+/// annotations, links and fields come along.
 pub fn derived_copy(
     src: &SourceInfo,
     pages: &[(u32, Option<[f32; 4]>)],
-    strip_stamps: bool,
+    fix: &mut dyn FnMut(&mut Pdf, &mut Dictionary, &PageGeom, usize) -> Result<()>,
 ) -> Result<Vec<u8>> {
     let from = crate::file::load_pdf(&src.path, src.password.as_deref())?;
     let loaded = LoadedSource::from_pdf(&from)?;
@@ -586,7 +587,7 @@ pub fn derived_copy(
     let pages_id = pdf.new_object_id();
     let mut map: HashMap<ObjectId, ObjectId> = HashMap::new();
     let mut kids: Vec<Object> = Vec::with_capacity(pages.len());
-    for &(index, crop) in pages {
+    for (position, &(index, crop)) in pages.iter().enumerate() {
         let page = *loaded
             .pages
             .get(index as usize)
@@ -606,9 +607,13 @@ pub fn derived_copy(
                 crop.iter().map(|&v| Object::Real(v)).collect::<Vec<_>>(),
             );
         }
-        if strip_stamps {
-            crate::stamps::strip(&mut pdf, &dict);
-        }
+        let rotate = dict
+            .get(b"Rotate")
+            .ok()
+            .and_then(|o| o.as_i64().ok())
+            .unwrap_or(0) as i32;
+        let geom = geom_of(&dict, rotate);
+        fix(&mut pdf, &mut dict, &geom, position)?;
         dict.set("Parent", pages_id);
         dict.set("Type", Object::Name(b"Page".to_vec()));
         pdf.objects.insert(id, Object::Dictionary(dict));
@@ -2306,7 +2311,7 @@ mod tests {
         let pages: Vec<ObjectId> = pdf.get_pages().into_values().collect();
         for (i, &p) in pages.iter().enumerate() {
             let dict = pdf.get_dictionary(p).unwrap();
-            assert!(has_artifacts(&pdf, dict));
+            assert!(has_artifacts(&pdf, dict, crate::stamps::HEADER_FOOTER));
             let all: Vec<u8> = dict
                 .get(b"Contents")
                 .unwrap()
@@ -2330,10 +2335,22 @@ mod tests {
         assert_eq!(stored.texts, hf.texts);
         assert_eq!(scope, None);
         // Stripped, both pages come back clean.
-        let bytes = derived_copy(&info(&out, 2), &[(0, None), (1, None)], true).unwrap();
+        let bytes = derived_copy(
+            &info(&out, 2),
+            &[(0, None), (1, None)],
+            &mut |pdf, d, _, _| {
+                crate::stamps::strip(pdf, d, crate::stamps::HEADER_FOOTER);
+                Ok(())
+            },
+        )
+        .unwrap();
         let clean = Pdf::load_mem(&bytes).unwrap();
         for p in clean.get_pages().into_values() {
-            assert!(!has_artifacts(&clean, clean.get_dictionary(p).unwrap()));
+            assert!(!has_artifacts(
+                &clean,
+                clean.get_dictionary(p).unwrap(),
+                crate::stamps::HEADER_FOOTER
+            ));
         }
     }
 
