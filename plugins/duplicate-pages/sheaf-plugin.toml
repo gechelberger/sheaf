@@ -1,12 +1,17 @@
 id = "duplicate-pages"
 name = "Find Duplicate Pages"
-version = "0.1.0"
-api = "^0.1"
+version = "0.2.1"
+api = "^0.2"
+homepage = "https://github.com/gechelberger/sheaf/tree/main/plugins/duplicate-pages"
 description = "Finds pages that appear twice in a binder (the same statement scanned twice, a W-2 sent in two batches, pages repeated by a merge) and lets you remove the extra copies."
 
 [[commands]]
 id = "find"
 label = "Find &Duplicate Pages…"
+icon = "icons/find.svg"
+help = "Find pages that appear more than once and remove the extra copies."
+keywords = ["duplicates", "repeated", "dedupe"]
+when = ["document"]
 category = "Pages"
 menu = "Document"
 

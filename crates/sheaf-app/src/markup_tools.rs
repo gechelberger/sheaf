@@ -8,7 +8,7 @@
 
 use gpui::{
     AnyElement, Context, CursorStyle, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    PathBuilder, Pixels, Point, Window, canvas, div, prelude::*, px, rgb, svg,
+    PathBuilder, Pixels, Point, Window, canvas, div, prelude::*, px, rgb,
 };
 use sheaf_core::{PageSize, Rotation};
 use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, Edit, PageId, Pt, annot::CONNECTOR_SIZE};
@@ -48,51 +48,6 @@ impl Tool {
             Tool::Ink => "Pencil",
             Tool::Tick => "Tick",
             Tool::Connector => "Connector",
-        }
-    }
-
-    /// Embedded artwork path (see `assets.rs`).
-    pub fn icon(self) -> &'static str {
-        match self {
-            Tool::Select => "icons/select.svg",
-            Tool::Note => "icons/note.svg",
-            Tool::Highlight => "icons/highlight.svg",
-            Tool::FreeText => "icons/text.svg",
-            Tool::Square => "icons/rectangle.svg",
-            Tool::Ellipse => "icons/ellipse.svg",
-            Tool::Line => "icons/line.svg",
-            Tool::Arrow => "icons/arrow.svg",
-            Tool::Ink => "icons/pencil.svg",
-            Tool::Tick => "icons/tick.svg",
-            Tool::Connector => "icons/connector.svg",
-        }
-    }
-
-    /// Tooltip title; fuller than the undo-history `label`.
-    pub fn title(self) -> &'static str {
-        match self {
-            Tool::Note => "Sticky Note",
-            Tool::FreeText => "Free Text",
-            Tool::Square => "Rectangle",
-            Tool::Tick => "Tickmark",
-            t => t.label(),
-        }
-    }
-
-    /// Tooltip flavor text.
-    pub fn description(self) -> &'static str {
-        match self {
-            Tool::Select => "Select, move, and delete annotations",
-            Tool::Note => "Click to pin a comment to the page",
-            Tool::Highlight => "Drag across text to highlight it",
-            Tool::FreeText => "Drag a box, then type text onto the page",
-            Tool::Square => "Drag to draw a rectangle",
-            Tool::Ellipse => "Drag to draw an ellipse",
-            Tool::Line => "Drag to draw a straight line",
-            Tool::Arrow => "Drag to draw an arrow",
-            Tool::Ink => "Draw freehand",
-            Tool::Tick => "Click to stamp the selected tickmark",
-            Tool::Connector => "Click twice to place a linked pair of markers",
         }
     }
 
@@ -715,48 +670,9 @@ impl DocView {
         true
     }
 
-    /// Toolbar: tools, colors, and the tickmark palette.
-    pub(crate) fn render_toolbar(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let tool = self.tool;
+    /// The markup color swatches, and their length along a toolbar.
+    pub(crate) fn render_colors(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let color = self.tool_color;
-        let tools: Vec<_> = Tool::ALL
-            .iter()
-            .map(|&t| {
-                let active = t == tool;
-                div()
-                    .id(("tool", t as usize))
-                    .size(px(26.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_sm()
-                    .cursor_pointer()
-                    .bg(if active {
-                        theme::ACCENT
-                    } else {
-                        theme::CONTROL
-                    })
-                    .text_color(if active {
-                        theme::TEXT_BRIGHT
-                    } else {
-                        theme::TEXT_SUBTLE
-                    })
-                    .hover(|s| {
-                        s.bg(if active {
-                            theme::ACCENT_HOVER
-                        } else {
-                            theme::CONTROL_HOVER
-                        })
-                    })
-                    .on_click(cx.listener(move |v, _, _, cx| v.set_tool(t, cx)))
-                    .tooltip(Tooltip::for_action(t.title(), t.description(), t.action()))
-                    .child(svg().path(t.icon()).size(px(18.0)).text_color(if active {
-                        theme::TEXT_BRIGHT
-                    } else {
-                        theme::TEXT_SUBTLE
-                    }))
-            })
-            .collect();
         let colors: Vec<_> = COLORS
             .iter()
             .map(|&(c, name)| {
@@ -786,6 +702,22 @@ impl DocView {
                     }))
             })
             .collect();
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .children(colors)
+            .into_any_element()
+    }
+
+    pub(crate) fn colors_length() -> f32 {
+        // 16px swatches, gap_1 between.
+        COLORS.len() as f32 * 20.0 - 4.0
+    }
+
+    /// The tickmark and stamp palette, and its length along a toolbar.
+    pub(crate) fn render_ticks(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let tool = self.tool;
         let tick = self.tick_glyph.clone();
         let marks = cx.global::<crate::contrib::Contributions>().toolbar_marks();
         let ticks: Vec<_> = marks
@@ -826,21 +758,25 @@ impl DocView {
             })
             .collect();
         div()
-            .flex_shrink_0()
             .flex()
             .items_center()
             .gap_1()
-            .px_2()
-            .py_1()
-            .bg(theme::PANEL)
-            .border_b_1()
-            .border_color(theme::DIVIDER)
-            .children(tools)
-            .child(div().w(px(12.0)))
-            .children(colors)
-            .child(div().w(px(12.0)))
             .children(ticks)
             .into_any_element()
+    }
+
+    /// The tickmark palette's length: 22px per single mark, wider stamps
+    /// about 7px a character plus padding, gap_1 between.
+    pub(crate) fn ticks_length(cx: &gpui::App) -> f32 {
+        let marks = cx.global::<crate::contrib::Contributions>().toolbar_marks();
+        let along: f32 = marks
+            .iter()
+            .map(|g| match g.chars().count() {
+                1 => 22.0,
+                n => n as f32 * 7.0 + 12.0,
+            } + 4.0)
+            .sum();
+        (along - 4.0).max(0.0)
     }
 
     pub(crate) fn page_cursor(&self) -> CursorStyle {

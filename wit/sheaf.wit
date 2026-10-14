@@ -4,7 +4,7 @@
 /// Versioning: semver on this package. The host keeps serving the previous
 /// minor/major world when it moves on (N-1), so a plugin built against an
 /// older API keeps loading.
-package sheaf:plugin@0.1.0;
+package sheaf:plugin@0.2.0;
 
 /// Shared data types. Ids are opaque and stable for the life of an open
 /// document; they are not page numbers.

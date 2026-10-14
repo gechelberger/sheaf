@@ -1,11 +1,11 @@
 //! Command palette: a searchable list of commands. Type to filter, Up/Down
 //! to pick, Enter to run. The app supplies the commands; running one emits
-//! its action for the app to dispatch. Each row also shows the command's
-//! id (in sheaf, what `keymap.json` binds).
+//! its action for the app to dispatch. Each row shows the command's icon,
+//! a line of help, and its id (in sheaf, what `keymap.json` binds).
 
 use gpui::{
-    Action, AnyElement, Context, Entity, EventEmitter, Focusable, MouseButton, Subscription,
-    Window, actions, div, prelude::*, px,
+    Action, AnyElement, Context, Entity, EventEmitter, Focusable, MouseButton, SharedString,
+    Subscription, Window, actions, div, prelude::*, px, svg,
 };
 
 use crate::list::ListLayout;
@@ -19,8 +19,8 @@ actions!(
 
 pub const KEY_CONTEXT: &str = "Palette";
 
-const ROW_H: f32 = 30.0;
-const MAX_ROWS: usize = 12;
+const ROW_H: f32 = 44.0;
+const MAX_ROWS: usize = 10;
 
 /// One row of the palette.
 pub struct Command {
@@ -29,6 +29,17 @@ pub struct Command {
     /// Shown before the label ("View: Fit Width") and searched with it.
     pub category: String,
     pub label: String,
+    /// Asset path of its artwork.
+    pub icon: SharedString,
+    /// Shown under the label.
+    pub help: String,
+    /// More search terms. A command found only by one ranks below those
+    /// whose label matches.
+    pub keywords: Vec<String>,
+    /// Whether it can run now; others are listed greyed out.
+    pub enabled: bool,
+    /// For a command that switches something on and off: whether it's on.
+    pub checked: Option<bool>,
     /// What running the command emits, in `PaletteEvent::Run`.
     pub action: Box<dyn Action>,
     pub shortcut: Option<String>,
@@ -36,6 +47,11 @@ pub struct Command {
 
 pub enum PaletteEvent {
     Run(Box<dyn Action>),
+    /// A row was right-clicked: its command id, where. The palette closes.
+    Context {
+        id: String,
+        position: gpui::Point<gpui::Pixels>,
+    },
     Dismiss,
 }
 
@@ -52,10 +68,13 @@ pub struct Palette {
 
 impl EventEmitter<PaletteEvent> for Palette {}
 
+/// How far a keyword match ranks below the same match in a label.
+const KEYWORD_PENALTY: i32 = 1000;
+
 /// Subsequence match of `query` against `hay` (both lowercase). Higher is
 /// better; None when it doesn't match. Contiguous runs and matches at word
 /// starts score well, so "fw" finds "Fit Width" before "File > Save".
-fn score(query: &str, hay: &str) -> Option<i32> {
+pub fn score(query: &str, hay: &str) -> Option<i32> {
     if query.is_empty() {
         return Some(0);
     }
@@ -109,7 +128,15 @@ impl Palette {
             .enumerate()
             .filter_map(|(i, c)| {
                 let hay = format!("{} {}", c.category, c.label).to_lowercase();
-                score(&q, &hay).map(|s| (s, i))
+                score(&q, &hay)
+                    .or_else(|| {
+                        c.keywords
+                            .iter()
+                            .filter_map(|k| score(&q, &k.to_lowercase()))
+                            .max()
+                            .map(|s| s - KEYWORD_PENALTY)
+                    })
+                    .map(|s| (s, i))
             })
             .collect();
         if !q.is_empty() {
@@ -121,7 +148,9 @@ impl Palette {
     }
 
     fn run_selected(&mut self, cx: &mut Context<Self>) {
-        if let Some(&i) = self.matches.get(self.selected) {
+        if let Some(&i) = self.matches.get(self.selected)
+            && self.commands[i].enabled
+        {
             cx.emit(PaletteEvent::Run(self.commands[i].action.boxed_clone()));
         }
     }
@@ -150,6 +179,16 @@ impl Render for Palette {
             .map(|row| {
                 let c = &self.commands[self.matches[row]];
                 let selected = row == self.selected;
+                let on = c.enabled;
+                let (strong, muted, detail) = if on {
+                    (theme::TEXT_STRONG, theme::TEXT_MUTED, theme::TEXT_DETAIL)
+                } else {
+                    (
+                        theme::TEXT_DISABLED,
+                        theme::TEXT_DISABLED_DIM,
+                        theme::TEXT_DISABLED_DIM,
+                    )
+                };
                 layout
                     .place(row)
                     .id(("cmd", row))
@@ -157,37 +196,87 @@ impl Render for Palette {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .cursor_pointer()
+                    .when(on, |d| d.cursor_pointer().hover(|s| s.bg(theme::HOVER)))
                     .when(selected, |d| d.bg(theme::SELECTED))
-                    .hover(|s| s.bg(theme::HOVER))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.selected = row;
                         this.run_selected(cx);
                     }))
+                    .on_mouse_down(MouseButton::Right, {
+                        let id = c.id.clone();
+                        cx.listener(move |_, e: &gpui::MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            cx.emit(PaletteEvent::Context {
+                                id: id.clone(),
+                                position: e.position,
+                            });
+                        })
+                    })
                     .child(
-                        div()
-                            .text_sm()
-                            .text_color(theme::TEXT_MUTED)
-                            .child(format!("{}:", c.category)),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(theme::TEXT_STRONG)
-                            .child(c.label.clone()),
+                        svg()
+                            .path(c.icon.clone())
+                            .flex_shrink_0()
+                            .size(px(18.0))
+                            .text_color(if selected { strong } else { muted }),
                     )
                     .child(
                         div()
                             .flex_1()
-                            .text_xs()
-                            .text_color(theme::TEXT_DISABLED)
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .child(c.id.clone()),
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_baseline()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .text_sm()
+                                            .text_color(muted)
+                                            .child(format!("{}:", c.category)),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .text_sm()
+                                            .text_color(strong)
+                                            .child(c.label.clone()),
+                                    )
+                                    .when(c.checked == Some(true), |d| {
+                                        d.child(
+                                            div()
+                                                .flex_shrink_0()
+                                                .text_xs()
+                                                .text_color(theme::ACCENT)
+                                                .child("✓ on"),
+                                        )
+                                    })
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .text_xs()
+                                            .text_color(theme::TEXT_DISABLED)
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .text_ellipsis()
+                                            .child(c.id.clone()),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(detail)
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .child(c.help.clone()),
+                            ),
                     )
                     .when_some(c.shortcut.clone(), |d, s| {
-                        d.child(div().text_xs().text_color(theme::TEXT_DETAIL).child(s))
+                        d.child(div().text_xs().text_color(detail).child(s))
                     })
                     .into_any_element()
             })

@@ -27,7 +27,7 @@ pub use runtime::{
 };
 
 /// The version of `sheaf:plugin` this host provides.
-pub const API_VERSION: semver::Version = semver::Version::new(0, 1, 0);
+pub const API_VERSION: semver::Version = semver::Version::new(0, 2, 0);
 
 /// A plugin directory found on disk.
 pub struct Found {

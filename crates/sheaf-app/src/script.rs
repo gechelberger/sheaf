@@ -7,7 +7,8 @@
 //! - `{"keys": "ctrl-shift-k escape"}`: keystrokes, space-separated.
 //! - `{"type": "text"}`: type text into whatever has focus.
 //! - `{"click": [x, y]}`, `{"drag": [x1, y1, x2, y2], "shift": true}`: in
-//!   window coordinates (logical px). `{"hover": [x, y]}` only moves.
+//!   window coordinates (logical px); `"right": true` clicks the right
+//!   button. `{"hover": [x, y]}` only moves.
 //! - `{"drag_page": [x1, y1, x2, y2], "page": 0, "shift": true}`: in page
 //!   points (the page as the file draws it), on page index `page`.
 //! - `{"form": {"field-id": value, ...}}`: fill the open plugin form and
@@ -17,7 +18,7 @@
 //!   two minutes) until `<script>.go` contains that name, so a harness can
 //!   take a screenshot first.
 //! - `{"dump": "outline" | "notice" | "annots" | "pages" | "panels" |
-//!   "plugins" | "region" | "view" | "layout" | "focus"}`: print state as `SCRIPT <what>: …` lines.
+//!   "plugins" | "region" | "view" | "layout" | "toolbar" | "focus"}`: print state as `SCRIPT <what>: …` lines.
 //! - `{"quit": true}`
 //!
 //! File pickers can't be driven; set `SHEAF_SCRIPT_PICK=<path>` and every
@@ -202,9 +203,22 @@ async fn run_step(
         pause(cx, 100).await;
         Ok(())
     } else if let Some(c) = coords("click") {
-        mouse(handle, cx, (c[0], c[1]), (c[0], c[1]), shift).await
+        let button = if step.get("right").and_then(Value::as_bool) == Some(true) {
+            MouseButton::Right
+        } else {
+            MouseButton::Left
+        };
+        mouse(handle, cx, (c[0], c[1]), (c[0], c[1]), shift, button).await
     } else if let Some(c) = coords("drag") {
-        mouse(handle, cx, (c[0], c[1]), (c[2], c[3]), shift).await
+        mouse(
+            handle,
+            cx,
+            (c[0], c[1]),
+            (c[2], c[3]),
+            shift,
+            MouseButton::Left,
+        )
+        .await
     } else if let Some(c) = coords("drag_page") {
         let page = step.get("page").and_then(Value::as_u64).unwrap_or(0) as usize;
         let (a, b) = handle
@@ -216,7 +230,7 @@ async fn run_step(
             })
             .map_err(|e| e.to_string())?
             .ok_or("that page isn't laid out")?;
-        mouse(handle, cx, a, b, shift).await
+        mouse(handle, cx, a, b, shift, MouseButton::Left).await
     } else {
         Err(format!("unknown step {step}"))
     }
@@ -229,6 +243,7 @@ async fn mouse(
     from: (f32, f32),
     to: (f32, f32),
     shift: bool,
+    button: MouseButton,
 ) -> Result<(), String> {
     let modifiers = Modifiers {
         shift,
@@ -255,7 +270,7 @@ async fn mouse(
     pause(cx, 100).await;
     send(
         PlatformInput::MouseDown(MouseDownEvent {
-            button: MouseButton::Left,
+            button,
             position: at(from),
             modifiers,
             click_count: 1,
@@ -272,7 +287,7 @@ async fn mouse(
         send(
             PlatformInput::MouseMove(MouseMoveEvent {
                 position: at(p),
-                pressed_button: Some(MouseButton::Left),
+                pressed_button: Some(button),
                 modifiers,
             }),
             cx,
@@ -284,7 +299,7 @@ async fn mouse(
     pause(cx, 100).await;
     send(
         PlatformInput::MouseUp(MouseUpEvent {
-            button: MouseButton::Left,
+            button,
             position: at(to),
             modifiers,
             click_count: 1,
@@ -375,6 +390,11 @@ impl Workspace {
                     .and_then(|id| st.outline_flat().into_iter().find(|(_, n)| n.id == id))
                     .map(|(_, n)| n.title.clone())
             ),
+            "toolbar" => {
+                for line in self.toolbar_dump(cx) {
+                    eprintln!("SCRIPT toolbar: {line}");
+                }
+            }
             "layout" => {
                 for (i, pane) in d.panes.iter().enumerate() {
                     eprintln!(

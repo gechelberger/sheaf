@@ -6,11 +6,14 @@
 //! id = "tax-form-bookmarks"
 //! name = "Tax Form Bookmarks"
 //! version = "0.1.0"
-//! api = "^0.1"
+//! api = "^0.2"
+//! homepage = "https://example.com/tax-form-bookmarks"
 //!
 //! [[commands]]
 //! id = "scan"
 //! label = "Bookmarks from Tax Forms"
+//! icon = "icons/scan.svg"
+//! help = "Bookmark each tax form in the document."
 //! category = "Bookmarks"
 //! menu = "Tools/Tax"
 //! keys = "ctrl-alt-b"
@@ -60,6 +63,9 @@ pub struct Manifest {
     pub api: semver::VersionReq,
     #[serde(default)]
     pub description: String,
+    /// An `https://` page about the plugin, linked from the plugin manager.
+    #[serde(default)]
+    pub homepage: Option<String>,
     #[serde(default)]
     pub commands: Vec<CommandDecl>,
     #[serde(default)]
@@ -76,10 +82,18 @@ pub struct Manifest {
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct CommandDecl {
     pub id: String,
     pub label: String,
+    /// SVG artwork, relative to the manifest (`icons/scan.svg`), in the
+    /// style of sheaf's own (`assets/icons/fns/README.md`).
+    pub icon: String,
+    /// A sentence or two for tooltips and the command palette.
+    pub help: String,
+    /// More words the command palette finds it by.
+    #[serde(default)]
+    pub keywords: Vec<String>,
     /// Shown before the label in the command palette; defaults to the
     /// plugin's name.
     #[serde(default)]
@@ -90,7 +104,23 @@ pub struct CommandDecl {
     /// Default key binding in `keymap.json` syntax, e.g. `"ctrl-alt-b"`.
     #[serde(default)]
     pub keys: Option<String>,
+    /// When it can run: any of [`WHEN_WORDS`], all of which must hold.
+    /// Menus and the palette grey it out otherwise.
+    #[serde(default)]
+    pub when: Vec<String>,
+    /// Where `keys` applies, as a `keymap.json` context, e.g.
+    /// `"DocView && !TextInput"`. Defaults to the whole window.
+    #[serde(default)]
+    pub keys_context: Option<String>,
 }
+
+/// What a command's `when` may name: a document is open, an annotation
+/// is selected, pages are selected in the thumbnails, a region is
+/// Shift+dragged on a page.
+pub const WHEN_WORDS: &[&str] = &["document", "selection", "pages", "region"];
+
+/// The largest icon file a plugin may ship.
+pub const MAX_ICON_BYTES: u64 = 64 << 10;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -233,7 +263,51 @@ impl Manifest {
         let path = dir.join(FILE_NAME);
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
-        Self::parse(&text).with_context(|| format!("{}", path.display()))
+        let m = Self::parse(&text).with_context(|| format!("{}", path.display()))?;
+        for c in &m.commands {
+            m.icon(dir, c)
+                .with_context(|| format!("{}: command {:?}", path.display(), c.id))?;
+        }
+        Ok(m)
+    }
+
+    /// The `version` in the manifest in `dir`, even when the rest no longer
+    /// loads (a plugin built for an older API), so an old copy can still be
+    /// recognized and upgraded.
+    pub fn version_in(dir: &Path) -> Option<semver::Version> {
+        #[derive(Deserialize)]
+        struct Versioned {
+            version: semver::Version,
+        }
+        let text = std::fs::read_to_string(dir.join(FILE_NAME)).ok()?;
+        toml::from_str::<Versioned>(&text).ok().map(|v| v.version)
+    }
+
+    /// The SVG for a command's icon, read from the plugin folder `dir`.
+    /// Fails when the file is missing, isn't SVG, is too large or lies
+    /// outside the folder.
+    pub fn icon(&self, dir: &Path, c: &CommandDecl) -> Result<Vec<u8>> {
+        let root = dir
+            .canonicalize()
+            .with_context(|| format!("reading {}", dir.display()))?;
+        let path = root.join(&c.icon);
+        let real = path
+            .canonicalize()
+            .with_context(|| format!("icon {:?} not found", c.icon))?;
+        if !real.starts_with(&root) {
+            bail!("icon {:?} is outside the plugin folder", c.icon);
+        }
+        let size = std::fs::metadata(&real)?.len();
+        if size > MAX_ICON_BYTES {
+            bail!(
+                "icon {:?} is {size} bytes; the limit is {MAX_ICON_BYTES}",
+                c.icon
+            );
+        }
+        let bytes = std::fs::read(&real)?;
+        usvg::Tree::from_data(&bytes, &usvg::Options::default())
+            .with_context(|| format!("icon {:?} isn't a valid SVG", c.icon))?;
+        Ok(bytes)
     }
 
     fn validate(&self) -> Result<()> {
@@ -248,6 +322,13 @@ impl Manifest {
         }
         if self.name.trim().is_empty() {
             bail!("name is empty");
+        }
+        if let Some(url) = &self.homepage
+            && (!url.starts_with("https://")
+                || url.len() <= "https://".len()
+                || url.chars().any(|c| c.is_whitespace() || c.is_control()))
+        {
+            bail!("homepage {url:?} must be an https:// URL");
         }
         if !self.api.matches(&API_VERSION) {
             bail!(
@@ -269,6 +350,30 @@ impl Manifest {
             seen.push(&c.id);
             if c.label.trim().is_empty() {
                 bail!("command {:?} has no label", c.id);
+            }
+            if let Some(w) = c.when.iter().find(|w| !WHEN_WORDS.contains(&w.as_str())) {
+                bail!(
+                    "command {:?}: unknown `when` {w:?}; use any of {}",
+                    c.id,
+                    WHEN_WORDS.join(", ")
+                );
+            }
+            if c.help.trim().is_empty() {
+                bail!("command {:?} has no help", c.id);
+            }
+            let icon = Path::new(&c.icon);
+            if !c.icon.ends_with(".svg")
+                || c.icon.contains('\\')
+                || !icon
+                    .components()
+                    .all(|p| matches!(p, std::path::Component::Normal(_)))
+            {
+                bail!(
+                    "command {:?}: icon {:?} must be an .svg path inside the plugin folder, like \"icons/{}.svg\"",
+                    c.id,
+                    c.icon,
+                    c.id
+                );
             }
             if let Some(menu) = &c.menu
                 && menu.split('/').any(|s| s.trim().is_empty())
@@ -325,11 +430,17 @@ mod tests {
         id = "tax-form-bookmarks"
         name = "Tax Form Bookmarks"
         version = "0.1.0"
-        api = "^0.1"
+        api = "^0.2"
+        homepage = "https://example.com/tax"
 
         [[commands]]
         id = "scan"
         label = "Bookmarks from Tax Forms"
+        icon = "icons/scan.svg"
+        help = "Bookmark each tax form."
+        keywords = ["irs"]
+        when = ["document"]
+        keys-context = "DocView"
         menu = "Tools/Tax"
         keys = "ctrl-alt-b"
 
@@ -350,6 +461,10 @@ mod tests {
         let m = Manifest::parse(GOOD).unwrap();
         assert_eq!(m.id, "tax-form-bookmarks");
         assert_eq!(m.commands[0].menu.as_deref(), Some("Tools/Tax"));
+        assert_eq!(m.commands[0].keys_context.as_deref(), Some("DocView"));
+        assert_eq!(m.commands[0].keywords, ["irs"]);
+        assert_eq!(m.commands[0].when, ["document"]);
+        assert_eq!(m.homepage.as_deref(), Some("https://example.com/tax"));
         assert_eq!(m.category(&m.commands[0]), "Tax Form Bookmarks");
         assert_eq!(m.marks.stamps, ["Agreed"]);
         assert_eq!(m.permissions, Permissions::default());
@@ -385,16 +500,71 @@ mod tests {
     fn rejects_invalid_manifests() {
         assert!(bad(|s| s.replace("tax-form-bookmarks", "Tax Forms")).contains("plugin id"));
         assert!(bad(|s| s.replace("tax-form-bookmarks", "docview")).contains("reserved"));
-        assert!(bad(|s| s.replace("^0.1", "^2.0")).contains("built for API"));
+        assert!(bad(|s| s.replace("^0.2", "^2.0")).contains("built for API"));
+        assert!(bad(|s| s.replace("^0.2", "^0.1")).contains("built for API"));
+        assert!(bad(|s| s.replace("https://example.com/tax", "http://x")).contains("homepage"));
+        assert!(bad(|s| s.replace("[\"document\"]", "[\"editable\"]")).contains("unknown `when`"));
+        assert!(
+            bad(|s| s.replace("help = \"Bookmark each tax form.\"", "help = \" \""))
+                .contains("no help")
+        );
+        assert!(bad(|s| s.replace("help = \"Bookmark each tax form.\"\n", "")).contains("help"));
+        assert!(bad(|s| s.replace("icon = \"icons/scan.svg\"\n", "")).contains("icon"));
+        for path in [
+            "../scan.svg",
+            "/etc/scan.svg",
+            "icons/scan.png",
+            "icons\\\\scan.svg",
+            "./scan.svg",
+        ] {
+            assert!(
+                bad(|s| s.replace("icons/scan.svg", path)).contains("must be an .svg path"),
+                "{path}"
+            );
+        }
         assert!(bad(|s| s.replace(r"\d{4}", r"\d{4")).contains("preset"));
         assert!(bad(|s| s.replace("Tools/Tax", "Tools//Tax")).contains("bad menu path"));
         assert!(bad(|s| s.replace("id = \"scan\"", "id = \"Scan!\"")).contains("command id"));
         assert!(
-            bad(|s| format!("{s}\n[[commands]]\nid = \"scan\"\nlabel = \"x\"\n"))
-                .contains("declared twice")
+            bad(|s| format!(
+                "{s}\n[[commands]]\nid = \"scan\"\nlabel = \"x\"\nicon = \"i.svg\"\nhelp = \"x\"\n"
+            ))
+            .contains("declared twice")
         );
         assert!(bad(|s| s.replace("version = \"0.1.0\"", "version = \"one\"")).contains("version"));
         assert!(bad(|s| format!("{s}\nsurprise = 1\n")).contains("unknown field"));
         assert!(bad(|s| s.replace("name = \"Tax Form Bookmarks\"", "")).contains("name"));
+    }
+
+    #[test]
+    fn icons_load_from_the_plugin_folder() {
+        let root = std::env::temp_dir().join(format!("sheaf-icon-test-{}", std::process::id()));
+        let dir = root.join("tax");
+        std::fs::create_dir_all(dir.join("icons")).unwrap();
+        std::fs::write(dir.join(FILE_NAME), GOOD).unwrap();
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 3h18"/></svg>"#;
+        let load = || format!("{:#}", Manifest::load(&dir).unwrap_err());
+        assert!(load().contains("not found"));
+        std::fs::write(dir.join("icons/scan.svg"), "not svg").unwrap();
+        assert!(load().contains("isn't a valid SVG"));
+        std::fs::write(
+            dir.join("icons/scan.svg"),
+            vec![b' '; MAX_ICON_BYTES as usize + 1],
+        )
+        .unwrap();
+        assert!(load().contains("limit"));
+        std::fs::write(dir.join("icons/scan.svg"), svg).unwrap();
+        let m = Manifest::load(&dir).unwrap();
+        assert_eq!(m.icon(&dir, &m.commands[0]).unwrap(), svg.as_bytes());
+        // A link out of the folder is refused.
+        #[cfg(unix)]
+        {
+            std::fs::write(root.join("outside.svg"), svg).unwrap();
+            std::fs::remove_file(dir.join("icons/scan.svg")).unwrap();
+            std::os::unix::fs::symlink(root.join("outside.svg"), dir.join("icons/scan.svg"))
+                .unwrap();
+            assert!(load().contains("outside the plugin folder"));
+        }
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

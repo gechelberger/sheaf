@@ -6,8 +6,10 @@ Each command lives at `<command>/icon.svg`. Transparent backgrounds and
 disabled button colors. Designed for 20–32px display.
 
 Open `preview.html` in a browser to review the set on light and dark surfaces
-at 16, 20, 24, and 32px. The markup toolbar uses the tool icons, embedded via
-`crates/sheaf-app/src/assets.rs`; add an entry there when wiring up another one.
+at 16, 20, 24, and 32px. Every built-in command names its icon in
+`crates/sheaf-app/src/command_info.rs`, and `crates/sheaf-app/src/assets.rs`
+embeds them all; a new command needs both (a test checks). Plugins ship their
+own in the same style (see `docs/plugins.md`).
 Keep the command label and shortcut as a tooltip and an accessible button name. Inline SVG inherits CSS color; an SVG loaded through
 an image element does not inherit the parent element's color.
 
@@ -66,11 +68,35 @@ an image element does not inherit the parent element's color.
 | [recognize-text](recognize-text/icon.svg) | Recognize text (OCR) | `RecognizeText` |
 | [cancel-ocr](cancel-ocr/icon.svg) | Cancel OCR | `CancelOcr` |
 | [manage-plugins](manage-plugins/icon.svg) | Manage plugins | `ManagePlugins` |
+| [export-pages](export-pages/icon.svg) | Export pages | `ExportPages` |
+| [print](print/icon.svg) | Print | `Print` |
+| [properties](properties/icon.svg) | Document properties | `DocumentProperties` |
+| [clear-recent](clear-recent/icon.svg) | Clear recent files | `ClearRecent` |
+| [pattern-search](pattern-search/icon.svg) | Pattern search | `ShowPatterns` |
+| [single-page](single-page/icon.svg) | Single page | `SinglePage` |
+| [single-page-continuous](single-page-continuous/icon.svg) | Single page continuous | `SinglePageContinuous` |
+| [two-up](two-up/icon.svg) | Two-up | `TwoUp` |
+| [two-up-continuous](two-up-continuous/icon.svg) | Two-up continuous | `TwoUpContinuous` |
+| [cover-page](cover-page/icon.svg) | Cover page in two-up | `ToggleCoverPage` |
+| [rotate-view-right](rotate-view-right/icon.svg) | Rotate view clockwise | `RotateViewCw` |
+| [rotate-view-left](rotate-view-left/icon.svg) | Rotate view counterclockwise | `RotateViewCcw` |
+| [split](split/icon.svg) | Split view | `SplitView` |
+| [read-mode](read-mode/icon.svg) | Read mode | `ReadMode` |
+| [full-screen](full-screen/icon.svg) | Full screen | `FullScreen` |
+| [rulers](rulers/icon.svg) | Rulers | `ToggleRulers` |
+| [grid](grid/icon.svg) | Grid | `ToggleGrid` |
+| [clear-guides](clear-guides/icon.svg) | Clear guides | `ClearGuides` |
+| [go-to-page](go-to-page/icon.svg) | Go to page | `GoToPage` |
+| [attachments](attachments/icon.svg) | Attachments | `ShowAttachments` |
+| [layers](layers/icon.svg) | Layers | `ShowLayers` |
+| [toolbar](toolbar/icon.svg) | Toolbar | `ToggleToolbar` |
+| [customize-toolbar](customize-toolbar/icon.svg) | Customize toolbar | `CustomizeToolbar` |
 
 ## Pattern-search alternatives
 
 Compare these side by side at the top of `preview.html`, on light and dark surfaces.
-All represent `ShowPatterns`; no default has been selected yet.
+All represent `ShowPatterns`. [`pattern-search/icon.svg`](pattern-search/icon.svg)
+is a copy of the regex variant, in use until one is chosen.
 
 - [Repeated matches](pattern-search/rows.svg): three text rows with aligned bold matches and a magnifier.
 - [Regex](pattern-search/regex.svg): a magnifier containing a path-drawn `.*` symbol (no font dependency).

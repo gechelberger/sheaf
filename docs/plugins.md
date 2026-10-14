@@ -1,6 +1,6 @@
 # Writing sheaf plugins
 
-Status: API `sheaf:plugin@0.1.0`, 2026-10-13. Design notes live in
+Status: API `sheaf:plugin@0.2.0`, 2026-10-14. Design notes live in
 [`todos/plugins.md`](../todos/plugins.md).
 
 A sheaf plugin is a WebAssembly component plus a manifest. It can add
@@ -39,7 +39,7 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
-sheaf-plugin-api = "0.1"   # or { path = ".../sheaf/crates/sheaf-plugin-api" }
+sheaf-plugin-api = "0.2"   # or { path = ".../sheaf/crates/sheaf-plugin-api" }
 
 [profile.release]
 opt-level = "s"
@@ -82,13 +82,18 @@ sheaf_plugin_api::export!(MyPlugin);
 id = "my-plugin"
 name = "My Plugin"
 version = "0.1.0"
-api = "^0.1"
+api = "^0.2"
+homepage = "https://example.com/my-plugin"
 
 [[commands]]
 id = "bookmark-first-lines"
 label = "Bookmark &First Lines"
+icon = "icons/bookmark-first-lines.svg"
+help = "Bookmark each page, titled with its first line of text."
 menu = "Tools/My Plugin"
 ```
+
+and `icons/bookmark-first-lines.svg` beside it (see [Icons](#icons)).
 
 Build and install:
 
@@ -96,13 +101,13 @@ Build and install:
 cargo build --release --target wasm32-wasip2
 dest=~/.config/sheaf/plugins/my-plugin     # %APPDATA%\sheaf\plugins on Windows
 mkdir -p "$dest"
-cp sheaf-plugin.toml "$dest/"
+cp -r sheaf-plugin.toml icons "$dest/"
 cp target/wasm32-wasip2/release/my_plugin.wasm "$dest/plugin.wasm"
 ```
 
 Restart sheaf, or use **Plugins → Manage Plugins… → Install from Folder…**
-on a folder holding `sheaf-plugin.toml` and `plugin.wasm`. To hand a plugin
-to someone else, zip those two files (at the top level or in one folder) and
+on a folder holding `sheaf-plugin.toml`, `plugin.wasm` and `icons/`. To hand
+a plugin to someone else, zip those (at the top level or in one folder) and
 rename the zip to `name.sheafplugin`; **Install from File…** takes it.
 
 Other languages work too: anything that builds a WASI 0.2 component for the
@@ -118,14 +123,31 @@ running any plugin code.
 |---|---|
 | `id` | 1–64 lowercase letters, digits and dashes. Unique. Can't be a built-in action namespace (`docview`, `tools`, `workspace`, …). |
 | `name`, `description` | Shown in the plugin manager. |
+| `homepage` | Optional `https://` URL (docs, source, changelog), linked from the plugin manager. |
 | `version` | Semver of the plugin. |
-| `api` | Semver requirement on the API, e.g. `"^0.1"`. sheaf refuses a plugin whose range it doesn't satisfy. |
-| `[[commands]]` | `id`, `label` (`&` marks the menu mnemonic), optional `category` (palette prefix; defaults to `name`), `menu` (a path like `"Tools/Workpapers"`; menus and submenus are created as needed), `keys` (a default binding in `keymap.json` syntax, active anywhere in the window; the user's keymap overrides it). |
+| `api` | Semver requirement on the API, e.g. `"^0.2"`. sheaf refuses a plugin whose range it doesn't satisfy. |
+| `[[commands]]` | `id`; `label` (`&` marks the menu mnemonic); `icon`, an SVG in the plugin folder such as `"icons/scan.svg"` (see [Icons](#icons)); `help`, a sentence or two of plain text shown in tooltips and the command palette. Optional: `keywords` (more words the palette finds it by), `category` (palette prefix; defaults to `name`), `menu` (a path like `"Tools/Workpapers"`; menus and submenus are created as needed), `keys` (a default binding in `keymap.json` syntax; the user's keymap overrides it), `keys-context` (where `keys` applies, as a keymap context such as `"DocView && !TextInput"`; by default anywhere in the window, text fields included, so give single-key bindings a context), `when` (what must hold for it to run, all of: `"document"` a document is open, `"selection"` an annotation is selected, `"pages"` pages are selected in the thumbnails, `"region"` a region is Shift+dragged; menus and the palette grey the command out otherwise, and sheaf decides without running plugin code). `icon` and `help` are required. |
 | `[[panels]]` | `id`, `label`. Each gets a dock tab and a **View → Plugin Panels** entry. |
 | `events` | Document events to receive: any of `"opened"`, `"edited"`, `"saved"`, `"selection-changed"`, `"closed"`, `"region"` (the region the user Shift+drags on a page, live while dragging, and its clearing). |
 | `[[presets]]` | `name`, `regex`: pattern-search presets shown (read-only) in the Patterns panel. |
 | `[marks]` | `tickmarks = [{ name, marks = ["Σ", …] }]` and `stamps = ["PBC", …]` for the markup toolbar. |
 | `[permissions]` | `read = ["~/Documents/Clients"]`, `write = [...]`: absolute paths or `~/…`. `network = ["api.example.com"]`: hosts the plugin may make HTTP requests to (`"*.example.com"` includes subdomains, `"host:8080"` limits the port). See [Trust model](#trust-model). |
+
+### Icons
+
+Every command has one: it's what toolbars, the command palette and the
+plugin manager show. Draw it in the style of sheaf's own
+([`assets/icons/fns/README.md`](../assets/icons/fns/README.md)): a 24 × 24
+viewBox, 1.75-unit rounded strokes, no fill, and `currentColor` for every
+stroke, so it follows the theme and the button's state. It should read at
+16–32px. sheaf checks when it loads the plugin that the file exists inside
+the plugin folder, is valid SVG and is at most 64 KB; a command whose icon
+fails is left out and the plugin manager says why.
+
+Plugins don't put themselves on the toolbar; users do, from View >
+Customize Toolbar… or by right-clicking the command in a menu or the
+command palette. A plugin command on the toolbar is hidden while the
+plugin is off and comes back with it.
 
 A command runs as the action `plugin::Run`, so users can bind it themselves:
 
@@ -245,6 +267,12 @@ current one, so a plugin built against the last API keeps loading for at
 least one more release. A manifest's `api` range says which worlds it can
 take; sheaf refuses one it can't satisfy, with a message, rather than
 guessing.
+
+**0.2.0** (2026-10-14) changed the manifest, not the WIT: every command
+needs `icon` and `help`, and a plugin package is a folder (or archive) with
+its `icons/`. 0.1 plugins aren't served alongside, since nothing outside
+this repository was built against them; rebuild against the 0.2 SDK and add
+the new keys.
 
 ## Trust model
 

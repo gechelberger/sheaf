@@ -6539,6 +6539,7 @@ dependencies = [
  "sheaf-core",
  "sheaf-doc",
  "toml 0.9.12+spec-1.1.0",
+ "usvg",
  "wasmtime",
  "wasmtime-wasi",
  "wasmtime-wasi-http",
@@ -6546,7 +6547,7 @@ dependencies = [
 
 [[package]]
 name = "sheaf-plugin-api"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "wasi 0.14.7+wasi-0.2.4",
  "wit-bindgen 0.62.0",

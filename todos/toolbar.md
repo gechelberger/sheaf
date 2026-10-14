@@ -1,6 +1,7 @@
 # Configurable floating toolbar (planned)
 
-Status: notes only, not started. Written 2026-10-13. The fixed markup
+Status: done 2026-10-14 on `cmd-icons` (all seven slices; notes under
+each below). Written 2026-10-13. The fixed markup
 toolbar (`markup_tools.rs` `render_toolbar`) covers what we have today and
 stays as is for now; this is the toolbar we want once the command set is
 big enough that no fixed layout fits everyone.
@@ -239,20 +240,150 @@ This is the part that makes it worth doing.
    updated. Palette shows help text and searches keywords. Tests for
    manifest parsing, missing icons and path escapes. Useful on its own,
    toolbar or not.
+   *Done 2026-10-14.* Notes and deviations:
+   - Built-in metadata lives in `sheaf-app/src/command_info.rs`, keyed by
+     action name, rather than on each menu item (several commands sit in
+     two menus). `Command::builtin` fills it in; the registry refuses a
+     command with an empty icon or help (`RegistryError::Incomplete`), and
+     an `assets.rs` test walks every built-in and loads its icon.
+   - 20 new icons for the M7 commands (print, export pages, properties,
+     page layouts, cover page, view rotation, split, read mode, full
+     screen, rulers, grid, clear guides, go to page, attachments, layers,
+     clear recent). `ShowPatterns` uses a copy of the regex variant
+     (`pattern-search/icon.svg`) until one is picked.
+   - Commands that aren't in a manifest get stand-ins: Open Recent entries
+     use `open`, plugin panels' Show commands use `right-dock`.
+   - `Tool::description()` now reads the command's help; tool icons come
+     from the same table.
+   - Plugin icons are read at plugin start (`Manifest::icon` checks path,
+     size ≤ 64 KB and `usvg` parse) and served from memory as
+     `plugin-icons/<plugin>/<command>-<hash>.svg`, so a reinstalled
+     plugin's new artwork isn't hidden by GPUI's cache.
+   - Packages copy only top-level files and `icons/` (not `target/`).
+   - API bumped to 0.2 (WIT text unchanged). Bundled upgrades compare the
+     installed manifest's `version` alone, so 0.1 copies that no longer
+     load still upgrade.
+   - Palette rows are two lines (icon, label, id; help underneath);
+     keyword-only matches rank below label matches. The plugin manager
+     shows a Website link and each plugin's command icons.
+   - Not done: icons in the menus (optional in the plan).
 2. `when` availability plus the built-in active/enabled hooks, used by the
    menu bar and palette first so it's exercised before the toolbar exists.
+   *Done 2026-10-14.* Notes and deviations:
+   - `availability.rs`: `Facts` snapshots one window (document open,
+     annotation/page selection, region, undo/redo, unsaved changes, OCR
+     running, guides, recent files, tool, page mode, split, rulers, grid,
+     read mode/full screen, visible panels, open docks). `Command` gains
+     `when`, `enabled` and `checked`; built-ins get theirs from
+     `availability::builtin(id)`.
+   - Only `document`, `selection`, `pages` and `region` are in the
+     vocabulary. `editable` and `text-selection` wait for the features:
+     sheaf has no read-only documents or text selection yet, and an
+     unknown word is a manifest error, so adding them later is additive.
+   - Built-ins enabled by rule: Save (unsaved changes), Undo/Redo, Clear
+     Guides, Clear Recent, cover page (two-up only), Recognize Text / Cancel
+     OCR. Checked: page modes, cover page, split, read mode, full screen,
+     rulers, grid, tools, panels on screen, docks.
+   - Title-bar menus: `MenuBar::set_state` takes a hook (`ItemState`); a
+     checkmark gutter appears in menus with toggles. Keyboard-opened menus
+     now pick their first enabled item on the next draw, since the hook
+     reads the workspace that asked the menu to open.
+   - The palette lists disabled commands greyed and won't run them; a
+     command also counts as disabled when its action has no handler where
+     focus was. Toggles show "✓ on".
+   - Bundled plugin commands declare `when = ["document"]` (0.2.1).
+   - Not done: macOS's native menus still get static items (no greying
+     beyond GPUI's own action check, no checkmarks).
 3. `sheaf-ui` toolbar widget: static items, separators, tooltips, state,
    overflow. Docked at the top only. App renders one from a hardcoded
    default layout that matches today's bar, behind a setting, beside the
    old bar.
+   *Done 2026-10-14.* Notes and deviations:
+   - `sheaf_ui::toolbar::Toolbar` is an entity the host refills each frame
+     (`set_items`): `Button` (icon, title, help, action, enabled,
+     checked), `Separator`, `Widget` (an element plus its length). Events:
+     `Run(action)` and `Context { item, position }` (for slice 6).
+   - Overflow is decided from fixed lengths (26px buttons, widgets say
+     theirs) against the length measured last frame; the rest go in a `»`
+     dropdown, widgets included. Vertical orientation is in from the start.
+   - The workspace hosts it (above the document view) so later docking
+     can use all four edges; `Run` focuses the document and dispatches,
+     like the palette. Colors and tickmarks became `DocView::render_colors`
+     / `render_ticks`, shared with the old bar, and are already widget
+     items (`toolbar::Colors`, `toolbar::Tickmarks`).
+   - Setting: `"new_toolbar": true` in `settings.json`. Script dump:
+     `{"dump": "toolbar"}`.
 4. `toolbar.json`: load, resolve, report bad entries like `keymap.json`,
    keep unknown ids. Widget items for colors and tickmarks.
+   *Done 2026-10-14.* Notes and deviations:
+   - `toolbar.rs`: `Toolbars` global from `toolbar.json` (a list; the app
+     shows the first). Each `Spec` has name, dock, position, orientation,
+     visible and items. No file means the default layout; nothing is
+     written until the user changes something.
+   - Items: command id, widget id, `"separator"`, or
+     `["plugin::Run", { plugin, command, args }]` (stored as the command
+     id plus args). Unreadable items are reported on stderr and kept
+     verbatim (`Entry::Invalid`), so a save doesn't lose them;
+     unregistered ids are logged at info level and skipped when drawing.
+   - Overflow keeps layout order: the first item that doesn't fit and
+     everything after it go into `»`.
 5. Docking to all four edges and floating with drag, dock targets and
    on-screen clamping. Position saved per window.
+   *Done 2026-10-14.* Notes and deviations:
+   - A grip (two rows of dots) starts the bar; pressing it emits
+     `ToolbarEvent::Grab`. While dragging, the bar floats under the
+     pointer and the four edges of the document area show dock targets;
+     dropping within 48px of an edge docks there, anywhere else floats.
+   - Docked bars take space from the document view (top/bottom
+     horizontal, left/right vertical); a floating bar draws over it with
+     a shadow, its length capped to the area and its position clamped
+     4px inside, every frame (so it comes back when the window shrinks).
+   - Vertical bars list widgets (colors, tickmarks) under `»`: they're
+     drawn across. Overflow now drops separators left first, last or
+     doubled by that.
+   - Placement is per window (`Workspace::toolbar_place`); a drop also
+     writes it to `toolbar.json` so new windows start there. Orientation
+     of a floating bar is in the file; the switch comes with slice 6's
+     context menu.
 6. Customize dialog, plus Add/Remove from the context menus of the bar,
    the menu bar and the palette.
+   *Done 2026-10-14.* Notes and deviations:
+   - New commands View > Toolbar (`workspace::ToggleToolbar`, checked
+     while shown) and View > Customize Toolbar… (`workspace::
+     CustomizeToolbar`), with icons.
+   - `toolbar_dialog.rs`: left, a separator, the two widgets and every
+     command (Open Recent entries left out), ranked like the palette
+     (`sheaf_ui::palette::score` is public now); right, the layout, with
+     unregistered ids shown greyed "(not loaded)". Add / Remove / Move
+     Up / Move Down / Separator, double-click to add or remove, drag rows
+     to reorder, Reset to Default. Each change is written to the global
+     layout at once (so the bar updates live); Cancel restores the layout
+     from when the dialog opened, OK saves `toolbar.json`.
+   - Right-click menus: on the bar, Remove from Toolbar (when on an
+     item), Customize Toolbar…, dock to another edge or float, lay a
+     floating bar out across/down, Hide Toolbar. On a title-bar menu item
+     (`MenuBar::set_on_secondary`) or a palette row
+     (`PaletteEvent::Context`): Add to / Remove from Toolbar.
+   - Found on the way: the dock tab strip overflowed under the document,
+     so a hidden tab (Layers) caught clicks meant for the toolbar. Tabs
+     that don't fit now scroll instead.
+   - Script: `{"click": [x, y], "right": true}`.
 7. Replace the fixed markup toolbar with the default layout; remove the
    setting from slice 3.
+
+   *Done 2026-10-14.* Notes and deviations:
+   - The fixed bar (`DocView::render_toolbar`) and the `new_toolbar`
+     setting are gone; the default layout is the old bar's contents, so
+     nothing changes until someone customizes it.
+   - View was taller than the window (since M7), hiding its last items,
+     the new Toolbar ones included. It now groups Page Display, Page
+     Navigation and Panels (with the docks) into submenus, as Acrobat
+     does; Plugin Panels stays where plugins put it.
+   - README documents `toolbar.json`; `docs/plugins.md` says plugins
+     don't place themselves on the toolbar.
+   - Left for later: macOS native menus get no checkmarks or rule-based
+     greying; more than one toolbar (the file is a list, the app shows the
+     first); context-dependent bars.
 
 Each slice should get a `--script` test (`script.rs`): dispatch
 `workspace::CustomizeToolbar`, click, `dump` a new `"toolbar"` state.

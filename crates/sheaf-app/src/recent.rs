@@ -180,6 +180,12 @@ fn sync_menu(cx: &mut App) {
                 id: id.clone(),
                 label: label.clone(),
                 category: "Open Recent".into(),
+                icon: crate::command_info::icon_path("open"),
+                help: "Open this file again.".into(),
+                keywords: Vec::new(),
+                when: Vec::new(),
+                enabled: None,
+                checked: None,
                 target: Target::Builtin(Box::new(OpenRecent { path: p.clone() })),
             })
             .is_ok()

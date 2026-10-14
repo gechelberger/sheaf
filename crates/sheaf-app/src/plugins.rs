@@ -5,7 +5,7 @@
 //! `todos/plugins.md` for the design.
 //!
 //! Plugins live in `<config dir>/plugins/`, one directory per plugin
-//! holding a `sheaf-plugin.toml` and a `plugin.wasm`. The plugins that ship
+//! holding a `sheaf-plugin.toml`, a `plugin.wasm` and its `icons/`. The plugins that ship
 //! with sheaf (the repo's `plugins/`, built by `scripts/build-plugins.sh`
 //! into `plugins/` next to the executable) are installed there on first
 //! run and are ordinary plugins from then on: the user can turn them off,
@@ -34,6 +34,7 @@ use sheaf_plugin::{
 };
 use sheaf_render::RenderHandle;
 
+use crate::availability::When;
 use crate::commands::{Command, CommandRegistry, Run, ShowPluginPanel, Target};
 use crate::contrib::{Contributions, Marks, PluginPanel, TickSet};
 use crate::docview::DocView;
@@ -116,9 +117,7 @@ pub fn install_bundled(from: &Path, dest: &Path) -> Vec<String> {
             None => true,
             // Installed before: upgrade only our own, unchanged copy. A
             // missing directory means the user deleted it.
-            Some(v) => {
-                *v < f.manifest.version && Manifest::load(&target).is_ok_and(|m| m.version == *v)
-            }
+            Some(v) => *v < f.manifest.version && Manifest::version_in(&target).as_ref() == Some(v),
         };
         if !install {
             continue;
@@ -154,17 +153,34 @@ pub fn install_bundled(from: &Path, dest: &Path) -> Vec<String> {
 fn copy_plugin(from: &Path, to: &Path) -> Result<()> {
     let tmp = to.with_extension("installing");
     let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(&tmp)?;
-    for entry in std::fs::read_dir(from)? {
-        let entry = entry?;
-        if entry.file_type()?.is_file() {
-            std::fs::copy(entry.path(), tmp.join(entry.file_name()))?;
-        }
-    }
+    copy_tree(from, &tmp)?;
     if to.exists() {
         std::fs::remove_dir_all(to)?;
     }
     std::fs::rename(&tmp, to)?;
+    Ok(())
+}
+
+/// Copy a plugin folder: its files and its `icons/` folder. Links and
+/// other folders (a build's `target/`) are left behind.
+fn copy_tree(from: &Path, to: &Path) -> Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        if kind.is_file() {
+            std::fs::copy(entry.path(), to.join(entry.file_name()))?;
+        } else if kind.is_dir() && entry.file_name() == "icons" {
+            let icons = to.join("icons");
+            std::fs::create_dir_all(&icons)?;
+            for icon in std::fs::read_dir(entry.path())? {
+                let icon = icon?;
+                if icon.file_type()?.is_file() {
+                    std::fs::copy(icon.path(), icons.join(icon.file_name()))?;
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -316,6 +332,13 @@ impl PluginHost {
         self.plugins.get(id).map(|p| p.status())
     }
 
+    fn dir(&self, id: &str) -> Option<PathBuf> {
+        self.installed
+            .iter()
+            .find(|i| i.manifest.id == id)
+            .map(|i| i.dir.clone())
+    }
+
     fn manifest(&self, id: &str) -> Option<&Manifest> {
         self.installed
             .iter()
@@ -356,7 +379,10 @@ fn start(id: &str, cx: &mut App) {
     let Some(m) = cx.global::<PluginHost>().manifest(id).cloned() else {
         return;
     };
-    let mut problems: Vec<String> = register(&m, cx)
+    let Some(dir) = cx.global::<PluginHost>().dir(id) else {
+        return;
+    };
+    let mut problems: Vec<String> = register(&m, &dir, cx)
         .into_iter()
         .map(|e| format!("{id}: {e}"))
         .collect();
@@ -377,6 +403,7 @@ fn stop(id: &str, cx: &mut App) {
     host.pending_consent.retain(|p| p != id);
     cx.global_mut::<CommandRegistry>().remove_plugin(id);
     cx.global_mut::<Contributions>().remove_plugin(id);
+    crate::assets::remove_plugin_icons(id);
 }
 
 fn save_state(cx: &mut App) {
@@ -487,8 +514,9 @@ fn same_dir(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// Install a `.sheafplugin` file: a zip holding `sheaf-plugin.toml` and
-/// `plugin.wasm` (at its root or in one folder). Returns the plugin's id.
+/// Install a `.sheafplugin` file: a zip holding `sheaf-plugin.toml`,
+/// `plugin.wasm` and an `icons/` folder (at its root or in one folder).
+/// Returns the plugin's id.
 pub fn install_archive(path: &Path, cx: &mut App) -> Result<String> {
     let tmp = std::env::temp_dir().join(format!(
         "sheaf-plugin-install-{}-{}",
@@ -505,10 +533,12 @@ pub fn install_archive(path: &Path, cx: &mut App) -> Result<String> {
 }
 
 /// Unpack the files a plugin needs, by name only: entry paths never pick
-/// where anything is written.
+/// where anything is written. Icons are the `.svg` files in a folder
+/// named `icons`, and land in `icons/`.
 fn extract_archive(path: &Path, to: &Path) -> Result<()> {
     const WANTED: &[&str] = &["sheaf-plugin.toml", "plugin.wasm", "README.md", "LICENSE"];
     const MAX_BYTES: u64 = 64 << 20;
+    const MAX_FILES: usize = 512;
     let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let mut zip = zip::ZipArchive::new(file).context("not a plugin archive (zip)")?;
     std::fs::create_dir_all(to)?;
@@ -518,25 +548,41 @@ fn extract_archive(path: &Path, to: &Path) -> Result<()> {
         if !entry.is_file() {
             continue;
         }
-        let name = entry
-            .name()?
-            .rsplit(['/', '\\'])
-            .next()
-            .unwrap_or_default()
-            .to_string();
-        if !WANTED.contains(&name.as_str()) {
+        let path = entry.name()?.to_string();
+        let mut parts = path.rsplit(['/', '\\']);
+        let base = parts.next().unwrap_or_default().to_string();
+        let in_icons = parts.next() == Some("icons");
+        let name = if in_icons && is_icon_name(&base) {
+            format!("icons/{base}")
+        } else if WANTED.contains(&base.as_str()) {
+            base
+        } else {
             continue;
-        }
+        };
         anyhow::ensure!(entry.size() <= MAX_BYTES, "{name} is too large");
         anyhow::ensure!(
             !seen.contains(&name),
             "the archive has more than one {name}"
         );
         seen.push(name.clone());
+        anyhow::ensure!(seen.len() <= MAX_FILES, "the archive has too many files");
+        if in_icons {
+            std::fs::create_dir_all(to.join("icons"))?;
+        }
         let mut out = std::fs::File::create(to.join(&name))?;
         std::io::copy(&mut (&mut entry).take(MAX_BYTES), &mut out)?;
     }
     Ok(())
+}
+
+/// A plain `.svg` file name: no path, nothing hidden.
+fn is_icon_name(name: &str) -> bool {
+    name.len() > ".svg".len()
+        && name.ends_with(".svg")
+        && !name.starts_with('.')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
 /// Ask about plugins whose permissions the user hasn't answered, one at a
@@ -650,20 +696,36 @@ pub fn dispatch_event(
     }
 }
 
-/// Add a manifest's static contributions. Returns one message per item
-/// that couldn't be added; the rest still are.
-fn register(m: &Manifest, cx: &mut App) -> Vec<String> {
+/// Add a manifest's static contributions, reading command icons from the
+/// plugin's folder `dir`. Returns one message per item that couldn't be
+/// added; the rest still are.
+fn register(m: &Manifest, dir: &Path, cx: &mut App) -> Vec<String> {
     let mut errors = Vec::new();
     let mut bindings = Vec::new();
     let workspace = KeyBindingContextPredicate::parse(crate::workspace::KEY_CONTEXT)
         .ok()
         .map(Rc::new);
     for c in &m.commands {
-        let added = cx.global_mut::<CommandRegistry>().add_plugin_command(
-            &m.id,
-            &c.id,
-            &c.label,
-            m.category(c),
+        let icon = match m.icon(dir, c) {
+            Ok(svg) => crate::assets::add_plugin_icon(&m.id, &c.id, svg),
+            Err(e) => {
+                errors.push(format!("command {:?}: {e:#}", c.id));
+                continue;
+            }
+        };
+        let added = cx.global_mut::<CommandRegistry>().add_placed(
+            Command {
+                id: format!("{}::{}", m.id, c.id),
+                label: c.label.clone(),
+                category: m.category(c).to_string(),
+                icon,
+                help: c.help.clone(),
+                keywords: c.keywords.clone(),
+                when: c.when.iter().filter_map(|w| When::parse(w)).collect(),
+                enabled: None,
+                checked: None,
+                target: Target::plugin(&m.id, &c.id),
+            },
             c.menu.as_deref(),
         );
         if let Err(e) = added {
@@ -676,10 +738,20 @@ fn register(m: &Manifest, cx: &mut App) -> Vec<String> {
                 command: c.id.clone(),
                 args: None,
             });
+            let context = match &c.keys_context {
+                Some(text) => match KeyBindingContextPredicate::parse(text) {
+                    Ok(p) => Some(Rc::new(p)),
+                    Err(e) => {
+                        errors.push(format!("command {:?}: keys-context {text:?}: {e}", c.id));
+                        continue;
+                    }
+                },
+                None => workspace.clone(),
+            };
             match KeyBinding::load(
                 keys,
                 action,
-                workspace.clone(),
+                context,
                 false,
                 None,
                 cx.keyboard_mapper().as_ref(),
@@ -704,6 +776,12 @@ fn register(m: &Manifest, cx: &mut App) -> Vec<String> {
                 id: format!("{}::show-panel-{}", m.id, p.id),
                 label: p.label.clone(),
                 category: "Panels".into(),
+                icon: crate::command_info::icon_path("right-dock"),
+                help: format!("Show the {} panel from {}.", p.label, m.name),
+                keywords: Vec::new(),
+                when: Vec::new(),
+                enabled: None,
+                checked: None,
                 target: Target::Builtin(Box::new(ShowPluginPanel { panel: id })),
             },
             Some("View/Plugin Panels"),
@@ -1195,7 +1273,7 @@ mod tests {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(
             dir.join("sheaf-plugin.toml"),
-            format!("id = \"{id}\"\nname = \"{id}\"\nversion = \"{version}\"\napi = \"^0.1\"\n"),
+            format!("id = \"{id}\"\nname = \"{id}\"\nversion = \"{version}\"\napi = \"^0.2\"\n"),
         )
         .unwrap();
         std::fs::write(dir.join("plugin.wasm"), version).unwrap();
@@ -1207,7 +1285,7 @@ mod tests {
 
     fn manifest(perms: &str) -> Manifest {
         Manifest::parse(&format!(
-            "id = \"p\"\nname = \"P\"\nversion = \"1.0.0\"\napi = \"^0.1\"\n[permissions]\n{perms}"
+            "id = \"p\"\nname = \"P\"\nversion = \"1.0.0\"\napi = \"^0.2\"\n[permissions]\n{perms}"
         ))
         .unwrap()
     }
@@ -1279,6 +1357,9 @@ mod tests {
             for (name, body) in [
                 ("p/sheaf-plugin.toml", "id = \"p\""),
                 ("p/plugin.wasm", "wasm"),
+                ("p/icons/scan.svg", "<svg/>"),
+                ("p/icons/.hidden.svg", "no"),
+                ("p/notes/icons.svg", "no"),
                 ("../../escape/README.md", "outside"),
                 ("p/other.txt", "ignored"),
             ] {
@@ -1294,7 +1375,15 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         names.sort();
-        assert_eq!(names, ["README.md", "plugin.wasm", "sheaf-plugin.toml"]);
+        assert_eq!(
+            names,
+            ["README.md", "icons", "plugin.wasm", "sheaf-plugin.toml"]
+        );
+        let icons: Vec<_> = std::fs::read_dir(out.join("icons"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(icons, ["scan.svg"]);
         assert_eq!(
             std::fs::read_to_string(out.join("plugin.wasm")).unwrap(),
             "wasm"
@@ -1316,6 +1405,27 @@ mod tests {
         }
         let err = extract_archive(&dup, &root.join("dup")).unwrap_err();
         assert!(err.to_string().contains("more than one plugin.wasm"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn copies_take_the_icons_folder_and_nothing_else() {
+        let root = std::env::temp_dir().join(format!("sheaf-copy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let from = root.join("src");
+        plugin(&from, "p", "1.0.0");
+        std::fs::create_dir_all(from.join("icons")).unwrap();
+        std::fs::write(from.join("icons/scan.svg"), "<svg/>").unwrap();
+        std::fs::create_dir_all(from.join("target/debug")).unwrap();
+        std::fs::write(from.join("target/debug/big"), "x").unwrap();
+        let to = root.join("dest");
+        copy_plugin(&from, &to).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(to.join("icons/scan.svg")).unwrap(),
+            "<svg/>"
+        );
+        assert!(to.join("plugin.wasm").is_file());
+        assert!(!to.join("target").exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1359,6 +1469,17 @@ mod tests {
         plugin(&from.join("d"), "d", "1.1.0");
         install_bundled(&from, &dest);
         assert_eq!(installed(&dest, "d").as_deref(), Some("1.1.0"));
+
+        // A copy built for an older API no longer loads, but still upgrades.
+        plugin(&from.join("e"), "e", "1.0.0");
+        install_bundled(&from, &dest);
+        let old = dest.join("e").join("sheaf-plugin.toml");
+        let text = std::fs::read_to_string(&old).unwrap();
+        std::fs::write(&old, text.replace("^0.2", "^0.1")).unwrap();
+        assert!(Manifest::load(&dest.join("e")).is_err());
+        plugin(&from.join("e"), "e", "1.1.0");
+        assert!(install_bundled(&from, &dest).is_empty());
+        assert_eq!(installed(&dest, "e").as_deref(), Some("1.1.0"));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

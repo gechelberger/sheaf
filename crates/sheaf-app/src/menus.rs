@@ -7,7 +7,7 @@
 use gpui::{Action, App, Menu};
 use sheaf_ui::menu_bar::parse_label;
 
-use crate::commands::{Command, CommandRegistry, MenuEntry, MenuSpec, Target};
+use crate::commands::{Command, CommandRegistry, MenuEntry, MenuSpec};
 use crate::*;
 
 /// The menus to show, built-in and contributed.
@@ -38,13 +38,13 @@ pub fn register_builtins(reg: &mut CommandRegistry) {
     for (name, items) in app_menu_last {
         for (label, action) in actions(items) {
             if reg.get(action.name()).is_none() {
-                reg.add(Command {
-                    id: action.name().to_string(),
-                    label: label.to_string(),
-                    category: parse_label(name).0,
-                    target: Target::Builtin(action.boxed_clone()),
-                })
-                .expect("unique built-in id");
+                reg.add(Command::builtin(
+                    action.name(),
+                    label,
+                    &parse_label(name).0,
+                    action.boxed_clone(),
+                ))
+                .expect("unique built-in id, with an entry in command_info.rs");
             }
         }
     }
@@ -154,40 +154,60 @@ fn builtin_menus() -> Vec<(&'static str, Vec<Item>)> {
                 item("Fit &Width", ZoomFitWidth),
                 item("Fit &Page", ZoomFitPage),
                 sep(),
-                item("&Single Page", SinglePage),
-                item("Single Page &Continuous", SinglePageContinuous),
-                item("T&wo-Up", TwoUp),
-                item("Two-Up Contin&uous", TwoUpContinuous),
-                item("Show Co&ver Page in Two-Up", ToggleCoverPage),
-                item("Rotate View Clock&wise", RotateViewCw),
-                item("Rotate View Counterclockwi&se", RotateViewCcw),
-                item("Spl&it", SplitView),
+                Item::Sub(
+                    "Page &Display",
+                    vec![
+                        item("&Single Page", SinglePage),
+                        item("Single Page &Continuous", SinglePageContinuous),
+                        item("&Two-Up", TwoUp),
+                        item("Two-Up Contin&uous", TwoUpContinuous),
+                        sep(),
+                        item("Show Co&ver Page in Two-Up", ToggleCoverPage),
+                    ],
+                ),
+                item("Rotate View &Clockwise", RotateViewCw),
+                item("Rotate View Counterc&lockwise", RotateViewCcw),
+                Item::Sub(
+                    "Page &Navigation",
+                    vec![
+                        item("&First Page", FirstPage),
+                        item("&Previous Page", PrevPage),
+                        item("&Next Page", NextPage),
+                        item("&Last Page", LastPage),
+                        sep(),
+                        item("&Go to Page…", GoToPage),
+                    ],
+                ),
+                sep(),
+                item("Spli&t", SplitView),
                 item("&Read Mode", ReadMode),
-                item("F&ull Screen", FullScreen),
+                item("&Full Screen", FullScreen),
+                sep(),
                 item("R&ulers", ToggleRulers),
                 item("&Grid", ToggleGrid),
-                item("Clear Gui&des", ClearGuides),
+                item("Clear Guid&es", ClearGuides),
                 sep(),
-                item("&First Page", FirstPage),
-                item("Pre&vious Page", PrevPage),
-                item("&Next Page", NextPage),
-                item("&Last Page", LastPage),
-                item("&Go to Page…", GoToPage),
+                Item::Sub(
+                    "Panel&s",
+                    vec![
+                        item("&Thumbnails", ShowThumbnails),
+                        item("&Bookmarks", ShowOutline),
+                        item("Patte&rns", ShowPatterns),
+                        item("&Calculator", ShowCalc),
+                        item("Co&mments", ShowComments),
+                        item("Attac&hments", ShowAttachments),
+                        item("La&yers", ShowLayers),
+                        sep(),
+                        item("Navigation Pan&es", ToggleSidebar),
+                        item("&Left Dock", ToggleLeftDock),
+                        item("Ri&ght Dock", ToggleRightDock),
+                        item("B&ottom Dock", ToggleBottomDock),
+                    ],
+                ),
+                item("Co&mmand Palette…", CommandPalette),
                 sep(),
-                item("&Thumbnails", ShowThumbnails),
-                item("&Bookmarks", ShowOutline),
-                item("Patte&rns", ShowPatterns),
-                item("&Calculator", ShowCalc),
-                item("Co&mments", ShowComments),
-                item("Attac&hments", ShowAttachments),
-                item("La&yers", ShowLayers),
-                sep(),
-                item("Command &Palette…", CommandPalette),
-                sep(),
-                item("Navigation Pan&es", ToggleSidebar),
-                item("Left &Dock", ToggleLeftDock),
-                item("Ri&ght Dock", ToggleRightDock),
-                item("Botto&m Dock", ToggleBottomDock),
+                item("Tool&bar", ToggleToolbar),
+                item("Customi&ze Toolbar…", CustomizeToolbar),
             ],
         ),
         menu(

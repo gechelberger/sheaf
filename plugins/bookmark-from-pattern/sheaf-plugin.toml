@@ -1,11 +1,16 @@
 id = "bookmark-from-pattern"
 name = "Bookmark from Pattern"
-version = "0.1.0"
-api = "^0.1"
+version = "0.2.1"
+api = "^0.2"
+homepage = "https://github.com/gechelberger/sheaf/tree/main/plugins/bookmark-from-pattern"
 description = "Bookmarks every match of a pattern, at the match, titled from it: invoice numbers, account numbers, check numbers, anything a regular expression can find."
 
 [[commands]]
 id = "bookmark"
 label = "Bookmarks from &Pattern…"
+icon = "icons/bookmark.svg"
+help = "Bookmark every match of a regular expression, titled from the match."
+keywords = ["regex", "outline", "invoice"]
+when = ["document"]
 category = "Bookmarks"
 menu = "Document"

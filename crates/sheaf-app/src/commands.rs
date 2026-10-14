@@ -20,6 +20,8 @@ use serde::{Deserialize, Serialize};
 
 use sheaf_ui::menu_bar::{parse_label, platform_label as menu_label};
 
+use crate::availability::{Rule, When};
+
 /// Run a plugin command. Bindable in `keymap.json`:
 /// `["plugin::Run", { "plugin": "tax-form-bookmarks", "command": "scan" }]`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema, Action)]
@@ -54,6 +56,13 @@ pub enum Target {
 }
 
 impl Target {
+    pub fn plugin(plugin: &str, command: &str) -> Self {
+        Target::Plugin {
+            plugin: plugin.to_string(),
+            command: command.to_string(),
+        }
+    }
+
     /// The action to dispatch for this command.
     pub fn action(&self) -> Box<dyn Action> {
         match self {
@@ -73,7 +82,52 @@ pub struct Command {
     pub label: String,
     /// Shown before the label in the palette, e.g. "File".
     pub category: String,
+    /// The asset path its artwork loads from: `icons/<name>.svg` for
+    /// built-ins (see `command_info.rs`), `plugin-icons/…` for plugins.
+    /// Required.
+    pub icon: String,
+    /// A sentence or two of plain text for tooltips and the palette.
+    /// Required.
+    pub help: String,
+    /// More words the palette finds it by.
+    pub keywords: Vec<String>,
+    /// What must hold for it to run; all of them.
+    pub when: Vec<When>,
+    /// A built-in's own test beyond `when` (Undo needs something to undo).
+    pub enabled: Option<Rule>,
+    /// For a built-in that switches something on and off: whether it's on.
+    pub checked: Option<Rule>,
     pub target: Target,
+}
+
+impl Command {
+    /// A built-in command, with its artwork, help and keywords from
+    /// [`command_info`](crate::command_info). Without an entry there, the
+    /// registry refuses it.
+    pub fn builtin(id: &str, label: &str, category: &str, action: Box<dyn Action>) -> Self {
+        let info = crate::command_info::info(id);
+        let rules = crate::availability::builtin(id);
+        Command {
+            id: id.to_string(),
+            label: label.to_string(),
+            category: category.to_string(),
+            icon: info
+                .as_ref()
+                .map(|i| crate::command_info::icon_path(i.icon))
+                .unwrap_or_default(),
+            help: info
+                .as_ref()
+                .map(|i| i.help.to_string())
+                .unwrap_or_default(),
+            keywords: info
+                .map(|i| i.keywords.iter().map(|k| k.to_string()).collect())
+                .unwrap_or_default(),
+            when: rules.when.to_vec(),
+            enabled: rules.enabled,
+            checked: rules.checked,
+            target: Target::Builtin(action),
+        }
+    }
 }
 
 pub enum MenuEntry {
@@ -96,6 +150,11 @@ pub struct MenuSpec {
 pub enum RegistryError {
     /// The id is already taken (by a built-in or an earlier plugin).
     Duplicate(String),
+    /// The command has no icon or no help text.
+    Incomplete {
+        id: String,
+        missing: &'static str,
+    },
     /// A menu entry names a command that isn't registered.
     Unknown(String),
     BadMenuPath(String),
@@ -105,6 +164,9 @@ impl fmt::Display for RegistryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             RegistryError::Duplicate(id) => write!(f, "command {id:?} is already registered"),
+            RegistryError::Incomplete { id, missing } => {
+                write!(f, "command {id:?} has no {missing}")
+            }
             RegistryError::Unknown(id) => write!(f, "no command {id:?}"),
             RegistryError::BadMenuPath(p) => write!(f, "bad menu path {p:?}"),
         }
@@ -138,6 +200,16 @@ impl CommandRegistry {
         self.index.get(id).map(|&i| &self.commands[i])
     }
 
+    /// The command an action runs, if it's registered: a built-in by its
+    /// action name, a plugin command by `plugin::Run`'s plugin and command.
+    pub fn for_action(&self, action: &dyn Action) -> Option<&Command> {
+        if let Some(run) = action.as_any().downcast_ref::<Run>() {
+            return self.get(&format!("{}::{}", run.plugin, run.command));
+        }
+        self.get(action.name())
+            .filter(|c| c.target.action().partial_eq(action))
+    }
+
     #[cfg(test)]
     pub fn menus(&self) -> &[MenuSpec] {
         &self.menus
@@ -146,6 +218,19 @@ impl CommandRegistry {
     pub fn add(&mut self, command: Command) -> Result<(), RegistryError> {
         if self.index.contains_key(&command.id) {
             return Err(RegistryError::Duplicate(command.id));
+        }
+        let missing = if command.icon.trim().is_empty() {
+            Some("icon")
+        } else if command.help.trim().is_empty() {
+            Some("help")
+        } else {
+            None
+        };
+        if let Some(missing) = missing {
+            return Err(RegistryError::Incomplete {
+                id: command.id,
+                missing,
+            });
         }
         self.index.insert(command.id.clone(), self.commands.len());
         self.commands.push(command);
@@ -169,32 +254,6 @@ impl CommandRegistry {
         check(self, &menu.entries)?;
         self.menus.push(menu);
         Ok(())
-    }
-
-    /// Register a plugin command as `<plugin>::<command>`, and place it in
-    /// the menus when `menu` names a path such as `"Tools/Workpapers"`.
-    pub fn add_plugin_command(
-        &mut self,
-        plugin: &str,
-        command: &str,
-        label: &str,
-        category: &str,
-        menu: Option<&str>,
-    ) -> Result<String, RegistryError> {
-        let id = format!("{plugin}::{command}");
-        self.add_placed(
-            Command {
-                id: id.clone(),
-                label: label.to_string(),
-                category: category.to_string(),
-                target: Target::Plugin {
-                    plugin: plugin.to_string(),
-                    command: command.to_string(),
-                },
-            },
-            menu,
-        )?;
-        Ok(id)
     }
 
     /// Register a command and, when `menu` names a path such as
@@ -382,15 +441,27 @@ fn same_name(menu: &str, name: &str) -> bool {
 }
 
 /// Every registered command, in registration (built-ins: menu) order, as
-/// the command palette lists them.
-pub fn palette_commands(cx: &App) -> Vec<sheaf_ui::palette::Command> {
+/// the command palette lists them, with their state in `window` given its
+/// `facts`. Call before the palette takes focus: a command is enabled only
+/// if its action has a handler where focus is.
+pub fn palette_commands(
+    facts: &crate::availability::Facts,
+    window: &gpui::Window,
+    cx: &App,
+) -> Vec<sheaf_ui::palette::Command> {
     cx.global::<CommandRegistry>()
         .commands()
         .iter()
         .map(|c| {
             let action = c.target.action();
+            let state = crate::availability::state(c, facts);
             sheaf_ui::palette::Command {
+                enabled: state.enabled && window.is_action_available(action.as_ref(), cx),
+                checked: state.checked,
                 id: c.id.clone(),
+                icon: c.icon.clone().into(),
+                help: c.help.clone(),
+                keywords: c.keywords.clone(),
                 category: c.category.clone(),
                 label: parse_label(&c.label).0.trim_end_matches('…').to_string(),
                 shortcut: sheaf_ui::menu_bar::shortcut(action.as_ref(), cx).map(|s| s.to_string()),
@@ -404,6 +475,34 @@ pub fn palette_commands(cx: &App) -> Vec<sheaf_ui::palette::Command> {
 mod tests {
     use super::*;
     use crate::{About, Save};
+
+    /// Register a plugin command the way `plugins.rs` does.
+    fn add_plugin(
+        reg: &mut CommandRegistry,
+        plugin: &str,
+        command: &str,
+        label: &str,
+        category: &str,
+        menu: Option<&str>,
+    ) -> Result<String, RegistryError> {
+        let id = format!("{plugin}::{command}");
+        reg.add_placed(
+            Command {
+                id: id.clone(),
+                label: label.into(),
+                category: category.into(),
+                icon: "plugin-icons/x.svg".into(),
+                help: "Does a thing.".into(),
+                keywords: Vec::new(),
+                when: Vec::new(),
+                enabled: None,
+                checked: None,
+                target: Target::plugin(plugin, command),
+            },
+            menu,
+        )?;
+        Ok(id)
+    }
 
     fn names(entries: &[MenuEntry]) -> Vec<String> {
         entries
@@ -451,13 +550,12 @@ mod tests {
     fn plugin_cannot_shadow_builtin_or_another_plugin() {
         let mut reg = CommandRegistry::builtin();
         assert_eq!(
-            reg.add_plugin_command("docview", "Save", "Save", "File", None),
+            add_plugin(&mut reg, "docview", "Save", "Save", "File", None),
             Err(RegistryError::Duplicate("docview::Save".into()))
         );
-        reg.add_plugin_command("tax", "scan", "Scan", "Tax", None)
-            .unwrap();
+        add_plugin(&mut reg, "tax", "scan", "Scan", "Tax", None).unwrap();
         assert_eq!(
-            reg.add_plugin_command("tax", "scan", "Scan again", "Tax", None),
+            add_plugin(&mut reg, "tax", "scan", "Scan again", "Tax", None),
             Err(RegistryError::Duplicate("tax::scan".into()))
         );
         // The built-in is untouched.
@@ -473,7 +571,8 @@ mod tests {
     #[test]
     fn plugin_menu_paths() {
         let mut reg = CommandRegistry::builtin();
-        reg.add_plugin_command(
+        add_plugin(
+            &mut reg,
             "wp",
             "tick",
             "Tick All",
@@ -481,8 +580,15 @@ mod tests {
             Some("tools/Workpapers"),
         )
         .unwrap();
-        reg.add_plugin_command("wp", "foot", "Foot", "Workpapers", Some("Tools/workpapers"))
-            .unwrap();
+        add_plugin(
+            &mut reg,
+            "wp",
+            "foot",
+            "Foot",
+            "Workpapers",
+            Some("Tools/workpapers"),
+        )
+        .unwrap();
         let tools = names(&menu(&reg, "Tools").entries);
         assert_eq!(&tools[tools.len() - 2..], ["-", "Workpapers/"]);
         let MenuEntry::Submenu(wp) = menu(&reg, "Tools").entries.last().unwrap() else {
@@ -491,14 +597,13 @@ mod tests {
         assert_eq!(names(&wp.entries), ["Tick All", "Foot"]);
 
         // A new top-level menu lands before Help.
-        reg.add_plugin_command("tax", "scan", "Scan", "Tax", Some("Tax"))
-            .unwrap();
+        add_plugin(&mut reg, "tax", "scan", "Scan", "Tax", Some("Tax")).unwrap();
         let order: Vec<String> = reg.menus().iter().map(|m| parse_label(&m.name).0).collect();
         let tax = order.iter().position(|n| n == "Tax").unwrap();
         assert_eq!(order[tax + 1], "Help");
 
         assert_eq!(
-            reg.add_plugin_command("tax", "x", "X", "Tax", Some("Tax//Y")),
+            add_plugin(&mut reg, "tax", "x", "X", "Tax", Some("Tax//Y")),
             Err(RegistryError::BadMenuPath("Tax//Y".into()))
         );
         assert!(reg.get("tax::x").is_none(), "nothing registered on error");
@@ -512,12 +617,17 @@ mod tests {
             .map(|m| names(&m.entries))
             .collect();
         let mut reg = CommandRegistry::builtin();
-        reg.add_plugin_command("wp", "tick", "Tick", "WP", Some("Tools/Workpapers"))
-            .unwrap();
-        reg.add_plugin_command("wp", "own", "Own", "WP", Some("Workpapers"))
-            .unwrap();
-        reg.add_plugin_command("tax", "scan", "Scan", "Tax", Some("Tools/Tax"))
-            .unwrap();
+        add_plugin(
+            &mut reg,
+            "wp",
+            "tick",
+            "Tick",
+            "WP",
+            Some("Tools/Workpapers"),
+        )
+        .unwrap();
+        add_plugin(&mut reg, "wp", "own", "Own", "WP", Some("Workpapers")).unwrap();
+        add_plugin(&mut reg, "tax", "scan", "Scan", "Tax", Some("Tools/Tax")).unwrap();
         reg.remove_plugin("wp");
         assert!(reg.get("wp::tick").is_none());
         assert!(reg.get("tax::scan").is_some());
@@ -530,8 +640,7 @@ mod tests {
     #[test]
     fn plugin_command_dispatches_run() {
         let mut reg = CommandRegistry::default();
-        reg.add_plugin_command("tax", "scan", "Scan", "Tax", None)
-            .unwrap();
+        add_plugin(&mut reg, "tax", "scan", "Scan", "Tax", None).unwrap();
         let action = reg.get("tax::scan").unwrap().target.action();
         assert_eq!(action.name(), "plugin::Run");
         assert!(action.partial_eq(&Run {
@@ -539,6 +648,42 @@ mod tests {
             command: "scan".into(),
             args: None,
         }));
+    }
+
+    #[test]
+    fn commands_need_an_icon_and_help() {
+        let mut reg = CommandRegistry::default();
+        let cmd = |icon: &str, help: &str| Command {
+            id: "tax::scan".into(),
+            label: "Scan".into(),
+            category: "Tax".into(),
+            icon: icon.into(),
+            help: help.into(),
+            keywords: Vec::new(),
+            when: Vec::new(),
+            enabled: None,
+            checked: None,
+            target: Target::plugin("tax", "scan"),
+        };
+        let incomplete = |missing| {
+            Err(RegistryError::Incomplete {
+                id: "tax::scan".into(),
+                missing,
+            })
+        };
+        assert_eq!(reg.add(cmd("", "Scans.")), incomplete("icon"));
+        assert_eq!(reg.add(cmd("plugin-icons/x.svg", " ")), incomplete("help"));
+        assert!(reg.get("tax::scan").is_none());
+        reg.add(cmd("plugin-icons/x.svg", "Scans.")).unwrap();
+        // A built-in without an entry in command_info.rs is refused too.
+        let unknown = Command::builtin("docview::Nope", "Nope", "File", Box::new(Save));
+        assert!(matches!(
+            reg.add(unknown),
+            Err(RegistryError::Incomplete {
+                missing: "icon",
+                ..
+            })
+        ));
     }
 
     #[test]

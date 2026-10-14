@@ -7,6 +7,11 @@
 //! opens a menu directly, arrows move, Enter runs, Esc backs out, and a
 //! letter runs the item it underlines.
 //!
+//! The app can say more about each item through [`MenuBar::set_state`]:
+//! whether it's enabled now (Undo with nothing to undo isn't) and, for
+//! items that switch something on and off, whether it's on (drawn with a
+//! checkmark).
+//!
 //! While active the bar holds keyboard focus. The element focused before
 //! that is remembered: items are enabled and dispatched as if it still had
 //! focus, and it gets focus back when the bar closes.
@@ -20,6 +25,30 @@ use gpui::{
 use crate::theme;
 
 pub const KEY_CONTEXT: &str = "MenuBar";
+
+/// What the app says about a menu item right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ItemState {
+    pub enabled: bool,
+    /// For an item that switches something on and off: whether it's on.
+    pub checked: Option<bool>,
+}
+
+impl Default for ItemState {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            checked: None,
+        }
+    }
+}
+
+/// Asked about each item as it's drawn or stepped over.
+pub type StateFn = std::rc::Rc<dyn Fn(&dyn Action, &Window, &App) -> ItemState>;
+
+/// Called when an item is right-clicked (after the menu closes), with its
+/// action and the pointer's window position.
+pub type SecondaryFn = std::rc::Rc<dyn Fn(&dyn Action, gpui::Point<Pixels>, &mut Window, &mut App)>;
 
 actions!(
     menu_bar,
@@ -50,6 +79,12 @@ pub struct MenuBar {
     sub_item: Option<usize>,
     /// Activated from the keyboard: show mnemonic underlines.
     keyboard: bool,
+    /// Highlight the first enabled item on the next draw. Deferred rather
+    /// than done when the menu opens: the app's [`StateFn`] may read the
+    /// view that asked for it to open.
+    pick_first: bool,
+    state: Option<StateFn>,
+    secondary: Option<SecondaryFn>,
     /// Bounds of the bar from the last frame, so a click on a title isn't
     /// also treated as a click outside the open dropdown.
     bounds: Bounds<Pixels>,
@@ -76,10 +111,30 @@ impl MenuBar {
             sub: None,
             sub_item: None,
             keyboard: false,
+            pick_first: false,
+            state: None,
+            secondary: None,
             bounds: Bounds::default(),
             sub_bounds: Bounds::default(),
             _blur: blur,
         }
+    }
+
+    /// Ask `state` about items from now on.
+    pub fn set_state(&mut self, state: StateFn) {
+        self.state = Some(state);
+    }
+
+    /// Call `f` when an item is right-clicked.
+    pub fn set_on_secondary(&mut self, f: SecondaryFn) {
+        self.secondary = Some(f);
+    }
+
+    fn app_state(&self, action: &dyn Action, window: &Window, cx: &App) -> ItemState {
+        self.state
+            .as_ref()
+            .map(|f| f(action, window, cx))
+            .unwrap_or_default()
     }
 
     /// Pick up changed menus (a plugin turned on or off).
@@ -129,11 +184,8 @@ impl MenuBar {
         self.keyboard = keyboard;
         self.sub = None;
         self.sub_item = None;
-        self.item = if keyboard {
-            self.step_item(None, 1, window, cx)
-        } else {
-            None
-        };
+        self.item = None;
+        self.pick_first = keyboard;
         cx.notify();
     }
 
@@ -189,7 +241,11 @@ impl MenuBar {
         match item {
             OwnedMenuItem::Action {
                 action, disabled, ..
-            } => !disabled && self.enabled(action.as_ref(), window, cx),
+            } => {
+                !disabled
+                    && self.enabled(action.as_ref(), window, cx)
+                    && self.app_state(action.as_ref(), window, cx).enabled
+            }
             OwnedMenuItem::Submenu(m) => m.items.iter().any(|i| self.item_enabled(i, window, cx)),
             _ => false,
         }
@@ -399,6 +455,28 @@ impl MenuBar {
         cx: &mut Context<Self>,
     ) -> Vec<gpui::AnyElement> {
         let highlighted_ix = if sub { self.sub_item } else { self.item };
+        let checks: Vec<Option<bool>> = items
+            .iter()
+            .map(|item| match item {
+                OwnedMenuItem::Action {
+                    action, checked, ..
+                } => self
+                    .app_state(action.as_ref(), window, cx)
+                    .checked
+                    .or(checked.then_some(true)),
+                _ => None,
+            })
+            .collect();
+        // A gutter for checkmarks, in menus that have any.
+        let gutter = checks.iter().any(Option::is_some);
+        let check = move |ix: usize| {
+            gutter.then(|| {
+                div()
+                    .w(px(14.0))
+                    .flex_shrink_0()
+                    .when(checks[ix] == Some(true), |d| d.child("✓"))
+            })
+        };
         items
             .iter()
             .enumerate()
@@ -426,6 +504,21 @@ impl MenuBar {
                 };
                 match item {
                     OwnedMenuItem::Action { name, action, .. } => row
+                        .on_mouse_down(MouseButton::Right, {
+                            let action = action.boxed_clone();
+                            cx.listener(move |bar, e: &gpui::MouseDownEvent, window, cx| {
+                                cx.stop_propagation();
+                                let Some(f) = bar.secondary.clone() else {
+                                    return;
+                                };
+                                bar.close(window, cx);
+                                let action = action.boxed_clone();
+                                let at = e.position;
+                                window.defer(cx, move |window, cx| {
+                                    f(action.as_ref(), at, window, cx)
+                                });
+                            })
+                        })
                         .on_mouse_move(cx.listener(move |bar, _, _, cx| {
                             if sub {
                                 if bar.sub_item != Some(ix) {
@@ -446,7 +539,12 @@ impl MenuBar {
                                 bar.run(ix, window, cx)
                             }
                         }))
-                        .child(label(name, self.keyboard))
+                        .child(
+                            div()
+                                .flex()
+                                .children(check(ix))
+                                .child(label(name, self.keyboard)),
+                        )
                         .children(
                             shortcut(action.as_ref(), cx).map(|s| div().text_color(dim).child(s)),
                         )
@@ -463,7 +561,12 @@ impl MenuBar {
                             .on_click(cx.listener(move |bar, _, window, cx| {
                                 bar.open_sub(ix, true, window, cx)
                             }))
-                            .child(label(&m.name, self.keyboard))
+                            .child(
+                                div()
+                                    .flex()
+                                    .children(check(ix))
+                                    .child(label(&m.name, self.keyboard)),
+                            )
                             .child(div().text_color(dim).child("›"))
                             .when(open, |d| {
                                 d.child(
@@ -550,6 +653,9 @@ impl MenuBar {
 
 impl Render for MenuBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if std::mem::take(&mut self.pick_first) && self.item.is_none() {
+            self.item = self.step_item(None, 1, window, cx);
+        }
         let underline = self.keyboard && self.active.is_some() || window.modifiers().alt;
         let titles = self
             .menus
