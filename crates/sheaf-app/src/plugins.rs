@@ -1229,7 +1229,7 @@ mod tests {
         let mut st = PluginState::default();
         let none = manifest("");
         assert!(!st.needs_consent(&none), "nothing to ask");
-        let m = manifest("read = [\"/data\"]\nnetwork = [\"api.example.com\"]");
+        let m = manifest("read = [\"~/data\"]\nnetwork = [\"api.example.com\"]");
         assert!(st.needs_consent(&m));
         assert_eq!(st.granted(&m), Permissions::default());
         st.consent.insert(
@@ -1243,12 +1243,12 @@ mod tests {
         assert_eq!(st.granted(&m), m.permissions);
         // A new version wants more: ask again; meanwhile it gets only what
         // was allowed and it still asks for.
-        let more = manifest("read = [\"/data\", \"/other\"]");
+        let more = manifest("read = [\"~/data\", \"~/other\"]");
         assert!(st.needs_consent(&more));
         assert_eq!(
             st.granted(&more),
             Permissions {
-                read: vec!["/data".into()],
+                read: vec!["~/data".into()],
                 write: vec![],
                 network: vec![],
             }
