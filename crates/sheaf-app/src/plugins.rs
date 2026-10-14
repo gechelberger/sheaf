@@ -15,7 +15,7 @@
 //! `<config dir>/plugins.json` ([`PluginState`]). A plugin asking for files
 //! or the network runs without them until the user says yes.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -55,6 +55,8 @@ pub struct PluginHost {
     pub state: PluginState,
     /// Plugins whose permissions the user hasn't been asked about yet.
     pending_consent: Vec<String>,
+    /// Region events, latest wins per plugin (see `dispatch_event`).
+    regions: Latest<(gpui::WeakEntity<DocView>, sheaf_plugin::DocEvent)>,
     runtime: Option<Arc<Runtime>>,
 }
 
@@ -592,6 +594,14 @@ pub fn dispatch_event(
         E::Saved { path } => (P::Saved(path.display().to_string()), None),
         E::SelectionChanged => (P::SelectionChanged, None),
         E::Closed => (P::Closed, None),
+        E::Region { page, rect } => (
+            P::Region {
+                page: *page,
+                rect: *rect,
+            },
+            None,
+        ),
+        E::RegionCleared => (P::RegionCleared, None),
     };
     let Some(host) = cx.try_global::<PluginHost>() else {
         return;
@@ -605,7 +615,19 @@ pub fn dispatch_event(
         })
         .map(|(id, _)| id.clone())
         .collect();
+    let coalesce = kind == sheaf_plugin::EventKind::Region;
     for id in to {
+        // Live while dragging: a plugin still busy with one region gets
+        // only the newest next, not every mouse move.
+        if coalesce
+            && cx
+                .global_mut::<PluginHost>()
+                .regions
+                .offer(&id, (doc.downgrade(), event.clone()))
+                .is_none()
+        {
+            continue;
+        }
         run(
             &id,
             Call::Event(event.clone()),
@@ -961,6 +983,10 @@ pub fn run(
         presets: presets(cx),
     };
     let what = call.to_string();
+    let region_call = matches!(
+        call,
+        Call::Event(sheaf_plugin::DocEvent::Region { .. } | sheaf_plugin::DocEvent::RegionCleared)
+    );
     let call_kind = match &call {
         Call::Event(_) => CallKind::Event,
         _ => CallKind::User,
@@ -986,11 +1012,11 @@ pub fn run(
 
     let weak = doc.as_ref().map(|d| d.downgrade());
     let plugin_id = plugin_id.to_string();
-    cx.spawn(async move |_, cx| {
+    cx.spawn_in(window, async move |ws, cx| {
         let result = rx
             .await
             .unwrap_or_else(|_| Err(PluginError::Unavailable("its thread stopped".into())));
-        cx.update(|cx| {
+        ws.update_in(cx, |_, window, cx| {
             let doc = weak.and_then(|w| w.upgrade());
             match result {
                 Ok(out) if out.batches.is_empty() && quiet => {}
@@ -1015,9 +1041,70 @@ pub fn run(
                     notice(&doc, format!("{label}: {e}"), cx);
                 }
             }
-        });
+            if region_call {
+                region_done(&plugin_id, window, cx);
+            }
+        })
+        .ok();
     })
     .detach();
+}
+
+/// A plugin finished a region call: send it the newest region event that
+/// arrived meanwhile, if any.
+fn region_done(plugin: &str, window: &mut Window, cx: &mut Context<Workspace>) {
+    let Some((doc, event)) = cx.global_mut::<PluginHost>().regions.done(plugin) else {
+        return;
+    };
+    match doc.upgrade() {
+        Some(doc) => run(plugin, Call::Event(event), Some(doc), window, cx),
+        // The document is gone: nothing more to send.
+        None => {
+            cx.global_mut::<PluginHost>().regions.done(plugin);
+        }
+    }
+}
+
+/// Per-key "latest wins" queue: while a key is busy, newer items replace
+/// the one waiting instead of piling up.
+pub struct Latest<T> {
+    busy: HashSet<String>,
+    waiting: HashMap<String, T>,
+}
+
+impl<T> Default for Latest<T> {
+    fn default() -> Self {
+        Self {
+            busy: HashSet::new(),
+            waiting: HashMap::new(),
+        }
+    }
+}
+
+impl<T> Latest<T> {
+    /// Offer an item: Some(item) to send now (the key is now busy), or
+    /// None if it's waiting behind a call in progress.
+    pub fn offer(&mut self, key: &str, item: T) -> Option<T> {
+        if self.busy.contains(key) {
+            self.waiting.insert(key.to_string(), item);
+            None
+        } else {
+            self.busy.insert(key.to_string());
+            Some(item)
+        }
+    }
+
+    /// The key's call finished: the waiting item to send next (the key
+    /// stays busy), or None (the key is free).
+    pub fn done(&mut self, key: &str) -> Option<T> {
+        match self.waiting.remove(key) {
+            Some(item) => Some(item),
+            None => {
+                self.busy.remove(key);
+                None
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1043,6 +1130,18 @@ mod tests {
             "id = \"p\"\nname = \"P\"\nversion = \"1.0.0\"\napi = \"^0.1\"\n[permissions]\n{perms}"
         ))
         .unwrap()
+    }
+
+    #[test]
+    fn latest_wins_while_busy() {
+        let mut q = Latest::default();
+        assert_eq!(q.offer("p", 1), Some(1), "idle: send now");
+        assert_eq!(q.offer("p", 2), None, "busy: wait");
+        assert_eq!(q.offer("p", 3), None, "replaces 2");
+        assert_eq!(q.offer("other", 9), Some(9), "keys are independent");
+        assert_eq!(q.done("p"), Some(3), "only the newest");
+        assert_eq!(q.done("p"), None, "now idle");
+        assert_eq!(q.offer("p", 4), Some(4));
     }
 
     #[test]

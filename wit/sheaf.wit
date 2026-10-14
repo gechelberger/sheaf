@@ -149,6 +149,9 @@ interface types {
     record annot-ref { page: page-id, id: annot-id }
     record connector-pair { a: page-annot, b: page-annot }
 
+    /// A region the user selected (Shift+drag) on a page.
+    record region { page: page-id, rect: box2 }
+
     /// Something that happened to a document, for plugins that subscribe
     /// (manifest `events`).
     variant doc-event {
@@ -160,6 +163,12 @@ interface types {
         saved(string),
         selection-changed,
         closed,
+        /// The selected region changed, live while the user drags. Sent
+        /// latest-wins: a plugin still busy with one gets only the newest
+        /// next. Subscribe with `"region"`.
+        region(region),
+        /// The region was cleared (also under `"region"`).
+        region-cleared,
     }
 
     /// One change to the document; mirrors sheaf's own edits.
@@ -207,6 +216,10 @@ interface text {
     search: func(page: page-id, query: string, match-case: bool) -> result<list<text-match>, string>;
     /// Boxes of the text under `rect`, merged per line.
     text-boxes: func(page: page-id, rect: box2) -> result<list<box2>, string>;
+    /// The page's words with their boxes, in reading order; only those
+    /// whose box centre is in `rect`, if given. For live work, fetch a
+    /// page's words once and filter yourself.
+    words: func(page: page-id, rect: option<box2>) -> result<list<text-match>, string>;
 }
 
 /// The user's pattern-search presets.
@@ -326,7 +339,8 @@ interface ui {
     /// call's time limit.
     show-form: func(form: form) -> option<list<field-answer>>;
 
-    /// A one-line message in the document's status area.
+    /// A one-line message in the document's status area; an empty message
+    /// clears it.
     notice: func(message: string);
 
     enum icon { none, check, cross, link, warning, info, page }

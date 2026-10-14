@@ -29,6 +29,7 @@ mod plugin_manager;
 mod plugin_panel;
 #[cfg(feature = "plugins")]
 mod plugins;
+mod region;
 mod settings;
 mod text_area;
 mod text_input;

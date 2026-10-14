@@ -139,6 +139,8 @@ pub enum EventKind {
     Saved,
     SelectionChanged,
     Closed,
+    /// Region selected and region cleared.
+    Region,
 }
 
 /// Permissions as concrete directories.

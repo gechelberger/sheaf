@@ -189,6 +189,14 @@ impl DocView {
     /// Clear the notice if it still says `text` (a "working…" message
     /// whose work ended quietly).
     #[cfg_attr(not(feature = "plugins"), allow(dead_code))]
+    pub(crate) fn clear_notice(&mut self, cx: &mut Context<Self>) {
+        if let State::Ready(doc) = &mut self.state {
+            doc.notice = None;
+        }
+        cx.notify();
+    }
+
+    #[cfg_attr(not(feature = "plugins"), allow(dead_code))]
     pub(crate) fn clear_notice_if(&mut self, text: &str, cx: &mut Context<Self>) {
         if let State::Ready(doc) = &mut self.state
             && doc.notice.as_deref() == Some(text)

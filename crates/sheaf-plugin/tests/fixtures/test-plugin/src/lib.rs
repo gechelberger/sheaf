@@ -213,6 +213,8 @@ impl Guest for TestPlugin {
             DocEvent::Saved(p) => format!("saved:{p}"),
             DocEvent::SelectionChanged => "selection".to_string(),
             DocEvent::Closed => "closed".to_string(),
+            DocEvent::Region(r) => format!("region:{}", r.page),
+            DocEvent::RegionCleared => "cleared".to_string(),
         };
         let mut all = storage::get("events").unwrap_or_default();
         if !all.is_empty() {

@@ -381,6 +381,13 @@ impl DocView {
             return;
         };
         window.focus(&self.focus_handle, cx);
+        // Shift+drag selects a region, whatever the tool; a plain click
+        // drops the region and goes on as usual.
+        if ev.modifiers.shift {
+            self.start_region(page, p, cx);
+            return;
+        }
+        self.clear_region(cx);
         // A calculator tape waiting to be placed takes the click, whatever
         // the tool.
         let under = match &self.state {
@@ -513,6 +520,9 @@ impl DocView {
         let Some((page, p)) = self.page_point(ev.position) else {
             return;
         };
+        if self.drag_region(page, p, cx) {
+            return;
+        }
         let tool = self.tool;
         let State::Ready(doc) = &mut self.state else {
             return;
@@ -535,6 +545,9 @@ impl DocView {
         cx: &mut Context<Self>,
     ) {
         if ev.button != MouseButton::Left {
+            return;
+        }
+        if self.end_region(cx) {
             return;
         }
         let tool = self.tool;

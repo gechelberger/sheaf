@@ -990,3 +990,66 @@ fn bookmark_from_pattern_bundled_plugin() {
     };
     assert_eq!(*default, 1, "last time used the Invoice preset");
 }
+
+#[test]
+fn subtotal_bundled_plugin() {
+    let src = workspace_root().join("plugins/subtotal");
+    let wasm = build_plugin(&src, "subtotal.wasm");
+    let dir = install("subtotal", &src, &wasm);
+    let p = Runtime::new(Limits::default()).unwrap().load(
+        dir.clone(),
+        Manifest::load(&dir).unwrap(),
+        LoadOptions::default(),
+    );
+    assert!(
+        p.manifest()
+            .events
+            .contains(&sheaf_plugin::EventKind::Region)
+    );
+    // The fake engine puts line n at y = 10 + 100n, word x at its offset.
+    let text: Arc<dyn TextSource> = Arc::new(Pages(vec![
+        "Rent $1,200.00 W-2\nFees (34.50) 2025\nTotal 9,999",
+    ]));
+    let d = doc(1);
+    let page = d.page(0).unwrap().id;
+    let ui = Arc::new(FakeUi::default());
+    let ctx = || CallContext {
+        doc: Some(DocContext {
+            path: "ledger.pdf".into(),
+            snapshot: d.snapshot(),
+            selection: Vec::new(),
+            current_page: None,
+            text: text.clone(),
+            ocr: None,
+        }),
+        ui: Some(ui.clone()),
+        presets: Vec::new(),
+    };
+    let region = |x: f32, y: f32, w: f32, h: f32| {
+        Call::Event(DocEvent::Region {
+            page,
+            rect: sheaf_doc::Box2 { x, y, w, h },
+        })
+    };
+    let call = |c| block_on(p.call(c, ctx())).unwrap().unwrap();
+    // Lines 0 and 1: 1,200.00 + (34.50) + 2025.
+    call(region(0.0, 0.0, 100.0, 150.0));
+    assert_eq!(
+        ui.notices.lock().unwrap().last().unwrap(),
+        "Sum 3,190.50 · 3 numbers"
+    );
+    // Just the first line's amount.
+    call(region(0.0, 0.0, 100.0, 50.0));
+    assert_eq!(
+        ui.notices.lock().unwrap().last().unwrap(),
+        "Sum 1,200.00 · 1 number"
+    );
+    // Nothing there.
+    call(region(500.0, 500.0, 10.0, 10.0));
+    assert_eq!(
+        ui.notices.lock().unwrap().last().unwrap(),
+        "Subtotal: no numbers in the selection"
+    );
+    call(Call::Event(DocEvent::RegionCleared));
+    assert_eq!(ui.notices.lock().unwrap().last().unwrap(), "");
+}

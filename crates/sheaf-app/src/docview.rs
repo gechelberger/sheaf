@@ -405,6 +405,14 @@ pub enum DocEvent {
     },
     /// The set of selected pages changed.
     SelectionChanged,
+    /// The selected region (Shift+drag) changed: live while dragging.
+    Region {
+        page: PageId,
+        /// Source-displayed space, like annotations.
+        rect: Box2,
+    },
+    /// The region was cleared.
+    RegionCleared,
     /// The tab closed. Emitted by the workspace just before it drops the view.
     Closed,
 }
@@ -454,6 +462,8 @@ pub struct DocView {
     /// Set while a plugin's edits are applied, so its own edits aren't
     /// reported back to it.
     pub(crate) edit_source: Option<String>,
+    /// Shift+drag region (see region.rs).
+    pub(crate) region: Option<crate::region::Region>,
     /// Rows of plugin panels for this document, by `<plugin>.<panel>`.
     #[cfg(feature = "plugins")]
     pub(crate) plugin_panels: HashMap<String, crate::plugin_panel::PluginPanelState>,
@@ -527,6 +537,7 @@ impl DocView {
             tool_color: [255, 230, 0],
             tick_glyph: "✓".into(),
             edit_source: None,
+            region: None,
             #[cfg(feature = "plugins")]
             plugin_panels: HashMap::new(),
         };
@@ -1029,6 +1040,7 @@ impl DocView {
         if self.prune_selection() {
             cx.emit(DocEvent::SelectionChanged);
         }
+        self.prune_region(cx);
         self.schedule_autosave(cx);
         let plugin = self.edit_source.clone();
         cx.emit(DocEvent::Edited {
@@ -2741,6 +2753,7 @@ impl Render for DocView {
         let (tool, tool_color) = (self.tool, self.tool_color);
         let mut body = None;
         let mut wants: Vec<(PageRef, RenderRequest)> = Vec::new();
+        let region = self.region.clone();
         let status: SharedString = match &mut self.state {
             State::Loading => "Opening…".into(),
             State::Failed(e) => format!("Failed: {e}").into(),
@@ -3229,6 +3242,15 @@ impl Render for DocView {
                                     k,
                                 ));
                             }
+                            if let Some(overlay) = crate::region::overlay(
+                                region.as_ref(),
+                                pl.pref.id,
+                                src,
+                                pl.pref.rotation,
+                                k,
+                            ) {
+                                page_div = page_div.child(overlay);
+                            }
                             if let Some(preview) = DocView::drag_preview(
                                 doc,
                                 tool,
@@ -3351,7 +3373,9 @@ impl Render for DocView {
             .on_action(cx.listener(|v, _: &ZoomFitPage, _, cx| v.set_zoom(Zoom::FitPage, None, cx)))
             .on_action(cx.listener(|v, _: &Find, window, cx| v.open_search(window, cx)))
             .on_action(cx.listener(|v, _: &CloseSearch, window, cx| {
-                if v.search.is_some() {
+                if v.clear_region(cx) {
+                    // Esc drops a selected region first.
+                } else if v.search.is_some() {
                     v.close_search(window, cx)
                 } else if v.cancel_ocr(cx) {
                     // Esc during a Recognize Text run stops it.

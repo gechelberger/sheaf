@@ -122,7 +122,7 @@ running any plugin code.
 | `api` | Semver requirement on the API, e.g. `"^0.1"`. sheaf refuses a plugin whose range it doesn't satisfy. |
 | `[[commands]]` | `id`, `label` (`&` marks the menu mnemonic), optional `category` (palette prefix; defaults to `name`), `menu` (a path like `"Tools/Workpapers"`; menus and submenus are created as needed), `keys` (a default binding in `keymap.json` syntax, active anywhere in the window; the user's keymap overrides it). |
 | `[[panels]]` | `id`, `label`. Each gets a dock tab and a **View → Plugin Panels** entry. |
-| `events` | Document events to receive: any of `"opened"`, `"edited"`, `"saved"`, `"selection-changed"`, `"closed"`. |
+| `events` | Document events to receive: any of `"opened"`, `"edited"`, `"saved"`, `"selection-changed"`, `"closed"`, `"region"` (the region the user Shift+drags on a page, live while dragging, and its clearing). |
 | `[[presets]]` | `name`, `regex`: pattern-search presets shown (read-only) in the Patterns panel. |
 | `[marks]` | `tickmarks = [{ name, marks = ["Σ", …] }]` and `stamps = ["PBC", …]` for the markup toolbar. |
 | `[permissions]` | `read = ["~/Documents/Clients"]`, `write = [...]`, `network = false`. Absolute paths or `~/…`. See [Trust model](#trust-model). |
@@ -154,7 +154,8 @@ while the document is open; they aren't page numbers. With no document open,
 `path` is none and the lists are empty.
 
 **`text`**: `page-text`, `pattern-search(page, regex)`,
-`search(page, query, match-case)` and `text-boxes(page, rect)`. Matches come
+`search(page, query, match-case)`, `text-boxes(page, rect)` and
+`words(page, rect?)` (every word with its box). Matches come
 with their boxes in page coordinates: points, top-left origin, the page as
 the file displays it (the same space annotations use). Pattern matches also
 carry their capture groups. OCR text the user hasn't saved yet counts.
@@ -176,7 +177,7 @@ children. `Batch` in the SDK builds the common ones (`bookmark_at`,
 if they cancel). Fields: text, number (with optional bounds), choice,
 checkbox, file (open or save) and page range (answered as page ids).
 `FormBuilder` in the SDK builds forms and reads answers. `notice(message)`
-shows a line in the status area. `set-panel(panel, rows)` replaces the rows
+shows a line in the status area (an empty message clears it). `set-panel(panel, rows)` replaces the rows
 of one of your panels for the current document. Each row has a label,
 detail, badge, icon, indent, an optional page (clicking the row goes there)
 and buttons that call `panel-action`.
@@ -210,7 +211,10 @@ when there is none). Uninstalling keeps this data.
   exits or the plugin is turned off. Keep anything that must outlive that in
   `storage`.
 - **Events** arrive like any other call. A plugin isn't told about edits it
-  made itself.
+  made itself. Region events are latest-wins: while a plugin is handling
+  one, newer ones replace each other and only the newest is sent next. For
+  live work, fetch a page's words once and filter them yourself, as
+  `plugins/subtotal` does.
 
 ## Versioning
 

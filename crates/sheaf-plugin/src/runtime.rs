@@ -90,7 +90,7 @@ pub trait OcrSource: Send + Sync {
 }
 
 /// A document event, for plugins that subscribe to it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum DocEvent {
     Opened,
     /// The undo label.
@@ -99,6 +99,12 @@ pub enum DocEvent {
     Saved(String),
     SelectionChanged,
     Closed,
+    /// A region on a page, in its displayed space.
+    Region {
+        page: PageId,
+        rect: sheaf_doc::Box2,
+    },
+    RegionCleared,
 }
 
 impl DocEvent {
@@ -110,6 +116,7 @@ impl DocEvent {
             DocEvent::Saved(_) => EventKind::Saved,
             DocEvent::SelectionChanged => EventKind::SelectionChanged,
             DocEvent::Closed => EventKind::Closed,
+            DocEvent::Region { .. } | DocEvent::RegionCleared => EventKind::Region,
         }
     }
 }
@@ -151,7 +158,7 @@ pub struct CallContext {
 }
 
 /// One entry point into a plugin.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Call {
     Command {
         id: String,
@@ -691,6 +698,45 @@ impl api::text::Host for HostState {
                 .map_err(|e| format!("{e:#}"))?,
         };
         Ok(found.into_iter().map(convert::text_match_to_wit).collect())
+    }
+
+    fn words(
+        &mut self,
+        page: u64,
+        rect: Option<api::types::Box2>,
+    ) -> Result<Vec<api::types::TextMatch>, String> {
+        static WORD: std::sync::LazyLock<Arc<regex::Regex>> =
+            std::sync::LazyLock::new(|| Arc::new(regex::Regex::new(r"\S+").unwrap()));
+        let (d, p) = self.page_ref(page)?;
+        let words: Vec<TextMatch> = match d.snapshot.state.text_layer(p.id) {
+            Some(layer) => sheaf_doc::text_layer::pattern_search(layer, &WORD)
+                .into_iter()
+                .map(|h| TextMatch {
+                    text: h.text,
+                    rects: h.rects,
+                    groups: Vec::new(),
+                })
+                .collect(),
+            None => d
+                .text
+                .pattern_search(p.source, p.index, &WORD)
+                .map_err(|e| format!("{e:#}"))?,
+        };
+        let within = |m: &TextMatch| match rect {
+            None => true,
+            Some(r) => m.rects.first().is_some_and(|b| {
+                let (cx, cy) = (b.x + b.w / 2.0, b.y + b.h / 2.0);
+                cx >= r.x && cx <= r.x + r.w && cy >= r.y && cy <= r.y + r.h
+            }),
+        };
+        Ok(words
+            .into_iter()
+            .filter(within)
+            .map(|mut m| {
+                m.groups.clear();
+                convert::text_match_to_wit(m)
+            })
+            .collect())
     }
 
     fn text_boxes(

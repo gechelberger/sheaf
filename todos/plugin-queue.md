@@ -35,7 +35,15 @@ each match gets a bookmark at its position, titled from the match.
     placement) in storage; offer the user's Patterns presets in a choice
     beside a custom pattern (needs `patterns.presets()`).
 
-### 2. Subtotal (`subtotal`; was "Footing Checker")
+### 2. Subtotal (`subtotal`; was "Footing Checker") — done 2026-10-13
+Landed with: core region selection (Shift+drag with any tool; the region
+stays until Escape or a plain click; `region.rs`), a `region` event for
+plugins (region and region-cleared, coalesced latest-wins per plugin),
+`text.words(page, rect?)` (named `words` rather than `text-in-rect`: whole
+page when no rect, so plugins can cache), and an empty `ui.notice` clearing
+the status line. The plugin caches each page's numbers per document and
+drops the cache on edits; sums are exact fixed-point to 4 decimals.
+
 Drag a region; the plugin reads every number in it and shows the total in
 the status bar, like Excel's status-bar sum. Needs the region API (see API
 additions).

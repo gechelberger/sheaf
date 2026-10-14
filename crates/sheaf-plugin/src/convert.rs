@@ -341,6 +341,11 @@ pub fn event_to_wit(e: &DocEvent) -> w::DocEvent {
         DocEvent::Saved(p) => w::DocEvent::Saved(p.clone()),
         DocEvent::SelectionChanged => w::DocEvent::SelectionChanged,
         DocEvent::Closed => w::DocEvent::Closed,
+        DocEvent::Region { page, rect } => w::DocEvent::Region(w::Region {
+            page: page.0,
+            rect: box_to_wit(*rect),
+        }),
+        DocEvent::RegionCleared => w::DocEvent::RegionCleared,
     }
 }
 

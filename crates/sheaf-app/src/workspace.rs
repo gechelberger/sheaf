@@ -728,7 +728,13 @@ impl Workspace {
         match req {
             UiRequest::Notice(msg) => {
                 if let Some(d) = doc {
-                    d.update(cx, |d, cx| d.set_notice(msg, cx));
+                    d.update(cx, |d, cx| {
+                        if msg.trim().is_empty() {
+                            d.clear_notice(cx)
+                        } else {
+                            d.set_notice(msg, cx)
+                        }
+                    });
                 }
             }
             UiRequest::Panel(panel, rows) => {

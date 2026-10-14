@@ -1,0 +1,6 @@
+id = "subtotal"
+name = "Subtotal"
+version = "0.1.0"
+api = "^0.1"
+description = "Shift+drag over numbers on a page to see their sum and count in the status bar, live as you drag."
+events = ["region", "edited"]
