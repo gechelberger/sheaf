@@ -22,6 +22,10 @@ const GAP: f32 = 4.0;
 const SEPARATOR: f32 = 9.0;
 /// Padding at each end of the bar.
 const PAD: f32 = 8.0;
+/// The drag handle at the start of the bar.
+const GRIP: f32 = 10.0;
+/// The bar's thickness across its axis.
+pub const THICKNESS: f32 = BUTTON + 8.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Orientation {
@@ -74,6 +78,12 @@ pub enum ToolbarEvent {
         item: Option<usize>,
         position: Point<Pixels>,
     },
+    /// The grip was pressed at `position`; `offset` is where in the bar.
+    /// The host moves the bar while the button is down.
+    Grab {
+        position: Point<Pixels>,
+        offset: Point<Pixels>,
+    },
 }
 
 pub struct Toolbar {
@@ -81,6 +91,8 @@ pub struct Toolbar {
     orientation: Orientation,
     /// Space along the bar, measured last frame.
     extent: Option<f32>,
+    /// Where the bar was drawn last frame, in the window.
+    origin: Point<Pixels>,
     overflow_open: bool,
 }
 
@@ -92,6 +104,7 @@ impl Toolbar {
             items: Vec::new(),
             orientation,
             extent: None,
+            origin: Point::default(),
             overflow_open: false,
         }
     }
@@ -110,36 +123,74 @@ impl Toolbar {
         self.orientation
     }
 
-    /// The bar's length along its axis with every item showing.
+    /// The bar's length along its axis with every item it can hold
+    /// showing (plus `»` when some can't).
     pub fn natural_length(&self) -> f32 {
-        natural(&self.items)
+        let on: Vec<&Item> = self.items.iter().filter(|i| self.on_bar(i)).collect();
+        let along: f32 = on.iter().map(|i| i.length() + GAP).sum();
+        let more = if on.len() < self.items.len() {
+            BUTTON + GAP
+        } else {
+            0.0
+        };
+        2.0 * PAD + GRIP + along + more
     }
 
-    /// How many leading items fit in `extent` px; the rest overflow.
-    fn fits(&self) -> usize {
-        let Some(extent) = self.extent else {
-            return self.items.len();
+    /// Whether an item can sit on the bar at all: widgets are drawn
+    /// across, so a vertical bar lists them under `»`.
+    fn on_bar(&self, item: &Item) -> bool {
+        !(self.orientation == Orientation::Vertical && matches!(item, Item::Widget { .. }))
+    }
+
+    /// Which items show on the bar; the rest go under `»`. Items fit in
+    /// order: the first that doesn't, and everything after it, overflow.
+    /// Separators never start or end the bar or sit next to each other.
+    fn split(&self) -> Vec<bool> {
+        let candidates: Vec<bool> = self.items.iter().map(|i| self.on_bar(i)).collect();
+        let all_fit =
+            candidates.iter().all(|&c| c) && self.extent.is_none_or(|e| natural(&self.items) <= e);
+        let mut shown = if all_fit {
+            candidates
+        } else {
+            // Leave room for the overflow button.
+            let room = self.extent.unwrap_or(f32::INFINITY) - 2.0 * PAD - GRIP - GAP - BUTTON - GAP;
+            let mut used = 0.0;
+            let mut full = false;
+            self.items
+                .iter()
+                .zip(candidates)
+                .map(|(item, candidate)| {
+                    if !candidate || full {
+                        return false;
+                    }
+                    let len = item.length() + GAP;
+                    if used + len > room {
+                        full = true;
+                        return false;
+                    }
+                    used += len;
+                    true
+                })
+                .collect()
         };
-        if natural(&self.items) <= extent {
-            return self.items.len();
-        }
-        // Leave room for the overflow button.
-        let room = extent - 2.0 * PAD - BUTTON - GAP;
-        let mut used = 0.0;
-        let mut n = 0;
-        for item in &self.items {
-            let len = item.length() + GAP;
-            if used + len > room {
-                break;
+        let mut last: Option<usize> = None;
+        for (ix, item) in self.items.iter().enumerate() {
+            if !shown[ix] {
+                continue;
             }
-            used += len;
-            n += 1;
+            let sep = matches!(item, Item::Separator);
+            if sep && last.is_none_or(|l| matches!(self.items[l], Item::Separator)) {
+                shown[ix] = false;
+                continue;
+            }
+            last = Some(ix);
         }
-        // Don't end on a separator.
-        while n > 0 && matches!(self.items[n - 1], Item::Separator) {
-            n -= 1;
+        if let Some(l) = last
+            && matches!(self.items[l], Item::Separator)
+        {
+            shown[l] = false;
         }
-        n
+        shown
     }
 
     fn run(&mut self, action: Box<dyn Action>, cx: &mut Context<Self>) {
@@ -151,7 +202,7 @@ impl Toolbar {
 
 fn natural(items: &[Item]) -> f32 {
     let along: f32 = items.iter().map(|i| i.length() + GAP).sum();
-    2.0 * PAD + (along - GAP).max(0.0)
+    2.0 * PAD + GRIP + along
 }
 
 fn button(ix: usize, b: Button, cx: &mut Context<Toolbar>) -> AnyElement {
@@ -221,18 +272,27 @@ fn separator(vertical: bool) -> AnyElement {
 impl gpui::Render for Toolbar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let vertical = self.orientation == Orientation::Vertical;
-        let fits = self.fits();
-        let mut items = std::mem::take(&mut self.items).into_iter().enumerate();
-        let shown: Vec<AnyElement> = items
-            .by_ref()
-            .take(fits)
-            .map(|(ix, item)| match item {
-                Item::Button(b) => button(ix, b, cx),
-                Item::Separator => separator(vertical),
-                Item::Widget { element, .. } => element,
-            })
-            .collect();
-        let rest: Vec<(usize, Item)> = items.collect();
+        let split = self.split();
+        let mut shown: Vec<AnyElement> = Vec::new();
+        let mut rest: Vec<(usize, Item)> = Vec::new();
+        for (ix, item) in std::mem::take(&mut self.items).into_iter().enumerate() {
+            if split[ix] {
+                shown.push(match item {
+                    Item::Button(b) => button(ix, b, cx),
+                    Item::Separator => separator(vertical),
+                    Item::Widget { element, .. } => element,
+                });
+            } else if !(matches!(item, Item::Separator)
+                && rest
+                    .last()
+                    .is_none_or(|(_, i)| matches!(i, Item::Separator)))
+            {
+                rest.push((ix, item));
+            }
+        }
+        if matches!(rest.last(), Some((_, Item::Separator))) {
+            rest.pop();
+        }
         let overflow = (!rest.is_empty()).then(|| {
             let open = self.overflow_open;
             let rows: Vec<AnyElement> = rest
@@ -308,6 +368,7 @@ impl gpui::Render for Toolbar {
                 };
                 let len = f32::from(len);
                 this.update(cx, |bar, cx| {
+                    bar.origin = bounds.origin;
                     if bar.extent.is_none_or(|e| (e - len).abs() > 0.5) {
                         bar.extent = Some(len);
                         cx.notify();
@@ -338,9 +399,46 @@ impl gpui::Render for Toolbar {
                 }),
             )
             .child(measure)
+            .child(grip(vertical, cx))
             .children(shown)
             .children(overflow)
     }
+}
+
+/// The handle the bar is dragged by: two rows of dots.
+fn grip(vertical: bool, cx: &mut Context<Toolbar>) -> AnyElement {
+    let dots = |n: usize| {
+        div()
+            .flex()
+            .when(!vertical, |d| d.flex_col())
+            .gap(px(2.0))
+            .children((0..n).map(|_| div().size(px(2.0)).rounded_full().bg(theme::TEXT_DIM)))
+    };
+    div()
+        .id("tb-grip")
+        .flex_shrink_0()
+        .when(vertical, |d| d.h(px(GRIP)).w(px(BUTTON)))
+        .when(!vertical, |d| d.w(px(GRIP)).h(px(BUTTON)))
+        .flex()
+        .when(vertical, |d| d.flex_col())
+        .items_center()
+        .justify_center()
+        .gap(px(2.0))
+        .cursor_grab()
+        .tooltip(Tooltip::text("Drag to move the toolbar"))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|bar, e: &gpui::MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                cx.emit(ToolbarEvent::Grab {
+                    position: e.position,
+                    offset: e.position - bar.origin,
+                });
+            }),
+        )
+        .child(dots(4))
+        .child(dots(4))
+        .into_any_element()
 }
 
 fn overflow_row(ix: usize, b: Button, cx: &mut Context<Toolbar>) -> AnyElement {
@@ -410,26 +508,40 @@ mod tests {
 
     #[test]
     fn natural_length_adds_items_gaps_and_padding() {
-        assert_eq!(natural(&[]), 2.0 * PAD);
+        assert_eq!(natural(&[]), 2.0 * PAD + GRIP);
         let items = [widget(100.0), sep(), widget(20.0)];
         assert_eq!(
             natural(&items),
-            2.0 * PAD + 100.0 + (SEPARATOR - GAP) + 20.0 + 2.0 * GAP
+            2.0 * PAD + GRIP + 100.0 + (SEPARATOR - GAP) + 20.0 + 3.0 * GAP
         );
+    }
+
+    fn shown(bar: &Toolbar) -> usize {
+        bar.split().iter().filter(|&&s| s).count()
     }
 
     #[test]
     fn overflow_keeps_what_fits_and_never_ends_on_a_separator() {
         let mut bar = Toolbar::new(Orientation::Horizontal);
         bar.set_items(vec![widget(50.0), widget(50.0), sep(), widget(50.0)]);
-        assert_eq!(bar.fits(), 4, "unmeasured: everything");
+        assert_eq!(shown(&bar), 4, "unmeasured: everything");
         bar.extent = Some(bar.natural_length());
-        assert_eq!(bar.fits(), 4);
+        assert_eq!(shown(&bar), 4);
         // Room for two widgets and the overflow button, and the
         // separator that would follow them is dropped.
-        bar.extent = Some(2.0 * PAD + 2.0 * (50.0 + GAP) + BUTTON + GAP + 3.0);
-        assert_eq!(bar.fits(), 2);
+        bar.extent = Some(2.0 * PAD + GRIP + GAP + 2.0 * (50.0 + GAP) + BUTTON + GAP + 3.0);
+        assert_eq!(bar.split(), [true, true, false, false]);
         bar.extent = Some(10.0);
-        assert_eq!(bar.fits(), 0);
+        assert_eq!(shown(&bar), 0);
+    }
+
+    #[test]
+    fn vertical_bars_list_widgets_under_more() {
+        let mut bar = Toolbar::new(Orientation::Vertical);
+        bar.set_items(vec![sep(), widget(50.0), sep(), widget(5.0), sep()]);
+        assert_eq!(shown(&bar), 0, "only separators would be left");
+        bar.set_items(vec![widget(5.0), sep(), widget(50.0), sep(), widget(5.0)]);
+        bar.orientation = Orientation::Horizontal;
+        assert_eq!(shown(&bar), 5);
     }
 }

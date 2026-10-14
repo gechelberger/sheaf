@@ -92,7 +92,6 @@ impl Entry {
         }
     }
 
-    #[allow(dead_code)] // Saving and docking arrive in slices 5 and 6.
     fn to_json(&self) -> Value {
         match self {
             Entry::Separator => Value::from(SEPARATOR),
@@ -123,7 +122,6 @@ pub enum Dock {
 }
 
 impl Dock {
-    #[allow(dead_code)] // Saving and docking arrive in slices 5 and 6.
     pub fn orientation(self, floating: Orientation) -> Orientation {
         match self {
             Dock::Top | Dock::Bottom => Orientation::Horizontal,
@@ -216,7 +214,6 @@ impl Toolbars {
         &self.bars[0]
     }
 
-    #[allow(dead_code)] // Saving and docking arrive in slices 5 and 6.
     pub fn main_mut(&mut self) -> &mut Spec {
         &mut self.bars[0]
     }
@@ -259,7 +256,6 @@ impl Toolbars {
         (Toolbars { bars }, errors)
     }
 
-    #[allow(dead_code)] // Saving and docking arrive in slices 5 and 6.
     pub fn to_json(&self) -> String {
         let file = ConfigFile {
             toolbars: self
@@ -301,7 +297,6 @@ impl Toolbars {
         }
     }
 
-    #[allow(dead_code)] // Saving and docking arrive in slices 5 and 6.
     pub fn save(&self) -> Result<()> {
         let path = path();
         let dir = path.parent().context("toolbar path has no parent")?;
@@ -342,7 +337,6 @@ pub fn init(cx: &mut App) {
 }
 
 /// Save the toolbars after a change, logging a failure.
-#[allow(dead_code)] // Saving and docking arrive in slices 5 and 6.
 pub fn save(cx: &App) {
     if let Err(e) = cx.global::<Toolbars>().save() {
         log::warn!("saving toolbar.json: {e:#}");

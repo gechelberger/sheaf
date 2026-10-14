@@ -329,6 +329,22 @@ This is the part that makes it worth doing.
      everything after it go into `»`.
 5. Docking to all four edges and floating with drag, dock targets and
    on-screen clamping. Position saved per window.
+   *Done 2026-10-14.* Notes and deviations:
+   - A grip (two rows of dots) starts the bar; pressing it emits
+     `ToolbarEvent::Grab`. While dragging, the bar floats under the
+     pointer and the four edges of the document area show dock targets;
+     dropping within 48px of an edge docks there, anywhere else floats.
+   - Docked bars take space from the document view (top/bottom
+     horizontal, left/right vertical); a floating bar draws over it with
+     a shadow, its length capped to the area and its position clamped
+     4px inside, every frame (so it comes back when the window shrinks).
+   - Vertical bars list widgets (colors, tickmarks) under `»`: they're
+     drawn across. Overflow now drops separators left first, last or
+     doubled by that.
+   - Placement is per window (`Workspace::toolbar_place`); a drop also
+     writes it to `toolbar.json` so new windows start there. Orientation
+     of a floating bar is in the file; the switch comes with slice 6's
+     context menu.
 6. Customize dialog, plus Add/Remove from the context menus of the bar,
    the menu bar and the palette.
 7. Replace the fixed markup toolbar with the default layout; remove the
