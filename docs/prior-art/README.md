@@ -115,7 +115,8 @@ Acrobat for binder work". In priority order:
 - Two parallel UIs (Acrobat's "new" vs classic, Foxit's Classic vs Ribbon).
 - Feature gating by edition (Foxit's "Pro only" labels; Acrobat Standard vs Pro).
 - A floating toolbar that can't be docked (Acrobat's top complaint about its
-  new UI). sheaf's planned toolbar (`todos/toolbar.md`) should dock.
+  new UI). sheaf's planned toolbar ([`todos/toolbar.md`](../../todos/toolbar.md))
+  docks, and its layout is plain shareable text, like Foxit's XML export.
 - A plug-in that breaks on every host upgrade (PDFlyer's main pain point).
   sheaf's plugins are WASM components against our own WIT interface
   (`wit/sheaf.wit`), not the host's internals.
