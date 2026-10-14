@@ -33,7 +33,11 @@ gpui_platform.workspace = true
 anyhow.workspace = true
 env_logger.workspace = true
 log.workspace = true
-image.workspace = true
+image = { workspace = true, features = ["jpeg", "tiff"] }
+# PNG resolution (pHYs) and multi-page TIFF (with CCITT G4) for File > Export.
+png = "0.18"
+tiff = "0.11"
+fax = "0.2"
 smallvec.workspace = true
 futures.workspace = true
 im.workspace = true

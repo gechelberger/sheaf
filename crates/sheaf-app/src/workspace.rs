@@ -287,6 +287,8 @@ pub struct Workspace {
     dock_menu: Option<(Panel, Point<Pixels>)>,
     /// The command palette, while open.
     palette: Option<(Entity<Palette>, Subscription)>,
+    /// File > Export Pages, while open.
+    export: Option<(Entity<crate::export_dialog::ExportDialog>, Subscription)>,
     /// File > Print, while open.
     print: Option<(Entity<crate::print_dialog::PrintDialog>, Subscription)>,
     /// File > Properties, while open.
@@ -356,6 +358,7 @@ impl Workspace {
             resizing: None,
             dock_menu: None,
             palette: None,
+            export: None,
             print: None,
             properties: None,
             ocr_dialog: None,
@@ -851,6 +854,35 @@ impl Workspace {
             &["OK"],
         ));
         crate::recent::forget(&path, cx);
+    }
+
+    fn toggle_export(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.export.take().is_some() {
+            self.focus_active(window, cx);
+            cx.notify();
+            return;
+        }
+        let Some(ctx) = self.doc().and_then(|d| d.read(cx).export_context()) else {
+            return;
+        };
+        let dialog = cx.new(|cx| crate::export_dialog::ExportDialog::new(ctx, window, cx));
+        let sub = cx.subscribe_in(
+            &dialog,
+            window,
+            |ws, _, ev: &crate::export_dialog::ExportEvent, window, cx| {
+                ws.export = None;
+                ws.focus_active(window, cx);
+                if let crate::export_dialog::ExportEvent::Export(spec) = ev
+                    && let Some(doc) = ws.doc().cloned()
+                {
+                    let spec = spec.clone();
+                    doc.update(cx, |d, cx| d.export_pages(spec, window, cx));
+                }
+                cx.notify();
+            },
+        );
+        self.export = Some((dialog, sub));
+        cx.notify();
     }
 
     fn toggle_print(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1432,6 +1464,9 @@ impl Render for Workspace {
             )
             .on_action(cx.listener(|ws, _: &crate::Print, window, cx| ws.toggle_print(window, cx)))
             .on_action(
+                cx.listener(|ws, _: &crate::ExportPages, window, cx| ws.toggle_export(window, cx)),
+            )
+            .on_action(
                 cx.listener(|ws, a: &crate::recent::OpenRecent, window, cx| {
                     ws.open_recent(a.path.clone(), window, cx)
                 }),
@@ -1531,6 +1566,11 @@ impl Render for Workspace {
             )
             .children(
                 self.print
+                    .as_ref()
+                    .map(|(d, _)| deferred(d.clone()).with_priority(2)),
+            )
+            .children(
+                self.export
                     .as_ref()
                     .map(|(d, _)| deferred(d.clone()).with_priority(2)),
             );

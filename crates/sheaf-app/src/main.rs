@@ -12,6 +12,8 @@ mod commands;
 mod comments_panel;
 mod contrib;
 mod docview;
+mod export;
+mod export_dialog;
 mod file_dialog;
 mod goto;
 mod keymap;
@@ -159,7 +161,8 @@ actions!(
         ManagePlugins,
         DocumentProperties,
         ClearRecent,
-        Print
+        Print,
+        ExportPages
     ]
 );
 actions!(
@@ -290,6 +293,8 @@ fn main() {
             let pm = Some("PluginManager");
             let props = Some(properties_dialog::KEY_CONTEXT);
             let pd = Some(print_dialog::KEY_CONTEXT);
+            let ed = Some(export_dialog::KEY_CONTEXT);
+            let ed_keys = Some("ExportDialog && !TextInput");
             let pd_keys = Some("PrintDialog && !TextInput");
             let pf_keys = Some("PluginForm && !TextInput");
             cx.bind_keys([
@@ -380,6 +385,14 @@ fn main() {
                 KeyBinding::new("ctrl-shift-t", RecognizeText, ws),
                 KeyBinding::new("alt-enter", DocumentProperties, ws),
                 KeyBinding::new("ctrl-p", Print, ws),
+                KeyBinding::new("ctrl-shift-e", ExportPages, ws),
+                KeyBinding::new("tab", DialogNext, ed),
+                KeyBinding::new("shift-tab", DialogPrev, ed),
+                KeyBinding::new("left", DialogLeft, ed_keys),
+                KeyBinding::new("right", DialogRight, ed_keys),
+                KeyBinding::new("space", DialogRight, ed_keys),
+                KeyBinding::new("enter", DialogRun, ed_keys),
+                KeyBinding::new("escape", DialogCancel, ed_keys),
                 KeyBinding::new("tab", DialogNext, pd),
                 KeyBinding::new("shift-tab", DialogPrev, pd),
                 KeyBinding::new("left", DialogLeft, pd_keys),

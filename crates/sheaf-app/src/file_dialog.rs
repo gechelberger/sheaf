@@ -7,7 +7,22 @@ use gpui::{App, PathPromptOptions};
 
 type Dialog<T> = oneshot::Receiver<Result<Option<T>>>;
 
+/// Dev: `SHEAF_SCRIPT_PICK` answers every picker with that path, so UI
+/// scripts (see script.rs) can get past them.
+fn scripted() -> Option<PathBuf> {
+    std::env::var_os("SHEAF_SCRIPT_PICK").map(PathBuf::from)
+}
+
+fn answer<T>(value: T) -> Dialog<T> {
+    let (tx, rx) = oneshot::channel();
+    let _ = tx.send(Ok(Some(value)));
+    rx
+}
+
 pub fn open(cx: &App, options: PathPromptOptions) -> Dialog<Vec<PathBuf>> {
+    if let Some(p) = scripted() {
+        return answer(vec![p]);
+    }
     #[cfg(target_os = "linux")]
     let command = {
         let mut command = linux::command();
@@ -35,6 +50,9 @@ pub fn open(cx: &App, options: PathPromptOptions) -> Dialog<Vec<PathBuf>> {
 }
 
 pub fn save(cx: &App, directory: &Path, suggested_name: Option<&str>) -> Dialog<PathBuf> {
+    if let Some(p) = scripted() {
+        return answer(p);
+    }
     let rx = cx.prompt_for_new_path(directory, suggested_name);
     #[cfg(target_os = "linux")]
     {

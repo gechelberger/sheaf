@@ -122,6 +122,7 @@ fn builtin_menus() -> Vec<(&'static str, Vec<Item>)> {
                 item("Save &As…", SaveAs),
                 item("&Export Clean Copy…", ExportCleanCopy),
                 item("Export &Flattened Copy…", ExportFlattened),
+                item("Export Pa&ges…", ExportPages),
                 sep(),
                 item("&Print…", Print),
                 item("Propert&ies…", DocumentProperties),

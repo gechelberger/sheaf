@@ -20,6 +20,9 @@
 //!   "plugins" | "region" | "view" | "layout" | "focus"}`: print state as `SCRIPT <what>: …` lines.
 //! - `{"quit": true}`
 //!
+//! File pickers can't be driven; set `SHEAF_SCRIPT_PICK=<path>` and every
+//! open, folder and save picker answers with that path.
+//!
 //! Output goes to stderr. Never part of normal use.
 
 use std::path::PathBuf;
