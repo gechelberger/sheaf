@@ -16,6 +16,7 @@ sheaf-scan.workspace = true
 sheaf-ocr.workspace = true
 anyhow.workspace = true
 log.workspace = true
+regex.workspace = true
 serde.workspace = true
 image = { workspace = true, features = ["jpeg"] }
 # PNG resolution (pHYs) and multi-page TIFF for export.

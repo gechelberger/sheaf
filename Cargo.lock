@@ -6554,6 +6554,7 @@ dependencies = [
  "log",
  "lopdf",
  "png 0.18.1",
+ "regex",
  "serde",
  "serde_json",
  "sheaf-core",
