@@ -575,7 +575,10 @@ pub fn ask_consent(window: &mut Window, cx: &mut Context<Workspace>) {
                     gpui::PromptLevel::Info,
                     &format!("The “{name}” plugin wants to:"),
                     Some(&detail),
-                    &["Allow", "Don't Allow"],
+                    &[
+                        gpui::PromptButton::new("Allow"),
+                        gpui::PromptButton::cancel("Don't Allow"),
+                    ],
                 )
             });
             let Ok(rx) = answer else { return };

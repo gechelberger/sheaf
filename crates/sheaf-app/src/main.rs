@@ -439,6 +439,7 @@ fn main() {
                 eprintln!("keymap.json: {e}");
             }
             cx.set_menus(menus::app_menus(cx));
+            prompts::install(cx);
 
             let mut groups = window_paths(cli.paths, cli.separate_windows).into_iter();
             let password = cli.password.clone();
