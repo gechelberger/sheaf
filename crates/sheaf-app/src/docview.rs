@@ -2150,17 +2150,45 @@ impl DocView {
         .detach();
     }
 
+    /// Where inserted pages go by default: after the current page, or
+    /// after the last selected page. The page they go before (None: the
+    /// end).
+    pub(crate) fn insert_point(&self) -> Option<PageId> {
+        let targets = self.target_ids();
+        let State::Ready(doc) = &self.state else {
+            return None;
+        };
+        let last_target = targets.last().and_then(|id| doc.model.index_of(*id));
+        last_target.and_then(|i| doc.page_ref(i + 1)).map(|p| p.id)
+    }
+
     /// Insert every page of `path` after the current page (or after the
     /// selection), merging its bookmarks PDFlyer-style.
     pub fn insert_pdf(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        let targets = self.target_ids();
+        let before = self.insert_point();
+        let name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("file")
+            .to_string();
+        self.insert_file(path, before, name, true, cx);
+    }
+
+    /// Insert every page of `path` before `before` (None: at the end), as
+    /// one undo step labelled "Insert `name`", with its bookmarks merged
+    /// when `bookmarks`.
+    pub(crate) fn insert_file(
+        &mut self,
+        path: PathBuf,
+        before: Option<PageId>,
+        name: String,
+        bookmarks: bool,
+        cx: &mut Context<Self>,
+    ) {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        // Insert after the last targeted page: "before" is the one after it.
-        let last_target = targets.last().and_then(|id| doc.model.index_of(*id));
-        let before = last_target.and_then(|i| doc.page_ref(i + 1)).map(|p| p.id);
-        doc.notice = Some(format!("Inserting {}…", path.display()));
+        doc.notice = Some(format!("Inserting {name}…"));
         cx.notify();
         let timing = self.timing;
         cx.spawn(async move |this, cx| {
@@ -2214,12 +2242,11 @@ impl DocView {
                     password: None,
                 });
                 doc.handles.insert(sid, handle);
-                let flat: Vec<FlatOutlineItem> = outline.iter().map(flat_item).collect();
-                let name = path
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("file")
-                    .to_string();
+                let flat: Vec<FlatOutlineItem> = if bookmarks {
+                    outline.iter().map(flat_item).collect()
+                } else {
+                    Vec::new()
+                };
                 let label = format!("Insert {name}");
                 let mut outcome = None;
                 match doc.model.apply(
@@ -2233,13 +2260,21 @@ impl DocView {
                 ) {
                     Ok(out) => {
                         outcome = Some(out.clone());
-                        doc.notice = Some(format!(
-                            "Inserted {} page{} from {name}; {} bookmark{} merged",
-                            out.pages_added,
-                            if out.pages_added == 1 { "" } else { "s" },
-                            out.bookmarks_added,
-                            if out.bookmarks_added == 1 { "" } else { "s" }
-                        ));
+                        doc.notice = Some(if !bookmarks {
+                            // Pages sheaf made (blank, images): name says it all.
+                            format!("Inserted {name}")
+                        } else {
+                            format!(
+                                "Inserted {} page{} from {name}{}",
+                                out.pages_added,
+                                if out.pages_added == 1 { "" } else { "s" },
+                                match out.bookmarks_added {
+                                    0 => String::new(),
+                                    1 => "; 1 bookmark merged".into(),
+                                    n => format!("; {n} bookmarks merged"),
+                                }
+                            )
+                        });
                         if timing {
                             eprintln!(
                                 "[timing] inserted {name} ({page_count} pages) in {:?}",

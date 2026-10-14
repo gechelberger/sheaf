@@ -263,6 +263,29 @@ pub fn info(id: &str) -> Option<Info> {
             "Rotate the selected pages a quarter turn counterclockwise.",
             &["turn", "orientation"],
         ),
+        "workspace::InsertBlankPages" => (
+            "insert-blank",
+            "Insert blank pages, the size of the current page or a standard sheet.",
+            &["empty", "add page", "new page", "separator"],
+        ),
+        "workspace::InsertFromImages" => (
+            "insert-image",
+            "Insert pages made from images (JPEG, PNG, TIFF…), fitted to a page size or at their own.",
+            &[
+                "picture",
+                "photo",
+                "scan",
+                "jpeg",
+                "png",
+                "tiff",
+                "add pages",
+            ],
+        ),
+        "workspace::ReplacePages" => (
+            "replace-pages",
+            "Replace pages with pages from another PDF, keeping their bookmarks and comments.",
+            &["swap", "substitute", "update pages"],
+        ),
         "docview::InsertPdf" => (
             "insert-pdf",
             "Insert pages from another PDF, with its bookmarks.",

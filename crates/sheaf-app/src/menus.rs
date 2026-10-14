@@ -223,7 +223,15 @@ fn builtin_menus() -> Vec<(&'static str, Vec<Item>)> {
                 item("Rotate &Clockwise", RotatePageCw),
                 item("Rotate Co&unterclockwise", RotatePageCcw),
                 sep(),
-                item("&Insert PDF…", InsertPdf),
+                Item::Sub(
+                    "&Insert Pages",
+                    vec![
+                        item("From &File…", InsertPdf),
+                        item("From &Images…", InsertFromImages),
+                        item("&Blank Pages…", InsertBlankPages),
+                    ],
+                ),
+                item("Re&place Pages…", ReplacePages),
                 item("Du&plicate Pages", DuplicatePages),
                 item("E&xtract Pages…", ExtractPages),
                 item("&Split Document…", SplitDocument),

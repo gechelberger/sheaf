@@ -19,6 +19,7 @@ mod export;
 mod export_dialog;
 mod file_dialog;
 mod goto;
+mod insert_dialog;
 mod jobs;
 mod keymap;
 mod layers_panel;
@@ -27,6 +28,7 @@ mod menus;
 mod ocr_dialog;
 mod ocr_run;
 mod outline_panel;
+mod page_insert;
 mod pane;
 mod pattern_panel;
 mod patterns;
@@ -174,6 +176,9 @@ actions!(
         CreateFromScans,
         CombineFiles,
         SplitDocument,
+        InsertBlankPages,
+        InsertFromImages,
+        ReplacePages,
         ToggleToolbar,
         CustomizeToolbar
     ]
@@ -319,6 +324,8 @@ fn main() {
             let sd = Some(scan_dialog::KEY_CONTEXT);
             let cd = Some("CombineDialog && !TextInput");
             let spd = Some(split_dialog::KEY_CONTEXT);
+            let ind = Some(insert_dialog::KEY_CONTEXT);
+            let ind_keys = Some("InsertDialog && !TextInput");
             let spd_keys = Some("SplitDialog && !TextInput");
             let ed_keys = Some("ExportDialog && !TextInput");
             let pd_keys = Some("PrintDialog && !TextInput");
@@ -434,6 +441,12 @@ fn main() {
                 KeyBinding::new("right", DialogRight, spd_keys),
                 KeyBinding::new("enter", DialogRun, spd_keys),
                 KeyBinding::new("escape", DialogCancel, spd_keys),
+                KeyBinding::new("tab", DialogNext, ind),
+                KeyBinding::new("shift-tab", DialogPrev, ind),
+                KeyBinding::new("left", DialogLeft, ind_keys),
+                KeyBinding::new("right", DialogRight, ind_keys),
+                KeyBinding::new("enter", DialogRun, ind_keys),
+                KeyBinding::new("escape", DialogCancel, ind_keys),
                 KeyBinding::new("tab", DialogNext, pd),
                 KeyBinding::new("shift-tab", DialogPrev, pd),
                 KeyBinding::new("left", DialogLeft, pd_keys),

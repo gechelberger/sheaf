@@ -52,20 +52,31 @@ pub fn store(pdf: &[u8]) -> Result<PathBuf> {
 
 /// One blank page of `width` × `height` points.
 pub fn blank_pdf(width: f32, height: f32) -> Result<Vec<u8>> {
+    blank_pages(width, height, 1)
+}
+
+/// `count` blank pages of `width` × `height` points.
+pub fn blank_pages(width: f32, height: f32, count: usize) -> Result<Vec<u8>> {
     use lopdf::{Document as Pdf, Object, Stream, dictionary};
     let mut pdf = Pdf::with_version("1.5");
     let pages_id = pdf.new_object_id();
     let content = pdf.add_object(Stream::new(dictionary! {}, Vec::new()));
-    let page = pdf.add_object(dictionary! {
-        "Type" => "Page",
-        "Parent" => pages_id,
-        "MediaBox" => vec![0.into(), 0.into(), Object::Real(width), Object::Real(height)],
-        "Contents" => content,
-        "Resources" => dictionary! {},
-    });
+    let kids: Vec<Object> = (0..count.max(1))
+        .map(|_| {
+            pdf.add_object(dictionary! {
+                "Type" => "Page",
+                "Parent" => pages_id,
+                "MediaBox" => vec![0.into(), 0.into(), Object::Real(width), Object::Real(height)],
+                "Contents" => content,
+                "Resources" => dictionary! {},
+            })
+            .into()
+        })
+        .collect();
+    let n = kids.len() as i64;
     pdf.objects.insert(
         pages_id,
-        dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 }.into(),
+        dictionary! { "Type" => "Pages", "Kids" => kids, "Count" => n }.into(),
     );
     let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
     pdf.trailer.set("Root", catalog);

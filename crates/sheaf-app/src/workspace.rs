@@ -337,6 +337,8 @@ pub struct Workspace {
     scan: Option<(Entity<crate::scan_dialog::ScanDialog>, Subscription)>,
     combine: Option<(Entity<crate::combine_dialog::CombineDialog>, Subscription)>,
     split: Option<(Entity<crate::split_dialog::SplitDialog>, Subscription)>,
+    insert_dialog: Option<(Entity<crate::insert_dialog::InsertDialog>, Subscription)>,
+    replace_dialog: Option<(Entity<crate::insert_dialog::ReplaceDialog>, Subscription)>,
     /// File > Print, while open.
     print: Option<(Entity<crate::print_dialog::PrintDialog>, Subscription)>,
     /// File > Properties, while open.
@@ -433,6 +435,8 @@ impl Workspace {
             scan: None,
             combine: None,
             split: None,
+            insert_dialog: None,
+            replace_dialog: None,
             print: None,
             properties: None,
             ocr_dialog: None,
@@ -1112,6 +1116,140 @@ impl Workspace {
         );
         self.scan = Some((dialog, sub));
         cx.notify();
+    }
+
+    /// What the insert and replace dialogs asked for, done on the document.
+    fn on_insert_event(
+        &mut self,
+        ev: &crate::insert_dialog::InsertEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::insert_dialog::InsertEvent;
+        self.insert_dialog = None;
+        self.replace_dialog = None;
+        self.focus_active(window, cx);
+        let Some(doc) = self.doc().cloned() else {
+            cx.notify();
+            return;
+        };
+        match ev {
+            InsertEvent::Blank { count, size, at } => {
+                let (count, size, at) = (*count, *size, *at);
+                doc.update(cx, |d, cx| d.insert_blank(count, size, at, cx));
+            }
+            InsertEvent::Images { files, size, at } => {
+                let (files, size, at) = (files.clone(), *size, *at);
+                doc.update(cx, |d, cx| d.insert_images(files, size, at, cx));
+            }
+            InsertEvent::Replace { pages, file, from } => {
+                let (file, from) = (file.clone(), from.clone());
+                let pages = pages.clone();
+                doc.update(cx, |d, cx| {
+                    let ids = d.page_ids_at(&pages);
+                    d.replace_pages_with(file, ids, from, cx)
+                });
+            }
+            InsertEvent::Dismiss => {}
+        }
+        cx.notify();
+    }
+
+    fn open_insert_dialog(
+        &mut self,
+        kind: crate::insert_dialog::Insert,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.doc().is_none() || self.insert_dialog.is_some() {
+            return;
+        }
+        let dialog = cx.new(|cx| crate::insert_dialog::InsertDialog::new(kind, window, cx));
+        let sub = cx.subscribe_in(&dialog, window, |ws, _, ev, window, cx| {
+            ws.on_insert_event(ev, window, cx)
+        });
+        self.insert_dialog = Some((dialog, sub));
+        cx.notify();
+    }
+
+    fn insert_from_images(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.doc().is_none() {
+            return;
+        }
+        let rx = crate::file_dialog::open_filtered(
+            cx,
+            gpui::PathPromptOptions {
+                files: true,
+                directories: false,
+                multiple: true,
+                prompt: Some("Insert Images".into()),
+            },
+            crate::file_dialog::Filter::Images,
+        );
+        cx.spawn_in(window, async move |ws, cx| {
+            let Ok(Ok(Some(mut files))) = rx.await else {
+                return;
+            };
+            files.retain(|p| sheaf_doc::images::is_image_path(p));
+            if files.is_empty() {
+                return;
+            }
+            ws.update_in(cx, |ws, window, cx| {
+                ws.open_insert_dialog(crate::insert_dialog::Insert::Images(files), window, cx)
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Replace Pages: pick the PDF, read its page count, then the dialog.
+    fn replace_pages(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.doc().is_none() || self.replace_dialog.is_some() {
+            return;
+        }
+        let rx = crate::file_dialog::open(
+            cx,
+            gpui::PathPromptOptions {
+                files: true,
+                directories: false,
+                multiple: false,
+                prompt: Some("Replace With".into()),
+            },
+        );
+        cx.spawn_in(window, async move |ws, cx| {
+            let Ok(Ok(Some(mut files))) = rx.await else {
+                return;
+            };
+            let Some(file) = files.pop() else { return };
+            let p = file.clone();
+            let counted = cx
+                .background_executor()
+                .spawn(async move { sheaf_ops::open::describe(&p, None) })
+                .await;
+            ws.update_in(cx, |ws, window, cx| {
+                let Some(doc) = ws.doc().cloned() else { return };
+                let file_pages = match counted {
+                    Ok((info, _)) => info.page_count as usize,
+                    Err(e) => {
+                        doc.update(cx, |d, cx| d.set_notice(format!("Replace: {e:#}"), cx));
+                        return;
+                    }
+                };
+                let (doc_pages, targets) = doc.read_with(cx, |d, _| d.target_indexes());
+                let dialog = cx.new(|cx| {
+                    crate::insert_dialog::ReplaceDialog::new(
+                        file, file_pages, doc_pages, &targets, window, cx,
+                    )
+                });
+                let sub = cx.subscribe_in(&dialog, window, |ws, _, ev, window, cx| {
+                    ws.on_insert_event(ev, window, cx)
+                });
+                ws.replace_dialog = Some((dialog, sub));
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn toggle_split(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2185,6 +2323,15 @@ impl Render for Workspace {
             .on_action(
                 cx.listener(|ws, _: &crate::SplitDocument, window, cx| ws.toggle_split(window, cx)),
             )
+            .on_action(cx.listener(|ws, _: &crate::InsertBlankPages, window, cx| {
+                ws.open_insert_dialog(crate::insert_dialog::Insert::Blank, window, cx)
+            }))
+            .on_action(cx.listener(|ws, _: &crate::InsertFromImages, window, cx| {
+                ws.insert_from_images(window, cx)
+            }))
+            .on_action(
+                cx.listener(|ws, _: &crate::ReplacePages, window, cx| ws.replace_pages(window, cx)),
+            )
             .on_action(
                 cx.listener(|ws, a: &crate::recent::OpenRecent, window, cx| {
                     ws.open_recent(a.path.clone(), window, cx)
@@ -2306,6 +2453,16 @@ impl Render for Workspace {
             )
             .children(
                 self.split
+                    .as_ref()
+                    .map(|(d, _)| deferred(d.clone()).with_priority(2)),
+            )
+            .children(
+                self.insert_dialog
+                    .as_ref()
+                    .map(|(d, _)| deferred(d.clone()).with_priority(2)),
+            )
+            .children(
+                self.replace_dialog
                     .as_ref()
                     .map(|(d, _)| deferred(d.clone()).with_priority(2)),
             )

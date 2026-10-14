@@ -32,6 +32,9 @@ an image element does not inherit the parent element's color.
 | [redo](redo/icon.svg) | Redo | `Redo` |
 | [open](open/icon.svg) | Open PDF | `OpenFile` |
 | [save](save/icon.svg) | Save | `Save` |
+| [insert-blank](insert-blank/icon.svg) | Insert blank pages | `InsertBlankPages` |
+| [insert-image](insert-image/icon.svg) | Insert pages from images | `InsertFromImages` |
+| [replace-pages](replace-pages/icon.svg) | Replace pages | `ReplacePages` |
 | [insert-pdf](insert-pdf/icon.svg) | Insert PDF | `InsertPdf` |
 | [duplicate-pages](duplicate-pages/icon.svg) | Duplicate pages | `DuplicatePages` |
 | [extract-pages](extract-pages/icon.svg) | Extract pages | `ExtractPages` |
