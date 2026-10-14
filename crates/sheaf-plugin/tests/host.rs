@@ -161,6 +161,7 @@ fn ctx(d: &Document) -> CallContext {
             current_page: Some(d.page(0).unwrap().id),
             text: Arc::new(FakeText),
             ocr: None,
+            render: None,
         }),
         ui: None,
         presets: Vec::new(),
@@ -450,6 +451,7 @@ fn tax_form_bookmarks_example() {
             current_page: None,
             text: text.clone(),
             ocr: None,
+            render: None,
         }),
         ui: None,
         presets: Vec::new(),
@@ -635,6 +637,7 @@ fn amount_crossref_bundled_plugin() {
             current_page: None,
             text: text.clone(),
             ocr: None,
+            render: None,
         }),
         ui: Some(ui.clone()),
         presets: Vec::new(),
@@ -888,6 +891,7 @@ fn bookmark_from_pattern_bundled_plugin() {
             current_page: None,
             text: text.clone(),
             ocr: None,
+            render: None,
         }),
         ui: Some(ui.clone()),
         presets: vec![sheaf_plugin::Preset {
@@ -1021,6 +1025,7 @@ fn subtotal_bundled_plugin() {
             current_page: None,
             text: text.clone(),
             ocr: None,
+            render: None,
         }),
         ui: Some(ui.clone()),
         presets: Vec::new(),
@@ -1128,6 +1133,7 @@ fn currency_convert_bundled_plugin() {
             current_page: None,
             text: text.clone(),
             ocr: None,
+            render: None,
         }),
         ui: Some(ui.clone()),
         presets: Vec::new(),
@@ -1193,4 +1199,177 @@ fn currency_convert_bundled_plugin() {
     let out = run(&p, "convert", None, ctx(&d)).unwrap();
     assert_eq!(out.batches[0].edits.len(), 2);
     assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+/// Pixels whose gray value is (x + y) % 256 in page-pixel coordinates.
+struct FakeRender;
+
+impl sheaf_plugin::render::RenderSource for FakeRender {
+    fn render(
+        &self,
+        _source: SourceId,
+        _index: u32,
+        _page_w: u32,
+        _page_h: u32,
+        (x0, y0, w, h): (u32, u32, u32, u32),
+    ) -> Result<Vec<u8>> {
+        let mut out = Vec::with_capacity((w * h * 4) as usize);
+        for y in y0..y0 + h {
+            for x in x0..x0 + w {
+                let v = ((x + y) % 256) as u8;
+                out.extend([v, v, v, 255]);
+            }
+        }
+        Ok(out)
+    }
+}
+
+#[test]
+fn render_handles_crop_map_cap_and_expire() {
+    let p = load("render", Limits::default());
+    let d = doc(1);
+    let with_render = |d: &Document| {
+        let mut c = ctx(d);
+        c.doc.as_mut().unwrap().render = Some(Arc::new(FakeRender));
+        c
+    };
+    let err = run(&p, "render", None, with_render(&d)).unwrap_err();
+    assert_eq!(
+        err,
+        PluginError::Failed("612x792 -> 30x40 first [30] at 10,20 rows 60".into())
+    );
+    // The image the plugin kept is gone after its call.
+    let err = run(&p, "kept-width", None, with_render(&d)).unwrap_err();
+    assert_eq!(err, PluginError::Failed("0".into()));
+    let err = run(&p, "render-many", None, with_render(&d)).unwrap_err();
+    assert!(
+        matches!(&err, PluginError::Failed(m) if m.starts_with("16 then: at most 16 images")),
+        "{err:?}"
+    );
+    // Without a renderer it says so.
+    let err = run(&p, "render", None, ctx(&d)).unwrap_err();
+    assert_eq!(err, PluginError::Failed("rendering isn't available".into()));
+}
+
+/// Blocky noise per page: pages with the same seed look the same.
+struct SeededRender(Vec<u64>);
+
+impl sheaf_plugin::render::RenderSource for SeededRender {
+    fn render(
+        &self,
+        _source: SourceId,
+        index: u32,
+        page_w: u32,
+        page_h: u32,
+        (x0, y0, w, h): (u32, u32, u32, u32),
+    ) -> Result<Vec<u8>> {
+        let seed = self.0[index as usize];
+        let mut out = Vec::with_capacity((w * h * 4) as usize);
+        for y in y0..y0 + h {
+            for x in x0..x0 + w {
+                // Blocks scale with the page so any dpi gives the same picture.
+                let (bx, by) = (x * 16 / page_w, y * 16 / page_h);
+                let mut v = seed ^ (bx as u64 * 0x9e37_79b9) ^ (by as u64 * 0x85eb_ca6b);
+                v ^= v >> 13;
+                v = v.wrapping_mul(0xc2b2_ae35);
+                let g = (v >> 24) as u8;
+                out.extend([g, g, g, 255]);
+            }
+        }
+        Ok(out)
+    }
+}
+
+#[test]
+fn duplicate_pages_bundled_plugin() {
+    let src = workspace_root().join("plugins/duplicate-pages");
+    let wasm = build_plugin(&src, "duplicate_pages.wasm");
+    let dir = install("duplicate-pages", &src, &wasm);
+    let data = scratch("duplicates-data");
+    let p = Runtime::new(Limits::default()).unwrap().load(
+        dir.clone(),
+        Manifest::load(&dir).unwrap(),
+        LoadOptions {
+            data_dir: Some(data),
+            ..LoadOptions::default()
+        },
+    );
+    let text: Arc<dyn TextSource> = Arc::new(Pages(vec![
+        "Statement 101 total 5,000",
+        "Invoice 7",
+        "Statement 101 total 5,000",
+        // Same layout, next month.
+        "Statement 102 total 6,000",
+        "W-2 Acme 2025",
+    ]));
+    let render: Arc<dyn sheaf_plugin::render::RenderSource> =
+        Arc::new(SeededRender(vec![1, 2, 1, 1, 3]));
+    let d = doc(5);
+    let ui = Arc::new(FakeUi::default());
+    let ctx = |d: &Document| CallContext {
+        doc: Some(DocContext {
+            path: "binder.pdf".into(),
+            snapshot: d.snapshot(),
+            selection: Vec::new(),
+            current_page: None,
+            text: text.clone(),
+            ocr: None,
+            render: Some(render.clone()),
+        }),
+        ui: Some(ui.clone()),
+        presets: Vec::new(),
+    };
+    let tolerant = || {
+        Some(vec![FieldAnswer {
+            id: "match".into(),
+            value: FieldValue::Choice(0),
+        }])
+    };
+    *ui.answer.lock().unwrap() = tolerant();
+    run(&p, "find", None, ctx(&d)).unwrap();
+    let rows = ui.panels.lock().unwrap().last().unwrap().1.clone();
+    let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
+    assert_eq!(labels, ["Pages 1, 3", "Page 1", "Page 3"]);
+    assert_eq!(rows[0].detail, "100% alike");
+
+    // Keep the first copy: page 3 goes, in one step.
+    let out = block_on(p.call(
+        Call::PanelAction {
+            panel: "duplicates".into(),
+            row: rows[0].id.clone(),
+            action: "keep-first".into(),
+        },
+        ctx(&d),
+    ))
+    .unwrap()
+    .unwrap();
+    assert_eq!(out.batches[0].label, "Delete 1 duplicate page");
+    assert_eq!(
+        out.batches[0].edits,
+        [Edit::DeletePages {
+            ids: vec![d.page(2).unwrap().id]
+        }]
+    );
+    assert!(ui.panels.lock().unwrap().last().unwrap().1.is_empty());
+
+    // "Not duplicates" is remembered across runs.
+    *ui.answer.lock().unwrap() = tolerant();
+    run(&p, "find", None, ctx(&d)).unwrap();
+    let rows = ui.panels.lock().unwrap().last().unwrap().1.clone();
+    block_on(p.call(
+        Call::PanelAction {
+            panel: "duplicates".into(),
+            row: rows[0].id.clone(),
+            action: "not-duplicates".into(),
+        },
+        ctx(&d),
+    ))
+    .unwrap()
+    .unwrap();
+    *ui.answer.lock().unwrap() = tolerant();
+    run(&p, "find", None, ctx(&d)).unwrap();
+    assert_eq!(
+        ui.notices.lock().unwrap().last().unwrap(),
+        "No duplicate pages found"
+    );
 }

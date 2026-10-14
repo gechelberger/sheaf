@@ -5,6 +5,9 @@ use sheaf_plugin_api::types::{Edit, OutlineInsert};
 use sheaf_plugin_api::ui::{self, Field, FieldKind, FieldValue, Form, PanelRow, RowAction};
 use sheaf_plugin_api::{Guest, document, edits, log, storage, text};
 
+static KEPT: std::sync::Mutex<Option<sheaf_plugin_api::render::Image>> =
+    std::sync::Mutex::new(None);
+
 struct TestPlugin;
 
 impl Guest for TestPlugin {
@@ -177,6 +180,58 @@ impl Guest for TestPlugin {
                     layer.engine,
                     sheaf_plugin_api::ocr::page_text_layer(p).is_some()
                 ))
+            }
+            // Render a corner of page 1 in gray and describe it.
+            "render" => {
+                use sheaf_plugin_api::render::{PageRenderer, PixelFormat, RenderOptions};
+                let p = document::pages().first().map(|p| p.id).ok_or("no pages")?;
+                let r = PageRenderer::new(p);
+                let (w, h) = r.size();
+                let img = r.render(RenderOptions {
+                    dpi: 72,
+                    region: Some(sheaf_plugin_api::types::Box2 {
+                        x: 10.0,
+                        y: 20.0,
+                        w: 30.0,
+                        h: 40.0,
+                    }),
+                    format: PixelFormat::Gray8,
+                })?;
+                let first = img.read_rect(0, 0, 1, 1);
+                let at = img.to_page(0.0, 0.0);
+                let rows = img.read_rows(0, 2).len();
+                let (iw, ih) = (img.width(), img.height());
+                // Kept past the call: the host frees it anyway.
+                *KEPT.lock().unwrap() = Some(img);
+                Err(format!(
+                    "{w}x{h} -> {iw}x{ih} first {first:?} at {},{} rows {rows}",
+                    at.x, at.y
+                ))
+            }
+            "kept-width" => Err(format!(
+                "{}",
+                KEPT.lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|i| i.width())
+                    .unwrap_or(99)
+            )),
+            // Keep rendering small images alive until the host refuses.
+            "render-many" => {
+                use sheaf_plugin_api::render::{PageRenderer, PixelFormat, RenderOptions};
+                let p = document::pages().first().map(|p| p.id).ok_or("no pages")?;
+                let r = PageRenderer::new(p);
+                let mut alive = Vec::new();
+                loop {
+                    match r.render(RenderOptions {
+                        dpi: 10,
+                        region: None,
+                        format: PixelFormat::Rgba8,
+                    }) {
+                        Ok(i) => alive.push(i),
+                        Err(e) => return Err(format!("{} then: {e}", alive.len())),
+                    }
+                }
             }
             "fail" => Err("nope".into()),
             "trap" => panic!("boom"),

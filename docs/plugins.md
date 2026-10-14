@@ -185,6 +185,16 @@ and buttons that call `panel-action`.
 **`patterns`**: `presets()` returns the user's Patterns presets, then those
 plugins ship.
 
+**`render`**: read-only page images. `page-renderer(page)` draws the page
+(or a region of it, in page coordinates) at a dpi you choose (up to 600), in
+`gray8` or `rgba8`, as the file draws it, without sheaf's own unsaved
+markup. The pixels stay in sheaf: an `image` gives its size, maps pixels to
+page points (`to-page`), and hands over rows or tiles as you read them.
+Handles last for one call. Rendering time doesn't count against the call's
+limit, but each call may render at most 400 million pixels and keep 16
+images alive at once. `plugins/duplicate-pages` uses it to fingerprint
+pages.
+
 **`ocr`**: `recognize(page, options)` runs the user's OCR engine on one page
 and returns its words with boxes. It doesn't change the document.
 `page-text-layer(page)` returns the unsaved OCR layer, if any.

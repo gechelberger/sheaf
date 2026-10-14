@@ -76,7 +76,18 @@ HTTP additions (see API additions).
     edit page text, plugins should be able to as well, and this plugin
     replaces the text for real.
 
-### 4. Find Duplicate Pages (`duplicate-pages`; name not final)
+### 4. Find Duplicate Pages (`duplicate-pages`) — done 2026-10-13
+Landed with: the render resource (WIT `render`: `page-renderer` and `image`
+resources; tiles from the render worker at lowest priority in the file's
+own orientation; host-side pixels read as rows or tiles; gray8 and rgba8;
+handles freed when the call returns; 400 MP per call and 16 live images;
+render time not charged). Not yet: sheaf's own markup in renders, rotation
+and annotation/form switches, bitonal output, embedded-image facts.
+Fingerprints are a 16×16 average hash at 24 dpi plus word and number sets
+(numbers compared on their own so same-layout statements don't match);
+near-blank pages are skipped; "Not duplicates" is remembered by content
+key, so it survives reopening.
+
 Find near-duplicate pages within one binder: the same statement scanned
 twice, a W-2 sent in two batches, pages repeated by a merge. Core doesn't
 cover this (M14 "Compare documents" diffs two documents). First user of the

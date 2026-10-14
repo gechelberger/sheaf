@@ -222,6 +222,52 @@ interface text {
     words: func(page: page-id, rect: option<box2>) -> result<list<text-match>, string>;
 }
 
+/// Read-only page images. A renderer draws a page (or part of it) at the
+/// resolution and in the pixel format you ask for; the pixels stay in
+/// sheaf until you read them, a strip or a tile at a time. Pages render as
+/// the file draws them (the orientation text and annotations use), without
+/// sheaf's own unsaved markup. Handles last for one call. Rendering time
+/// doesn't count against the call's limit; rendered pixels per call and
+/// images alive at once are capped.
+interface render {
+    use types.{page-id, box2, pt};
+
+    enum pixel-format {
+        /// One byte per pixel, 0 black to 255 white.
+        gray8,
+        /// Four bytes per pixel: red, green, blue, alpha.
+        rgba8,
+    }
+
+    record render-options {
+        /// Resolution, 1 to 600.
+        dpi: u32,
+        /// Part of the page in page coordinates; none for all of it.
+        region: option<box2>,
+        format: pixel-format,
+    }
+
+    /// Rendered pixels, rows top to bottom.
+    resource image {
+        width: func() -> u32;
+        height: func() -> u32;
+        format: func() -> pixel-format;
+        /// The page point under pixel (x, y).
+        to-page: func(x: f32, y: f32) -> pt;
+        /// `count` whole rows starting at row `y`.
+        read-rows: func(y: u32, count: u32) -> list<u8>;
+        /// A `w` by `h` tile at (`x`, `y`), row by row.
+        read-rect: func(x: u32, y: u32, w: u32, h: u32) -> list<u8>;
+    }
+
+    resource page-renderer {
+        constructor(page: page-id);
+        /// The page's size in points, as the file draws it.
+        size: func() -> tuple<f32, f32>;
+        render: func(options: render-options) -> result<image, string>;
+    }
+}
+
 /// The user's pattern-search presets.
 interface patterns {
     record preset { name: string, regex: string }
@@ -381,6 +427,7 @@ world plugin {
     import ui;
     import storage;
     import patterns;
+    import render;
     import ocr;
     import log;
 

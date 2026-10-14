@@ -22,6 +22,10 @@ pub(crate) mod bindings {
     wasmtime::component::bindgen!({
         world: "plugin",
         path: "../../wit",
+        with: {
+            "sheaf:plugin/render.page-renderer": crate::render::PageRenderer,
+            "sheaf:plugin/render.image": crate::render::RenderedImage,
+        },
     });
 }
 
@@ -194,6 +198,8 @@ pub struct DocContext {
     pub text: Arc<dyn TextSource>,
     /// None: `ocr.recognize` reports that OCR isn't available.
     pub ocr: Option<Arc<dyn OcrSource>>,
+    /// None: `render` reports that rendering isn't available.
+    pub render: Option<Arc<dyn crate::render::RenderSource>>,
 }
 
 /// Edits one `edits.submit` asked for: one undo step.
@@ -439,6 +445,7 @@ impl Instance {
                 credit: credit.clone(),
             },
             credit,
+            render_handles: Default::default(),
             call: None,
             batches: Vec::new(),
             deadline: Instant::now() + rt.limits.call_timeout,
@@ -497,6 +504,7 @@ impl Instance {
             Call::Event(e) => world.call_on_event(&mut *store, &convert::event_to_wit(e)),
         };
         let data = store.data_mut();
+        data.drop_render_handles();
         data.call = None;
         let batches = std::mem::take(&mut data.batches);
         match result {
@@ -600,7 +608,7 @@ fn describe_trap(e: &wasmtime::Error, timeout: Duration) -> String {
 /// Per-plugin data the host functions reach.
 pub(crate) struct HostState {
     wasi: WasiCtx,
-    table: ResourceTable,
+    pub(crate) table: ResourceTable,
     limits: StoreLimits,
     plugin: String,
     /// Panel ids the manifest declares.
@@ -610,14 +618,16 @@ pub(crate) struct HostState {
     net: NetHooks,
     /// Nanoseconds this call spent waiting on the network (not charged).
     credit: Arc<std::sync::atomic::AtomicU64>,
+    /// Render handles this call made, freed when it returns.
+    pub(crate) render_handles: crate::render::CallHandles,
     call: Option<CallContext>,
     batches: Vec<EditBatch>,
     /// When the running call times out.
-    deadline: Instant,
+    pub(crate) deadline: Instant,
 }
 
 impl HostState {
-    fn doc(&self) -> Option<&DocContext> {
+    pub(crate) fn doc(&self) -> Option<&DocContext> {
         self.call.as_ref()?.doc.as_ref()
     }
 

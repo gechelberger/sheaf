@@ -1072,6 +1072,7 @@ impl DocView {
             current_page: doc.page_ref(doc.current_page).map(|p| p.id),
             text: crate::plugins::text_source(&doc.handles),
             ocr: Some(crate::plugins::ocr_source(&doc.handles)),
+            render: Some(crate::plugins::render_source(&doc.handles)),
         })
     }
 

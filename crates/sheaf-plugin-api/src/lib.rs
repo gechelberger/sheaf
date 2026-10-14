@@ -46,7 +46,9 @@ mod form;
 pub mod http;
 
 pub use batch::{Batch, annot, at};
-pub use bindings::sheaf::plugin::{document, edits, log, ocr, patterns, storage, text, types, ui};
+pub use bindings::sheaf::plugin::{
+    document, edits, log, ocr, patterns, render, storage, text, types, ui,
+};
 pub use bindings::{Guest, export};
 pub use form::{Answers, FormBuilder};
 

@@ -862,6 +862,53 @@ impl sheaf_plugin::OcrSource for EngineOcr {
     }
 }
 
+/// Page images for plugins, from the render workers at the lowest priority
+/// (behind on-screen tiles).
+struct EngineRender(HashMap<SourceId, RenderHandle>);
+
+impl sheaf_plugin::render::RenderSource for EngineRender {
+    fn render(
+        &self,
+        source: SourceId,
+        index: u32,
+        page_w: u32,
+        page_h: u32,
+        (x, y, w, h): (u32, u32, u32, u32),
+    ) -> Result<Vec<u8>> {
+        use sheaf_render::{Job, PixelFormat, RenderRequest};
+        let handle = self.0.get(&source).context("source not open")?;
+        let rx = handle.render(RenderRequest {
+            page: sheaf_core::PageIndex(index),
+            job: Job::Tile {
+                page_width: page_w,
+                page_height: page_h,
+                x,
+                y,
+                w,
+                h,
+                rotation: sheaf_core::Rotation::R0,
+            },
+            format: PixelFormat::Rgba,
+            priority: u8::MAX,
+        });
+        let rendered = futures::executor::block_on(rx).context("render thread is gone")??;
+        let r = rendered.raster;
+        anyhow::ensure!(
+            r.width == w && r.height == h,
+            "rendered {}×{}, wanted {w}×{h}",
+            r.width,
+            r.height
+        );
+        Ok(r.data)
+    }
+}
+
+pub fn render_source(
+    handles: &HashMap<SourceId, RenderHandle>,
+) -> Arc<dyn sheaf_plugin::render::RenderSource> {
+    Arc::new(EngineRender(handles.clone()))
+}
+
 pub fn ocr_source(handles: &HashMap<SourceId, RenderHandle>) -> Arc<dyn sheaf_plugin::OcrSource> {
     Arc::new(EngineOcr(handles.clone()))
 }

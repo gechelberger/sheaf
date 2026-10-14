@@ -13,6 +13,7 @@
 
 mod convert;
 pub mod manifest;
+pub mod render;
 mod runtime;
 mod storage;
 pub mod ui;
