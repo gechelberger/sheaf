@@ -271,8 +271,9 @@ rest of the path to parity in [ROADMAP.md](ROADMAP.md).
 | M4 | **Polish → v0.1**: unsaved-changes prompts, settings with persisted layout, command palette, user keymap, crash-recovery autosave, packaging + CI. *Done 2026-10-11 (Linux; Windows bundle and CI workflows not yet exercised).* | Daily-driver readiness |
 | M5 | **Scan & OCR**: `OcrEngine` trait with Tesseract and PaddleOCR engines, batch OCR over a binder with progress and cancel, invisible text layer written on save, search over OCR text. *OCR slices done 2026-10-12 (Linux; Windows build not yet exercised). Scan cleanup, image import, scanner intake and separator sheets still planned — see [`todos/ocr.md`](todos/ocr.md).* | Scanned binders become searchable |
 | M6 | **Plugins**: WASM components (wasmtime, WIT), command registry, declarative forms and panels, document events, storage, OCR as a host capability, permissions with consent, plugin manager, bundled plugins (tax-form bookmarks, amount cross-reference). *Slices done 2026-10-13 (Linux; Windows build not yet exercised) — see [`docs/plugins.md`](docs/plugins.md) and [`todos/plugins.md`](todos/plugins.md).* | Extensibility without forking |
+| M7 | **Viewing & output**: page modes and rotate view, split view, full screen / read mode, rulers / grid / guides, page labels, attachments, portfolios, layers, document properties, recent files, print with preview (`sheaf-print`: CUPS, GDI), export to PNG / JPEG / TIFF (G4) / text. *Slices done 2026-10-14 (Linux; printing tested against stand-in CUPS tools, the Windows print backend only type-checked) — see [`todos/m7.md`](todos/m7.md).* | Viewing and printing never need Acrobat |
 
-M7 onward (viewing and output through v1.0 parity) is laid out in [ROADMAP.md](ROADMAP.md).
+M8 onward (viewing and output through v1.0 parity) is laid out in [ROADMAP.md](ROADMAP.md).
 
 ## Open questions
 

@@ -346,82 +346,6 @@ pub fn stem_of(path: &Path) -> String {
         .to_string()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn raster(w: u32, h: u32) -> Raster {
-        let mut data = Vec::with_capacity((w * h * 4) as usize);
-        for i in 0..w * h {
-            data.extend_from_slice(&[(i % 256) as u8, 0, 255, 255]);
-        }
-        Raster {
-            width: w,
-            height: h,
-            format: PixelFormat::Rgba,
-            data,
-        }
-    }
-
-    #[test]
-    fn page_text_normalizes_line_ends() {
-        assert_eq!(
-            page_text("Form 1040\r\nwage-\u{2}\r\nearner \r\n\r\n"),
-            "Form 1040\nwage--\nearner\n"
-        );
-        assert_eq!(page_text("  \r\n"), "");
-    }
-
-    #[test]
-    fn names_sort() {
-        assert_eq!(file_name("Return", 7, 120, "png"), "Return_Page_007.png");
-        assert_eq!(file_name("Return", 1, 1, "jpg"), "Return_Page_1.jpg");
-    }
-
-    #[test]
-    fn png_keeps_size_and_resolution() {
-        let bytes = encode(raster(30, 20), Format::Png, 300).unwrap();
-        let dec = png::Decoder::new(Cursor::new(bytes));
-        let reader = dec.read_info().unwrap();
-        let info = reader.info();
-        assert_eq!((info.width, info.height), (30, 20));
-        let dims = info.pixel_dims.unwrap();
-        assert_eq!(dims.xppu, 11811);
-    }
-
-    #[test]
-    fn g4_round_trips_through_a_decoder() {
-        // A 40×10 page: white with a black bar in rows 3–5, columns 8–30.
-        let (w, h) = (40u32, 10u32);
-        let mut gray = vec![255u8; (w * h) as usize];
-        for y in 3..6 {
-            for x in 8..31 {
-                gray[(y * w + x) as usize] = 0;
-            }
-        }
-        let data = g4(&gray, w, h);
-        let mut rows = Vec::new();
-        fax::decoder::decode_g4(data.into_iter(), w as u16, Some(h as u16), |t| {
-            rows.push(fax::decoder::pels(t, w as u16).collect::<Vec<_>>());
-        });
-        assert_eq!(rows.len(), h as usize);
-        for (y, row) in rows.iter().enumerate() {
-            for (x, c) in row.iter().enumerate() {
-                let black = (3..6).contains(&y) && (8..31).contains(&x);
-                assert_eq!(*c == fax::Color::Black, black, "pel {x},{y}");
-            }
-        }
-    }
-
-    #[test]
-    fn jpeg_decodes_to_the_same_size() {
-        let bytes = encode(raster(30, 20), Format::Jpeg(80), 150).unwrap();
-        assert_eq!(&bytes[..2], &[0xFF, 0xD8]);
-        let im = image::load_from_memory(&bytes).unwrap();
-        assert_eq!((im.width(), im.height()), (30, 20));
-    }
-}
-
 impl crate::docview::DocView {
     /// What File > Export Pages needs from the view.
     pub(crate) fn export_context(&self) -> Option<crate::export_dialog::ExportContext> {
@@ -592,5 +516,81 @@ impl crate::docview::DocView {
             .ok();
         })
         .detach();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn raster(w: u32, h: u32) -> Raster {
+        let mut data = Vec::with_capacity((w * h * 4) as usize);
+        for i in 0..w * h {
+            data.extend_from_slice(&[(i % 256) as u8, 0, 255, 255]);
+        }
+        Raster {
+            width: w,
+            height: h,
+            format: PixelFormat::Rgba,
+            data,
+        }
+    }
+
+    #[test]
+    fn page_text_normalizes_line_ends() {
+        assert_eq!(
+            page_text("Form 1040\r\nwage-\u{2}\r\nearner \r\n\r\n"),
+            "Form 1040\nwage--\nearner\n"
+        );
+        assert_eq!(page_text("  \r\n"), "");
+    }
+
+    #[test]
+    fn names_sort() {
+        assert_eq!(file_name("Return", 7, 120, "png"), "Return_Page_007.png");
+        assert_eq!(file_name("Return", 1, 1, "jpg"), "Return_Page_1.jpg");
+    }
+
+    #[test]
+    fn png_keeps_size_and_resolution() {
+        let bytes = encode(raster(30, 20), Format::Png, 300).unwrap();
+        let dec = png::Decoder::new(Cursor::new(bytes));
+        let reader = dec.read_info().unwrap();
+        let info = reader.info();
+        assert_eq!((info.width, info.height), (30, 20));
+        let dims = info.pixel_dims.unwrap();
+        assert_eq!(dims.xppu, 11811);
+    }
+
+    #[test]
+    fn g4_round_trips_through_a_decoder() {
+        // A 40×10 page: white with a black bar in rows 3–5, columns 8–30.
+        let (w, h) = (40u32, 10u32);
+        let mut gray = vec![255u8; (w * h) as usize];
+        for y in 3..6 {
+            for x in 8..31 {
+                gray[(y * w + x) as usize] = 0;
+            }
+        }
+        let data = g4(&gray, w, h);
+        let mut rows = Vec::new();
+        fax::decoder::decode_g4(data.into_iter(), w as u16, Some(h as u16), |t| {
+            rows.push(fax::decoder::pels(t, w as u16).collect::<Vec<_>>());
+        });
+        assert_eq!(rows.len(), h as usize);
+        for (y, row) in rows.iter().enumerate() {
+            for (x, c) in row.iter().enumerate() {
+                let black = (3..6).contains(&y) && (8..31).contains(&x);
+                assert_eq!(*c == fax::Color::Black, black, "pel {x},{y}");
+            }
+        }
+    }
+
+    #[test]
+    fn jpeg_decodes_to_the_same_size() {
+        let bytes = encode(raster(30, 20), Format::Jpeg(80), 150).unwrap();
+        assert_eq!(&bytes[..2], &[0xFF, 0xD8]);
+        let im = image::load_from_memory(&bytes).unwrap();
+        assert_eq!((im.width(), im.height()), (30, 20));
     }
 }
