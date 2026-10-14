@@ -51,21 +51,9 @@ impl Tool {
         }
     }
 
-    /// Embedded artwork path (see `assets.rs`).
-    pub fn icon(self) -> &'static str {
-        match self {
-            Tool::Select => "icons/select.svg",
-            Tool::Note => "icons/note.svg",
-            Tool::Highlight => "icons/highlight.svg",
-            Tool::FreeText => "icons/text.svg",
-            Tool::Square => "icons/rectangle.svg",
-            Tool::Ellipse => "icons/ellipse.svg",
-            Tool::Line => "icons/line.svg",
-            Tool::Arrow => "icons/arrow.svg",
-            Tool::Ink => "icons/pencil.svg",
-            Tool::Tick => "icons/tick.svg",
-            Tool::Connector => "icons/connector.svg",
-        }
+    /// Embedded artwork path, from the tool's command (`command_info.rs`).
+    pub fn icon(self) -> String {
+        crate::command_info::icon_path(self.info().icon)
     }
 
     /// Tooltip title; fuller than the undo-history `label`.
@@ -79,21 +67,13 @@ impl Tool {
         }
     }
 
-    /// Tooltip flavor text.
+    /// Tooltip flavor text: the command's help.
     pub fn description(self) -> &'static str {
-        match self {
-            Tool::Select => "Select, move, and delete annotations",
-            Tool::Note => "Click to pin a comment to the page",
-            Tool::Highlight => "Drag across text to highlight it",
-            Tool::FreeText => "Drag a box, then type text onto the page",
-            Tool::Square => "Drag to draw a rectangle",
-            Tool::Ellipse => "Drag to draw an ellipse",
-            Tool::Line => "Drag to draw a straight line",
-            Tool::Arrow => "Drag to draw an arrow",
-            Tool::Ink => "Draw freehand",
-            Tool::Tick => "Click to stamp the selected tickmark",
-            Tool::Connector => "Click twice to place a linked pair of markers",
-        }
+        self.info().help
+    }
+
+    fn info(self) -> crate::command_info::Info {
+        crate::command_info::info(self.action().name()).expect("every tool has command info")
     }
 
     /// The action that selects this tool; its binding is the shortcut shown.

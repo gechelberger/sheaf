@@ -14,18 +14,82 @@ macro_rules! icons {
     };
 }
 
+// Every command's artwork (`command_info.rs` names them).
 const FILES: &[(&str, &[u8])] = icons![
-    "select",
-    "note",
-    "highlight",
-    "text",
-    "rectangle",
-    "ellipse",
-    "line",
+    "about",
+    "actual-size",
     "arrow",
-    "pencil",
-    "tick",
+    "attachments",
+    "bookmark",
+    "bottom-dock",
+    "calculator",
+    "cancel-ocr",
+    "clear-guides",
+    "clear-recent",
+    "close-document",
+    "close-window",
+    "command-palette",
+    "comments",
     "connector",
+    "cover-page",
+    "delete-pages",
+    "duplicate-pages",
+    "ellipse",
+    "export-clean",
+    "export-pages",
+    "extract-pages",
+    "find",
+    "first-page",
+    "fit-page",
+    "fit-width",
+    "flatten",
+    "full-screen",
+    "go-to-page",
+    "grid",
+    "highlight",
+    "insert-pdf",
+    "last-page",
+    "layers",
+    "left-dock",
+    "line",
+    "manage-plugins",
+    "navigation-panes",
+    "new-window",
+    "next-page",
+    "note",
+    "open",
+    "outline",
+    "pattern-search",
+    "pencil",
+    "prev-page",
+    "print",
+    "properties",
+    "quit",
+    "read-mode",
+    "recognize-text",
+    "rectangle",
+    "redo",
+    "right-dock",
+    "rotate-left",
+    "rotate-right",
+    "rotate-view-left",
+    "rotate-view-right",
+    "rulers",
+    "save-as",
+    "save",
+    "select-all-pages",
+    "select",
+    "single-page-continuous",
+    "single-page",
+    "split",
+    "text",
+    "thumbnails",
+    "tick",
+    "two-up-continuous",
+    "two-up",
+    "undo",
+    "zoom-in",
+    "zoom-out",
 ];
 
 pub struct Assets;
@@ -52,13 +116,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_tool_icon_is_embedded() {
-        for t in crate::markup_tools::Tool::ALL {
+    fn every_builtin_command_has_artwork_and_help() {
+        let reg = crate::commands::CommandRegistry::builtin();
+        assert!(reg.commands().len() > 60);
+        for c in reg.commands() {
             assert!(
-                Assets.load(t.icon()).unwrap().is_some(),
-                "missing {}",
-                t.icon()
+                Assets.load(&c.icon).unwrap().is_some(),
+                "{}: no embedded {}",
+                c.id,
+                c.icon
             );
+            assert!(c.help.ends_with('.'), "{}: help {:?}", c.id, c.help);
         }
     }
 }

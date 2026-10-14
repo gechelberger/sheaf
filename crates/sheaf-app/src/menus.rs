@@ -7,7 +7,7 @@
 use gpui::{Action, App, Menu};
 use sheaf_ui::menu_bar::parse_label;
 
-use crate::commands::{Command, CommandRegistry, MenuEntry, MenuSpec, Target};
+use crate::commands::{Command, CommandRegistry, MenuEntry, MenuSpec};
 use crate::*;
 
 /// The menus to show, built-in and contributed.
@@ -38,13 +38,13 @@ pub fn register_builtins(reg: &mut CommandRegistry) {
     for (name, items) in app_menu_last {
         for (label, action) in actions(items) {
             if reg.get(action.name()).is_none() {
-                reg.add(Command {
-                    id: action.name().to_string(),
-                    label: label.to_string(),
-                    category: parse_label(name).0,
-                    target: Target::Builtin(action.boxed_clone()),
-                })
-                .expect("unique built-in id");
+                reg.add(Command::builtin(
+                    action.name(),
+                    label,
+                    &parse_label(name).0,
+                    action.boxed_clone(),
+                ))
+                .expect("unique built-in id, with an entry in command_info.rs");
             }
         }
     }

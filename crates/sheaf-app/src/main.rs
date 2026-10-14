@@ -8,6 +8,7 @@ mod assets;
 mod attachments_panel;
 mod brand;
 mod calc_panel;
+mod command_info;
 mod commands;
 mod comments_panel;
 mod contrib;

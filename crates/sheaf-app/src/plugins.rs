@@ -659,11 +659,16 @@ fn register(m: &Manifest, cx: &mut App) -> Vec<String> {
         .ok()
         .map(Rc::new);
     for c in &m.commands {
-        let added = cx.global_mut::<CommandRegistry>().add_plugin_command(
-            &m.id,
-            &c.id,
-            &c.label,
-            m.category(c),
+        let added = cx.global_mut::<CommandRegistry>().add_placed(
+            Command {
+                id: format!("{}::{}", m.id, c.id),
+                label: c.label.clone(),
+                category: m.category(c).to_string(),
+                icon: crate::command_info::icon_path("manage-plugins"),
+                help: m.description.clone(),
+                keywords: Vec::new(),
+                target: Target::plugin(&m.id, &c.id),
+            },
             c.menu.as_deref(),
         );
         if let Err(e) = added {
@@ -704,6 +709,9 @@ fn register(m: &Manifest, cx: &mut App) -> Vec<String> {
                 id: format!("{}::show-panel-{}", m.id, p.id),
                 label: p.label.clone(),
                 category: "Panels".into(),
+                icon: crate::command_info::icon_path("right-dock"),
+                help: format!("Show the {} panel from {}.", p.label, m.name),
+                keywords: Vec::new(),
                 target: Target::Builtin(Box::new(ShowPluginPanel { panel: id })),
             },
             Some("View/Plugin Panels"),

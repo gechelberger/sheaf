@@ -1,11 +1,11 @@
 //! Command palette: a searchable list of commands. Type to filter, Up/Down
 //! to pick, Enter to run. The app supplies the commands; running one emits
-//! its action for the app to dispatch. Each row also shows the command's
-//! id (in sheaf, what `keymap.json` binds).
+//! its action for the app to dispatch. Each row shows the command's icon,
+//! a line of help, and its id (in sheaf, what `keymap.json` binds).
 
 use gpui::{
-    Action, AnyElement, Context, Entity, EventEmitter, Focusable, MouseButton, Subscription,
-    Window, actions, div, prelude::*, px,
+    Action, AnyElement, Context, Entity, EventEmitter, Focusable, MouseButton, SharedString,
+    Subscription, Window, actions, div, prelude::*, px, svg,
 };
 
 use crate::list::ListLayout;
@@ -19,8 +19,8 @@ actions!(
 
 pub const KEY_CONTEXT: &str = "Palette";
 
-const ROW_H: f32 = 30.0;
-const MAX_ROWS: usize = 12;
+const ROW_H: f32 = 44.0;
+const MAX_ROWS: usize = 10;
 
 /// One row of the palette.
 pub struct Command {
@@ -29,6 +29,13 @@ pub struct Command {
     /// Shown before the label ("View: Fit Width") and searched with it.
     pub category: String,
     pub label: String,
+    /// Asset path of its artwork.
+    pub icon: SharedString,
+    /// Shown under the label.
+    pub help: String,
+    /// More search terms. A command found only by one ranks below those
+    /// whose label matches.
+    pub keywords: Vec<String>,
     /// What running the command emits, in `PaletteEvent::Run`.
     pub action: Box<dyn Action>,
     pub shortcut: Option<String>,
@@ -51,6 +58,9 @@ pub struct Palette {
 }
 
 impl EventEmitter<PaletteEvent> for Palette {}
+
+/// How far a keyword match ranks below the same match in a label.
+const KEYWORD_PENALTY: i32 = 1000;
 
 /// Subsequence match of `query` against `hay` (both lowercase). Higher is
 /// better; None when it doesn't match. Contiguous runs and matches at word
@@ -109,7 +119,15 @@ impl Palette {
             .enumerate()
             .filter_map(|(i, c)| {
                 let hay = format!("{} {}", c.category, c.label).to_lowercase();
-                score(&q, &hay).map(|s| (s, i))
+                score(&q, &hay)
+                    .or_else(|| {
+                        c.keywords
+                            .iter()
+                            .filter_map(|k| score(&q, &k.to_lowercase()))
+                            .max()
+                            .map(|s| s - KEYWORD_PENALTY)
+                    })
+                    .map(|s| (s, i))
             })
             .collect();
         if !q.is_empty() {
@@ -165,26 +183,62 @@ impl Render for Palette {
                         this.run_selected(cx);
                     }))
                     .child(
-                        div()
-                            .text_sm()
-                            .text_color(theme::TEXT_MUTED)
-                            .child(format!("{}:", c.category)),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(theme::TEXT_STRONG)
-                            .child(c.label.clone()),
+                        svg()
+                            .path(c.icon.clone())
+                            .flex_shrink_0()
+                            .size(px(18.0))
+                            .text_color(if selected {
+                                theme::TEXT_STRONG
+                            } else {
+                                theme::TEXT_MUTED
+                            }),
                     )
                     .child(
                         div()
                             .flex_1()
-                            .text_xs()
-                            .text_color(theme::TEXT_DISABLED)
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .child(c.id.clone()),
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_baseline()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .text_sm()
+                                            .text_color(theme::TEXT_MUTED)
+                                            .child(format!("{}:", c.category)),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .text_sm()
+                                            .text_color(theme::TEXT_STRONG)
+                                            .child(c.label.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .text_xs()
+                                            .text_color(theme::TEXT_DISABLED)
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .text_ellipsis()
+                                            .child(c.id.clone()),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme::TEXT_DETAIL)
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .child(c.help.clone()),
+                            ),
                     )
                     .when_some(c.shortcut.clone(), |d, s| {
                         d.child(div().text_xs().text_color(theme::TEXT_DETAIL).child(s))
