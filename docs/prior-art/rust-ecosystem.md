@@ -2,8 +2,8 @@
 
 Our reviews of the crates sheaf could build on or borrow from. Collected
 2026-10-13 from `docs/gpui-kit-eval.md`, `todos/eval-gpui-kit.md`,
-`todos/table-extraction.md`, and an earlier gpui-pdf / pdfplumber review that
-was only in a chat transcript until now.
+`todos/table-extraction.md` (folded in below), and an earlier gpui-pdf /
+pdfplumber review that was only in a chat transcript until now.
 
 ## Summary
 
@@ -17,7 +17,7 @@ was only in a chat transcript until now.
 | **pdfium-render** | PDFium bindings; sheaf's renderer today | Keep. Expose PDFium's progressive (pausable) render API. |
 | **hayro** | Pure-Rust PDF renderer | Candidate second `Renderer` backend once it matures. |
 | **lopdf** | Object-level PDF read/write; sheaf's edit layer | Keep. sheaf already writes its own incremental updates on top (`sheaf-doc/src/incremental.rs`). |
-| **pdfplumber** (Rust port) | Python pdfplumber port; tables are close to the original, words aren't | Take only `pdfplumber-core`'s table finder, fed from PDFium. Plan in `todos/table-extraction.md`. |
+| **pdfplumber** (Rust port) | Python pdfplumber port; tables are close to the original, words aren't | Take only `pdfplumber-core`'s table finder, fed from PDFium. Benchmark and plan [below](#table-extraction-via-pdfplumber-core). |
 | **mupdf-rs** | MuPDF bindings | **AGPL. Don't use.** Copy the display-list *idea* only. |
 
 ## GPUI distributions
@@ -197,13 +197,14 @@ Sources: [docs.rs/gpui-pdf](https://docs.rs/gpui-pdf),
 - **What Rust lacks is the layer on top.** Candidates read: the Rust
   `pdfplumber` port (developer0hye, Apache-2.0, alpha; its own scorecard puts
   tables at 271/321 exact against Python pdfplumber 0.11.10 but words at
-  4/288), `pdfsink-rs` (claims about 250× faster than pdfplumber on tables, the
-  author's own benchmark), and `pdfni`.
+  4/288), `pdfsink-rs` (claims about 250× faster than pdfplumber on tables; our
+  benchmark below found it buggy and, in text mode, slower than Python), and
+  `pdfni`.
 - **Plan:** take only `pdfplumber-core`'s `TableFinder`, feed it PDFium
   characters and edges built from PDFium path objects, and keep PDFium as the
-  only parser. Details in `todos/table-extraction.md`. Also worth building:
-  configurable word grouping, and a debug overlay of character and word boxes
-  (cheap, since sheaf already draws over pages).
+  only parser. Details below. Also worth building: configurable word grouping,
+  and a debug overlay of character and word boxes (cheap, since sheaf already
+  draws over pages).
 - Other engines for text: lopdf / pdf-extract are weak on unusual encodings and
   CID fonts; MuPDF's "stext" is excellent but AGPL.
 
@@ -211,3 +212,99 @@ Sources: [pdfplumber (Rust) on docs.rs](https://docs.rs/pdfplumber),
 [pdfsink-rs](https://docs.rs/crate/pdfsink-rs/0.2.8),
 [pdfni](https://docs.rs/crate/pdfni/0.2.0),
 [pdfminer.six 20251229](https://newreleases.io/project/github/pdfminer/pdfminer.six/release/20251229).
+
+## Table extraction via `pdfplumber-core`
+
+Status: note only, nothing built. Researched 2026-10-13 against `pdfplumber` 0.4.1
+(`developer0hye/pdfplumber-rs`, Apache-2.0, alpha, single author).
+
+### Why
+Workpapers are full of tables (trial balances, schedules, tax forms). "Export table to
+CSV / copy as tab-separated" is a natural feature, and table detection is the one part of
+the Rust pdfplumber port that is close to Python pdfplumber: its own v0.3.0 scorecard has
+tables at 271/321 exact against pdfplumber 0.11.10. Its text and word grouping are not
+close (words 4/288, search 4/304), so we take **only the table finder** and keep PDFium
+for character extraction.
+
+### Interop: what it needs and where we'd get it
+`pdfplumber-core` has no parser dependency (only `regex`, `unicode-bidi`,
+`unicode-normalization`, optional `serde`). Everything below is plain public structs.
+Its coordinates are PDF points with a **top-left origin** (`x0, top, x1, bottom`).
+
+- **Entry point:** `table::TableFinder::new_with_words(edges, words, settings)`, plus
+  `.with_page_bbox(bbox)`, then `.find_tables()`. `find_tables_debug()` returns the
+  intermediate edges, intersections and cells, which is handy for an overlay.
+- **Cell text:** `table::extract_text_for_cells(&mut cells, &chars)` needs `Vec<Char>`.
+- **Inputs to build from sheaf:**
+  - **`Char`.** We need `text`, `bbox`, `fontname`, `size`, `upright` and `direction`.
+    PDFium chars already give us these (`sheaf-render/src/lib.rs` reads `loose_bounds`
+    around line 423). Other fields (`advance`, `doctop`, colours, `ctm`, `char_code`,
+    `mcid`, `tag`) can be best-effort or default.
+  - **`Word`.** This is `text` + `bbox` + `doctop` + `direction` + `chars`. It's only
+    used by the Stream (text-alignment) strategy. We could build it from
+    `sheaf_doc::TextLayer` words, or use `pdfplumber-core`'s own `words` module on our
+    `Char`s.
+  - **`Edge`.** This is `x0, top, x1, bottom, orientation, source`. The helpers
+    `edges::derive_edges(&[Line], &[Rect], &[Curve])` and `edge_from_line` /
+    `edges_from_rect` build them from shapes. **This is the new work:** sheaf doesn't
+    extract vector geometry today. Walk PDFium page objects (path objects → segments
+    and rectangles, with the stroke width), flip y to top-left, and apply page rotation.
+- **OCR'd scans** have no ruling lines in vector form, so only Stream works there,
+  using OCR words. Lattice on scans would need line detection on the raster (later, if
+  ever).
+
+### Baseline: pdfplumber-rs vs pdfsink-rs (2026-10-13)
+Python `pdfplumber` 0.11.10 is the reference. Every library runs its own parser and
+`extract_tables` per page, with defaults otherwise. The corpus is 34 PDFs: 26 table
+fixtures from pdfplumber's test suite and 8 current IRS forms (1040, 941, 1120, 1120-S,
+1065 K-1, 4562, W-2, 8949). That's 163 pages. A cell matches when it's equal after
+collapsing whitespace, compared by position in the grid.
+
+| Library | Strategy | Tables found / ref | Exact tables | Cell agreement | Files failed | Time (Python) |
+|---|---|---|---|---|---|---|
+| `pdfplumber` 0.4.1 | lines | 235 / 235 | **235** | **100.0%** | 0 | 1.6 s (19.4 s) |
+| `pdfsink-rs` 0.2.20 | lines | 227 / 235 | 186 | 86.7% | 1 | 2.7 s (19.3 s) |
+| `pdfplumber` 0.4.1 | text | 158 / 158 | **150** | **99.9%** | 0 | 4.3 s (32.3 s) |
+| `pdfsink-rs` 0.2.20 | text | 155 / 158 | 80 | 61.7% | 2 | 61.8 s (30.7 s) |
+
+- **pdfplumber-rs** matches Python's table grid every time. Its 8 inexact text-mode
+  tables differ only in which cell gets a glyph sitting on a boundary (`'nsactio'` vs
+  `'nsaction'`). It's about 8–12× faster than Python. The IRS forms are not in its own
+  test corpus and were also exact.
+- **pdfsink-rs** has real bugs:
+  - it drops a column (senate-expenditures);
+  - it mis-decodes text (`AMOUNT($)` comes out as `AMOUNT260`);
+  - it merges separate 1040 boxes into one giant cell;
+  - it fails to parse `issue-1181.pdf` ("invalid file trailer");
+  - it hangs for more than 300 s on the rotated NICS page in text mode;
+  - text mode is 2× *slower* than Python.
+
+  Drop it from consideration.
+- **What this doesn't test:**
+  - Lattice on real scans.
+  - Non-default settings.
+  - Feeding `pdfplumber-core` from **PDFium** chars and edges (the actual integration).
+    The next spike should compare that path against `pdfplumber`'s own parser on this
+    same corpus.
+- The harness lives in `/tmp/tblcmp`, which isn't kept:
+  - `harness/` is a Rust bin that runs either crate in lines or text mode;
+  - `scripts/ref.py` runs Python;
+  - `scripts/score.py` scores the results;
+  - `corpus/` has the PDFs.
+
+  Move it under `scripts/` if we pick this up.
+
+### Open questions
+- Depend on the crate (alpha, breaking 0.x releases, one maintainer), or vendor
+  `table.rs` + `edges.rs` + the types they touch (about 6k LOC with license notice)?
+  Leaning toward depending, pinned, behind a feature, then deciding after a trial.
+- Check that the published `pdfplumber-core` has no hidden coupling to
+  `pdfplumber-parse` through `Char` field semantics (e.g. `doctop`, `upright`).
+
+### Rough plan (when picked up)
+1. Spike: PDFium path objects → `Edge`; PDFium chars → `Char`; run `TableFinder` on 5–10
+   real workpaper pages; eyeball the results with a `find_tables_debug` overlay drawn by
+   `markup_tools`.
+2. If good: "Select table → Copy as TSV / Export CSV" command, using Lattice by default
+   and Stream as a fallback, with per-axis strategy in an advanced popover.
+3. Wire it as a host capability so plugins can call it (see [`todos/plugins.md`](../../todos/plugins.md)).
