@@ -2761,6 +2761,9 @@ impl Render for DocView {
         let mut body = None;
         let mut wants: Vec<(PageRef, RenderRequest)> = Vec::new();
         let region = self.region.clone();
+        // The status bar: where you are, then the latest notice, which
+        // gives way (ellipsis, full text on hover) when space is short.
+        let mut status_notice: Option<SharedString> = None;
         let status: SharedString = match &mut self.state {
             State::Loading => "Opening…".into(),
             State::Failed(e) => format!("Failed: {e}").into(),
@@ -3329,13 +3332,9 @@ impl Render for DocView {
                 let size = ps
                     .map(|s| format!("{:.0}×{:.0} pt", s.width, s.height))
                     .unwrap_or_default();
-                let notice = doc
-                    .notice
-                    .as_deref()
-                    .map(|n| format!("  —  {n}"))
-                    .unwrap_or_default();
+                status_notice = doc.notice.clone().map(Into::into);
                 format!(
-                    "page {} / {}  —  {size}  —  {:.0}% ({mode}){notice}",
+                    "page {} / {}  —  {size}  —  {:.0}% ({mode})",
                     (doc.current_page + 1).min(count),
                     count,
                     layout.zoom_percent(),
@@ -3467,7 +3466,20 @@ impl Render for DocView {
                     .items_center()
                     .bg(rgb(0x1e1e1e))
                     .text_sm()
-                    .child(status),
+                    .whitespace_nowrap()
+                    .child(div().flex_shrink_0().child(status))
+                    .when_some(status_notice, |d, notice| {
+                        d.child(
+                            div()
+                                .id("status-notice")
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .tooltip(crate::tooltip::Tooltip::text(notice.clone()))
+                                .child(format!("  —  {notice}")),
+                        )
+                    }),
             )
     }
 }
