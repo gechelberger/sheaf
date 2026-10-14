@@ -6485,6 +6485,7 @@ dependencies = [
  "clap",
  "ctrlc",
  "env_logger",
+ "image",
  "indicatif",
  "log",
  "lopdf",
@@ -6506,7 +6507,10 @@ version = "0.1.0-alpha.1"
 dependencies = [
  "anyhow",
  "env_logger",
+ "fax",
+ "flate2",
  "im",
+ "image",
  "log",
  "lopdf",
  "regex",
@@ -6514,6 +6518,7 @@ dependencies = [
  "serde_json",
  "sheaf-core",
  "thiserror 2.0.21",
+ "tiff",
 ]
 
 [[package]]
@@ -6542,10 +6547,11 @@ name = "sheaf-ops"
 version = "0.1.0-alpha.1"
 dependencies = [
  "anyhow",
- "fax",
  "image",
  "log",
  "png 0.18.1",
+ "serde",
+ "serde_json",
  "sheaf-core",
  "sheaf-doc",
  "sheaf-progress",

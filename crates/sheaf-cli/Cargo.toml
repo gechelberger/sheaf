@@ -22,3 +22,4 @@ ctrlc = "3"
 
 [dev-dependencies]
 lopdf.workspace = true
+image = { workspace = true, features = ["jpeg"] }

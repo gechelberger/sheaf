@@ -10,10 +10,11 @@ use clap::{Parser, Subcommand};
 use std::ffi::{OsStr, OsString};
 
 mod export;
+mod images;
 mod progress;
 
 /// The subcommands, for the app to recognize its hand-off.
-pub const SUBCOMMANDS: &[&str] = &["export"];
+pub const SUBCOMMANDS: &[&str] = &["export", "images-to-pdf"];
 
 /// Whether `arg` (the first argument after the program name) names a
 /// subcommand. A file of that name in the current directory still opens
@@ -35,6 +36,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     Export(export::ExportArgs),
+    ImagesToPdf(images::ImagesArgs),
 }
 
 /// Exit status when an op was cancelled (as for SIGINT).
@@ -56,6 +58,7 @@ where
     };
     let result = match cli.command {
         Command::Export(args) => export::run(args, cli.quiet),
+        Command::ImagesToPdf(args) => images::run(args, cli.quiet),
     };
     match result {
         Ok(()) => 0,

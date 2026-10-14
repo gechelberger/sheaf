@@ -12,8 +12,11 @@ sheaf-render.workspace = true
 sheaf-progress.workspace = true
 anyhow.workspace = true
 log.workspace = true
+serde.workspace = true
 image = { workspace = true, features = ["jpeg"] }
-# PNG resolution (pHYs) and multi-page TIFF (with CCITT G4) for export.
+# PNG resolution (pHYs) and multi-page TIFF for export.
 png = "0.18"
 tiff = "0.11"
-fax = "0.2"
+
+[dev-dependencies]
+serde_json.workspace = true

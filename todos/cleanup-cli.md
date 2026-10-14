@@ -268,3 +268,19 @@ handwritten notes (an MIT algorithm, about 150 lines), and blank-page removal.
    flags moved: each drives `DocView` (adding marks through the view, then
    saving), so each needs a window. They can move when their ops (clean,
    flatten, extract) do.
+3. Done. `sheaf_doc::images` reads an image file into `PageImage`s, one
+   per page (`read`; TIFF through the `tiff` crate, since `image` reads
+   only a TIFF's first page), and `to_pdf` builds the PDF bytes.
+   `PageImage::from_image` takes pixels the caller already has; the scan
+   pipeline uses it. The details:
+   - A JPEG's EXIF rotation becomes the page's `/Rotate`. Mirrored or CMYK
+     JPEGs are decoded instead.
+   - All-0/255 gray is stored as G4. `g4` moved here from export.
+   - With no recorded resolution, 96 dpi is assumed, as img2pdf does.
+
+   Deviation: there's no "add as a source" helper yet. Sources are
+   path-based (save, incremental save and the renderer all reopen the
+   path), so an image source needs its PDF bytes written to a file. M8's
+   Insert from Image adds that helper (a content-addressed file in the
+   cache directory) when the GUI needs it. HEIC isn't readable: there's no
+   permissive pure-Rust decoder.

@@ -6,6 +6,7 @@
 //! command line needs them.
 
 pub mod export;
+pub mod images;
 pub mod open;
 pub mod pages;
 

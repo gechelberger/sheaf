@@ -227,7 +227,7 @@ fn write_tiff_to(
             }
             TiffMode::BlackWhite => {
                 let gray = image::DynamicImage::ImageRgba8(rgba).into_luma8();
-                let data = g4(gray.as_raw(), w, h);
+                let data = sheaf_doc::images::g4(gray.as_raw(), w, h);
                 let mut dir = enc.image_directory()?;
                 let offset = dir.write_data(&data[..])?;
                 dir.write_tag(Tag::NewSubfileType, 2u32)?;
@@ -255,23 +255,6 @@ fn write_tiff_to(
     }
     drop(enc);
     Ok(())
-}
-
-/// 8-bit gray rows as CCITT Group 4, thresholded at mid-gray.
-fn g4(gray: &[u8], w: u32, h: u32) -> Vec<u8> {
-    use fax::{Color, VecWriter, encoder::Encoder};
-    let mut enc = Encoder::new(VecWriter::new());
-    for row in gray.chunks_exact(w as usize).take(h as usize) {
-        let pels = row
-            .iter()
-            .map(|&v| if v < 128 { Color::Black } else { Color::White });
-        // VecWriter can't fail.
-        let _ = enc.encode_line(pels, w as u16);
-    }
-    match enc.finish() {
-        Ok(writer) => writer.finish(),
-        Err(never) => match never {},
-    }
 }
 
 /// Encode an RGBA raster, recording its resolution where the format can.
@@ -385,30 +368,6 @@ mod tests {
         assert_eq!((info.width, info.height), (30, 20));
         let dims = info.pixel_dims.unwrap();
         assert_eq!(dims.xppu, 11811);
-    }
-
-    #[test]
-    fn g4_round_trips_through_a_decoder() {
-        // A 40×10 page: white with a black bar in rows 3–5, columns 8–30.
-        let (w, h) = (40u32, 10u32);
-        let mut gray = vec![255u8; (w * h) as usize];
-        for y in 3..6 {
-            for x in 8..31 {
-                gray[(y * w + x) as usize] = 0;
-            }
-        }
-        let data = g4(&gray, w, h);
-        let mut rows = Vec::new();
-        fax::decoder::decode_g4(data.into_iter(), w as u16, Some(h as u16), |t| {
-            rows.push(fax::decoder::pels(t, w as u16).collect::<Vec<_>>());
-        });
-        assert_eq!(rows.len(), h as usize);
-        for (y, row) in rows.iter().enumerate() {
-            for (x, c) in row.iter().enumerate() {
-                let black = (3..6).contains(&y) && (8..31).contains(&x);
-                assert_eq!(*c == fax::Color::Black, black, "pel {x},{y}");
-            }
-        }
     }
 
     #[test]
