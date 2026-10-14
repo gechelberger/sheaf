@@ -87,6 +87,7 @@ pub enum Panel {
     Patterns,
     Calc,
     Comments,
+    Attachments,
     /// A panel a plugin contributes, by its id without the `plugin:` prefix.
     /// Kept in the layout even while its plugin isn't loaded, so disabling
     /// a plugin doesn't forget where its panel was.
@@ -97,12 +98,13 @@ pub enum Panel {
 const PLUGIN_PANEL_PREFIX: &str = "plugin:";
 
 impl Panel {
-    const ALL: [Panel; 5] = [
+    const ALL: [Panel; 6] = [
         Panel::Thumbnails,
         Panel::Outline,
         Panel::Patterns,
         Panel::Calc,
         Panel::Comments,
+        Panel::Attachments,
     ];
 
     /// Stable id for settings and the `--panel` flag.
@@ -113,6 +115,7 @@ impl Panel {
             Panel::Patterns => "patterns".into(),
             Panel::Calc => "calc".into(),
             Panel::Comments => "comments".into(),
+            Panel::Attachments => "attachments".into(),
             Panel::Plugin(id) => format!("{PLUGIN_PANEL_PREFIX}{id}").into(),
         }
     }
@@ -131,6 +134,7 @@ impl Panel {
             Panel::Patterns => "Patterns".into(),
             Panel::Calc => "Calculator".into(),
             Panel::Comments => "Comments".into(),
+            Panel::Attachments => "Attachments".into(),
             // Plugins name their panels once they can contribute them
             // (M6 slice 3); until then, the id.
             Panel::Plugin(id) => id.clone(),
@@ -360,6 +364,7 @@ impl Workspace {
             Some("patterns") => this.show_panel(Panel::Patterns),
             Some("calc") => this.show_panel(Panel::Calc),
             Some("comments") => this.show_panel(Panel::Comments),
+            Some("attachments") => this.show_panel(Panel::Attachments),
             _ => {}
         }
         if let Some(p) = path {
@@ -922,7 +927,7 @@ impl Workspace {
         false
     }
 
-    fn new_window(path: Option<PathBuf>, cx: &mut App) {
+    pub(crate) fn new_window(path: Option<PathBuf>, cx: &mut App) {
         if let Err(e) = crate::open_workspace(Launch::file(path), None, cx) {
             log::error!("opening window: {e:#}");
         }
@@ -1086,6 +1091,7 @@ impl Workspace {
                 Panel::Patterns => d.render_patterns(wide, window, cx),
                 Panel::Calc => d.render_calc(wide, window, cx),
                 Panel::Comments => d.render_comments(window, cx),
+                Panel::Attachments => d.render_attachments(window, cx),
                 Panel::Plugin(id) => plugin_panel_body(d, &id, window, cx),
             }),
             _ => div().into_any_element(),
@@ -1274,6 +1280,10 @@ impl Render for Workspace {
                 if let Some(doc) = ws.doc().cloned() {
                     doc.update(cx, |d, cx| d.focus_comments(cx));
                 }
+                cx.notify();
+            }))
+            .on_action(cx.listener(|ws, _: &crate::ShowAttachments, _, cx| {
+                ws.show_panel(Panel::Attachments);
                 cx.notify();
             }))
             .on_action(cx.listener(|ws, _: &ShowCalc, window, cx| {

@@ -154,6 +154,7 @@ fn builtin_menus() -> Vec<(&'static str, Vec<Item>)> {
                 item("Patte&rns", ShowPatterns),
                 item("&Calculator", ShowCalc),
                 item("Co&mments", ShowComments),
+                item("Attac&hments", ShowAttachments),
                 sep(),
                 item("Command &Palette…", CommandPalette),
                 sep(),

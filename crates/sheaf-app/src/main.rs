@@ -5,6 +5,7 @@
 //! Each file opens in its own window.
 
 mod assets;
+mod attachments_panel;
 mod brand;
 mod calc_panel;
 mod commands;
@@ -140,6 +141,7 @@ actions!(
         ShowPatterns,
         ShowCalc,
         ShowComments,
+        ShowAttachments,
         CloseDocument,
         OpenFile,
         NewWindow,
@@ -350,6 +352,7 @@ fn main() {
                 KeyBinding::new("ctrl-alt-3", ShowPatterns, ws),
                 KeyBinding::new("ctrl-alt-4", ShowCalc, ws),
                 KeyBinding::new("ctrl-alt-5", ShowComments, ws),
+                KeyBinding::new("ctrl-alt-6", ShowAttachments, ws),
                 KeyBinding::new("ctrl-alt-l", ToggleLeftDock, ws),
                 KeyBinding::new("ctrl-alt-r", ToggleRightDock, ws),
                 KeyBinding::new("ctrl-alt-j", ToggleBottomDock, ws),

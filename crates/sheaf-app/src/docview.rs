@@ -149,6 +149,12 @@ pub(crate) struct Doc {
     /// Comments other tools left in the primary file (read-only).
     pub(crate) foreign_annots: Vec<sheaf_doc::file::ForeignAnnot>,
     pub(crate) selected_foreign: Option<usize>,
+    /// Files embedded in the primary file, and its portfolio schema if it
+    /// is one (see attachments_panel.rs). `facts_loaded` once read.
+    pub(crate) attachments: Vec<sheaf_doc::attachments::Attachment>,
+    pub(crate) collection: Option<sheaf_doc::portfolio::Collection>,
+    pub(crate) attachment_selected: Option<usize>,
+    pub(crate) facts_loaded: bool,
     /// The primary file's page labels, by its page index.
     pub(crate) labels: Option<(SourceId, Vec<String>)>,
     /// With two panes: the top pane's share of the height.
@@ -651,6 +657,10 @@ impl DocView {
             foreign_annots: Vec::new(),
             selected_foreign: None,
             labels: None,
+            attachments: Vec::new(),
+            collection: None,
+            attachment_selected: None,
+            facts_loaded: false,
             split: 0.5,
             split_drag: false,
         }));
@@ -1381,6 +1391,7 @@ impl DocView {
                         }
                         doc.touched();
                         view.fetch_page_sizes(cx);
+                        view.refresh_facts(cx);
                         cx.emit(DocEvent::Saved { path: path.clone() });
                         true
                     }
@@ -1455,6 +1466,9 @@ impl DocView {
                 doc.foreign_annots = foreign;
                 let primary = doc.model.primary();
                 doc.set_labels(primary, facts.labels);
+                doc.attachments = facts.attachments;
+                doc.collection = facts.collection;
+                doc.facts_loaded = true;
                 if by_index.is_empty() {
                     cx.notify();
                     return;

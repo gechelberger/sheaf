@@ -129,6 +129,10 @@ pub fn load_pdf(path: &Path, password: Option<&str>) -> Result<lopdf::Document> 
 pub struct FileFacts {
     /// Every page's label, when the file has `/PageLabels`.
     pub labels: Option<Vec<String>>,
+    /// Embedded files, document-level and on annotations.
+    pub attachments: Vec<crate::attachments::Attachment>,
+    /// Set when the file is a PDF Portfolio.
+    pub collection: Option<crate::portfolio::Collection>,
 }
 
 /// The facts sheaf reads from an open file's catalog.
@@ -136,6 +140,8 @@ pub fn facts_in(pdf: &lopdf::Document) -> FileFacts {
     let pages = pdf.get_pages().len() as u32;
     FileFacts {
         labels: crate::labels::page_labels(pdf, pages),
+        attachments: crate::attachments::attachments_in(pdf),
+        collection: crate::portfolio::collection(pdf),
     }
 }
 

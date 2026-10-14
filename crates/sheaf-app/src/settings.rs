@@ -63,7 +63,7 @@ impl Default for DockLayout {
     fn default() -> Self {
         Self {
             left: DockState {
-                panels: vec!["pages".into(), "bookmarks".into()],
+                panels: vec!["pages".into(), "bookmarks".into(), "attachments".into()],
                 active: 0,
                 open: true,
                 size: 220.0,
