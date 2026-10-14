@@ -127,18 +127,24 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 | Feature | Status |
 |---|---|
 | Open / render PDF (incl. encrypted, forms, large scans) | ✅ (password prompt pending) |
-| Continuous / single / facing page modes | ✅ continuous; single/facing 📋 |
-| Zoom (fit page / fit width / custom), rotate view | ✅ zoom; rotate view 📋 |
+| Continuous / single / facing page modes | ✅ View > Single Page, Two-Up (each with Continuous), Show Cover Page |
+| Zoom (fit page / fit width / custom), rotate view | ✅ rotate view is display only (Ctrl+Shift+Plus/Minus) |
 | Thumbnails sidebar (lazy, virtualized) | ✅ |
 | Bookmarks (outline) sidebar | ✅ |
 | Text search (find in document) | ✅ progressive; ~6 ms/page |
 | Pattern search (regex: SSNs, EINs, amounts, dates) — separate tool from Find, shared engine with redaction | ✅ Patterns panel, Ctrl+Shift+F |
 | User-defined patterns: add, save, and delete presets; several date formats built in | ✅ `patterns.json`; right-click a preset |
 | Multiple documents, one window each | ✅ |
+| Full screen / read mode | ✅ View > Full Screen (Ctrl+L; click or arrows turn pages, Esc leaves), Read Mode (Ctrl+H) |
+| Page labels (display) | ✅ status bar and thumbnails; View > Go to Page (Ctrl+Shift+N) takes a label or number |
+| Rulers, grid, guides | ✅ View > Rulers (Ctrl+R), Grid (Ctrl+U); drag from a ruler for a guide |
+| Split view (same document, two places) | ✅ View > Split (Ctrl+\\); F6 switches pane |
 | Split view (same doc, two positions) | 📋 |
-| Attachments panel | 📋 |
-| Open PDF Portfolios (browse and extract embedded files) | 📋 |
-| Layers (OCG) panel | 📋 |
+| Attachments panel | ✅ View > Attachments (Ctrl+Alt+6): open (PDFs in sheaf, others with the system program after a warning) or save out |
+| Open PDF Portfolios (browse and extract embedded files) | ✅ opens on its cover sheet with the Attachments panel: folders, metadata columns, open/save |
+| Recent files | ✅ File > Open Recent (last 10, shared by every window) |
+| Document Properties | ✅ File > Properties (Alt+Enter): description, security, fonts |
+| Layers (OCG) panel | ✅ View > Layers (Ctrl+Alt+7): show or hide for viewing; never saved |
 
 ### Page organization
 | Feature | Status |
@@ -200,12 +206,12 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 ### Conversion & export
 | Feature | Status |
 |---|---|
-| Export pages to PNG / JPEG | 🎯 |
-| Export to multi-page TIFF (PDFlyer) | 📋 |
+| Export pages to PNG / JPEG | ✅ File > Export Pages (Ctrl+Shift+E): resolution, JPEG quality, page range, marks included or not |
+| Export to multi-page TIFF (PDFlyer) | ✅ File > Export Pages > TIFF: one file, black-and-white (CCITT G4), grayscale or color |
 | Create PDF from images | 📋 |
 | OCR (searchable text layer) | ✅ Document > Recognize Text (OCR)… (Ctrl+Shift+T): Tesseract or PaddleOCR, whole binder / current / selected / range, skips pages that already have text, progress + Esc to stop, one undo step; Find and Patterns see the text before the first save |
-| Export text | 📋 |
-| Print | 📋 |
+| Export text | ✅ File > Export Pages > Text: one UTF-8 file, a form feed between pages (unsaved OCR text included) |
+| Print | ✅ File > Print (Ctrl+P): own dialog with sheet preview; printer, copies, pages (all/current/selected/bookmark/range), Fit/Actual/Shrink, orientation, paper, two-sided, comments on/off; CUPS on Linux/macOS, GDI on Windows; Save as PDF |
 | PDF/A conversion | ❓ |
 | Office ↔ PDF | ❌ not planned (use LibreOffice) |
 
@@ -265,8 +271,9 @@ rest of the path to parity in [ROADMAP.md](ROADMAP.md).
 | M4 | **Polish → v0.1**: unsaved-changes prompts, settings with persisted layout, command palette, user keymap, crash-recovery autosave, packaging + CI. *Done 2026-10-11 (Linux; Windows bundle and CI workflows not yet exercised).* | Daily-driver readiness |
 | M5 | **Scan & OCR**: `OcrEngine` trait with Tesseract and PaddleOCR engines, batch OCR over a binder with progress and cancel, invisible text layer written on save, search over OCR text. *OCR slices done 2026-10-12 (Linux; Windows build not yet exercised). Scan cleanup, image import, scanner intake and separator sheets still planned — see [`todos/ocr.md`](todos/ocr.md).* | Scanned binders become searchable |
 | M6 | **Plugins**: WASM components (wasmtime, WIT), command registry, declarative forms and panels, document events, storage, OCR as a host capability, permissions with consent, plugin manager, bundled plugins (tax-form bookmarks, amount cross-reference). *Slices done 2026-10-13 (Linux; Windows build not yet exercised) — see [`docs/plugins.md`](docs/plugins.md) and [`todos/plugins.md`](todos/plugins.md).* | Extensibility without forking |
+| M7 | **Viewing & output**: page modes and rotate view, split view, full screen / read mode, rulers / grid / guides, page labels, attachments, portfolios, layers, document properties, recent files, print with preview (`sheaf-print`: CUPS, GDI), export to PNG / JPEG / TIFF (G4) / text. *Slices done 2026-10-14 (Linux; printing tested against stand-in CUPS tools, the Windows print backend only type-checked) — see [`todos/m7.md`](todos/m7.md).* | Viewing and printing never need Acrobat |
 
-M7 onward (viewing and output through v1.0 parity) is laid out in [ROADMAP.md](ROADMAP.md).
+M8 onward (viewing and output through v1.0 parity) is laid out in [ROADMAP.md](ROADMAP.md).
 
 ## Open questions
 

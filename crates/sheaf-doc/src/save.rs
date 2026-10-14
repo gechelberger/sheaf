@@ -62,6 +62,16 @@ fn finish(mut pdf: Pdf) -> Result<Vec<u8>> {
 /// file at `path`, along with their markup and the bookmarks that point at
 /// them. Returns how many pages were written.
 pub fn extract_pages(model: &Snapshot, ids: &[PageId], path: &Path) -> Result<usize> {
+    let snap = subset(model, ids, true).context("no pages to extract")?;
+    let n = snap.state.pages.len();
+    let bytes = rewrite_with(&snap, false)?;
+    write_atomic(path, &bytes)?;
+    Ok(n)
+}
+
+/// `ids` (in document order) with their markup and text layers, and their
+/// bookmarks when `outline`. None when no page is kept.
+fn subset(model: &Snapshot, ids: &[PageId], outline: bool) -> Option<Snapshot> {
     let keep: HashSet<PageId> = ids.iter().copied().collect();
     let pages: Vector<PageRef> = model
         .state
@@ -71,16 +81,20 @@ pub fn extract_pages(model: &Snapshot, ids: &[PageId], path: &Path) -> Result<us
         .copied()
         .collect();
     if pages.is_empty() {
-        bail!("no pages to extract");
+        return None;
     }
     let mut annots = model.state.annots.clone();
     annots.retain(|id, _| keep.contains(id));
     let mut text_layers = model.state.text_layers.clone();
     text_layers.retain(|id, _| keep.contains(id));
-    let snap = Snapshot {
+    Some(Snapshot {
         state: DocState {
             pages,
-            outline: prune_outline(&model.state.outline, &keep),
+            outline: if outline {
+                prune_outline(&model.state.outline, &keep)
+            } else {
+                Vector::new()
+            },
             annots,
             text_layers,
         },
@@ -88,11 +102,20 @@ pub fn extract_pages(model: &Snapshot, ids: &[PageId], path: &Path) -> Result<us
         sources: model.sources.clone(),
         outline_dirty: true,
         annots_dirty: HashSet::new(),
-    };
-    let n = snap.state.pages.len();
-    let bytes = rewrite_with(&snap, false)?;
-    write_atomic(path, &bytes)?;
-    Ok(n)
+    })
+}
+
+/// The file sent to a printer: `ids` in document order, as they look
+/// now. With `markup`, every comment and mark is drawn into the page (as
+/// Export Flattened Copy does), so any printing system shows it; without,
+/// markup is left out (Export Clean Copy). Form fields print either way.
+pub fn print_pdf(model: &Snapshot, ids: &[PageId], markup: bool) -> Result<Vec<u8>> {
+    let snap = subset(model, ids, false).context("no pages to print")?;
+    let mut pdf = build_rewrite(&snap, !markup)?;
+    if markup {
+        flatten_annots(&mut pdf)?;
+    }
+    finish(pdf)
 }
 
 /// Bookmarks that still point somewhere: a node survives if its target is
@@ -2106,6 +2129,73 @@ mod tests {
             ]
         );
         assert!(extract_pages(&model.snapshot(), &[], &out).is_err());
+    }
+
+    /// The print file has just the chosen pages, no bookmarks, and its marks
+    /// drawn in or left out.
+    #[test]
+    fn print_pdf_flattens_or_drops_markup() {
+        use crate::annot::{AnnotKind, Box2};
+        let dir = tempdir();
+        let a = make_pdf(&dir, "p.pdf", "P", 3, &[]);
+        let mut model = Document::new(
+            info(&a, 3),
+            &[FlatOutlineItem {
+                title: "Top".into(),
+                page: Some(1),
+                depth: 0,
+                view: None,
+            }],
+            Box::new(FixedCount(10)),
+        );
+        let ids: Vec<PageId> = (0..3).map(|i| model.page(i).unwrap().id).collect();
+        model
+            .apply(
+                Edit::AnnotAdd {
+                    page: ids[1],
+                    annot: Annot {
+                        id: crate::annot::AnnotId(0),
+                        kind: AnnotKind::Square {
+                            rect: Box2 {
+                                x: 10.0,
+                                y: 10.0,
+                                w: 50.0,
+                                h: 20.0,
+                            },
+                        },
+                        color: [255, 0, 0],
+                        opacity: 1.0,
+                        stroke: 1.0,
+                        author: "t".into(),
+                        contents: String::new(),
+                        modified: String::new(),
+                    },
+                },
+                "a",
+            )
+            .unwrap();
+        let snap = model.snapshot();
+        let with = Pdf::load_mem(&print_pdf(&snap, &[ids[2], ids[1]], true).unwrap()).unwrap();
+        assert_eq!(with.get_pages().len(), 2);
+        let first = with.get_pages()[&1];
+        let content = String::from_utf8_lossy(&with.get_page_content(first)).into_owned();
+        assert!(content.contains("MARK P 1"), "{content}");
+        // The square is drawn into the page, not left as an annotation.
+        let annots = with.get_page_annotations(first).unwrap_or_default();
+        assert!(annots.is_empty());
+        assert!(content.len() > "MARK P 1".len() + 20, "{content}");
+        assert!(with.catalog().unwrap().get(b"Outlines").is_err());
+        let without = Pdf::load_mem(&print_pdf(&snap, &[ids[1]], false).unwrap()).unwrap();
+        let only = without.get_pages()[&1];
+        assert!(
+            without
+                .get_page_annotations(only)
+                .unwrap_or_default()
+                .is_empty()
+        );
+        let plain = String::from_utf8_lossy(&without.get_page_content(only)).into_owned();
+        assert!(plain.len() < content.len(), "{plain}");
+        assert!(print_pdf(&snap, &[], true).is_err());
     }
 
     /// Flattening draws each mark's appearance into the page content and

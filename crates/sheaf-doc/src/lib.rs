@@ -6,10 +6,15 @@
 //! [`SourceInfo`]; rendering and saving live in other crates.
 
 pub mod annot;
+pub mod attachments;
 pub mod file;
 pub mod history;
 pub mod incremental;
+pub mod labels;
+pub mod layers;
 pub mod model;
+pub mod portfolio;
+pub mod properties;
 pub mod recovery;
 pub mod save;
 pub mod text_layer;

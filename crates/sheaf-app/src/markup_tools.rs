@@ -303,7 +303,7 @@ impl DocView {
         let Some(index) = doc.model.state().index_of(page_id) else {
             return;
         };
-        let Some(pref) = doc.page_ref(index) else {
+        let Some(pref) = doc.shown_ref(index) else {
             return;
         };
         let Some(src) = doc
@@ -324,7 +324,7 @@ impl DocView {
             pref.rotation,
         );
         let ps = src.rotated(pref.rotation);
-        doc.pending_scroll = Some(crate::docview::ScrollTo::Reveal {
+        doc.scroll_to(crate::docview::ScrollTo::Reveal {
             page: index,
             fx: (r.x + r.w / 2.0) / ps.width.max(1.0),
             fy: (r.y + r.h / 2.0) / ps.height.max(1.0),
@@ -339,20 +339,14 @@ impl DocView {
         let State::Ready(doc) = &self.state else {
             return None;
         };
-        let layout = doc.layout.as_ref()?;
-        let b = doc.scroll.bounds();
-        let x = f32::from(pos.x - b.origin.x) - f32::from(doc.scroll.offset().x);
-        let y = f32::from(pos.y - b.origin.y) - f32::from(doc.scroll.offset().y);
-        if layout.len() == 0 {
-            return None;
-        }
-        let i = layout.page_at(y).min(layout.len() - 1);
-        let (left, top, w, h) = (
-            layout.lefts[i],
-            layout.tops[i],
-            layout.widths[i],
-            layout.heights[i],
-        );
+        let pane = doc.pane();
+        let layout = pane.layout.as_ref()?;
+        let b = pane.scroll.bounds();
+        let x = f32::from(pos.x - b.origin.x) - f32::from(pane.scroll.offset().x);
+        let y = f32::from(pos.y - b.origin.y) - f32::from(pane.scroll.offset().y);
+        let i = layout.page_at(x, y)?;
+        let r = layout.rect(i)?;
+        let (left, top, w, h) = (r.left, r.top, r.w, r.h);
         if y < top || y > top + h || x < left || x > left + w {
             return None;
         }

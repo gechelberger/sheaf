@@ -6451,12 +6451,14 @@ dependencies = [
  "anyhow",
  "embed-resource",
  "env_logger",
+ "fax",
  "futures",
  "gpui",
  "gpui_platform",
  "im",
  "image",
  "log",
+ "png 0.18.1",
  "regex",
  "resvg",
  "schemars",
@@ -6467,9 +6469,11 @@ dependencies = [
  "sheaf-doc",
  "sheaf-ocr",
  "sheaf-plugin",
+ "sheaf-print",
  "sheaf-render",
  "sheaf-ui",
  "smallvec",
+ "tiff",
  "unicode-segmentation",
  "zip 9.0.2",
 ]
@@ -6546,6 +6550,17 @@ version = "0.1.0"
 dependencies = [
  "wasi 0.14.7+wasi-0.2.4",
  "wit-bindgen 0.62.0",
+]
+
+[[package]]
+name = "sheaf-print"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "anyhow",
+ "log",
+ "sheaf-core",
+ "sheaf-render",
+ "windows 0.61.3",
 ]
 
 [[package]]

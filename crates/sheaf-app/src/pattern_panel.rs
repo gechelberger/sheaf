@@ -311,7 +311,7 @@ impl DocView {
         let Some(index) = doc.model.index_of(hit.page) else {
             return;
         };
-        let Some(pref) = doc.page_ref(index) else {
+        let Some(pref) = doc.shown_ref(index) else {
             return;
         };
         let src = doc
@@ -325,7 +325,7 @@ impl DocView {
         if let Some(r) = hit.rects.first() {
             let r = crate::docview::rotate_rect(*r, src, pref.rotation);
             let ps2 = src.rotated(pref.rotation);
-            doc.pending_scroll = Some(ScrollTo::Reveal {
+            doc.scroll_to(ScrollTo::Reveal {
                 page: index,
                 fx: (r.x + r.w / 2.0) / ps2.width.max(1.0),
                 fy: (r.y + r.h / 2.0) / ps2.height.max(1.0),

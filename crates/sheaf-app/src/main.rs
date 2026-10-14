@@ -5,19 +5,25 @@
 //! Each file opens in its own window.
 
 mod assets;
+mod attachments_panel;
 mod brand;
 mod calc_panel;
 mod commands;
 mod comments_panel;
 mod contrib;
 mod docview;
+mod export;
+mod export_dialog;
 mod file_dialog;
+mod goto;
 mod keymap;
+mod layers_panel;
 mod markup_tools;
 mod menus;
 mod ocr_dialog;
 mod ocr_run;
 mod outline_panel;
+mod pane;
 mod pattern_panel;
 mod patterns;
 #[cfg(feature = "plugins")]
@@ -28,7 +34,12 @@ mod plugin_manager;
 mod plugin_panel;
 #[cfg(feature = "plugins")]
 mod plugins;
+mod presentation;
+mod print_dialog;
+mod properties_dialog;
+mod recent;
 mod region;
+mod rulers;
 mod script;
 mod settings;
 mod workspace;
@@ -78,7 +89,22 @@ actions!(
         ExportCleanCopy,
         ExportFlattened,
         ExtractPages,
-        CancelOcr
+        CancelOcr,
+        SinglePage,
+        SinglePageContinuous,
+        TwoUp,
+        TwoUpContinuous,
+        ToggleCoverPage,
+        RotateViewCw,
+        RotateViewCcw,
+        SplitView,
+        NextPane,
+        FullScreen,
+        ReadMode,
+        ToggleRulers,
+        ToggleGrid,
+        ClearGuides,
+        GoToPage
     ]
 );
 actions!(
@@ -121,6 +147,8 @@ actions!(
         ShowPatterns,
         ShowCalc,
         ShowComments,
+        ShowAttachments,
+        ShowLayers,
         CloseDocument,
         OpenFile,
         NewWindow,
@@ -130,7 +158,11 @@ actions!(
         About,
         CommandPalette,
         RecognizeText,
-        ManagePlugins
+        ManagePlugins,
+        DocumentProperties,
+        ClearRecent,
+        Print,
+        ExportPages
     ]
 );
 actions!(
@@ -259,6 +291,11 @@ fn main() {
             let od_keys = Some("OcrDialog && !TextInput");
             let pf = Some("PluginForm");
             let pm = Some("PluginManager");
+            let props = Some(properties_dialog::KEY_CONTEXT);
+            let pd = Some(print_dialog::KEY_CONTEXT);
+            let ed = Some(export_dialog::KEY_CONTEXT);
+            let ed_keys = Some("ExportDialog && !TextInput");
+            let pd_keys = Some("PrintDialog && !TextInput");
             let pf_keys = Some("PluginForm && !TextInput");
             cx.bind_keys([
                 KeyBinding::new("right", NextPage, doc_keys),
@@ -277,6 +314,17 @@ fn main() {
                 KeyBinding::new("ctrl-0", ZoomFitPage, doc),
                 KeyBinding::new("ctrl-1", ZoomActual, doc),
                 KeyBinding::new("ctrl-2", ZoomFitWidth, doc),
+                // Acrobat: Rotate View Clockwise / Counterclockwise.
+                KeyBinding::new("ctrl-shift-=", RotateViewCw, doc),
+                KeyBinding::new("ctrl-shift--", RotateViewCcw, doc),
+                KeyBinding::new("ctrl-\\", SplitView, doc),
+                KeyBinding::new("f6", NextPane, doc),
+                KeyBinding::new("ctrl-l", FullScreen, doc),
+                KeyBinding::new("ctrl-h", ReadMode, doc),
+                KeyBinding::new("ctrl-r", ToggleRulers, doc),
+                // Acrobat: Go to Page.
+                KeyBinding::new("ctrl-shift-n", GoToPage, doc),
+                KeyBinding::new("ctrl-u", ToggleGrid, doc),
                 KeyBinding::new("r", RotatePageCw, doc_keys),
                 KeyBinding::new("shift-r", RotatePageCcw, doc_keys),
                 KeyBinding::new("delete", DeletePage, doc_keys),
@@ -320,6 +368,8 @@ fn main() {
                 KeyBinding::new("ctrl-alt-3", ShowPatterns, ws),
                 KeyBinding::new("ctrl-alt-4", ShowCalc, ws),
                 KeyBinding::new("ctrl-alt-5", ShowComments, ws),
+                KeyBinding::new("ctrl-alt-6", ShowAttachments, ws),
+                KeyBinding::new("ctrl-alt-7", ShowLayers, ws),
                 KeyBinding::new("ctrl-alt-l", ToggleLeftDock, ws),
                 KeyBinding::new("ctrl-alt-r", ToggleRightDock, ws),
                 KeyBinding::new("ctrl-alt-j", ToggleBottomDock, ws),
@@ -333,6 +383,30 @@ fn main() {
                 KeyBinding::new("ctrl-shift-k", CommandPalette, None),
                 // Recognize Text (OCR). Acrobat has no default shortcut for it.
                 KeyBinding::new("ctrl-shift-t", RecognizeText, ws),
+                KeyBinding::new("alt-enter", DocumentProperties, ws),
+                KeyBinding::new("ctrl-p", Print, ws),
+                KeyBinding::new("ctrl-shift-e", ExportPages, ws),
+                KeyBinding::new("tab", DialogNext, ed),
+                KeyBinding::new("shift-tab", DialogPrev, ed),
+                KeyBinding::new("left", DialogLeft, ed_keys),
+                KeyBinding::new("right", DialogRight, ed_keys),
+                KeyBinding::new("space", DialogRight, ed_keys),
+                KeyBinding::new("enter", DialogRun, ed_keys),
+                KeyBinding::new("escape", DialogCancel, ed_keys),
+                KeyBinding::new("tab", DialogNext, pd),
+                KeyBinding::new("shift-tab", DialogPrev, pd),
+                KeyBinding::new("left", DialogLeft, pd_keys),
+                KeyBinding::new("right", DialogRight, pd_keys),
+                KeyBinding::new("space", DialogRight, pd_keys),
+                KeyBinding::new("enter", DialogRun, pd_keys),
+                KeyBinding::new("escape", DialogCancel, pd_keys),
+                KeyBinding::new("pageup", print_dialog::PreviewPrev, pd),
+                KeyBinding::new("pagedown", print_dialog::PreviewNext, pd),
+                KeyBinding::new("tab", DialogNext, props),
+                KeyBinding::new("shift-tab", DialogPrev, props),
+                KeyBinding::new("left", DialogLeft, props),
+                KeyBinding::new("right", DialogRight, props),
+                KeyBinding::new("escape", DialogCancel, props),
                 KeyBinding::new("tab", DialogNext, od),
                 KeyBinding::new("shift-tab", DialogPrev, od),
                 KeyBinding::new("down", DialogNext, od_keys),
@@ -357,6 +431,7 @@ fn main() {
             ]);
             sheaf_ui::bind_keys(cx);
             cx.set_global(commands::CommandRegistry::builtin());
+            recent::init(cx);
             cx.set_global(contrib::Contributions::load());
             // Plugin bindings first, so the user's keymap can override them.
             #[cfg(feature = "plugins")]

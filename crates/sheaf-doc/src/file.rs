@@ -123,6 +123,41 @@ pub fn load_pdf(path: &Path, password: Option<&str>) -> Result<lopdf::Document> 
     Ok(pdf)
 }
 
+/// What sheaf shows about a file besides its pages and marks, read once
+/// when it opens.
+#[derive(Debug, Default)]
+pub struct FileFacts {
+    /// Every page's label, when the file has `/PageLabels`.
+    pub labels: Option<Vec<String>>,
+    /// Embedded files, document-level and on annotations.
+    pub attachments: Vec<crate::attachments::Attachment>,
+    /// Set when the file is a PDF Portfolio.
+    pub collection: Option<crate::portfolio::Collection>,
+    /// Optional content groups, in display order.
+    pub layers: Vec<crate::layers::Layer>,
+}
+
+/// The facts sheaf reads from an open file's catalog.
+pub fn facts_in(pdf: &lopdf::Document) -> FileFacts {
+    let pages = pdf.get_pages().len() as u32;
+    FileFacts {
+        labels: crate::labels::page_labels(pdf, pages),
+        attachments: crate::attachments::attachments_in(pdf),
+        collection: crate::portfolio::collection(pdf),
+        layers: crate::layers::layers_in(pdf),
+    }
+}
+
+/// Everything read from a file when it opens: annotations and facts, from
+/// one load.
+pub fn read_open(
+    path: impl AsRef<Path>,
+    password: Option<&str>,
+) -> Result<(AnnotsInFile, FileFacts)> {
+    let pdf = load_pdf(path.as_ref(), password)?;
+    Ok((annots_in(&pdf), facts_in(&pdf)))
+}
+
 /// Annotations sheaf wrote into `path` earlier, keyed by page index.
 pub fn read_sheaf_annots(path: impl AsRef<Path>) -> Result<HashMap<u32, Vec<Annot>>> {
     Ok(read_annots(path, None)?.sheaf)

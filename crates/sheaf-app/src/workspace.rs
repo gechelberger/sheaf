@@ -87,6 +87,8 @@ pub enum Panel {
     Patterns,
     Calc,
     Comments,
+    Attachments,
+    Layers,
     /// A panel a plugin contributes, by its id without the `plugin:` prefix.
     /// Kept in the layout even while its plugin isn't loaded, so disabling
     /// a plugin doesn't forget where its panel was.
@@ -97,12 +99,14 @@ pub enum Panel {
 const PLUGIN_PANEL_PREFIX: &str = "plugin:";
 
 impl Panel {
-    const ALL: [Panel; 5] = [
+    const ALL: [Panel; 7] = [
         Panel::Thumbnails,
         Panel::Outline,
         Panel::Patterns,
         Panel::Calc,
         Panel::Comments,
+        Panel::Attachments,
+        Panel::Layers,
     ];
 
     /// Stable id for settings and the `--panel` flag.
@@ -113,6 +117,8 @@ impl Panel {
             Panel::Patterns => "patterns".into(),
             Panel::Calc => "calc".into(),
             Panel::Comments => "comments".into(),
+            Panel::Attachments => "attachments".into(),
+            Panel::Layers => "layers".into(),
             Panel::Plugin(id) => format!("{PLUGIN_PANEL_PREFIX}{id}").into(),
         }
     }
@@ -131,6 +137,8 @@ impl Panel {
             Panel::Patterns => "Patterns".into(),
             Panel::Calc => "Calculator".into(),
             Panel::Comments => "Comments".into(),
+            Panel::Attachments => "Attachments".into(),
+            Panel::Layers => "Layers".into(),
             // Plugins name their panels once they can contribute them
             // (M6 slice 3); until then, the id.
             Panel::Plugin(id) => id.clone(),
@@ -279,6 +287,15 @@ pub struct Workspace {
     dock_menu: Option<(Panel, Point<Pixels>)>,
     /// The command palette, while open.
     palette: Option<(Entity<Palette>, Subscription)>,
+    /// File > Export Pages, while open.
+    export: Option<(Entity<crate::export_dialog::ExportDialog>, Subscription)>,
+    /// File > Print, while open.
+    print: Option<(Entity<crate::print_dialog::PrintDialog>, Subscription)>,
+    /// File > Properties, while open.
+    properties: Option<(
+        Entity<crate::properties_dialog::PropertiesDialog>,
+        Subscription,
+    )>,
     /// Document > Recognize Text (OCR)…, while open.
     ocr_dialog: Option<(Entity<OcrDialog>, Subscription)>,
     /// A plugin's `ui.show-form`, while open.
@@ -341,6 +358,9 @@ impl Workspace {
             resizing: None,
             dock_menu: None,
             palette: None,
+            export: None,
+            print: None,
+            properties: None,
             ocr_dialog: None,
             #[cfg(feature = "plugins")]
             plugin_form: None,
@@ -360,6 +380,8 @@ impl Workspace {
             Some("patterns") => this.show_panel(Panel::Patterns),
             Some("calc") => this.show_panel(Panel::Calc),
             Some("comments") => this.show_panel(Panel::Comments),
+            Some("attachments") => this.show_panel(Panel::Attachments),
+            Some("layers") => this.show_panel(Panel::Layers),
             _ => {}
         }
         if let Some(p) = path {
@@ -807,6 +829,121 @@ impl Workspace {
 
     /// Document > Recognize Text (OCR)…: open the options card for the
     /// active document (or close it if it's open).
+    /// File > Open Recent: open it like File > Open, or say it's gone.
+    fn open_recent(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if path.exists() {
+            let origin = window.window_handle().downcast::<Workspace>();
+            if let Some(origin) = origin {
+                cx.defer(move |cx| open_paths(origin, vec![path], cx));
+            }
+            return;
+        }
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        drop(sheaf_ui::prompts::ask(
+            window,
+            cx,
+            PromptLevel::Warning,
+            &format!("\"{name}\" can't be found"),
+            Some(&format!(
+                "It may have been moved, renamed or deleted. It's been taken off the recent files list.\n\n{}",
+                path.display()
+            )),
+            &["OK"],
+        ));
+        crate::recent::forget(&path, cx);
+    }
+
+    fn toggle_export(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.export.take().is_some() {
+            self.focus_active(window, cx);
+            cx.notify();
+            return;
+        }
+        let Some(ctx) = self.doc().and_then(|d| d.read(cx).export_context()) else {
+            return;
+        };
+        let dialog = cx.new(|cx| crate::export_dialog::ExportDialog::new(ctx, window, cx));
+        let sub = cx.subscribe_in(
+            &dialog,
+            window,
+            |ws, _, ev: &crate::export_dialog::ExportEvent, window, cx| {
+                ws.export = None;
+                ws.focus_active(window, cx);
+                if let crate::export_dialog::ExportEvent::Export(spec) = ev
+                    && let Some(doc) = ws.doc().cloned()
+                {
+                    let spec = spec.clone();
+                    doc.update(cx, |d, cx| d.export_pages(spec, window, cx));
+                }
+                cx.notify();
+            },
+        );
+        self.export = Some((dialog, sub));
+        cx.notify();
+    }
+
+    fn toggle_print(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((d, _)) = self.print.take() {
+            d.update(cx, |d, _| d.release(window));
+            self.focus_active(window, cx);
+            cx.notify();
+            return;
+        }
+        let prefs = self.settings.print.clone();
+        let Some(ctx) = self.doc().and_then(|d| d.read(cx).print_context(prefs)) else {
+            return;
+        };
+        let dialog = cx.new(|cx| crate::print_dialog::PrintDialog::new(ctx, window, cx));
+        let sub = cx.subscribe_in(
+            &dialog,
+            window,
+            |ws, dialog, ev: &crate::print_dialog::PrintEvent, window, cx| {
+                dialog.update(cx, |d, _| d.release(window));
+                ws.print = None;
+                ws.focus_active(window, cx);
+                if let crate::print_dialog::PrintEvent::Print(req) = ev {
+                    ws.settings.print = req.prefs.clone();
+                    if let Err(e) = ws.settings.save() {
+                        log::warn!("saving settings: {e:#}");
+                    }
+                    if let Some(doc) = ws.doc().cloned() {
+                        let req = (**req).clone();
+                        doc.update(cx, |d, cx| d.print(req, cx));
+                    }
+                }
+                cx.notify();
+            },
+        );
+        self.print = Some((dialog, sub));
+        cx.notify();
+    }
+
+    fn toggle_properties(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.properties.take().is_some() {
+            self.focus_active(window, cx);
+            cx.notify();
+            return;
+        }
+        let Some(ctx) = self.doc().and_then(|d| d.read(cx).properties_context()) else {
+            return;
+        };
+        let dialog = cx.new(|cx| crate::properties_dialog::PropertiesDialog::new(ctx, window, cx));
+        let sub = cx.subscribe_in(
+            &dialog,
+            window,
+            |ws, _, _: &crate::properties_dialog::PropertiesEvent, window, cx| {
+                ws.properties = None;
+                ws.focus_active(window, cx);
+                cx.notify();
+            },
+        );
+        self.properties = Some((dialog, sub));
+        cx.notify();
+    }
+
     fn toggle_ocr_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.ocr_dialog.take().is_some() {
             self.focus_active(window, cx);
@@ -922,7 +1059,7 @@ impl Workspace {
         false
     }
 
-    fn new_window(path: Option<PathBuf>, cx: &mut App) {
+    pub(crate) fn new_window(path: Option<PathBuf>, cx: &mut App) {
         if let Err(e) = crate::open_workspace(Launch::file(path), None, cx) {
             log::error!("opening window: {e:#}");
         }
@@ -1086,6 +1223,8 @@ impl Workspace {
                 Panel::Patterns => d.render_patterns(wide, window, cx),
                 Panel::Calc => d.render_calc(wide, window, cx),
                 Panel::Comments => d.render_comments(window, cx),
+                Panel::Attachments => d.render_attachments(window, cx),
+                Panel::Layers => d.render_layers(window, cx),
                 Panel::Plugin(id) => plugin_panel_body(d, &id, window, cx),
             }),
             _ => div().into_any_element(),
@@ -1178,8 +1317,23 @@ impl Render for Workspace {
                 ))
                 .into_any_element(),
         };
-        let show =
-            |ws: &Self, side: Side| !ws.all_hidden && ws.doc.is_some() && ws.dock(side).shows();
+        // Read Mode and Full Screen put the docks (and in full screen, the
+        // title bar) away.
+        let presentation = self
+            .doc()
+            .map(|d| d.read(cx).presentation())
+            .unwrap_or_default();
+        let bare = presentation != crate::presentation::Presentation::Normal;
+        let full = presentation == crate::presentation::Presentation::FullScreen;
+        if let Some(doc) = self.doc().cloned()
+            && let Some(id) = doc.update(cx, |d, _| d.take_wanted_panel())
+            && let Some(panel) = Panel::from_id(id)
+        {
+            self.show_panel(panel);
+        }
+        let show = |ws: &Self, side: Side| {
+            !bare && !ws.all_hidden && ws.doc.is_some() && ws.dock(side).shows()
+        };
         let left = show(self, Side::Left).then(|| self.render_dock(Side::Left, window, cx));
         let right = show(self, Side::Right).then(|| self.render_dock(Side::Right, window, cx));
         let bottom = show(self, Side::Bottom).then(|| self.render_dock(Side::Bottom, window, cx));
@@ -1267,6 +1421,14 @@ impl Render for Workspace {
                 }
                 cx.notify();
             }))
+            .on_action(cx.listener(|ws, _: &crate::ShowLayers, _, cx| {
+                ws.show_panel(Panel::Layers);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|ws, _: &crate::ShowAttachments, _, cx| {
+                ws.show_panel(Panel::Attachments);
+                cx.notify();
+            }))
             .on_action(cx.listener(|ws, _: &ShowCalc, window, cx| {
                 ws.show_panel(Panel::Calc);
                 if let Some(doc) = ws.doc().cloned() {
@@ -1299,6 +1461,21 @@ impl Render for Workspace {
             )
             .on_action(
                 cx.listener(|ws, _: &RecognizeText, window, cx| ws.toggle_ocr_dialog(window, cx)),
+            )
+            .on_action(cx.listener(|ws, _: &crate::Print, window, cx| ws.toggle_print(window, cx)))
+            .on_action(
+                cx.listener(|ws, _: &crate::ExportPages, window, cx| ws.toggle_export(window, cx)),
+            )
+            .on_action(
+                cx.listener(|ws, a: &crate::recent::OpenRecent, window, cx| {
+                    ws.open_recent(a.path.clone(), window, cx)
+                }),
+            )
+            .on_action(|_: &crate::ClearRecent, _, cx| crate::recent::clear(cx))
+            .on_action(
+                cx.listener(|ws, _: &crate::DocumentProperties, window, cx| {
+                    ws.toggle_properties(window, cx)
+                }),
             )
             .on_action(cx.listener(|ws, _: &ActivateMenuBar, window, cx| {
                 if let Some(bar) = &ws.menu_bar {
@@ -1357,7 +1534,7 @@ impl Render for Workspace {
             .size_full()
             .bg(theme::RAISED)
             .text_color(theme::TEXT_SOFT)
-            .child(title_bar)
+            .when(!full, |d| d.child(title_bar))
             .child(
                 div()
                     .relative()
@@ -1379,6 +1556,21 @@ impl Render for Workspace {
             )
             .children(
                 self.ocr_dialog
+                    .as_ref()
+                    .map(|(d, _)| deferred(d.clone()).with_priority(2)),
+            )
+            .children(
+                self.properties
+                    .as_ref()
+                    .map(|(d, _)| deferred(d.clone()).with_priority(2)),
+            )
+            .children(
+                self.print
+                    .as_ref()
+                    .map(|(d, _)| deferred(d.clone()).with_priority(2)),
+            )
+            .children(
+                self.export
                     .as_ref()
                     .map(|(d, _)| deferred(d.clone()).with_priority(2)),
             );

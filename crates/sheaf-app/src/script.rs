@@ -17,8 +17,11 @@
 //!   two minutes) until `<script>.go` contains that name, so a harness can
 //!   take a screenshot first.
 //! - `{"dump": "outline" | "notice" | "annots" | "pages" | "panels" |
-//!   "plugins" | "region" | "view" | "focus"}`: print state as `SCRIPT <what>: …` lines.
+//!   "plugins" | "region" | "view" | "layout" | "focus"}`: print state as `SCRIPT <what>: …` lines.
 //! - `{"quit": true}`
+//!
+//! File pickers can't be driven; set `SHEAF_SCRIPT_PICK=<path>` and every
+//! open, folder and save picker answers with that path.
 //!
 //! Output goes to stderr. Never part of normal use.
 
@@ -81,9 +84,12 @@ async fn run_step(
     if let Some(name) = step.get("checkpoint").and_then(Value::as_str) {
         // Synthetic input doesn't always schedule a frame; make sure the
         // screenshot sees the current state.
-        cx.update_window(handle.into(), |_, window, _| window.refresh())
-            .map_err(|e| e.to_string())?;
-        pause(cx, 300).await;
+        // A grab can show the frame before the last; draw twice.
+        for _ in 0..2 {
+            cx.update_window(handle.into(), |_, window, _| window.refresh())
+                .map_err(|e| e.to_string())?;
+            pause(cx, 300).await;
+        }
         eprintln!("SCRIPT checkpoint {name}");
         let started = Instant::now();
         while started.elapsed() < Duration::from_secs(120) {
@@ -296,16 +302,17 @@ impl crate::docview::DocView {
         let crate::docview::State::Ready(doc) = &self.state else {
             return None;
         };
-        let layout = doc.layout.as_ref()?;
-        let pref = doc.page_ref(page)?;
+        let pane = doc.pane();
+        let r = pane.layout.as_ref()?.rect(page)?;
+        let pref = doc.shown_ref(page)?;
         let src = doc.model.source(pref.source)?.page_size(pref.index);
         let shown = crate::markup_tools::rotate_pt(sheaf_doc::Pt { x, y }, src, pref.rotation);
-        let k = layout.widths[page] / src.rotated(pref.rotation).width.max(1.0);
-        let b = doc.scroll.bounds();
-        let off = doc.scroll.offset();
+        let k = r.w / src.rotated(pref.rotation).width.max(1.0);
+        let b = pane.scroll.bounds();
+        let off = pane.scroll.offset();
         Some((
-            f32::from(b.origin.x) + f32::from(off.x) + layout.lefts[page] + shown.x * k,
-            f32::from(b.origin.y) + f32::from(off.y) + layout.tops[page] + shown.y * k,
+            f32::from(b.origin.x) + f32::from(off.x) + r.left + shown.x * k,
+            f32::from(b.origin.y) + f32::from(off.y) + r.top + shown.y * k,
         ))
     }
 }
@@ -368,6 +375,19 @@ impl Workspace {
                     .and_then(|id| st.outline_flat().into_iter().find(|(_, n)| n.id == id))
                     .map(|(_, n)| n.title.clone())
             ),
+            "layout" => {
+                for (i, pane) in d.panes.iter().enumerate() {
+                    eprintln!(
+                        "SCRIPT layout: pane {i}{} {} row {} rotate {} page {} zoom {:.0}%",
+                        if i == d.active { " (active)" } else { "" },
+                        pane.mode.label(),
+                        pane.row,
+                        pane.rotation.degrees(),
+                        pane.current_page + 1,
+                        pane.layout.as_ref().map_or(0.0, |l| l.zoom_percent()),
+                    );
+                }
+            }
             "region" => eprintln!(
                 "SCRIPT region: {:?}",
                 view.region.as_ref().map(|r| (r.page, r.rect()))

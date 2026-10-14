@@ -124,7 +124,7 @@ impl DocView {
         doc.selected_annot = None;
         doc.selected_foreign = Some(ix);
         if let Some(index) = doc.index_of_source_page(f.page)
-            && let Some(pref) = doc.page_ref(index)
+            && let Some(pref) = doc.shown_ref(index)
             && let Some(src) = doc
                 .model
                 .source(pref.source)
@@ -141,7 +141,7 @@ impl DocView {
                 pref.rotation,
             );
             let ps = src.rotated(pref.rotation);
-            doc.pending_scroll = Some(ScrollTo::Reveal {
+            doc.scroll_to(ScrollTo::Reveal {
                 page: index,
                 fx: (r.x + r.w / 2.0) / ps.width.max(1.0),
                 fy: (r.y + r.h / 2.0) / ps.height.max(1.0),

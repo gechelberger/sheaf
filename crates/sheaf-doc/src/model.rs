@@ -148,6 +148,19 @@ impl DocState {
     }
 
     /// Pre-order walk of the outline with depth.
+    /// The pages bookmark `id` owns (as moving it with its pages takes
+    /// them), in document order.
+    pub fn bookmark_pages(&self, id: OutlineId) -> Option<Vec<PageId>> {
+        let flat = self.outline_flat();
+        let (_, node) = flat.iter().find(|(_, n)| n.id == id)?;
+        Some(
+            bookmark_span(self, node)?
+                .into_iter()
+                .map(|p| p.id)
+                .collect(),
+        )
+    }
+
     pub fn outline_flat(&self) -> Vec<(u16, &OutlineNode)> {
         fn walk<'a>(
             nodes: &'a Vector<OutlineNode>,

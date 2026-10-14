@@ -80,6 +80,10 @@ on it, and integrations such as CCH Workpaper Manager are left to plugins.
 
 ### M7: Viewing & output
 
+**Done 2026-10-14** (Linux). Slice notes, the print decision and what's
+left open (booklet / n-up, text "with layout", the Windows print backend
+untested on Windows) are in [`todos/m7.md`](todos/m7.md).
+
 Viewing:
 - Single page, two-up (facing), and two-up with cover page modes.
 - Rotate view (display only, not saved).
@@ -106,8 +110,9 @@ Output:
 Slices: page modes + rotate view → split view → panels (attachments, layers,
 properties) → print → image/TIFF/text export.
 
-**Decide at kickoff:** native print dialogs per platform vs our own dialog that
-sends to the OS spooler. On Linux, CUPS directly or the portal?
+**Decided at kickoff (2026-10-14):** sheaf's own print dialog with a
+preview, sending to CUPS (`lp`) on Linux/macOS and GDI on Windows; no
+portal. Reasons in [`todos/m7.md`](todos/m7.md).
 
 ### M8: Page tools
 

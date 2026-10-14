@@ -8,6 +8,7 @@ members = [
     "crates/sheaf-render",
     "crates/sheaf-ui",
     "crates/sheaf-ocr",
+    "crates/sheaf-print",
     "crates/sheaf-plugin",
     "crates/sheaf-plugin-api",
     "crates/sheaf-app",
@@ -26,6 +27,7 @@ sheaf-doc = { path = "crates/sheaf-doc" }
 sheaf-render = { path = "crates/sheaf-render" }
 sheaf-ui = { path = "crates/sheaf-ui" }
 sheaf-ocr = { path = "crates/sheaf-ocr" }
+sheaf-print = { path = "crates/sheaf-print" }
 sheaf-plugin = { path = "crates/sheaf-plugin" }
 
 # GPUI is pre-1.0 and only published sporadically; track Zed main at a pinned rev.
