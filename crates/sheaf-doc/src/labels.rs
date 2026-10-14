@@ -1,10 +1,14 @@
 //! Page labels (`/PageLabels` in the catalog): the "iv" or "A-3" a page
-//! shows instead of its position. Read only; writing them is M8.
+//! shows instead of its position. Read from files, kept in the model by
+//! page id ([`LabelSpec`]) so they survive reorders, and written back.
 
 use lopdf::{Dictionary, Document as Pdf, Object};
+use serde::{Deserialize, Serialize};
+
+use crate::model::PageId;
 
 /// How a range numbers its pages (`/S`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Style {
     Decimal,
     UpperRoman,
@@ -16,7 +20,7 @@ pub enum Style {
 }
 
 /// One entry of the number tree: pages from `start` on, until the next.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LabelRange {
     pub start: u32,
     pub style: Style,
@@ -66,6 +70,158 @@ pub fn labels_for(ranges: &[LabelRange], page_count: u32) -> Vec<String> {
             }
         })
         .collect()
+}
+
+/// A label range anchored to the page it starts at, as the model keeps
+/// it: reordering pages carries the range start along.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LabelSpec {
+    pub start: PageId,
+    pub style: Style,
+    pub prefix: String,
+    pub first: u32,
+}
+
+/// `specs` as ranges over page positions (`pages` in document order):
+/// sorted, a start whose page is gone dropped, and plain numbers from the
+/// first page when no range starts there (the PDF needs one at 0).
+pub fn resolve_specs(specs: &[LabelSpec], pages: &[PageId]) -> Vec<LabelRange> {
+    let mut ranges: Vec<LabelRange> = specs
+        .iter()
+        .filter_map(|s| {
+            let start = pages.iter().position(|p| *p == s.start)? as u32;
+            Some(LabelRange {
+                start,
+                style: s.style,
+                prefix: s.prefix.clone(),
+                first: s.first.max(1),
+            })
+        })
+        .collect();
+    ranges.sort_by_key(|r| r.start);
+    ranges.dedup_by_key(|r| r.start);
+    if !ranges.is_empty() && ranges[0].start != 0 {
+        ranges.insert(
+            0,
+            LabelRange {
+                start: 0,
+                style: Style::Decimal,
+                prefix: String::new(),
+                first: 1,
+            },
+        );
+    }
+    ranges
+}
+
+/// Back to specs, by the page at each start.
+pub fn to_specs(ranges: &[LabelRange], pages: &[PageId]) -> Vec<LabelSpec> {
+    ranges
+        .iter()
+        .filter_map(|r| {
+            Some(LabelSpec {
+                start: *pages.get(r.start as usize)?,
+                style: r.style,
+                prefix: r.prefix.clone(),
+                first: r.first,
+            })
+        })
+        .collect()
+}
+
+/// Number pages `from..=to` (positions) with `new`, as Acrobat's Page
+/// Labels dialog does: ranges starting inside are replaced, and the page
+/// after keeps the label it had, so numbering past the change is
+/// unchanged.
+pub fn apply(
+    ranges: &[LabelRange],
+    page_count: u32,
+    from: u32,
+    to: u32,
+    style: Style,
+    prefix: &str,
+    first: u32,
+) -> Vec<LabelRange> {
+    let covering = |p: u32| {
+        let at = ranges.partition_point(|r| r.start <= p);
+        at.checked_sub(1).map(|i| ranges[i].clone())
+    };
+    let after = (to + 1 < page_count).then(|| {
+        let next = to + 1;
+        match covering(next) {
+            Some(r) => LabelRange {
+                start: next,
+                first: r.first.saturating_add(next - r.start),
+                ..r
+            },
+            // No labels there before: plain numbers, as they showed.
+            None => LabelRange {
+                start: next,
+                style: Style::Decimal,
+                prefix: String::new(),
+                first: next + 1,
+            },
+        }
+    });
+    let mut out: Vec<LabelRange> = ranges
+        .iter()
+        .filter(|r| r.start < from || r.start > to + 1)
+        .cloned()
+        .collect();
+    if from > 0 && !out.iter().any(|r| r.start == 0) {
+        out.push(LabelRange {
+            start: 0,
+            style: Style::Decimal,
+            prefix: String::new(),
+            first: 1,
+        });
+    }
+    out.push(LabelRange {
+        start: from,
+        style,
+        prefix: prefix.to_string(),
+        first: first.max(1),
+    });
+    if let Some(a) = after
+        && !ranges.iter().any(|r| r.start == to + 1)
+    {
+        out.push(a);
+    } else if let Some(r) = ranges.iter().find(|r| r.start == to + 1) {
+        out.push(r.clone());
+    }
+    out.sort_by_key(|r| r.start);
+    out.dedup_by_key(|r| r.start);
+    out
+}
+
+/// The `/PageLabels` number tree for `ranges`.
+pub fn number_tree(ranges: &[LabelRange]) -> Dictionary {
+    let mut nums = Vec::with_capacity(ranges.len() * 2);
+    for r in ranges {
+        let mut d = Dictionary::new();
+        let s: Option<&[u8]> = match r.style {
+            Style::Decimal => Some(b"D"),
+            Style::UpperRoman => Some(b"R"),
+            Style::LowerRoman => Some(b"r"),
+            Style::UpperLetters => Some(b"A"),
+            Style::LowerLetters => Some(b"a"),
+            Style::None => None,
+        };
+        if let Some(s) = s {
+            d.set("S", Object::Name(s.to_vec()));
+        }
+        if !r.prefix.is_empty() {
+            d.set("P", crate::save::text_string(&r.prefix));
+        }
+        if r.first != 1 {
+            d.set("St", r.first as i64);
+        }
+        nums.push(Object::Integer(r.start as i64));
+        nums.push(Object::Dictionary(d));
+    }
+    let mut tree = Dictionary::new();
+    tree.set("Nums", nums);
+    tree
 }
 
 /// The label of the page `offset` pages into range `r`.
@@ -256,5 +412,71 @@ mod tests {
         let catalog = pdf.add_object(dictionary! { "Type" => "Catalog" });
         pdf.trailer.set("Root", catalog);
         assert!(page_labels(&pdf, 3).is_none());
+    }
+}
+
+#[cfg(test)]
+mod edit_tests {
+    use super::*;
+
+    fn r(start: u32, style: Style, prefix: &str, first: u32) -> LabelRange {
+        LabelRange {
+            start,
+            style,
+            prefix: prefix.into(),
+            first,
+        }
+    }
+
+    #[test]
+    fn apply_keeps_numbering_after_the_change() {
+        // 10 pages, plain numbers.
+        let out = apply(&[], 10, 0, 3, Style::LowerRoman, "", 1);
+        assert_eq!(
+            labels_for(&out, 10),
+            vec!["i", "ii", "iii", "iv", "5", "6", "7", "8", "9", "10"]
+        );
+        // Then restart at 1 from page 5.
+        let out = apply(&out, 10, 4, 9, Style::Decimal, "", 1);
+        assert_eq!(labels_for(&out, 10)[4..7], ["1", "2", "3"]);
+        // A prefixed run in the middle leaves the rest counting on.
+        let out = apply(&out, 10, 6, 7, Style::UpperLetters, "Ex-", 1);
+        assert_eq!(
+            labels_for(&out, 10),
+            vec!["i", "ii", "iii", "iv", "1", "2", "Ex-A", "Ex-B", "5", "6"]
+        );
+    }
+
+    #[test]
+    fn specs_follow_their_pages() {
+        let pages: Vec<PageId> = (0..5).map(PageId).collect();
+        let ranges = vec![r(0, Style::LowerRoman, "", 1), r(2, Style::Decimal, "", 1)];
+        let specs = to_specs(&ranges, &pages);
+        // Move the page that starts the decimal range to the front.
+        let moved = vec![pages[2], pages[0], pages[1], pages[3], pages[4]];
+        let back = resolve_specs(&specs, &moved);
+        assert_eq!(labels_for(&back, 5), vec!["1", "i", "ii", "iii", "iv"]);
+        // The roman range's start page deleted: it goes, and the first
+        // page gets plain numbers, since the PDF needs a range there.
+        let gone = vec![pages[1], pages[2], pages[3]];
+        let back = resolve_specs(&specs, &gone);
+        assert_eq!(back[0].start, 0);
+        assert_eq!(back[0].style, Style::Decimal);
+        assert_eq!(labels_for(&back, 3), vec!["1", "1", "2"]);
+    }
+
+    #[test]
+    fn number_tree_round_trips() {
+        let ranges = vec![
+            r(0, Style::LowerRoman, "", 1),
+            r(3, Style::Decimal, "A-", 5),
+        ];
+        let tree = number_tree(&ranges);
+        let mut pdf = Pdf::with_version("1.7");
+        let tree_id = pdf.add_object(tree);
+        let catalog =
+            pdf.add_object(lopdf::dictionary! { "Type" => "Catalog", "PageLabels" => tree_id });
+        pdf.trailer.set("Root", catalog);
+        assert_eq!(label_ranges(&pdf).unwrap(), ranges);
     }
 }

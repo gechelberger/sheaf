@@ -8,6 +8,7 @@
 pub mod annot;
 pub mod attachments;
 pub mod file;
+pub mod generated;
 pub mod history;
 pub mod images;
 pub mod incremental;
@@ -18,7 +19,9 @@ pub mod portfolio;
 pub mod properties;
 pub mod recovery;
 pub mod save;
+pub mod stamps;
 pub mod text_layer;
+pub mod watermark;
 
 pub use sheaf_core::{DestView, PageFrame};
 
@@ -26,6 +29,6 @@ pub use annot::{Annot, AnnotId, AnnotKind, Box2, PageGeom, Pt, default_author, p
 pub use history::{AllOf, FixedCount, HistoryPolicy, HistoryStats, MemoryBudget};
 pub use model::{
     DocState, Document, Edit, EditOutcome, FlatOutlineItem, JobId, NewOutlineItem, OutlineId,
-    OutlineNode, PageId, PageRef, Snapshot, SourceId, SourceInfo,
+    OutlineNode, PageId, PageRef, Rebase, Snapshot, SourceId, SourceInfo,
 };
 pub use text_layer::{OcrWord, TextHit, TextLayer};

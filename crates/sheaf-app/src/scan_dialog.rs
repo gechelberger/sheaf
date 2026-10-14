@@ -16,11 +16,11 @@ use gpui::{
     RenderImage, Task, Window, div, img, prelude::*, px, relative,
 };
 use image::RgbImage;
+use sheaf_image::clean::{Mode, Stage};
 use sheaf_ocr::OcrConfig;
 use sheaf_ops::images::Paper;
 use sheaf_ops::scan::ScanOptions;
 use sheaf_ops::{Cancelled, NoProgress, Tracker};
-use sheaf_scan::{Mode, Stage};
 use sheaf_ui::button::{Button, Chip};
 use sheaf_ui::{dialog, theme};
 
@@ -85,6 +85,7 @@ const ROW_OCR: usize = 7;
 const ROW_IMAGE: usize = 8;
 const ROW_VIEW: usize = 9;
 const ROW_CURL: usize = 10;
+const ROW_BLANKS: usize = 11;
 
 pub struct ScanDialog {
     focus: FocusHandle,
@@ -102,6 +103,8 @@ pub struct ScanDialog {
     /// The previewed file, decoded and shrunk.
     loaded: Option<(usize, Arc<RgbImage>)>,
     previews: Vec<(View, Arc<RenderImage>)>,
+    /// The previewed page came out blank.
+    preview_blank: bool,
     preview_error: Option<String>,
     generation: u64,
     _preview_task: Option<Task<()>>,
@@ -151,6 +154,7 @@ impl ScanDialog {
             view: View::Result,
             loaded: None,
             previews: Vec::new(),
+            preview_blank: false,
             preview_error: None,
             generation: 0,
             _preview_task: None,
@@ -172,6 +176,7 @@ impl ScanDialog {
             ROW_ORIENT,
             ROW_DESKEW,
             ROW_FLATTEN,
+            ROW_BLANKS,
             ROW_OCR,
         ];
         if self.files.len() > 1 {
@@ -226,6 +231,11 @@ impl ScanDialog {
             ROW_ORIENT => o.clean.orient = !o.clean.orient,
             ROW_DESKEW => o.clean.deskew = !o.clean.deskew,
             ROW_FLATTEN => o.clean.flatten = !o.clean.flatten,
+            ROW_BLANKS => {
+                o.drop_blanks = !o.drop_blanks;
+                cx.notify();
+                return;
+            }
             ROW_OCR => {
                 if self.ocr_unavailable.is_none() {
                     o.ocr = !o.ocr;
@@ -282,7 +292,7 @@ impl ScanDialog {
                 .spawn(async move {
                     let image = match loaded {
                         Some(im) => im,
-                        None => Arc::new(shrink(sheaf_scan::load(&path)?)),
+                        None => Arc::new(shrink(sheaf_image::io::load(&path)?)),
                     };
                     let views = preview(&image, &params)?;
                     anyhow::Ok((image, views))
@@ -293,8 +303,9 @@ impl ScanDialog {
                     return;
                 }
                 match result {
-                    Ok((image, views)) => {
+                    Ok((image, (views, blank))) => {
                         d.loaded = Some((index, image));
+                        d.preview_blank = blank;
                         if !views.iter().any(|(v, _)| *v == d.view) {
                             d.view = View::Result;
                         }
@@ -476,14 +487,16 @@ fn shrink(image: RgbImage) -> RgbImage {
     )
 }
 
-/// The photo with its page outlined, each step, and the result.
+/// The photo with its page outlined, each step, and the result; and
+/// whether the result is blank.
+#[allow(clippy::type_complexity)]
 fn preview(
     image: &RgbImage,
-    params: &sheaf_scan::ScanParams,
-) -> anyhow::Result<Vec<(View, Arc<RenderImage>)>> {
+    params: &sheaf_image::clean::ScanParams,
+) -> anyhow::Result<(Vec<(View, Arc<RenderImage>)>, bool)> {
     let mut photo = image.clone();
     if params.crop
-        && let Some(q) = sheaf_scan::find_page(image)
+        && let Some(q) = sheaf_image::clean::find_page(image)
     {
         outline(&mut photo, q);
     }
@@ -492,12 +505,13 @@ fn preview(
         sheaf_ops::scan::clean_image(image.clone(), params, &NoProgress, &mut |stage, im| {
             views.push((View::Stage(stage), to_render(im)))
         })?;
+    let blank = sheaf_ops::scan::is_blank_page(&cleaned.image);
     views.push((View::Result, to_render(&cleaned.image.into_rgb8())));
-    Ok(views)
+    Ok((views, blank))
 }
 
 /// Draw `q` on `img` in the accent color.
-fn outline(img: &mut RgbImage, q: sheaf_scan::Quad) {
+fn outline(img: &mut RgbImage, q: sheaf_image::clean::Quad) {
     let (w, h) = img.dimensions();
     let t = (w.max(h) / 300).max(2) as i32;
     for i in 0..4 {
@@ -590,6 +604,7 @@ impl Render for ScanDialog {
             true,
             cx,
         );
+        let blanks = self.toggle(ROW_BLANKS, "Leave out blank pages", o.drop_blanks, true, cx);
         let engine = self.ocr.engine.label();
         let ocr = div()
             .flex()
@@ -666,7 +681,27 @@ impl Render for ScanDialog {
             .map(|d| match (&shown, &self.preview_error) {
                 (_, Some(e)) => d.child(dialog::message(e.clone(), true)),
                 (Some(im), _) => {
-                    d.child(img(im.clone()).size_full().object_fit(ObjectFit::Contain))
+                    // A page that would be left out is dimmed, not hidden.
+                    let dropped = self.opts.drop_blanks && self.preview_blank;
+                    d.relative()
+                        .child(
+                            img(im.clone())
+                                .size_full()
+                                .object_fit(ObjectFit::Contain)
+                                .when(dropped, |i| i.opacity(0.35)),
+                        )
+                        .when(dropped, |d| {
+                            d.child(
+                                div()
+                                    .absolute()
+                                    .top_2()
+                                    .left_2()
+                                    .px_2()
+                                    .rounded_md()
+                                    .bg(theme::CARD)
+                                    .child(dialog::message("Blank: left out", false)),
+                            )
+                        })
                 }
                 _ => d.child(dialog::subtitle("Preparing preview…")),
             });
@@ -683,6 +718,7 @@ impl Render for ScanDialog {
             .child(self.row_el(ROW_ORIENT, "", orient))
             .child(self.row_el(ROW_DESKEW, "", deskew))
             .child(self.row_el(ROW_FLATTEN, "", flatten))
+            .child(self.row_el(ROW_BLANKS, "", blanks))
             .child(self.row_el(ROW_OCR, "Text", ocr))
             .when(n > 1, |d| {
                 d.child(self.row_el(ROW_IMAGE, "Preview", image_row))

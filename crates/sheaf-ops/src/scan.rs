@@ -1,5 +1,5 @@
 //! Photos and scans of paper to a clean PDF (`sheaf scan`, File > Create >
-//! From Scans/Photos): each image is cleaned up (`sheaf_scan`), becomes a
+//! From Scans/Photos): each image is cleaned up (`sheaf_image::clean`), becomes a
 //! page, and can be OCRed so the text is searchable. OCR reads the very
 //! image that becomes the page, so the text lines up with it.
 
@@ -9,11 +9,12 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sheaf_core::PageSize;
-use sheaf_doc::images::{PageImage, placement};
+use sheaf_doc::images::placement;
 use sheaf_doc::{Box2, Document, Edit, SourceInfo, TextLayer};
+use sheaf_image::clean::ScanParams;
+use sheaf_image::io::PageImage;
 use sheaf_ocr::{OcrConfig, OcrImage, OcrWord};
 use sheaf_progress::{Progress, Unit};
-use sheaf_scan::ScanParams;
 
 use crate::images::Paper;
 
@@ -30,6 +31,9 @@ pub struct ScanOptions {
     pub dpi: u32,
     /// Recognize text with the configured OCR engine.
     pub ocr: bool,
+    /// Leave out pages that come out blank (duplex backs, separators).
+    /// Only clearly blank ones: a nearly blank page stays.
+    pub drop_blanks: bool,
 }
 
 impl Default for ScanOptions {
@@ -39,6 +43,7 @@ impl Default for ScanOptions {
             page: Paper::Letter,
             dpi: 300,
             ocr: false,
+            drop_blanks: false,
         }
     }
 }
@@ -72,6 +77,8 @@ pub struct ScanReport {
     pub cropped: usize,
     /// Words recognized, when OCR ran.
     pub words: usize,
+    /// Blank pages left out.
+    pub dropped: usize,
 }
 
 /// Clean up one photo.
@@ -79,8 +86,8 @@ pub fn clean_one(
     path: &Path,
     params: &ScanParams,
     progress: &dyn Progress,
-) -> Result<sheaf_scan::Cleaned> {
-    let image = sheaf_scan::load(path)?;
+) -> Result<sheaf_image::clean::Cleaned> {
+    let image = sheaf_image::io::load(path)?;
     clean_image(image, params, progress, &mut |_, _| {})
         .with_context(|| format!("cleaning up {}", path.display()))
 }
@@ -91,15 +98,16 @@ pub fn clean_image(
     image: image::RgbImage,
     params: &ScanParams,
     progress: &dyn Progress,
-    stage: &mut dyn FnMut(sheaf_scan::Stage, &image::RgbImage),
-) -> Result<sheaf_scan::Cleaned> {
-    let orienter = |img: &image::RgbImage| sheaf_ocr::orient::scores(img);
+    stage: &mut dyn FnMut(sheaf_image::clean::Stage, &image::RgbImage),
+) -> Result<sheaf_image::clean::Cleaned> {
+    let orienter = |img: &image::RgbImage| orientation_votes(img);
     let unwarper = |img: &image::RgbImage| sheaf_ocr::rectify::unwarp(img);
-    let models = sheaf_scan::Models {
-        orient: (params.orient && sheaf_ocr::orient::available())
-            .then_some(&orienter as sheaf_scan::Orienter),
+    let models = sheaf_image::clean::Models {
+        orient: (params.orient
+            && (sheaf_ocr::orient::available() || sheaf_ocr::orient::osd_available()))
+        .then_some(&orienter as sheaf_image::clean::Orienter),
         unwarp: (params.flatten_curl && sheaf_ocr::rectify::available())
-            .then_some(&unwarper as sheaf_scan::Unwarper),
+            .then_some(&unwarper as sheaf_image::clean::Unwarper),
     };
     if params.flatten_curl && models.unwarp.is_none() {
         anyhow::bail!(
@@ -107,7 +115,47 @@ pub fn clean_image(
             sheaf_ocr::rectify::unavailable_reason().unwrap_or_default()
         );
     }
-    sheaf_scan::clean_with(image, params, models, progress, stage)
+    sheaf_image::clean::clean_with(image, params, models, progress, stage)
+}
+
+/// Votes for which way up a page goes, from the models there are:
+/// PaddleOCR's orientation classifier, averaged over the page turned all
+/// four ways (on its own it has favourite answers), and Tesseract's
+/// orientation detection on the gray page and a black-and-white copy,
+/// each weighted by its confidence. On ten phone photos of engineering
+/// drawings neither was right alone; together they were.
+pub fn orientation_votes(img: &image::RgbImage) -> Option<[f32; 4]> {
+    let mut votes = [0f32; 4];
+    let mut any = false;
+    if sheaf_ocr::orient::available() {
+        let s = (1000.0 / img.width().max(img.height()) as f32).min(1.0);
+        let small = image::imageops::resize(
+            img,
+            ((img.width() as f32 * s) as u32).max(1),
+            ((img.height() as f32 * s) as u32).max(1),
+            image::imageops::FilterType::Triangle,
+        );
+        for r in 0..4u16 {
+            if let Some(sc) = sheaf_ocr::orient::scores(&sheaf_image::clean::turn(small.clone(), r))
+            {
+                for (j, v) in sc.iter().enumerate() {
+                    votes[(j + r as usize) % 4] += v / 4.0;
+                }
+                any = true;
+            }
+        }
+    }
+    if sheaf_ocr::orient::osd_available() {
+        let gray = image::DynamicImage::ImageRgb8(img.clone()).into_luma8();
+        let bw = sheaf_image::clean::sauvola(&gray, (gray.width() / 50).max(15) | 1, 0.25);
+        for im in [&gray, &bw] {
+            if let Some((k, conf)) = sheaf_ocr::orient::osd(im, 300) {
+                votes[k as usize] += (conf / 8.0).clamp(0.0, 1.0);
+                any = true;
+            }
+        }
+    }
+    any.then_some(votes)
 }
 
 /// Clean up `inputs` and write them to `out` as a PDF, a page each.
@@ -152,9 +200,20 @@ pub fn scan(
                 &format!("{}: turned {}°", path.display(), cleaned.turns * 90),
             );
         }
+        if opts.drop_blanks && is_blank_page(&cleaned.image) {
+            step.message(
+                sheaf_progress::Level::Info,
+                &format!("{}: blank, left out", path.display()),
+            );
+            report.dropped += 1;
+            progress.set(i as u64 + 1);
+            continue;
+        }
         let page = match opts.clean.mode {
             // Black and white goes in as CCITT G4.
-            sheaf_scan::Mode::Bw => PageImage::from_image(cleaned.image.clone(), opts.dpi as f32),
+            sheaf_image::clean::Mode::Bw => {
+                PageImage::from_image(cleaned.image.clone(), opts.dpi as f32)
+            }
             _ => PageImage::jpeg(&cleaned.image, opts.dpi as f32, JPEG_QUALITY)?,
         };
         if let Some(engine) = engine.as_mut() {
@@ -174,6 +233,9 @@ pub fn scan(
         progress.set(i as u64 + 1);
     }
     progress.check()?;
+    if pages.is_empty() {
+        anyhow::bail!("every page came out blank");
+    }
     let bytes = sheaf_doc::images::to_pdf(&pages, fit)?;
     if engine.is_none() {
         crate::images::write_atomic(out, &bytes)?;
@@ -188,6 +250,14 @@ pub fn scan(
     let _ = std::fs::remove_file(&tmp);
     result?;
     Ok(report)
+}
+
+/// Whether a cleaned page is blank enough to leave out.
+pub fn is_blank_page(image: &image::DynamicImage) -> bool {
+    matches!(
+        sheaf_image::blank::judge_image(image, sheaf_image::blank::Sensitivity::Normal),
+        sheaf_image::blank::Verdict::Blank { .. }
+    )
 }
 
 /// An engine's words on a cleaned image, in points on its page.
@@ -270,7 +340,7 @@ mod tests {
         let opts: ScanOptions =
             serde_json::from_str(r#"{"page":"original","mode":"bw","ocr":true}"#).unwrap();
         assert_eq!(opts.params().fit, None);
-        assert_eq!(opts.clean.mode, sheaf_scan::Mode::Bw);
+        assert_eq!(opts.clean.mode, sheaf_image::clean::Mode::Bw);
         assert!(opts.ocr && opts.clean.deskew);
     }
 }

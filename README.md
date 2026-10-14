@@ -41,12 +41,16 @@ sheaf export binder.pdf -o pngs/ --pages "1-3, 10-" --dpi 200
 sheaf export binder.pdf -f tiff --tiff bw -o binder.tif
 sheaf-cli export binder.pdf -f text -o binder.txt
 sheaf scan photos/*.jpg -o receipts.pdf --mode bw --ocr
+sheaf remove-blanks scans.pdf -o clean.pdf --rejects removed.pdf
 ```
 
 | Subcommand | Does |
 |---|---|
+| `combine` | PDFs and images into one PDF in order; `file:range` takes some pages (`a.pdf:1-3,7`). A bookmark per file (`--no-file-bookmarks` to skip), `--image-page` |
 | `export` | Pages to PNG, JPEG, TIFF or text, as File > Export Pages. Prints the files written; refuses to overwrite without `--force` |
-| `scan` | Photos or scans of paper to a clean PDF: finds the page in the photo and straightens it, turns it upright, levels the text, evens out shadows and color casts. `--mode color\|gray\|bw`, `--page letter\|a4\|original`, `--dpi`, `--ocr` (searchable text that lines up with the page), `--no-crop`/`--no-deskew`/… to skip a step, `--flatten-curl` for curled or bent pages (UVDoc model; `scripts/fetch-ocr-data.sh --uvdoc`) |
+| `split` | One PDF into several: `--every N`, `--bookmarks` (a file per top-level bookmark), `--max-size 10MB`, or `--ranges "1-3; 4-10; 11-"` |
+| `remove-blanks` | Blank, and "intentionally left blank", pages out of a PDF, as Document > Find Blank Pages…. Prints each page found and whether it goes; `--dry-run` writes nothing; `--rejects` keeps the removed pages in a file of their own, bookmarked "p. 4 — blank". Nearly blank pages (a signature) stay unless `--nearly-blank`; `--sensitivity strict\|normal\|lenient`, `--keep-intentional`, `--pages` |
+| `scan` | Photos or scans of paper to a clean PDF: finds the page in the photo and straightens it, turns it upright, levels the text, evens out shadows and color casts. `--mode color\|gray\|bw`, `--page letter\|a4\|original`, `--dpi`, `--ocr` (searchable text that lines up with the page), `--no-crop`/`--no-deskew`/… to skip a step, `--drop-blanks` to leave out blank pages, `--flatten-curl` for curled or bent pages (UVDoc model; `scripts/fetch-ocr-data.sh --uvdoc`) |
 | `images-to-pdf` | JPEG, PNG, TIFF (every page), BMP, GIF and WebP files to one PDF, a page each: `--page original\|letter\|a4`, `--margin`, `--dpi` |
 
 ## Why
@@ -54,7 +58,8 @@ sheaf scan photos/*.jpg -o receipts.pdf --mode bw --ocr
 Acrobat has become slow enough that routine work — opening a 400-page scanned
 workpaper binder, reordering pages, dropping a tickmark — is painful,
 especially on older hardware. PDFlyer makes the workflow tolerable but is
-locked to 32-bit Acrobat on Windows.
+Windows-only and runs inside a paid copy of Acrobat Standard or Pro (64-bit
+Acrobat since PDFlyer v20; v22 dropped Windows 10).
 
 Sheaf's bet is that a PDF editor written in Rust, with a GPU-accelerated UI and
 a render pipeline designed around tiling and caching, can be an order of
@@ -178,23 +183,27 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 | Reorder pages (drag in thumbnails) | ✅ |
 | Rotate **individual** pages (PDFlyer-style, not whole doc) | ✅ |
 | Delete / extract / duplicate pages | ✅ Document > Extract Pages… keeps marks and relevant bookmarks |
-| Insert PDF at position (PDFlyer "Insert PDF") | ✅ |
+| Insert PDF at position (PDFlyer "Insert PDF") | ✅ Document > Insert Pages > From File… |
 | Merge bookmarks on insert (parents merged, children appended) | ✅ |
-| Combine Files: many PDFs and images into one, choosing pages from each | 📋 |
-| Split document (by page range, by bookmark, by size) | 📋 |
-| Insert blank page / from image / from scanner | 📋 |
-| Crop pages | 📋 |
-| Page labels (roman numerals, prefixes) | 📋 |
-| Headers / footers / Bates numbering | 📋 |
-| Watermarks / backgrounds | 📋 |
+| Combine Files: many PDFs and images into one, choosing pages from each | ✅ File > Create > Combine Files…: add files or a folder or drop them, reorder, a page range per file, a bookmark per file holding its own bookmarks, images at their size or fitted to Letter/A4. `sheaf combine -o out.pdf a.pdf:1-3 scan.tif b.png` |
+| Split document (by page range, by bookmark, by size) | ✅ Document > Split Document…: every N pages, at each top-level bookmark (files named after them), by maximum file size, or by page ranges; unsaved changes included; Esc stops it. `sheaf split` |
+| Insert blank page / from image | ✅ Document > Insert Pages > Blank Pages… (size of the current page or Letter/A4/Legal, how many, where) and From Images… (fitted to a page size or at their own) |
+| Remove blank pages | ✅ Document > Find Blank Pages…: blank, nearly blank (a signature) and "intentionally left blank" pages found by content and pixels (margins, off-white paper, bleed-through and dust ignored); reviewed with thumbnails before one undoable delete. `sheaf remove-blanks` |
+| Replace pages | ✅ Document > Replace Pages…: pages of this document with a run of another PDF's; bookmarks and comments on them stay |
+| Insert from scanner | 📋 M5 |
+| Crop pages | ✅ Document > Crop Pages…: margins (in, mm or pt, as the page is shown) or trim white margins, on the current, selected, all or a range of pages; marks and OCR text stay on their content; saved as `/CropBox` |
+| Page labels (roman numerals, prefixes) | ✅ Document > Page Labels…: style, prefix and start for a run of pages; the pages after keep their labels; labels follow their pages through reorders and are written as `/PageLabels`; shown in the status bar and thumbnails, and Go to Page takes them |
+| Headers / footers / Bates numbering | ✅ Document > Header & Footer… and Bates Numbering…: six places with page number, page count, date, file name and Bates tokens; size, color, margins, page range; shown on the pages at once, written as tagged artifacts like Acrobat's on save; Update and Remove work on ours and Acrobat's |
+| Watermarks / backgrounds | ✅ Document > Watermark… and Background…: text or an image, opacity, rotation, nine positions, page range; in front of or behind the content; written as tagged artifacts like Acrobat's; shown exactly as saved; Update and Remove |
 
 ### Bookmarks (PDFlyer-heavy)
 | Feature | Status |
 |---|---|
 | Create / rename / delete / nest bookmarks | ✅ |
 | Move bookmark **with its pages** | ✅ Shift+drag |
-| Colorize bookmarks by level / status | ✅ per bookmark; by level 📋 |
-| Bookmark from page range | 📋 |
+| Colorize bookmarks | ✅ per bookmark; Document > Color Bookmarks by Level…. PDFlyer colors by populated vs empty and, separately, by status; both 📋 ([Pending](ROADMAP.md#pdflyer-parity-gaps)) |
+| Bookmark from page range | ✅ Document > Bookmarks from Pages…: one per page, titled from a template (`Page <<label>>`), optionally under a new parent |
+| Bookmark pattern matches | ✅ Patterns panel > Bookmark matches: one per match, pointing at it |
 | Target sheets / auto-bookmark from scan separators | ❓ |
 
 ### Markup & annotation
@@ -205,7 +214,7 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 | Ink / freehand | ✅ |
 | Stamps (built-in + custom) | ✅ tickmark library; custom 📋 |
 | **Tickmarks** (PDFlyer): quick-stamp library, keyboard-driven | ✅ |
-| **Connectors** (PDFlyer): linked markers that jump between pages | ✅ saved as Link annotations, so they jump in Acrobat too |
+| **Connectors** (PDFlyer): linked markers that jump between pages | ✅ pairs saved as Link annotations, so they jump in Acrobat too. PDFlyer's are label *groups* (1–50, A–ZZ) with Prev/Next and "all pages with / without"; groups are 📋 ([Pending](ROADMAP.md#pdflyer-parity-gaps)) |
 | **Calculator tape** (PDFlyer): 10-key calc, tape placed as annotation | ✅ Calculator panel (Ctrl+Alt+4) |
 | Comments list / review panel, status, replies | ✅ Comments panel (Ctrl+Alt+5) lists ours and third-party; status/replies 📋 |
 | Flatten annotations | ✅ File > Export Flattened Copy… (links and form fields kept) |
@@ -234,7 +243,7 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 |---|---|
 | Export pages to PNG / JPEG | ✅ File > Export Pages (Ctrl+Shift+E): resolution, JPEG quality, page range, marks included or not; Esc stops a running export. Also `sheaf export` on the command line |
 | Export to multi-page TIFF (PDFlyer) | ✅ File > Export Pages > TIFF: one file, black-and-white (CCITT G4), grayscale or color |
-| Create PDF from images | ✅ File > Create > From Scans/Photos…: phone photos or scans cleaned up (page found and straightened, upright, deskewed, shadows and color casts evened out), color/gray/black-and-white, Letter/A4/as photographed, optional OCR, with a preview of each step. `sheaf scan` and `sheaf images-to-pdf` on the command line |
+| Create PDF from images | ✅ File > Create > From Scans/Photos…: phone photos or scans cleaned up (page found and straightened, upright, deskewed, shadows and color casts evened out), color/gray/black-and-white, Letter/A4/as photographed, optional OCR, blank pages left out if asked (the preview dims them), with a preview of each step. `sheaf scan` and `sheaf images-to-pdf` on the command line |
 | OCR (searchable text layer) | ✅ Document > Recognize Text (OCR)… (Ctrl+Shift+T): Tesseract or PaddleOCR, whole binder / current / selected / range, skips pages that already have text, progress + Esc to stop, one undo step; Find and Patterns see the text before the first save |
 | Export text | ✅ File > Export Pages > Text: one UTF-8 file, a form feed between pages (unsaved OCR text included) |
 | Print | ✅ File > Print (Ctrl+P): own dialog with sheet preview; printer, copies, pages (all/current/selected/bookmark/range), Fit/Actual/Shrink, orientation, paper, two-sided, comments on/off; CUPS on Linux/macOS, GDI on Windows; Save as PDF |
@@ -312,8 +321,10 @@ M8 onward (viewing and output through v1.0 parity) is laid out in [ROADMAP.md](R
 - **One parser or two?** PDFium for rendering + lopdf for editing means two
   parsers of the same bytes. Alternative: do everything through PDFium's
   (limited) write API, or write our own object layer. Spike in M0.
-- **PDFlyer "Target Sheets" / Scan integration.** These depend on CCH Scan.
-  Do we want a generic "barcode/separator-sheet → bookmark" feature instead?
+- ~~**PDFlyer "Target Sheets" / Scan integration.**~~ Decided: CCH target
+  sheets are proprietary barcodes read by CCH Scan, so sheaf gets a generic
+  barcode / patch-code / keyword separator sheet → bookmark or split instead
+  (ROADMAP M5).
 - **Scripting language** for batch actions: Rhai (pure Rust, easy embed) vs
   Lua (familiar). Post-MVP, but affects the command architecture.
 

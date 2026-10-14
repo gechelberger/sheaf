@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <title>Split a document into several files</title>
+  <rect x="8" y="2.5" width="8" height="8" rx="1"/><path d="M12 10.5v2.5m0 0-6 3m6-3 6 3"/><rect x="2.5" y="16" width="7" height="5.5" rx="1"/><rect x="14.5" y="16" width="7" height="5.5" rx="1"/>
+</svg>

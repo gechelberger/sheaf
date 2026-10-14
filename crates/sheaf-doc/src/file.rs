@@ -127,8 +127,11 @@ pub fn load_pdf(path: &Path, password: Option<&str>) -> Result<lopdf::Document> 
 /// when it opens.
 #[derive(Debug, Default)]
 pub struct FileFacts {
-    /// Every page's label, when the file has `/PageLabels`.
-    pub labels: Option<Vec<String>>,
+    /// The file's `/PageLabels` ranges, by page index.
+    pub label_ranges: Option<Vec<crate::labels::LabelRange>>,
+    /// The header/footer sheaf drew into the file, and the page indexes
+    /// it's on (none: all).
+    pub header_footer: Option<(crate::stamps::HeaderFooter, Option<Vec<usize>>)>,
     /// Embedded files, document-level and on annotations.
     pub attachments: Vec<crate::attachments::Attachment>,
     /// Set when the file is a PDF Portfolio.
@@ -139,9 +142,9 @@ pub struct FileFacts {
 
 /// The facts sheaf reads from an open file's catalog.
 pub fn facts_in(pdf: &lopdf::Document) -> FileFacts {
-    let pages = pdf.get_pages().len() as u32;
     FileFacts {
-        labels: crate::labels::page_labels(pdf, pages),
+        label_ranges: crate::labels::label_ranges(pdf),
+        header_footer: crate::stamps::from_catalog(pdf),
         attachments: crate::attachments::attachments_in(pdf),
         collection: crate::portfolio::collection(pdf),
         layers: crate::layers::layers_in(pdf),
@@ -279,9 +282,10 @@ fn annots_in(pdf: &lopdf::Document) -> AnnotsInFile {
     out
 }
 
-/// MediaBox and /Rotate of a page (inherited attributes resolved).
+/// The visible box and /Rotate of a page (inherited attributes resolved).
 pub fn page_geom(pdf: &lopdf::Document, page: lopdf::ObjectId) -> PageGeom {
     let mut media = None;
+    let mut crop = None;
     let mut rotate = None;
     let mut id = page;
     for _ in 0..64 {
@@ -303,6 +307,14 @@ pub fn page_geom(pdf: &lopdf::Document, page: lopdf::ObjectId) -> PageGeom {
                 v[1].max(v[3]),
             ]);
         }
+        if crop.is_none()
+            && let Ok(cb) = dict
+                .get(b"CropBox")
+                .and_then(|o| pdf.dereference(o).map(|(_, o)| o))
+            && let Ok(arr) = cb.as_array()
+        {
+            crop = crate::annot::box_of(arr);
+        }
         if rotate.is_none()
             && let Ok(r) = dict.get(b"Rotate").and_then(|o| o.as_i64())
         {
@@ -314,7 +326,7 @@ pub fn page_geom(pdf: &lopdf::Document, page: lopdf::ObjectId) -> PageGeom {
         }
     }
     PageGeom {
-        media: media.unwrap_or([0.0, 0.0, 612.0, 792.0]),
+        media: crate::annot::visible_box(media.unwrap_or([0.0, 0.0, 612.0, 792.0]), crop),
         rotate: rotate.unwrap_or(0).rem_euclid(360),
     }
 }

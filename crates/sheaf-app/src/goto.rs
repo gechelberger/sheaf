@@ -2,7 +2,6 @@
 //! takes a label ("iv", "A-3") or a page number.
 
 use gpui::{AnyElement, Context, Entity, Focusable, Subscription, Window, div, prelude::*, px};
-use sheaf_doc::SourceId;
 use sheaf_ui::text_input::{TextInput, TextInputEvent};
 use sheaf_ui::theme;
 
@@ -16,22 +15,24 @@ pub(crate) struct GoTo {
 }
 
 impl Doc {
-    /// Page `index`'s label: from its file's `/PageLabels` when it has
-    /// them, else its position.
-    pub(crate) fn page_label(&self, index: usize) -> String {
-        if let Some((sid, labels)) = &self.labels
-            && let Some(p) = self.page_ref(index)
-            && p.source == *sid
-            && let Some(l) = labels.get(p.index as usize)
-        {
-            return l.clone();
+    /// Every page's label when the document has page labels, worked out
+    /// once per version.
+    pub(crate) fn labels(&self) -> Option<std::sync::Arc<Vec<String>>> {
+        let mut cache = self.labels.borrow_mut();
+        if cache.0 != self.version {
+            *cache = (
+                self.version,
+                self.model.state().page_labels().map(std::sync::Arc::new),
+            );
         }
-        (index + 1).to_string()
+        cache.1.clone()
     }
 
-    /// Labels for the primary file, once read.
-    pub(crate) fn set_labels(&mut self, sid: SourceId, labels: Option<Vec<String>>) {
-        self.labels = labels.map(|l| (sid, l));
+    /// Page `index`'s label, or its position when there are no labels.
+    pub(crate) fn page_label(&self, index: usize) -> String {
+        self.labels()
+            .and_then(|l| l.get(index).cloned())
+            .unwrap_or_else(|| (index + 1).to_string())
     }
 
     /// The page a typed label or number names: an exact label first
@@ -42,7 +43,7 @@ impl Doc {
             return None;
         }
         let n = self.model.page_count();
-        if self.labels.is_some()
+        if self.labels().is_some()
             && let Some(i) = (0..n).find(|&i| self.page_label(i).eq_ignore_ascii_case(text))
         {
             return Some(i);

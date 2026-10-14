@@ -561,13 +561,32 @@ impl DocView {
             .children(edit_row)
             .child(
                 div()
-                    .text_xs()
-                    .text_color(if ps.error.is_some() {
-                        theme::ERROR
-                    } else {
-                        theme::TEXT_MUTED
-                    })
-                    .child(status),
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_xs()
+                            .text_color(if ps.error.is_some() {
+                                theme::ERROR
+                            } else {
+                                theme::TEXT_MUTED
+                            })
+                            .child(status),
+                    )
+                    .when(ps.done && !ps.hits.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .id("pattern-bookmark")
+                                .text_xs()
+                                .text_color(theme::ACCENT)
+                                .cursor_pointer()
+                                .hover(|s| s.underline())
+                                .child("Bookmark matches")
+                                .on_click(cx.listener(|v, _, _, cx| v.bookmark_pattern_hits(cx))),
+                        )
+                    }),
             );
         let results = div()
             .id("pattern-results")
@@ -659,4 +678,49 @@ fn preset_menu(index: usize, pos: Point<Pixels>, cx: &mut Context<DocView>) -> A
     )
     .with_priority(1)
     .into_any_element()
+}
+
+impl DocView {
+    /// Patterns panel > Bookmark matches: a bookmark per match, titled with
+    /// its text and pointing at it, under one titled with the pattern; one
+    /// undo step.
+    pub(crate) fn bookmark_pattern_hits(&mut self, cx: &mut Context<Self>) {
+        let Some(ps) = &self.pattern else {
+            return;
+        };
+        let mut items = vec![sheaf_doc::NewOutlineItem {
+            title: format!("Pattern: {}", ps.source.trim()),
+            target: ps.hits.first().map(|h| h.page),
+            view: None,
+            depth: 0,
+        }];
+        items.extend(ps.hits.iter().map(|h| {
+            let top = h.rects.iter().map(|r| r.y).fold(f32::MAX, f32::min);
+            sheaf_doc::NewOutlineItem {
+                title: h.text.trim().to_string(),
+                target: Some(h.page),
+                view: (top < f32::MAX).then(|| sheaf_core::DestView::Xyz {
+                    left: None,
+                    top: Some((top - 12.0).max(0.0)),
+                    zoom: None,
+                }),
+                depth: 1,
+            }
+        }));
+        let n = items.len() - 1;
+        let State::Ready(doc) = &self.state else {
+            return;
+        };
+        let after = doc.model.state().outline.last().map(|o| o.id);
+        self.apply_batch(
+            vec![sheaf_doc::Edit::OutlineInsertTree {
+                parent: None,
+                after,
+                items,
+            }],
+            &format!("Bookmark {n} match{}", if n == 1 { "" } else { "es" }),
+            cx,
+        );
+        self.wanted_panel = Some("bookmarks");
+    }
 }

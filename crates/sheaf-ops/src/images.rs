@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use sheaf_doc::images::{PageFit, PageImage};
+use sheaf_doc::images::PageFit;
+use sheaf_image::io::PageImage;
 use sheaf_progress::{Progress, Unit};
 
 /// Page size for pages made from images.
@@ -60,7 +61,7 @@ pub fn read_all(
     let mut pages = Vec::new();
     for (i, path) in inputs.iter().enumerate() {
         progress.check()?;
-        let mut read = sheaf_doc::images::read(path)?;
+        let mut read = sheaf_image::io::read(path)?;
         if let Some(d) = dpi.filter(|d| *d > 0.0) {
             for p in &mut read {
                 p.dpi = (d, d);

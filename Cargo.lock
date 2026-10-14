@@ -6466,12 +6466,12 @@ dependencies = [
  "sheaf-cli",
  "sheaf-core",
  "sheaf-doc",
+ "sheaf-image",
  "sheaf-ocr",
  "sheaf-ops",
  "sheaf-plugin",
  "sheaf-print",
  "sheaf-render",
- "sheaf-scan",
  "sheaf-ui",
  "smallvec",
  "unicode-segmentation",
@@ -6491,10 +6491,10 @@ dependencies = [
  "log",
  "lopdf",
  "sheaf-doc",
+ "sheaf-image",
  "sheaf-ocr",
  "sheaf-ops",
  "sheaf-progress",
- "sheaf-scan",
 ]
 
 [[package]]
@@ -6510,7 +6510,6 @@ version = "0.1.0-alpha.1"
 dependencies = [
  "anyhow",
  "env_logger",
- "fax",
  "flate2",
  "im",
  "image",
@@ -6520,7 +6519,23 @@ dependencies = [
  "serde",
  "serde_json",
  "sheaf-core",
+ "sheaf-image",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "sheaf-image"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "anyhow",
+ "fax",
+ "image",
+ "imageproc",
+ "log",
+ "png 0.18.1",
+ "serde",
+ "serde_json",
+ "sheaf-progress",
  "tiff",
 ]
 
@@ -6540,6 +6555,7 @@ dependencies = [
  "serde_json",
  "sheaf-core",
  "sheaf-doc",
+ "sheaf-image",
  "sheaf-render",
  "tesseract-rs",
  "thiserror 2.0.21",
@@ -6552,16 +6568,16 @@ dependencies = [
  "anyhow",
  "image",
  "log",
- "png 0.18.1",
+ "lopdf",
+ "regex",
  "serde",
  "serde_json",
  "sheaf-core",
  "sheaf-doc",
+ "sheaf-image",
  "sheaf-ocr",
  "sheaf-progress",
  "sheaf-render",
- "sheaf-scan",
- "tiff",
 ]
 
 [[package]]
@@ -6603,6 +6619,7 @@ dependencies = [
  "anyhow",
  "log",
  "sheaf-core",
+ "sheaf-image",
  "sheaf-render",
  "windows 0.61.3",
 ]
@@ -6625,20 +6642,8 @@ dependencies = [
  "regex",
  "sheaf-core",
  "sheaf-doc",
+ "sheaf-image",
  "thiserror 2.0.21",
-]
-
-[[package]]
-name = "sheaf-scan"
-version = "0.1.0-alpha.1"
-dependencies = [
- "anyhow",
- "image",
- "imageproc",
- "log",
- "serde",
- "serde_json",
- "sheaf-progress",
 ]
 
 [[package]]

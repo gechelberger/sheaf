@@ -14,7 +14,7 @@ use im::Vector;
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, StringFormat, dictionary};
 
 use crate::annot::{Annot, AnnotId, AnnotKind, PageGeom, to_pdf};
-use crate::model::{DocState, OutlineNode, PageId, PageRef, Snapshot, SourceId};
+use crate::model::{DocState, OutlineNode, PageId, PageRef, Snapshot, SourceId, SourceInfo};
 use crate::text_layer;
 use sheaf_core::{DestView, PageFrame};
 
@@ -62,11 +62,15 @@ fn finish(mut pdf: Pdf) -> Result<Vec<u8>> {
 /// file at `path`, along with their markup and the bookmarks that point at
 /// them. Returns how many pages were written.
 pub fn extract_pages(model: &Snapshot, ids: &[PageId], path: &Path) -> Result<usize> {
-    let snap = subset(model, ids, true).context("no pages to extract")?;
-    let n = snap.state.pages.len();
-    let bytes = rewrite_with(&snap, false)?;
+    let bytes = extract_bytes(model, ids)?;
     write_atomic(path, &bytes)?;
-    Ok(n)
+    Ok(ids.len())
+}
+
+/// What [`extract_pages`] would write, in memory.
+pub fn extract_bytes(model: &Snapshot, ids: &[PageId]) -> Result<Vec<u8>> {
+    let snap = subset(model, ids, true).context("no pages to extract")?;
+    rewrite_with(&snap, false)
 }
 
 /// `ids` (in document order) with their markup and text layers, and their
@@ -97,10 +101,18 @@ fn subset(model: &Snapshot, ids: &[PageId], outline: bool) -> Option<Snapshot> {
             },
             annots,
             text_layers,
+            labels: if outline {
+                model.state.labels.clone()
+            } else {
+                None
+            },
+            header_footer: model.state.header_footer.clone(),
         },
         primary: model.primary,
         sources: model.sources.clone(),
         outline_dirty: true,
+        labels_dirty: true,
+        header_footer_dirty: model.header_footer_dirty,
         annots_dirty: HashSet::new(),
     })
 }
@@ -367,6 +379,13 @@ fn build_rewrite(model: &Snapshot, clean: bool) -> Result<Pdf> {
     let mut copy_maps: HashMap<SourceId, HashMap<ObjectId, ObjectId>> = HashMap::new();
     let mut connectors = Vec::new();
     let mut ocr_objects = None;
+    let mut stamp_objects = None;
+    let page_ids: Vec<PageId> = state.pages.iter().map(|p| p.id).collect();
+    let bates = state
+        .header_footer
+        .as_ref()
+        .map(|hf| hf.bates_numbers(&page_ids))
+        .unwrap_or_default();
     // Primary page dicts as loaded. A duplicated page is visited twice and
     // the first visit rewrites the object, so the second must not read it
     // back (it would see the rotation already applied).
@@ -420,6 +439,43 @@ fn build_rewrite(model: &Snapshot, clean: bool) -> Result<Pdf> {
             let geom = geom_of(&dict, original as i32);
             text_layer::install(&mut pdf, &mut dict, layer, &geom, &mut ocr_objects);
         }
+        // A header/footer the file doesn't have drawn yet.
+        if model.header_footer_dirty
+            && let Some(hf) = &state.header_footer
+            && hf.covers(pref.id)
+        {
+            let geom = geom_of(&dict, original as i32);
+            let extra = pref.rotation.degrees();
+            let [x0, y0, x1, y1] = geom.media;
+            let total = (geom.rotate + extra).rem_euclid(360);
+            let size = if total % 180 == 0 {
+                sheaf_core::PageSize {
+                    width: x1 - x0,
+                    height: y1 - y0,
+                }
+            } else {
+                sheaf_core::PageSize {
+                    width: y1 - y0,
+                    height: x1 - x0,
+                }
+            };
+            let position = kids.len();
+            let facts = crate::stamps::PageFacts {
+                index: position,
+                count: state.pages.len(),
+                bates: bates.get(position).copied().flatten(),
+            };
+            let placed = hf.layout(size, &facts);
+            crate::stamps::install(
+                &mut pdf,
+                &mut dict,
+                &placed,
+                hf.color,
+                &geom,
+                extra,
+                &mut stamp_objects,
+            );
+        }
         let g = geom_of(&dict, original as i32);
         frames.insert(
             pref.id,
@@ -463,11 +519,37 @@ fn build_rewrite(model: &Snapshot, clean: bool) -> Result<Pdf> {
     // (serialization happens in `finish`)
 
     let catalog_id = pdf.trailer.get(b"Root")?.as_reference()?;
+    // Labels the model keeps follow their pages.
+    let labels_tree = state
+        .label_ranges()
+        .filter(|r| !r.is_empty())
+        .map(|r| pdf.add_object(crate::labels::number_tree(&r)));
+    let identity = is_identity(model, &sources[&primary_id]);
     let catalog = pdf.get_dictionary_mut(catalog_id)?;
     catalog.set("Pages", pages_id);
-    // Page labels index by position; they'd be wrong after any reorder.
-    if !is_identity(model, &sources[&primary_id]) {
-        catalog.remove(b"PageLabels");
+    // The header/footer's settings, so Update can start from them.
+    match &state.header_footer {
+        Some(hf) => catalog.set(
+            crate::stamps::CATALOG_KEY,
+            crate::stamps::to_catalog(hf, &page_ids),
+        ),
+        None => {
+            catalog.remove(crate::stamps::CATALOG_KEY.as_bytes());
+        }
+    }
+    match labels_tree {
+        Some(id) => catalog.set("PageLabels", id),
+        // Removed.
+        None if model.labels_dirty => {
+            catalog.remove(b"PageLabels");
+        }
+        // Never read into the model: the file's index by position, so
+        // they'd be wrong after any reorder.
+        None => {
+            if !identity {
+                catalog.remove(b"PageLabels");
+            }
+        }
     }
     catalog.remove(b"Outlines");
     if !state.outline.is_empty() {
@@ -479,6 +561,74 @@ fn build_rewrite(model: &Snapshot, clean: bool) -> Result<Pdf> {
     }
 
     Ok(pdf)
+}
+
+/// Pages of `src`, each given a new `/CropBox` (`[x0, y0, x1, y1]` in its
+/// user space), as a new PDF: what a cropped page becomes, since sources
+/// are files. See [`derived_copy`].
+pub fn cropped_copy(src: &SourceInfo, pages: &[(u32, [f32; 4])]) -> Result<Vec<u8>> {
+    let pages: Vec<(u32, Option<[f32; 4]>)> = pages.iter().map(|&(i, c)| (i, Some(c))).collect();
+    derived_copy(src, &pages, &mut |_, _, _, _| Ok(()))
+}
+
+/// Pages of `src` as a new PDF, each with a new `/CropBox` when given,
+/// then passed to `fix` (with the new PDF, the page's dictionary, its
+/// geometry, and its position in `pages`) to change its content. sheaf's
+/// own marks are left out, since the model keeps them; other
+/// annotations, links and fields come along.
+pub fn derived_copy(
+    src: &SourceInfo,
+    pages: &[(u32, Option<[f32; 4]>)],
+    fix: &mut dyn FnMut(&mut Pdf, &mut Dictionary, &PageGeom, usize) -> Result<()>,
+) -> Result<Vec<u8>> {
+    let from = crate::file::load_pdf(&src.path, src.password.as_deref())?;
+    let loaded = LoadedSource::from_pdf(&from)?;
+    let mut pdf = Pdf::with_version("1.7");
+    let pages_id = pdf.new_object_id();
+    let mut map: HashMap<ObjectId, ObjectId> = HashMap::new();
+    let mut kids: Vec<Object> = Vec::with_capacity(pages.len());
+    for (position, &(index, crop)) in pages.iter().enumerate() {
+        let page = *loaded
+            .pages
+            .get(index as usize)
+            .with_context(|| format!("no page {index} in {}", src.path.display()))?;
+        let mut dict = copy_page_dict(&from, page, &mut pdf, &mut map)?;
+        let id = map[&page];
+        for (k, v) in loaded.inherited.get(&page).into_iter().flatten() {
+            if !dict.has(k) {
+                let v = remap(&from, v, &mut pdf, &mut map)?;
+                dict.set(k.clone(), v);
+            }
+        }
+        strip_sheaf_annots(&pdf, &mut dict);
+        if let Some(crop) = crop {
+            dict.set(
+                "CropBox",
+                crop.iter().map(|&v| Object::Real(v)).collect::<Vec<_>>(),
+            );
+        }
+        let rotate = dict
+            .get(b"Rotate")
+            .ok()
+            .and_then(|o| o.as_i64().ok())
+            .unwrap_or(0) as i32;
+        let geom = geom_of(&dict, rotate);
+        fix(&mut pdf, &mut dict, &geom, position)?;
+        dict.set("Parent", pages_id);
+        dict.set("Type", Object::Name(b"Page".to_vec()));
+        pdf.objects.insert(id, Object::Dictionary(dict));
+        kids.push(id.into());
+    }
+    let count = kids.len() as i64;
+    pdf.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => kids, "Count" => count }),
+    );
+    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    pdf.trailer.set("Root", catalog);
+    let mut out = Vec::new();
+    pdf.save_to(&mut out)?;
+    Ok(out)
 }
 
 /// Which strategy a save used.
@@ -678,7 +828,7 @@ fn remap(
 }
 
 /// PDF text string: PDFDocEncoding when ASCII, otherwise UTF-16BE with BOM.
-fn text_string(s: &str) -> Object {
+pub(crate) fn text_string(s: &str) -> Object {
     if s.is_ascii() {
         Object::String(s.as_bytes().to_vec(), StringFormat::Literal)
     } else {
@@ -789,23 +939,15 @@ pub fn validate(model: &Snapshot) -> Result<()> {
 
 /// Page geometry from a (flattened) page dictionary and its original rotation.
 pub(crate) fn geom_of(dict: &Dictionary, rotate: i32) -> PageGeom {
-    let media = dict
-        .get(b"MediaBox")
-        .ok()
-        .and_then(|o| o.as_array().ok())
-        .filter(|a| a.len() == 4)
-        .map(|a| {
-            let v: Vec<f32> = a.iter().map(|o| o.as_float().unwrap_or(0.0)).collect();
-            [
-                v[0].min(v[2]),
-                v[1].min(v[3]),
-                v[0].max(v[2]),
-                v[1].max(v[3]),
-            ]
-        })
-        .unwrap_or([0.0, 0.0, 612.0, 792.0]);
+    let boxed = |key: &[u8]| {
+        dict.get(key)
+            .ok()
+            .and_then(|o| o.as_array().ok())
+            .and_then(|a| crate::annot::box_of(a))
+    };
+    let media = boxed(b"MediaBox").unwrap_or([0.0, 0.0, 612.0, 792.0]);
     PageGeom {
-        media,
+        media: crate::annot::visible_box(media, boxed(b"CropBox")),
         rotate: rotate.rem_euclid(360),
     }
 }
@@ -959,7 +1101,7 @@ pub(crate) fn link_connectors(
 mod tests {
     use super::*;
     use crate::history::FixedCount;
-    use crate::model::{Document, Edit, FlatOutlineItem, SourceInfo};
+    use crate::model::{Document, Edit, FlatOutlineItem};
     use lopdf::content::{Content, Operation};
     use sheaf_core::{PageSize, Rotation};
 
@@ -2133,6 +2275,170 @@ mod tests {
 
     /// The print file has just the chosen pages, no bookmarks, and its marks
     /// drawn in or left out.
+    /// A header/footer is drawn into page content as pagination
+    /// artifacts on save, its settings kept in the catalog; a derived copy
+    /// can strip it again.
+    #[test]
+    fn header_footer_is_drawn_stored_and_strippable() {
+        use crate::stamps::{HeaderFooter, has_artifacts};
+        let dir = tempdir();
+        let a = make_pdf(&dir, "hf.pdf", "H", 2, &[]);
+        let mut model = Document::new(info(&a, 2), &[], crate::history::default_policy());
+        let hf = HeaderFooter {
+            texts: [
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                "Page <<1>> of <<N>>".into(),
+                String::new(),
+            ],
+            ..Default::default()
+        };
+        model
+            .apply(
+                Edit::SetHeaderFooter {
+                    header_footer: Some(hf.clone()),
+                },
+                "hf",
+            )
+            .unwrap();
+        assert!(model.header_footer_dirty());
+        let out = dir.join("hf-out.pdf");
+        // In place it falls back from incremental to a rewrite.
+        rewrite_to_path(&model.snapshot(), &out).unwrap();
+        let pdf = Pdf::load(&out).unwrap();
+        let pages: Vec<ObjectId> = pdf.get_pages().into_values().collect();
+        for (i, &p) in pages.iter().enumerate() {
+            let dict = pdf.get_dictionary(p).unwrap();
+            assert!(has_artifacts(&pdf, dict, crate::stamps::HEADER_FOOTER));
+            let all: Vec<u8> = dict
+                .get(b"Contents")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|o| {
+                    let s = pdf
+                        .get_object(o.as_reference().unwrap())
+                        .unwrap()
+                        .as_stream()
+                        .unwrap();
+                    s.decompressed_content()
+                        .unwrap_or_else(|_| s.content.clone())
+                })
+                .collect();
+            let want = format!("(Page {} of 2)", i + 1);
+            assert!(String::from_utf8_lossy(&all).contains(&want), "page {i}");
+        }
+        let (stored, scope) = crate::stamps::from_catalog(&pdf).unwrap();
+        assert_eq!(stored.texts, hf.texts);
+        assert_eq!(scope, None);
+        // Stripped, both pages come back clean.
+        let bytes = derived_copy(
+            &info(&out, 2),
+            &[(0, None), (1, None)],
+            &mut |pdf, d, _, _| {
+                crate::stamps::strip(pdf, d, crate::stamps::HEADER_FOOTER);
+                Ok(())
+            },
+        )
+        .unwrap();
+        let clean = Pdf::load_mem(&bytes).unwrap();
+        for p in clean.get_pages().into_values() {
+            assert!(!has_artifacts(
+                &clean,
+                clean.get_dictionary(p).unwrap(),
+                crate::stamps::HEADER_FOOTER
+            ));
+        }
+    }
+
+    /// Labels set in the model follow their pages through a reorder, by
+    /// rewrite and by incremental save, and removing them removes them.
+    #[test]
+    fn page_labels_are_written_and_follow_pages() {
+        use crate::labels::{LabelSpec, Style, label_ranges, labels_for};
+        let dir = tempdir();
+        let a = make_pdf(&dir, "labels.pdf", "L", 4, &[]);
+        let bytes = std::fs::metadata(&a).unwrap().len() as usize;
+        let mut model = Document::new(
+            SourceInfo {
+                bytes,
+                ..info(&a, 4)
+            },
+            &[],
+            crate::history::default_policy(),
+        );
+        let ids: Vec<PageId> = model.state().pages.iter().map(|p| p.id).collect();
+        let spec = |id, style, first| LabelSpec {
+            start: id,
+            style,
+            prefix: String::new(),
+            first,
+        };
+        model
+            .apply(
+                Edit::SetPageLabels {
+                    ranges: vec![
+                        spec(ids[0], Style::LowerRoman, 1),
+                        spec(ids[2], Style::Decimal, 1),
+                    ],
+                },
+                "labels",
+            )
+            .unwrap();
+        let read = |p: &Path| {
+            let pdf = Pdf::load(p).unwrap();
+            label_ranges(&pdf).map(|r| labels_for(&r, 4))
+        };
+        // Incremental, in place.
+        assert_eq!(
+            save_to_path(&model.snapshot(), &a).unwrap(),
+            Strategy::Incremental
+        );
+        assert_eq!(read(&a).unwrap(), vec!["i", "ii", "1", "2"]);
+        // Move the decimal range's first page to the front; rewrite.
+        model
+            .apply(
+                Edit::MovePages {
+                    ids: vec![ids[2]],
+                    before: Some(ids[0]),
+                },
+                "move",
+            )
+            .unwrap();
+        let out = dir.join("moved.pdf");
+        rewrite_to_path(&model.snapshot(), &out).unwrap();
+        assert_eq!(read(&out).unwrap(), vec!["1", "i", "ii", "iii"]);
+        // Removed.
+        model
+            .apply(Edit::SetPageLabels { ranges: vec![] }, "none")
+            .unwrap();
+        let out = dir.join("none.pdf");
+        rewrite_to_path(&model.snapshot(), &out).unwrap();
+        assert_eq!(read(&out), None);
+    }
+
+    /// Displayed positions start at the CropBox's corner, as viewers draw.
+    #[test]
+    fn geometry_follows_the_crop_box() {
+        let d = dictionary! {
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "CropBox" => vec![100.into(), 100.into(), 400.into(), 500.into()],
+        };
+        let g = geom_of(&d, 0);
+        assert_eq!(g.media, [100.0, 100.0, 400.0, 500.0]);
+        let u = g.to_user(crate::annot::Pt { x: 10.0, y: 10.0 });
+        assert_eq!((u.x, u.y), (110.0, 490.0));
+        // A crop outside the media box is ignored.
+        let d = dictionary! {
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "CropBox" => vec![700.into(), 700.into(), 800.into(), 900.into()],
+        };
+        assert_eq!(geom_of(&d, 0).media, [0.0, 0.0, 612.0, 792.0]);
+    }
+
     #[test]
     fn print_pdf_flattens_or_drops_markup() {
         use crate::annot::{AnnotKind, Box2};

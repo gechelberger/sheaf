@@ -7,7 +7,8 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use sheaf_core::{PageIndex, Rotation};
-use sheaf_render::{Job, PixelFormat, Renderer, pdfium::PdfiumEngine};
+use sheaf_image::raster::PixelFormat;
+use sheaf_render::{Job, Renderer, pdfium::PdfiumEngine};
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateDCW, DEVMODE_COLLATE, DEVMODE_DUPLEX, DEVMODEW,
     DIB_RGB_COLORS, DM_COLLATE, DM_COPIES, DM_DUPLEX, DM_IN_BUFFER, DM_ORIENTATION, DM_OUT_BUFFER,

@@ -960,7 +960,8 @@ impl sheaf_plugin::render::RenderSource for EngineRender {
         page_h: u32,
         (x, y, w, h): (u32, u32, u32, u32),
     ) -> Result<Vec<u8>> {
-        use sheaf_render::{Job, PixelFormat, RenderRequest};
+        use sheaf_image::raster::PixelFormat;
+        use sheaf_render::{Job, RenderRequest};
         let handle = self.0.get(&source).context("source not open")?;
         let rx = handle.render(RenderRequest {
             page: sheaf_core::PageIndex(index),
@@ -1245,7 +1246,7 @@ pub fn run(
 }
 
 /// The status line for a running command's progress, once it has any.
-fn progress_line(label: &str, s: &sheaf_ops::Snapshot) -> Option<String> {
+fn progress_line(label: &str, s: &sheaf_ops::ProgressSnapshot) -> Option<String> {
     if s.cancelled {
         return Some(format!("{label}: stopping…"));
     }

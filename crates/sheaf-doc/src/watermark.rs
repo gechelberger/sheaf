@@ -1,0 +1,433 @@
+//! Watermarks and backgrounds: text or an image drawn across pages, with
+//! opacity, rotation and position, in front of the page's content
+//! (watermark) or behind it (background).
+//!
+//! They're written into a copy of each page (see `sheaf_ops::derive`), as
+//! marked-content artifacts the way Acrobat writes them:
+//! `/Artifact <</Type /Pagination /Subtype /Watermark>> BDC … EMC`, or
+//! `/Background`. The settings ride along in the property list, so the
+//! dialog can offer them again after a reopen.
+
+use std::path::PathBuf;
+
+use anyhow::{Context, Result};
+use lopdf::content::Content;
+use lopdf::{Dictionary, Document as Pdf, Object, Stream, dictionary};
+use serde::{Deserialize, Serialize};
+use sheaf_core::PageSize;
+
+use crate::annot::{PageGeom, Pt};
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Mark {
+    Text {
+        text: String,
+        font_size: f32,
+        color: [u8; 3],
+    },
+    /// An image file, `scale` of the page's width wide.
+    Image { path: PathBuf, scale: f32 },
+}
+
+/// Where on the page: 0, 1, 2 for left/top, center, right/bottom.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Anchor {
+    pub horizontal: u8,
+    pub vertical: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Watermark {
+    pub mark: Mark,
+    /// 0–1.
+    pub opacity: f32,
+    /// Degrees counterclockwise, as the page is shown.
+    pub rotation: f32,
+    pub anchor: Anchor,
+    /// Behind the page's content (a background) rather than in front.
+    pub behind: bool,
+}
+
+impl Default for Watermark {
+    fn default() -> Self {
+        Self {
+            mark: Mark::Text {
+                text: "DRAFT".into(),
+                font_size: 72.0,
+                color: [200, 30, 30],
+            },
+            opacity: 0.3,
+            rotation: 45.0,
+            anchor: Anchor {
+                horizontal: 1,
+                vertical: 1,
+            },
+            behind: false,
+        }
+    }
+}
+
+impl Watermark {
+    /// The artifact subtypes this one's kind is written as.
+    pub fn kinds(&self) -> &'static [&'static [u8]] {
+        if self.behind {
+            crate::stamps::BACKGROUND
+        } else {
+            crate::stamps::WATERMARK
+        }
+    }
+}
+
+/// Space kept from the edge for a mark placed at a side.
+const EDGE: f32 = 36.0;
+const GS: &str = "SheafWMgs";
+const FONT: &str = "SheafWMf";
+const IMAGE: &str = "SheafWMim";
+
+/// The mark's size before rotation, in points, on a page `size` wide.
+fn extent(wm: &Watermark, size: PageSize, image: Option<(u32, u32)>) -> (f32, f32) {
+    match &wm.mark {
+        Mark::Text {
+            text, font_size, ..
+        } => (
+            crate::stamps::helvetica_width(text, *font_size),
+            font_size * 0.72,
+        ),
+        Mark::Image { scale, .. } => {
+            let w = size.width * scale.clamp(0.01, 2.0);
+            let (iw, ih) = image.unwrap_or((1, 1));
+            (w, w * ih.max(1) as f32 / iw.max(1) as f32)
+        }
+    }
+}
+
+/// Draw `wm` on `page` (geometry `geom`, shown with `extra` degrees of
+/// sheaf rotation beyond its own `/Rotate`).
+pub fn install(
+    pdf: &mut Pdf,
+    page: &mut Dictionary,
+    wm: &Watermark,
+    geom: &PageGeom,
+    extra: i32,
+) -> Result<()> {
+    let rotate = (geom.rotate + extra).rem_euclid(360);
+    let g = PageGeom {
+        media: geom.media,
+        rotate,
+    };
+    let [x0, y0, x1, y1] = g.media;
+    let size = if rotate % 180 == 0 {
+        PageSize {
+            width: x1 - x0,
+            height: y1 - y0,
+        }
+    } else {
+        PageSize {
+            width: y1 - y0,
+            height: x1 - x0,
+        }
+    };
+    let image = match &wm.mark {
+        Mark::Image { path, .. } => {
+            let img = sheaf_image::io::read(path)?
+                .into_iter()
+                .next()
+                .context("the image has no pages")?;
+            let dims = (img.width, img.height);
+            Some((crate::images::image_stream(&img)?, dims))
+        }
+        Mark::Text { .. } => None,
+    };
+    let (w, h) = extent(wm, size, image.as_ref().map(|(_, d)| *d));
+    // The mark's frame in shown space (y down): x along the text,
+    // y up from it.
+    let a = wm.rotation.to_radians();
+    let ux = (a.cos(), -a.sin());
+    let uy = (-a.sin(), -a.cos());
+    // Its rotated bounding box, to keep a side-placed mark on the page.
+    let bw = (w * a.cos()).abs() + (h * a.sin()).abs();
+    let bh = (w * a.sin()).abs() + (h * a.cos()).abs();
+    let place = |slot: u8, page: f32, extent: f32| match slot {
+        0 => EDGE + extent / 2.0,
+        2 => page - EDGE - extent / 2.0,
+        _ => page / 2.0,
+    };
+    let cx = place(wm.anchor.horizontal, size.width, bw);
+    let cy = place(wm.anchor.vertical, size.height, bh);
+    // Bottom-left of the mark (text: its baseline start).
+    let ox = cx - ux.0 * w / 2.0 - uy.0 * h / 2.0;
+    let oy = cy - ux.1 * w / 2.0 - uy.1 * h / 2.0;
+    // Shown space to user space is affine.
+    let o = g.to_user(Pt { x: 0.0, y: 0.0 });
+    let ex = g.to_user(Pt { x: 1.0, y: 0.0 });
+    let ey = g.to_user(Pt { x: 0.0, y: 1.0 });
+    let map = |(vx, vy): (f32, f32)| {
+        (
+            (ex.x - o.x) * vx + (ey.x - o.x) * vy,
+            (ex.y - o.y) * vx + (ey.y - o.y) * vy,
+        )
+    };
+    let origin = g.to_user(Pt { x: ox, y: oy });
+    let (xa, xb) = map(ux);
+    let (ya, yb) = map(uy);
+    let settings = serde_json::to_string(wm).unwrap_or_default();
+    let subtype = if wm.behind { "Background" } else { "Watermark" };
+    let body = match &wm.mark {
+        Mark::Text {
+            text,
+            font_size,
+            color,
+        } => {
+            let [r, gr, b] = color.map(|v| v as f32 / 255.0);
+            let t: String = text
+                .chars()
+                .map(|c| match c as u32 {
+                    0x20..=0x7e | 0xa0..=0xff => c,
+                    _ => '?',
+                })
+                .flat_map(|c| match c {
+                    '(' | ')' | '\\' => vec!['\\', c],
+                    c => vec![c],
+                })
+                .collect();
+            format!(
+                "{xa:.4} {xb:.4} {ya:.4} {yb:.4} {:.3} {:.3} cm \
+                 BT {r:.3} {gr:.3} {b:.3} rg /{FONT} {font_size:.2} Tf 0 0 Td ({t}) Tj ET",
+                origin.x, origin.y
+            )
+        }
+        Mark::Image { .. } => format!(
+            "{:.4} {:.4} {:.4} {:.4} {:.3} {:.3} cm /{IMAGE} Do",
+            xa * w,
+            xb * w,
+            ya * h,
+            yb * h,
+            origin.x,
+            origin.y
+        ),
+    };
+    let mark = format!("/{GS} gs {body}");
+    // The settings go in as a string object in the property list.
+    let props = dictionary! {
+        "Type" => "Pagination",
+        "Subtype" => Object::Name(subtype.as_bytes().to_vec()),
+        "SheafStamp" => true,
+        "SheafSettings" => Object::String(settings.into_bytes(), lopdf::StringFormat::Literal),
+    };
+    let ops = Content {
+        operations: vec![
+            lopdf::content::Operation::new(
+                "BDC",
+                vec![
+                    Object::Name(b"Artifact".to_vec()),
+                    Object::Dictionary(props),
+                ],
+            ),
+            lopdf::content::Operation::new("q", vec![]),
+        ],
+    };
+    let mut bytes = ops.encode()?;
+    bytes.extend_from_slice(mark.as_bytes());
+    bytes.extend_from_slice(b"\nQ\nEMC\n");
+
+    // Resources: transparency, font or image.
+    let deref = |pdf: &Pdf, o: Option<&Object>| -> Dictionary {
+        o.and_then(|o| pdf.dereference(o).ok())
+            .and_then(|(_, o)| o.as_dict().ok().cloned())
+            .unwrap_or_default()
+    };
+    let mut resources = deref(pdf, page.get(b"Resources").ok());
+    let opacity = wm.opacity.clamp(0.0, 1.0);
+    let gs = pdf.add_object(dictionary! {
+        "Type" => "ExtGState", "CA" => Object::Real(opacity), "ca" => Object::Real(opacity),
+    });
+    let mut gstates = deref(pdf, resources.get(b"ExtGState").ok());
+    gstates.set(GS, gs);
+    resources.set("ExtGState", Object::Dictionary(gstates));
+    match image {
+        Some((stream, _)) => {
+            let im = pdf.add_object(stream);
+            let mut xo = deref(pdf, resources.get(b"XObject").ok());
+            xo.set(IMAGE, im);
+            resources.set("XObject", Object::Dictionary(xo));
+        }
+        None => {
+            let font = pdf.add_object(dictionary! {
+                "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica-Bold",
+                "Encoding" => "WinAnsiEncoding",
+            });
+            let mut fonts = deref(pdf, resources.get(b"Font").ok());
+            fonts.set(FONT, font);
+            resources.set("Font", Object::Dictionary(fonts));
+        }
+    }
+    page.set("Resources", Object::Dictionary(resources));
+
+    let mut current: Vec<Object> = match page.get(b"Contents").ok().cloned() {
+        None => Vec::new(),
+        Some(Object::Array(a)) => a,
+        Some(Object::Reference(r)) => match pdf.get_object(r) {
+            Ok(Object::Array(a)) => a.clone(),
+            _ => vec![Object::Reference(r)],
+        },
+        Some(other) => vec![other],
+    };
+    let entries = if wm.behind {
+        // Ours first: balanced q/Q, so the page's content starts clean.
+        let mut s = Stream::new(dictionary! {}, bytes);
+        let _ = s.compress();
+        let mut v = vec![Object::Reference(pdf.add_object(s))];
+        v.append(&mut current);
+        v
+    } else {
+        // The page's content isolated in q … Q, then ours.
+        let q = pdf.add_object(Stream::new(dictionary! {}, b"q\n".to_vec()));
+        let mut ours = b"Q\n".to_vec();
+        ours.extend(bytes);
+        let mut s = Stream::new(dictionary! {}, ours);
+        let _ = s.compress();
+        let mut v = vec![Object::Reference(q)];
+        v.append(&mut current);
+        v.push(Object::Reference(pdf.add_object(s)));
+        v
+    };
+    page.set("Contents", Object::Array(entries));
+    Ok(())
+}
+
+/// The settings of the first watermark (or background, with `behind`)
+/// on `page`, if sheaf wrote one.
+pub fn read(pdf: &Pdf, page: &Dictionary, behind: bool) -> Option<Watermark> {
+    let subtype: &[u8] = if behind { b"Background" } else { b"Watermark" };
+    let ids: Vec<lopdf::ObjectId> = match page.get(b"Contents").ok()? {
+        Object::Reference(r) => match pdf.get_object(*r).ok()? {
+            Object::Array(a) => a.iter().filter_map(|o| o.as_reference().ok()).collect(),
+            _ => vec![*r],
+        },
+        Object::Array(a) => a.iter().filter_map(|o| o.as_reference().ok()).collect(),
+        _ => return None,
+    };
+    for id in ids {
+        let Ok(s) = pdf.get_object(id).and_then(|o| o.as_stream()) else {
+            continue;
+        };
+        let bytes = s
+            .decompressed_content()
+            .unwrap_or_else(|_| s.content.clone());
+        if !bytes.windows(13).any(|w| w == b"SheafSettings") {
+            continue;
+        }
+        let Ok(content) = Content::decode(&bytes) else {
+            continue;
+        };
+        for op in content.operations {
+            if op.operator == "BDC"
+                && let Some(Object::Dictionary(d)) = op.operands.get(1)
+                && d.get(b"Subtype").ok().and_then(|o| o.as_name().ok()) == Some(subtype)
+                && let Ok(json) = d.get(b"SheafSettings").and_then(|o| o.as_str())
+                && let Ok(wm) = serde_json::from_slice(json)
+            {
+                return Some(wm);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn page(pdf: &mut Pdf) -> Dictionary {
+        let c = pdf.add_object(Stream::new(
+            dictionary! {},
+            b"0 0 1 rg 10 10 50 50 re f".to_vec(),
+        ));
+        dictionary! {
+            "Type" => "Page",
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Contents" => c,
+        }
+    }
+
+    fn all_content(pdf: &Pdf, page: &Dictionary) -> String {
+        page.get(b"Contents")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| {
+                let s = pdf
+                    .get_object(o.as_reference().unwrap())
+                    .unwrap()
+                    .as_stream()
+                    .unwrap();
+                String::from_utf8_lossy(&s.decompressed_content().unwrap_or(s.content.clone()))
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("|")
+    }
+
+    #[test]
+    fn text_watermark_in_front_and_read_back() {
+        let mut pdf = Pdf::with_version("1.7");
+        let mut p = page(&mut pdf);
+        let wm = Watermark::default();
+        install(
+            &mut pdf,
+            &mut p,
+            &wm,
+            &PageGeom {
+                media: [0.0, 0.0, 612.0, 792.0],
+                rotate: 0,
+            },
+            0,
+        )
+        .unwrap();
+        let text = all_content(&pdf, &p);
+        // Page content first, the mark after.
+        let at_page = text.find("re f").unwrap();
+        let at_mark = text.find("(DRAFT) Tj").unwrap();
+        assert!(at_page < at_mark, "{text}");
+        assert!(text.contains("/Watermark"));
+        assert_eq!(read(&pdf, &p, false), Some(wm));
+        assert_eq!(read(&pdf, &p, true), None);
+        assert!(crate::stamps::has_artifacts(
+            &pdf,
+            &p,
+            crate::stamps::WATERMARK
+        ));
+        assert!(crate::stamps::strip(&mut pdf, &p, crate::stamps::WATERMARK));
+        assert_eq!(read(&pdf, &p, false), None);
+    }
+
+    #[test]
+    fn background_goes_first() {
+        let mut pdf = Pdf::with_version("1.7");
+        let mut p = page(&mut pdf);
+        let wm = Watermark {
+            behind: true,
+            ..Default::default()
+        };
+        install(
+            &mut pdf,
+            &mut p,
+            &wm,
+            &PageGeom {
+                media: [0.0, 0.0, 612.0, 792.0],
+                rotate: 0,
+            },
+            0,
+        )
+        .unwrap();
+        let text = all_content(&pdf, &p);
+        assert!(
+            text.find("(DRAFT)").unwrap() < text.find("re f").unwrap(),
+            "{text}"
+        );
+        assert!(text.contains("/Background"));
+        assert!(read(&pdf, &p, true).is_some());
+    }
+}

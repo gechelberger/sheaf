@@ -19,22 +19,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use futures::channel::oneshot;
 use sheaf_core::{PageIndex, PageSize, Rotation};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PixelFormat {
-    /// Straight RGBA8, what the `image` crate and most encoders want.
-    Rgba,
-    /// BGRA8 — PDFium's native output and what GPUI uploads without conversion.
-    Bgra,
-}
-
-/// A rendered page or tile: tightly packed 4 bytes/pixel, row-major.
-pub struct Raster {
-    pub width: u32,
-    pub height: u32,
-    pub format: PixelFormat,
-    pub data: Vec<u8>,
-}
+use sheaf_image::raster::{PixelFormat, Raster};
 
 /// What to rasterize. Sizes are device pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -322,10 +307,12 @@ pub mod pdfium {
                 }
             }
 
-            /// The page's MediaBox and `/Rotate`, for converting positions.
+            /// The page's visible box (CropBox, else MediaBox) and `/Rotate`,
+            /// for converting positions.
             fn frame_of(doc: &PdfDocument<'_>, index: u32) -> Option<sheaf_core::PageFrame> {
                 let page = doc.pages().get(index as i32).ok()?;
-                let b = page.boundaries().media().ok()?.bounds;
+                let bounds = page.boundaries();
+                let b = bounds.crop().or_else(|_| bounds.media()).ok()?.bounds;
                 let rotate = match page.rotation().ok()? {
                     PdfPageRenderRotation::None => 0,
                     PdfPageRenderRotation::Degrees90 => 90,

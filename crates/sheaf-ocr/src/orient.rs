@@ -88,3 +88,71 @@ mod model {
         Some(s)
     }
 }
+
+/// Tesseract's orientation detection (OSD): the clockwise quarter turns
+/// that make `img` upright and Tesseract's confidence, or `None` without
+/// the `tesseract` feature or `osd.traineddata`. It reads the shapes of
+/// the characters themselves, so it works on pages with little text.
+pub fn osd(img: &image::GrayImage, dpi: u32) -> Option<(u16, f32)> {
+    #[cfg(feature = "tesseract")]
+    {
+        tess::osd(img, dpi)
+    }
+    #[cfg(not(feature = "tesseract"))]
+    {
+        let _ = (img, dpi);
+        None
+    }
+}
+
+/// Whether [`osd`] can answer.
+pub fn osd_available() -> bool {
+    #[cfg(feature = "tesseract")]
+    {
+        tess::api().is_some()
+    }
+    #[cfg(not(feature = "tesseract"))]
+    {
+        false
+    }
+}
+
+#[cfg(feature = "tesseract")]
+mod tess {
+    use std::sync::{Mutex, OnceLock};
+
+    use tesseract_rs::{TessPageSegMode, TesseractAPI};
+
+    pub fn api() -> Option<&'static Mutex<TesseractAPI>> {
+        static CELL: OnceLock<Option<Mutex<TesseractAPI>>> = OnceLock::new();
+        CELL.get_or_init(|| {
+            let dir = crate::data::tessdata_dir(&Default::default())?;
+            if !dir.join("osd.traineddata").is_file() {
+                return None;
+            }
+            let api = TesseractAPI::new();
+            if let Err(e) = api.init(&dir, "osd") {
+                log::warn!("Tesseract OSD: {e}");
+                return None;
+            }
+            let _ = api.set_page_seg_mode(TessPageSegMode::PSM_OSD_ONLY);
+            let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
+            let _ = api.set_variable("debug_file", null);
+            Some(Mutex::new(api))
+        })
+        .as_ref()
+    }
+
+    pub fn osd(img: &image::GrayImage, dpi: u32) -> Option<(u16, f32)> {
+        let api = api()?.lock().ok()?;
+        let (w, h) = (img.width() as i32, img.height() as i32);
+        api.set_image(img.as_raw(), w, h, 1, w).ok()?;
+        api.set_source_resolution(dpi as i32).ok()?;
+        let (deg, conf, _, _) = api.detect_os().ok()?;
+        log::debug!("Tesseract OSD: {deg}° ({conf:.2})");
+        // Tesseract reports how far the image is turned clockwise; undoing
+        // it takes the rest of a full turn.
+        let k = (deg.rem_euclid(360) / 90) as u16;
+        Some(((4 - k) % 4, conf))
+    }
+}

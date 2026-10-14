@@ -96,7 +96,6 @@ impl DocView {
                 match facts {
                     Ok(f) => {
                         if doc.model.primary() == sid {
-                            doc.set_labels(sid, f.labels);
                             doc.attachments = f.attachments;
                             doc.collection = f.collection;
                             doc.attachment_selected = None;

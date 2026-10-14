@@ -9,10 +9,10 @@
 use lopdf::{Document as Pdf, Object, Stream, dictionary};
 #[cfg(any(feature = "tesseract", feature = "oar"))]
 use sheaf_core::{PageIndex, Rotation};
+use sheaf_image::raster::PixelFormat;
 #[cfg(any(feature = "tesseract", feature = "oar"))]
 use sheaf_ocr::{EngineKind, OcrConfig, OcrWord, build_engine};
 use sheaf_ocr::{InputKind, OcrImage};
-use sheaf_render::PixelFormat;
 #[cfg(any(feature = "tesseract", feature = "oar"))]
 use sheaf_render::{Job, Renderer};
 
@@ -120,7 +120,7 @@ fn image_kinds_match_engines() {
     // Sanity for the harness itself, always on.
     assert_eq!(
         OcrImage::from_raster(
-            &sheaf_render::Raster {
+            &sheaf_image::raster::Raster {
                 width: 1,
                 height: 1,
                 format: PixelFormat::Rgba,
@@ -178,8 +178,7 @@ fn text_page() -> image::RgbImage {
             PixelFormat::Rgba,
         )
         .unwrap();
-    let rgba = image::RgbaImage::from_raw(raster.width, raster.height, raster.data).unwrap();
-    image::DynamicImage::ImageRgba8(rgba).into_rgb8()
+    raster.to_rgb().unwrap()
 }
 
 #[test]
@@ -216,4 +215,22 @@ fn uvdoc_returns_a_page() {
         flat.width(),
         flat.height()
     );
+}
+
+#[test]
+#[ignore = "needs libpdfium; skips without osd.traineddata"]
+#[cfg(all(feature = "oar", feature = "tesseract"))]
+fn tesseract_osd_undoes_a_turn() {
+    use image::imageops::{rotate90, rotate270};
+    if !sheaf_ocr::orient::osd_available() {
+        eprintln!("skipped: no osd.traineddata");
+        return;
+    }
+    let gray = |im: image::RgbImage| image::DynamicImage::ImageRgb8(im).into_luma8();
+    let page = text_page();
+    let turns = |im| sheaf_ocr::orient::osd(&im, 100).map(|(k, _)| k);
+    assert_eq!(turns(gray(page.clone())), Some(0));
+    // Turned clockwise once, it takes three more to come back.
+    assert_eq!(turns(gray(rotate90(&page))), Some(3));
+    assert_eq!(turns(gray(rotate270(&page))), Some(1));
 }

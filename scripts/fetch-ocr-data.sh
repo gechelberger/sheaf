@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Download the OCR engines' data into vendor/ocr/ so sheaf-ocr can find it:
 #   vendor/ocr/tessdata/eng.traineddata   Tesseract English (tessdata_fast)
+#   vendor/ocr/tessdata/osd.traineddata   Tesseract orientation detection
 #   vendor/ocr/models/*.onnx, *.txt       PaddleOCR PP-OCRv5 models for oar-ocr
 #   vendor/ocr/lib/libonnxruntime.so      Microsoft's ONNX Runtime (onnxruntime.dll
 #                                         on Windows), loaded at run time
@@ -39,6 +40,8 @@ fetch() { # url dest
 
 tess="https://github.com/tesseract-ocr/tessdata_fast/raw/${TESSDATA_REF}"
 fetch "$tess/eng.traineddata" "$dest/tessdata/eng.traineddata"
+# Orientation detection, for turning scanned and photographed pages upright.
+fetch "$tess/osd.traineddata" "$dest/tessdata/osd.traineddata"
 fetch "$tess/LICENSE" "$dest/tessdata/LICENSE"
 
 oar="https://github.com/GreatV/oar-ocr/releases/download/${OAR_MODELS_TAG}"

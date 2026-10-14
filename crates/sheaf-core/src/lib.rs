@@ -129,7 +129,8 @@ pub enum DestView {
 
 /// A page's geometry for mapping between user space (PDF coordinates,
 /// bottom-left origin, before `/Rotate`) and displayed space (top-left
-/// origin, after `/Rotate`): its MediaBox (x0, y0, x1, y1) and `/Rotate`.
+/// origin, after `/Rotate`): its visible box (x0, y0, x1, y1; the CropBox, else
+/// the MediaBox) and `/Rotate`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PageFrame {
     pub media: [f32; 4],

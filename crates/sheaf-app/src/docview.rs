@@ -36,9 +36,9 @@ use crate::{ClearGuides, FullScreen, GoToPage, ReadMode, ToggleGrid, ToggleRuler
 use sheaf_doc::{
     Document, Edit, EditOutcome, FlatOutlineItem, OutlineId, PageId, PageRef, SourceId, SourceInfo,
 };
+use sheaf_image::raster::PixelFormat;
 use sheaf_render::{
-    Job, OutlineItem, PixelFormat, Rect, RenderHandle, RenderRequest, Rendered, SearchEvent,
-    SearchHit,
+    Job, OutlineItem, Rect, RenderHandle, RenderRequest, Rendered, SearchEvent, SearchHit,
 };
 
 use crate::{
@@ -107,6 +107,9 @@ pub(crate) struct Doc {
     /// thumbnails and a rotated view of the same page need both.
     pub(crate) previews: HashMap<(PageId, Rotation), Arc<RenderImage>>,
     pub(crate) tiles: HashMap<TileKey, Arc<RenderImage>>,
+    /// The source page each page id showed when last checked: a page that
+    /// now shows another (replaced, cropped, or undone) drops its images.
+    pub(crate) shown: HashMap<PageId, (SourceId, u32)>,
     /// Dropping the task drops the oneshot receiver, which tells the worker
     /// to skip the render if it hasn't started.
     pub(crate) inflight: HashMap<TileKey, Task<()>>,
@@ -120,6 +123,8 @@ pub(crate) struct Doc {
     pub(crate) thumb_scroll: ScrollHandle,
     /// Pages whose previews the thumbnail panel is showing; kept cached.
     pub(crate) thumb_keep: HashSet<(PageId, Rotation)>,
+    /// Previews the blank-page review is showing; kept cached.
+    pub(crate) review_keep: HashSet<(PageId, Rotation)>,
     /// Last page the thumbnail panel auto-scrolled to follow.
     pub(crate) thumb_followed: Option<PageId>,
     pub(crate) outline_loaded: bool,
@@ -163,8 +168,8 @@ pub(crate) struct Doc {
     /// Pages of the primary file whose sheaf-written marks PDFium is told
     /// not to draw; repeated when its renderer is reopened.
     pub(crate) sheaf_pages: Vec<u32>,
-    /// The primary file's page labels, by its page index.
-    pub(crate) labels: Option<(SourceId, Vec<String>)>,
+    /// Every page's label (from the model), and the version it's for.
+    pub(crate) labels: std::cell::RefCell<(u64, Option<std::sync::Arc<Vec<String>>>)>,
     /// With two panes: the top pane's share of the height.
     pub(crate) split: f32,
     /// The split divider is being dragged.
@@ -280,6 +285,46 @@ impl Doc {
         for p in &mut self.panes {
             p.layout = None;
         }
+        self.drop_stale_images();
+    }
+
+    /// Forget images of pages that now show a different source page.
+    fn drop_stale_images(&mut self) {
+        let mut stale: HashSet<PageId> = HashSet::new();
+        for p in self.model.state().pages.iter() {
+            let now = (p.source, p.index);
+            if let Some(was) = self.shown.insert(p.id, now)
+                && was != now
+            {
+                stale.insert(p.id);
+            }
+        }
+        if stale.is_empty() {
+            return;
+        }
+        let tiles: Vec<TileKey> = self
+            .tiles
+            .keys()
+            .filter(|k| stale.contains(&k.0))
+            .copied()
+            .collect();
+        for k in tiles {
+            if let Some(im) = self.tiles.remove(&k) {
+                self.retired.push(im);
+            }
+        }
+        let previews: Vec<(PageId, Rotation)> = self
+            .previews
+            .keys()
+            .filter(|k| stale.contains(&k.0))
+            .copied()
+            .collect();
+        for k in previews {
+            if let Some(im) = self.previews.remove(&k) {
+                self.retired.push(im);
+            }
+        }
+        self.inflight.retain(|k, _| !stale.contains(&k.0));
     }
 
     /// Drop every rendered image so pages re-rasterize (after the engine's
@@ -391,8 +436,10 @@ pub struct DocView {
     pub(crate) comments: Option<crate::comments_panel::Comments>,
     /// A Recognize Text run in progress (see ocr_run.rs).
     pub(crate) ocr: Option<crate::ocr_run::OcrRun>,
-    /// An Export Pages run in progress (see export.rs).
-    pub(crate) export_run: Option<sheaf_ops::Tracker>,
+    /// A background job in progress: Export Pages, Split (see jobs.rs).
+    pub(crate) job: Option<crate::jobs::Job>,
+    /// Blank pages found, waiting for review (see blank_review.rs).
+    pub(crate) blank_review: Option<crate::blank_review::Review>,
     /// A plugin command running on this document, with its progress
     /// (see plugins.rs).
     #[cfg_attr(not(feature = "plugins"), allow(dead_code))]
@@ -495,7 +542,8 @@ impl DocView {
             calc: None,
             comments: None,
             ocr: None,
-            export_run: None,
+            job: None,
+            blank_review: None,
             plugin_run: None,
             pending_comments_focus: false,
             initial_query: None,
@@ -652,12 +700,14 @@ impl DocView {
             active: 0,
             previews: HashMap::new(),
             tiles: HashMap::new(),
+            shown: HashMap::new(),
             inflight: HashMap::new(),
             retired: Vec::new(),
             first_paint: None,
             notice: None,
             thumb_scroll: ScrollHandle::new(),
             thumb_keep: HashSet::new(),
+            review_keep: HashSet::new(),
             thumb_followed: None,
             outline_loaded: false,
             outline_expanded: HashSet::new(),
@@ -678,7 +728,7 @@ impl DocView {
             pending_connector: None,
             foreign_annots: Vec::new(),
             selected_foreign: None,
-            labels: None,
+            labels: std::cell::RefCell::new((u64::MAX, None)),
             attachments: Vec::new(),
             collection: None,
             attachment_selected: None,
@@ -1499,8 +1549,18 @@ impl DocView {
                     );
                 }
                 doc.foreign_annots = foreign;
-                let primary = doc.model.primary();
-                doc.set_labels(primary, facts.labels);
+                if let Some(ranges) = &facts.label_ranges
+                    && let Err(e) = doc.model.set_initial_labels(ranges)
+                {
+                    log::warn!("page labels arrived after edits; ignored: {e:#}");
+                }
+                if let Some((hf, scope)) = facts.header_footer.clone()
+                    && let Err(e) = doc.model.set_initial_header_footer(hf, scope)
+                {
+                    log::warn!("header/footer settings arrived after edits; ignored: {e:#}");
+                }
+                // The labels changed under the same version.
+                doc.labels.borrow_mut().0 = u64::MAX;
                 doc.attachments = facts.attachments;
                 doc.collection = facts.collection;
                 doc.set_layers(facts.layers);
@@ -2150,17 +2210,45 @@ impl DocView {
         .detach();
     }
 
+    /// Where inserted pages go by default: after the current page, or
+    /// after the last selected page. The page they go before (None: the
+    /// end).
+    pub(crate) fn insert_point(&self) -> Option<PageId> {
+        let targets = self.target_ids();
+        let State::Ready(doc) = &self.state else {
+            return None;
+        };
+        let last_target = targets.last().and_then(|id| doc.model.index_of(*id));
+        last_target.and_then(|i| doc.page_ref(i + 1)).map(|p| p.id)
+    }
+
     /// Insert every page of `path` after the current page (or after the
     /// selection), merging its bookmarks PDFlyer-style.
     pub fn insert_pdf(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        let targets = self.target_ids();
+        let before = self.insert_point();
+        let name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("file")
+            .to_string();
+        self.insert_file(path, before, name, true, cx);
+    }
+
+    /// Insert every page of `path` before `before` (None: at the end), as
+    /// one undo step labelled "Insert `name`", with its bookmarks merged
+    /// when `bookmarks`.
+    pub(crate) fn insert_file(
+        &mut self,
+        path: PathBuf,
+        before: Option<PageId>,
+        name: String,
+        bookmarks: bool,
+        cx: &mut Context<Self>,
+    ) {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        // Insert after the last targeted page: "before" is the one after it.
-        let last_target = targets.last().and_then(|id| doc.model.index_of(*id));
-        let before = last_target.and_then(|i| doc.page_ref(i + 1)).map(|p| p.id);
-        doc.notice = Some(format!("Inserting {}…", path.display()));
+        doc.notice = Some(format!("Inserting {name}…"));
         cx.notify();
         let timing = self.timing;
         cx.spawn(async move |this, cx| {
@@ -2214,12 +2302,11 @@ impl DocView {
                     password: None,
                 });
                 doc.handles.insert(sid, handle);
-                let flat: Vec<FlatOutlineItem> = outline.iter().map(flat_item).collect();
-                let name = path
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("file")
-                    .to_string();
+                let flat: Vec<FlatOutlineItem> = if bookmarks {
+                    outline.iter().map(flat_item).collect()
+                } else {
+                    Vec::new()
+                };
                 let label = format!("Insert {name}");
                 let mut outcome = None;
                 match doc.model.apply(
@@ -2233,13 +2320,21 @@ impl DocView {
                 ) {
                     Ok(out) => {
                         outcome = Some(out.clone());
-                        doc.notice = Some(format!(
-                            "Inserted {} page{} from {name}; {} bookmark{} merged",
-                            out.pages_added,
-                            if out.pages_added == 1 { "" } else { "s" },
-                            out.bookmarks_added,
-                            if out.bookmarks_added == 1 { "" } else { "s" }
-                        ));
+                        doc.notice = Some(if !bookmarks {
+                            // Pages sheaf made (blank, images): name says it all.
+                            format!("Inserted {name}")
+                        } else {
+                            format!(
+                                "Inserted {} page{} from {name}{}",
+                                out.pages_added,
+                                if out.pages_added == 1 { "" } else { "s" },
+                                match out.bookmarks_added {
+                                    0 => String::new(),
+                                    1 => "; 1 bookmark merged".into(),
+                                    n => format!("; {n} bookmarks merged"),
+                                }
+                            )
+                        });
                         if timing {
                             eprintln!(
                                 "[timing] inserted {name} ({page_count} pages) in {:?}",
@@ -2803,7 +2898,12 @@ impl DocView {
 
     // ----- rendering pipeline -------------------------------------------------
 
-    fn ensure_rendered(&mut self, pref: PageRef, want: RenderRequest, cx: &mut Context<Self>) {
+    pub(crate) fn ensure_rendered(
+        &mut self,
+        pref: PageRef,
+        want: RenderRequest,
+        cx: &mut Context<Self>,
+    ) {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
@@ -3054,7 +3154,7 @@ fn flat_item(i: &OutlineItem) -> FlatOutlineItem {
 
 /// Wrap a BGRA raster as a GPUI image without copying the pixel data.
 /// `RenderImage` is documented as BGRA; `RgbaImage` here is just the container.
-pub(crate) fn to_render_image(raster: sheaf_render::Raster) -> RenderImage {
+pub(crate) fn to_render_image(raster: sheaf_image::raster::Raster) -> RenderImage {
     debug_assert_eq!(raster.format, PixelFormat::Bgra);
     let buf = image::RgbaImage::from_raw(raster.width, raster.height, raster.data)
         .expect("raster size matches buffer");
@@ -3441,7 +3541,9 @@ fn evict(doc: &mut Doc, frames: &[PaneFrame]) {
         }
     }
     let keep_preview = |doc: &Doc, &(p, r): &(PageId, Rotation)| {
-        kept.get(&p).is_some_and(|rots| rots.contains(&r)) || doc.thumb_keep.contains(&(p, r))
+        kept.get(&p).is_some_and(|rots| rots.contains(&r))
+            || doc.thumb_keep.contains(&(p, r))
+            || doc.review_keep.contains(&(p, r))
     };
     let evict: Vec<(PageId, Rotation)> = doc
         .previews
@@ -3591,6 +3693,8 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
             theme::PATTERN_HIT_CURRENT,
         ));
     }
+    // A header/footer not yet saved into the file, drawn as it will be.
+    page_div = page_div.children(header_footer_elements(doc, pl, k));
     // Our markup, drawn over the page in the displayed orientation.
     if let Some(list) = doc.model.state().annots_on(pl.pref.id) {
         for a in list.iter() {
@@ -3966,9 +4070,10 @@ impl Render for DocView {
                 State::Ready(_) => unreachable!(),
             }
         };
+        let review = self.render_blank_review(cx);
         let ocr_progress = self
             .ocr_progress()
-            .or_else(|| self.export_progress())
+            .or_else(|| self.job_progress())
             .or_else(|| {
                 let (_, t) = self.plugin_run.as_ref()?;
                 t.snapshot().fraction
@@ -4054,8 +4159,10 @@ impl Render for DocView {
                     v.close_search(window, cx)
                 } else if v.cancel_ocr(cx) {
                     // Esc during a Recognize Text run stops it.
-                } else if v.cancel_export(cx) {
-                    // Likewise an Export Pages run.
+                } else if v.close_blank_review(cx) {
+                    // Esc closes the blank-page review.
+                } else if v.cancel_job(cx) {
+                    // Likewise an export or a split.
                 } else if v.cancel_plugin_run(cx) {
                     // And a plugin command that reports progress.
                 } else if v.cancel_tape_placing(cx) || v.cancel_pending_connector(cx) {
@@ -4125,7 +4232,14 @@ impl Render for DocView {
             .text_color(theme::TEXT_SOFT)
             .children(search_bar)
             .children(goto_bar)
-            .child(div().flex_grow(1.0).min_h(px(0.0)).children(body))
+            .child(
+                div()
+                    .relative()
+                    .flex_grow(1.0)
+                    .min_h(px(0.0))
+                    .children(body)
+                    .children(review),
+            )
             .when_some(ocr_progress, |d, frac| {
                 d.child(
                     div()
@@ -4416,6 +4530,54 @@ impl Render for DragPreview {
                 format!("{} pages", self.count)
             })
     }
+}
+
+/// The unsaved header/footer on one page, in page-local logical px. Only
+/// without a view rotation: GPUI can't turn text, and the header/footer
+/// reads upright on the page as the document has it.
+fn header_footer_elements(doc: &Doc, pl: &PagePlan, k: f32) -> Vec<AnyElement> {
+    let st = doc.model.state();
+    let Some(hf) = &st.header_footer else {
+        return Vec::new();
+    };
+    let own = st.pages.get(pl.index);
+    if !doc.model.header_footer_dirty()
+        || !hf.covers(pl.pref.id)
+        || own.is_none_or(|p| p.rotation != pl.pref.rotation)
+    {
+        return Vec::new();
+    }
+    let size = doc.model.page_size(&pl.pref);
+    let bates = if hf.bates.is_some() {
+        let ids: Vec<PageId> = st.pages.iter().map(|p| p.id).collect();
+        hf.bates_numbers(&ids).get(pl.index).copied().flatten()
+    } else {
+        None
+    };
+    let facts = sheaf_doc::stamps::PageFacts {
+        index: pl.index,
+        count: st.pages.len(),
+        bates,
+    };
+    let [r, g, b] = hf.color;
+    let color = rgb(((r as u32) << 16) | ((g as u32) << 8) | b as u32);
+    hf.layout(size, &facts)
+        .into_iter()
+        .map(|p| {
+            div()
+                .absolute()
+                .left(px(p.x * k))
+                .top(px((p.baseline - p.size * 0.9) * k))
+                .h(px(p.size * 1.1 * k))
+                .whitespace_nowrap()
+                .font_family("Liberation Sans")
+                .text_size(px(p.size * k))
+                .line_height(px(p.size * 1.1 * k))
+                .text_color(color)
+                .child(p.text)
+                .into_any_element()
+        })
+        .collect()
 }
 
 /// GPUI elements for one annotation, positioned in page-local logical px.

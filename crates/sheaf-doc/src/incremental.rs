@@ -40,6 +40,10 @@ fn build(snap: &Snapshot) -> Result<(usize, Vec<u8>)> {
     let original_len = original.len();
     let mut pdf =
         Pdf::load_mem(&original).with_context(|| format!("parsing {}", info.path.display()))?;
+    if snap.header_footer_dirty {
+        // Drawing it touches every page's content: a rewrite does that.
+        bail!("a new header/footer is written by a full save");
+    }
     if pdf.encryption_state.is_some() || pdf.trailer.has(b"Encrypt") {
         bail!("incremental save of encrypted files is not supported yet");
     }
@@ -184,6 +188,21 @@ fn build(snap: &Snapshot) -> Result<(usize, Vec<u8>)> {
         }
     }
 
+    // Only a page-tree rewrite has changed the catalog so far.
+    let reordered = catalog_changed;
+    let labels_now = snap.state.label_ranges().filter(|r| !r.is_empty());
+    if snap.labels_dirty || (reordered && labels_now.is_some()) {
+        match labels_now {
+            Some(r) => {
+                let id = pdf.add_object(crate::labels::number_tree(&r));
+                catalog.set("PageLabels", id);
+            }
+            None => {
+                catalog.remove(b"PageLabels");
+            }
+        }
+        catalog_changed = true;
+    }
     if snap.outline_dirty {
         catalog.remove(b"Outlines");
         if !snap.state.outline.is_empty() {

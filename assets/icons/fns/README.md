@@ -32,6 +32,9 @@ an image element does not inherit the parent element's color.
 | [redo](redo/icon.svg) | Redo | `Redo` |
 | [open](open/icon.svg) | Open PDF | `OpenFile` |
 | [save](save/icon.svg) | Save | `Save` |
+| [insert-blank](insert-blank/icon.svg) | Insert blank pages | `InsertBlankPages` |
+| [insert-image](insert-image/icon.svg) | Insert pages from images | `InsertFromImages` |
+| [replace-pages](replace-pages/icon.svg) | Replace pages | `ReplacePages` |
 | [insert-pdf](insert-pdf/icon.svg) | Insert PDF | `InsertPdf` |
 | [duplicate-pages](duplicate-pages/icon.svg) | Duplicate pages | `DuplicatePages` |
 | [extract-pages](extract-pages/icon.svg) | Extract pages | `ExtractPages` |
@@ -68,6 +71,17 @@ an image element does not inherit the parent element's color.
 | [recognize-text](recognize-text/icon.svg) | Recognize text (OCR) | `RecognizeText` |
 | [cancel-ocr](cancel-ocr/icon.svg) | Cancel OCR | `CancelOcr` |
 | [manage-plugins](manage-plugins/icon.svg) | Manage plugins | `ManagePlugins` |
+| [combine-files](combine-files/icon.svg) | Combine files | `CombineFiles` |
+| [split-document](split-document/icon.svg) | Split document | `SplitDocument` |
+| [crop-pages](crop-pages/icon.svg) | Crop pages | `CropPages` |
+| [page-labels](page-labels/icon.svg) | Page labels | `PageLabels` |
+| [header-footer](header-footer/icon.svg) | Header & footer | `HeaderFooter` |
+| [bates](bates/icon.svg) | Bates numbering | `BatesNumbering` |
+| [watermark](watermark/icon.svg) | Watermark | `AddWatermark` |
+| [background](background/icon.svg) | Background | `AddBackground` |
+| [bookmarks-from-pages](bookmarks-from-pages/icon.svg) | Bookmarks from pages | `BookmarksFromPages` |
+| [color-bookmarks](color-bookmarks/icon.svg) | Color bookmarks by level | `ColorBookmarksByLevel` |
+| [find-blank-pages](find-blank-pages/icon.svg) | Find blank pages | `FindBlankPages` |
 | [create-from-scans](create-from-scans/icon.svg) | Create from scans/photos | `CreateFromScans` |
 | [export-pages](export-pages/icon.svg) | Export pages | `ExportPages` |
 | [print](print/icon.svg) | Print | `Print` |

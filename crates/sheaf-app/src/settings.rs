@@ -21,6 +21,10 @@ pub struct Settings {
     pub print: crate::print_dialog::PrintPrefs,
     /// File > Create > From Scans/Photos' last choices.
     pub scan: sheaf_ops::scan::ScanOptions,
+    /// File > Create > Combine Files' last choices.
+    pub combine: sheaf_ops::combine::CombineParams,
+    /// Document > Find Blank Pages' last choices.
+    pub blanks: sheaf_ops::blank::BlankParams,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -184,6 +188,14 @@ mod tests {
             },
             scan: sheaf_ops::scan::ScanOptions {
                 dpi: 200,
+                ..Default::default()
+            },
+            combine: sheaf_ops::combine::CombineParams {
+                bookmark_each_file: false,
+                ..Default::default()
+            },
+            blanks: sheaf_ops::blank::BlankParams {
+                keep_intentional: true,
                 ..Default::default()
             },
         };

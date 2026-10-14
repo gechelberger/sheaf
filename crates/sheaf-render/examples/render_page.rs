@@ -9,7 +9,8 @@ use std::time::Instant;
 
 use anyhow::Result;
 use sheaf_core::PageIndex;
-use sheaf_render::{PixelFormat, Renderer, pdfium::PdfiumEngine};
+use sheaf_image::raster::PixelFormat;
+use sheaf_render::{Renderer, pdfium::PdfiumEngine};
 
 fn main() -> Result<()> {
     env_logger::init();

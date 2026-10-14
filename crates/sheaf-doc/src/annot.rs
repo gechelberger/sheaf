@@ -113,6 +113,94 @@ pub enum AnnotKind {
     },
 }
 
+/// A box array as `[x0, y0, x1, y1]`, normalized.
+pub fn box_of(arr: &[lopdf::Object]) -> Option<[f32; 4]> {
+    if arr.len() != 4 {
+        return None;
+    }
+    let v: Vec<f32> = arr.iter().map(|o| o.as_float().unwrap_or(0.0)).collect();
+    Some([
+        v[0].min(v[2]),
+        v[1].min(v[3]),
+        v[0].max(v[2]),
+        v[1].max(v[3]),
+    ])
+}
+
+/// What a viewer shows: `crop` clipped to `media` (PDF 32000 §14.11.2),
+/// or `media` when there's no crop or it doesn't overlap.
+pub fn visible_box(media: [f32; 4], crop: Option<[f32; 4]>) -> [f32; 4] {
+    match crop {
+        Some(c) => {
+            let b = [
+                c[0].max(media[0]),
+                c[1].max(media[1]),
+                c[2].min(media[2]),
+                c[3].min(media[3]),
+            ];
+            if b[2] - b[0] > 0.5 && b[3] - b[1] > 0.5 {
+                b
+            } else {
+                media
+            }
+        }
+        None => media,
+    }
+}
+
+impl AnnotKind {
+    /// The same shape moved by (`dx`, `dy`) points.
+    pub fn translated(&self, dx: f32, dy: f32) -> AnnotKind {
+        let mv = |p: &Pt| Pt {
+            x: p.x + dx,
+            y: p.y + dy,
+        };
+        let mb = |b: &Box2| Box2 {
+            x: b.x + dx,
+            y: b.y + dy,
+            w: b.w,
+            h: b.h,
+        };
+        match self {
+            AnnotKind::Highlight { rects } => AnnotKind::Highlight {
+                rects: rects.iter().map(mb).collect(),
+            },
+            AnnotKind::Note { pos } => AnnotKind::Note { pos: mv(pos) },
+            AnnotKind::FreeText { rect, size } => AnnotKind::FreeText {
+                rect: mb(rect),
+                size: *size,
+            },
+            AnnotKind::Square { rect } => AnnotKind::Square { rect: mb(rect) },
+            AnnotKind::Ellipse { rect } => AnnotKind::Ellipse { rect: mb(rect) },
+            AnnotKind::Line { a, b, arrow } => AnnotKind::Line {
+                a: mv(a),
+                b: mv(b),
+                arrow: *arrow,
+            },
+            AnnotKind::Ink { paths } => AnnotKind::Ink {
+                paths: paths.iter().map(|p| p.iter().map(mv).collect()).collect(),
+            },
+            AnnotKind::Stamp { rect, glyph } => AnnotKind::Stamp {
+                rect: mb(rect),
+                glyph: glyph.clone(),
+            },
+            AnnotKind::Connector {
+                rect,
+                label,
+                partner,
+            } => AnnotKind::Connector {
+                rect: mb(rect),
+                label: label.clone(),
+                partner: *partner,
+            },
+            AnnotKind::Tape { rect, size } => AnnotKind::Tape {
+                rect: mb(rect),
+                size: *size,
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Annot {
     pub id: AnnotId,
@@ -259,7 +347,9 @@ pub fn default_author() -> String {
 /// Geometry of a page needed to map between displayed and user space.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PageGeom {
-    /// MediaBox: x0, y0, x1, y1 in user space.
+    /// The visible box, x0, y0, x1, y1 in user space: the CropBox clipped
+    /// to the MediaBox, or the MediaBox when there's no CropBox. It's what
+    /// viewers show, so "displayed" positions start at its corner.
     pub media: [f32; 4],
     /// `/Rotate`, normalized to 0/90/180/270.
     pub rotate: i32,

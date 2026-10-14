@@ -7,10 +7,13 @@
 
 use std::path::PathBuf;
 
+use anyhow::Context;
+
 use lopdf::{Dictionary, Document as Pdf, Object, Stream, dictionary};
 use sheaf_core::{PageIndex, Rotation};
+use sheaf_image::raster::PixelFormat;
 use sheaf_render::pdfium::PdfiumEngine;
-use sheaf_render::{Job, PixelFormat, Renderer};
+use sheaf_render::{Job, Renderer};
 
 fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
@@ -35,13 +38,7 @@ fn main() -> anyhow::Result<()> {
             },
             PixelFormat::Rgba,
         )?;
-        let gray: Vec<u8> = raster
-            .data
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|p| ((77 * p[0] as u32 + 150 * p[1] as u32 + 29 * p[2] as u32) >> 8) as u8)
-            .collect();
+        let gray = raster.to_gray().context("short render")?.into_raw();
         let mut image = Stream::new(
             dictionary! {
                 "Type" => "XObject",

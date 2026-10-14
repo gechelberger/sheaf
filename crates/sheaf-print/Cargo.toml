@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+sheaf-image.workspace = true
 anyhow.workspace = true
 log.workspace = true
 

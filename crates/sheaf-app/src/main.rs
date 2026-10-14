@@ -7,24 +7,34 @@
 mod assets;
 mod attachments_panel;
 mod availability;
+mod blank_review;
+mod blanks_dialog;
+mod bookmark_tools;
 mod brand;
 mod calc_panel;
+mod combine_dialog;
 mod command_info;
 mod commands;
 mod comments_panel;
 mod contrib;
+mod crop_dialog;
 mod docview;
 mod export;
 mod export_dialog;
 mod file_dialog;
 mod goto;
+mod header_footer_dialog;
+mod insert_dialog;
+mod jobs;
 mod keymap;
+mod labels_dialog;
 mod layers_panel;
 mod markup_tools;
 mod menus;
 mod ocr_dialog;
 mod ocr_run;
 mod outline_panel;
+mod page_insert;
 mod pane;
 mod pattern_panel;
 mod patterns;
@@ -45,8 +55,10 @@ mod rulers;
 mod scan_dialog;
 mod script;
 mod settings;
+mod split_dialog;
 mod toolbar;
 mod toolbar_dialog;
+mod watermark_dialog;
 mod workspace;
 
 use std::path::PathBuf;
@@ -169,6 +181,20 @@ actions!(
         Print,
         ExportPages,
         CreateFromScans,
+        CombineFiles,
+        SplitDocument,
+        InsertBlankPages,
+        InsertFromImages,
+        ReplacePages,
+        CropPages,
+        PageLabels,
+        HeaderFooter,
+        BatesNumbering,
+        AddWatermark,
+        AddBackground,
+        BookmarksFromPages,
+        ColorBookmarksByLevel,
+        FindBlankPages,
         ToggleToolbar,
         CustomizeToolbar
     ]
@@ -312,6 +338,20 @@ fn main() {
             let pd = Some(print_dialog::KEY_CONTEXT);
             let ed = Some(export_dialog::KEY_CONTEXT);
             let sd = Some(scan_dialog::KEY_CONTEXT);
+            let cd = Some("CombineDialog && !TextInput");
+            let spd = Some(split_dialog::KEY_CONTEXT);
+            let ind = Some(insert_dialog::KEY_CONTEXT);
+            let crd = Some(crop_dialog::KEY_CONTEXT);
+            let lbd = Some(labels_dialog::KEY_CONTEXT);
+            let hfd = Some(header_footer_dialog::KEY_CONTEXT);
+            let wmd = Some(watermark_dialog::KEY_CONTEXT);
+            let bmd = Some(bookmark_tools::KEY_CONTEXT);
+            let bld = Some(blanks_dialog::KEY_CONTEXT);
+            let bld_keys = Some("BlanksDialog && !TextInput");
+            let lbd_keys = Some("LabelsDialog && !TextInput");
+            let crd_keys = Some("CropDialog && !TextInput");
+            let ind_keys = Some("InsertDialog && !TextInput");
+            let spd_keys = Some("SplitDialog && !TextInput");
             let ed_keys = Some("ExportDialog && !TextInput");
             let pd_keys = Some("PrintDialog && !TextInput");
             let pf_keys = Some("PluginForm && !TextInput");
@@ -418,6 +458,49 @@ fn main() {
                 KeyBinding::new("space", DialogRight, sd),
                 KeyBinding::new("enter", DialogRun, sd),
                 KeyBinding::new("escape", DialogCancel, sd),
+                KeyBinding::new("enter", DialogRun, cd),
+                KeyBinding::new("escape", DialogCancel, cd),
+                KeyBinding::new("tab", DialogNext, spd),
+                KeyBinding::new("shift-tab", DialogPrev, spd),
+                KeyBinding::new("left", DialogLeft, spd_keys),
+                KeyBinding::new("right", DialogRight, spd_keys),
+                KeyBinding::new("enter", DialogRun, spd_keys),
+                KeyBinding::new("escape", DialogCancel, spd_keys),
+                KeyBinding::new("tab", DialogNext, ind),
+                KeyBinding::new("shift-tab", DialogPrev, ind),
+                KeyBinding::new("left", DialogLeft, ind_keys),
+                KeyBinding::new("right", DialogRight, ind_keys),
+                KeyBinding::new("enter", DialogRun, ind_keys),
+                KeyBinding::new("escape", DialogCancel, ind_keys),
+                KeyBinding::new("tab", DialogNext, crd),
+                KeyBinding::new("shift-tab", DialogPrev, crd),
+                KeyBinding::new("left", DialogLeft, crd_keys),
+                KeyBinding::new("right", DialogRight, crd_keys),
+                KeyBinding::new("enter", DialogRun, crd_keys),
+                KeyBinding::new("escape", DialogCancel, crd_keys),
+                KeyBinding::new("tab", DialogNext, lbd),
+                KeyBinding::new("shift-tab", DialogPrev, lbd),
+                KeyBinding::new("left", DialogLeft, lbd_keys),
+                KeyBinding::new("right", DialogRight, lbd_keys),
+                KeyBinding::new("enter", DialogRun, lbd_keys),
+                KeyBinding::new("escape", DialogCancel, lbd_keys),
+                KeyBinding::new("tab", DialogNext, hfd),
+                KeyBinding::new("shift-tab", DialogPrev, hfd),
+                KeyBinding::new("escape", DialogCancel, hfd),
+                KeyBinding::new("tab", DialogNext, wmd),
+                KeyBinding::new("shift-tab", DialogPrev, wmd),
+                KeyBinding::new("escape", DialogCancel, wmd),
+                KeyBinding::new("tab", DialogNext, bmd),
+                KeyBinding::new("shift-tab", DialogPrev, bmd),
+                KeyBinding::new("enter", DialogRun, bmd),
+                KeyBinding::new("escape", DialogCancel, bmd),
+                KeyBinding::new("tab", DialogNext, bld),
+                KeyBinding::new("shift-tab", DialogPrev, bld),
+                KeyBinding::new("left", DialogLeft, bld_keys),
+                KeyBinding::new("right", DialogRight, bld_keys),
+                KeyBinding::new("space", DialogRight, bld_keys),
+                KeyBinding::new("enter", DialogRun, bld_keys),
+                KeyBinding::new("escape", DialogCancel, bld_keys),
                 KeyBinding::new("tab", DialogNext, pd),
                 KeyBinding::new("shift-tab", DialogPrev, pd),
                 KeyBinding::new("left", DialogLeft, pd_keys),

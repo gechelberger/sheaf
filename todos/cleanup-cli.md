@@ -1,6 +1,7 @@
 # Plan: ops layer, CLI, shared progress, scan cleanup
 
 Status: **done** (2026-10-14), branch `cleanup-cli`. See "Slice notes" at the end.
+`sheaf-scan` has since become `sheaf_image::clean` ([`m8-sheaf-image.md`](m8-sheaf-image.md)).
 
 ## Why
 
@@ -394,6 +395,44 @@ Verification:
 - **GUI.** Esc stops a running export, a plugin command, and a scan in the
   dialog.
 
-Still open: real phone-photo fixtures; blank-page removal; and the two
+Blank-page removal landed in M8 (slices 9–12, [`blanks.md`](blanks.md)).
+
+Still open: real phone-photo fixtures; and the two
 "Open" questions above (keeping the raw photos as attachments, and cleaning
 pages already in a PDF).
+
+## Tuning on real photos (2026-10-14)
+
+Ten phone photos of engineering drawings on a granite counter: landscape
+sheets shot portrait, fine lines, little text, uneven light, and three
+close-ups of part of a sheet. What changed:
+
+- **Orientation.** Each signal was wrong somewhere on its own:
+  - word shape misjudged a drawing whose labels run both ways;
+  - PaddleOCR's orientation model was confidently wrong, and flipped its
+    answer when the input changed slightly;
+  - Tesseract's OSD (`osd.traineddata`, now fetched by default) missed
+    one.
+
+  `sheaf_ops::scan::orientation_votes` now combines them: the model
+  averaged over the page turned all four ways, plus OSD on the gray page
+  and on a black-and-white copy (weighted by confidence/8), with word
+  shape as a 0.15 tiebreak. All ten come out upright (before: two wrong).
+  The orienter now gets the full-resolution page, because OSD needs it.
+- **Edge clearing.**
+  - It only takes dark shapes nearly all within 6% of the edges. A table
+    in a close-up runs off the photo, and it had been erased whole.
+  - It fills with the local paper colour, not white. White made
+    flattening leave tan halos around cleared areas and along the edges.
+- **Detection.** It ignores quads whose corners fall more than 2% outside
+  the photo: in a close-up of part of a sheet, those corners are guesses.
+
+Still open:
+- **Page edges on busy backgrounds.** Light granite gives a loose crop:
+  stone along an edge, and in black and white a short dark sliver.
+  Ranking candidates by contrast across their sides, a smoothness mask,
+  and Hough lines were all tried; on these drawings each did worse than
+  the largest quad.
+- **Close-ups.** One with a table can still be cropped to the table.
+- **Fixtures.** The photos (25 MB) aren't committed. The new regression
+  test covers the table-off-the-edge case synthetically.

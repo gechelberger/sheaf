@@ -5,12 +5,17 @@
 //! `check()` once cancelled. Ops move here one at a time, when the
 //! command line needs them.
 
+pub mod blank;
+pub mod combine;
+pub mod crop;
+pub mod derive;
 pub mod export;
 pub mod images;
 pub mod open;
 pub mod pages;
 pub mod scan;
+pub mod split;
 
 pub use open::open;
 
-pub use sheaf_progress::{Cancelled, NoProgress, Progress, Snapshot, Tracker};
+pub use sheaf_progress::{Cancelled, NoProgress, Progress, Snapshot as ProgressSnapshot, Tracker};

@@ -84,6 +84,18 @@ impl TextLayer {
         }
     }
 
+    /// The layer on a page whose shown area moved: words shifted by
+    /// (`dx`, `dy`) source-displayed points, on a page now `page` big.
+    pub fn shifted(&self, dx: f32, dy: f32, page: PageSize) -> TextLayer {
+        let mut out = self.clone();
+        for w in &mut out.words {
+            w.rect.x += dx;
+            w.rect.y += dy;
+        }
+        out.page = page;
+        out
+    }
+
     pub fn is_empty(&self) -> bool {
         self.words.is_empty()
     }

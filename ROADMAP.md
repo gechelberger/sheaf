@@ -13,6 +13,7 @@ comes late, once the object-layer groundwork from earlier milestones exists.
 
 The README [feature tables](README.md#features) remain the authoritative
 per-feature status. This file groups and orders the 📋 and ❓ items from them.
+New proposals not yet placed in a milestone go under [Pending](#pending).
 
 ## Done
 
@@ -49,10 +50,12 @@ below are a first cut.
   engines, Tesseract 5 (static) and PaddleOCR PP-OCRv5 on ONNX Runtime
   (`oar-ocr`); Document > Recognize Text (OCR)…; one undo step; Find and
   Patterns search unsaved layers. Design in [`todos/ocr.md`](todos/ocr.md).
-- ✅ Scan cleanup (`sheaf-scan`): deskew, despeckle, auto-rotate by detected
+- ✅ Scan cleanup (`sheaf_image::clean`): deskew, despeckle, auto-rotate by detected
   text orientation (word shape, plus PaddleOCR's orientation model when
-  present), black-and-white by Sauvola thresholding. Blank-page removal is
-  still to do.
+  present), black-and-white by Sauvola thresholding. Blank-page removal
+  (M8, `sheaf_ops::blank` over `sheaf_image::blank`): "Leave out blank
+  pages" when scanning, Document > Find Blank Pages… with a review before
+  deleting, and `sheaf remove-blanks`.
 - ✅ Camera capture: phone photos of paper. Find the page and correct the
   perspective, clear the background left at its edges, even out shadows,
   lighting and white balance, and optionally flatten curled pages (UVDoc,
@@ -125,7 +128,7 @@ portal. Reasons in [`todos/m7.md`](todos/m7.md).
 
 ### M8: Page tools
 
-- **Combine Files** (Acrobat's File → Create → Combine Files): build a new
+- ✅ **Combine Files** (Acrobat's File → Create → Combine Files): build a new
   PDF from any number of PDFs and images (JPEG/PNG/TIFF, multi-page TIFF).
   - Add files or whole folders, or drop them in; reorder and remove in a
     list or thumbnail grid.
@@ -137,20 +140,20 @@ portal. Reasons in [`todos/m7.md`](todos/m7.md).
     decoding reuses the M5 image import.
   - Command line: `sheaf combine -o out.pdf a.pdf:1-3 scan.tif b.png`.
   - Office files are not accepted (no Office conversion, see Not planned).
-- Split document by page range, by top-level bookmark, or by file size.
-- Insert blank page; insert pages from images (shares M5 image import).
-- Replace pages (Acrobat's Replace Pages).
-- Crop pages (CropBox), with the option to apply to a range.
-- Page labels: edit numbering style, prefix, start.
-- Headers / footers: add, update, remove (with date, page number, file name).
-- Bates numbering.
-- Watermarks and backgrounds (text or image, opacity, behind/in front).
-- Bookmarks: create from a page range; colorize by level; auto-bookmark from
+- ✅ Split document by page range, by top-level bookmark, or by file size.
+- ✅ Insert blank page; insert pages from images (shares M5 image import).
+- ✅ Replace pages (Acrobat's Replace Pages).
+- ✅ Crop pages (CropBox), with the option to apply to a range.
+- ✅ Page labels: edit numbering style, prefix, start.
+- ✅ Headers / footers: add, update, remove (with date, page number, file name).
+- ✅ Bates numbering.
+- ✅ Watermarks and backgrounds (text or image, opacity, behind/in front).
+- ✅ Bookmarks: create from a page range; colorize by level; auto-bookmark from
   a text pattern (reuses the Patterns engine).
 
-Slices: Combine Files → split → insert blank/images + replace → crop →
-page labels → headers/footers + Bates → watermark/background → bookmark
-extras.
+Slices: Combine Files ✅ → split ✅ → insert blank/images + replace ✅ → crop ✅ →
+page labels ✅ → headers/footers + Bates ✅ → watermark/background ✅ → bookmark
+extras ✅. Done 2026-10-14; notes in [`todos/m8.md`](todos/m8.md).
 
 Headers/footers, Bates and watermarks are written as tagged artifacts the way
 Acrobat writes them, so Acrobat can update or remove them later and so can we.
@@ -160,16 +163,18 @@ Acrobat writes them, so Acrobat can update or remove them later and so can we.
 - Underline, strikethrough, squiggly, replace-text / insert-text marks.
 - Polygon, polyline, cloud, callout (free text with leader).
 - Custom stamps: from image or PDF page; dynamic stamps (date, time, user name).
-- Sign-off / review stamps (preparer and reviewer initials + date) **(PDFlyer;
-  verify against PDFlyer)**.
+- Sign-off / review stamps (preparer and reviewer initials + date). A sheaf
+  extension, not PDFlyer: PDFlyer's nearest tool is Set Status, and real
+  sign-off lives in ProSystem fx Engagement's binder. See
+  [PDFlyer parity gaps](#pdflyer-parity-gaps); Set Status may replace this.
 - Comment status (accepted/rejected/completed), replies, author and
   date filters, sorting.
 - Import / export comments as FDF and XFDF.
 - Comment summary report (comments with page thumbnails, to PDF).
 - File-attachment annotations.
 - Measurement: distance, perimeter, area, with page scale and calibration.
-- Calculator tape that picks up numbers by clicking page text **(PDFlyer;
-  verify against PDFlyer)**.
+- Calculator tape that picks up numbers by clicking page text. A sheaf
+  extension: PDFlyer's tape numbers are typed.
 
 Slices: text-markup types → shape types → custom/dynamic stamps → replies and
 status → FDF/XFDF + summary → measurement → calc tape from page text.
@@ -292,16 +297,16 @@ Every remaining 📋 / ❓ row from the README feature tables, with its mileston
 | Attachments panel | M7 |
 | Open PDF Portfolios (read-only) | M7 |
 | Layers (OCG) panel | M7 |
-| Combine Files (PDFs + images, page subsets) | M8 |
-| Split document (range, bookmark, size) | M8 |
-| Insert blank page / from image | M8 |
+| Combine Files (PDFs + images, page subsets) | M8 ✅ |
+| Split document (range, bookmark, size) | M8 ✅ |
+| Insert blank page / from image | M8 ✅ |
 | Insert from scanner | M5 |
-| Crop pages | M8 |
-| Page labels | M7 (display), M8 (edit) |
-| Headers / footers / Bates numbering | M8 |
-| Watermarks / backgrounds | M8 |
-| Colorize bookmarks by level | M8 |
-| Bookmark from page range | M8 |
+| Crop pages | M8 ✅ |
+| Page labels | M7 (display), M8 (edit) ✅ |
+| Headers / footers / Bates numbering | M8 ✅ |
+| Watermarks / backgrounds | M8 ✅ |
+| Colorize bookmarks by level | M8 ✅ |
+| Bookmark from page range | M8 ✅ |
 | Target sheets / auto-bookmark from scan separators | M5 (separator sheets) |
 | Underline / strikethrough | M9 |
 | Polygon | M9 |
@@ -330,6 +335,94 @@ Every remaining 📋 / ❓ row from the README feature tables, with its mileston
 | Optimize / reduce file size | M14 |
 | Preflight / accessibility checker ❓ | M14 |
 | Batch actions / scripting | M15 |
+
+## Pending
+
+Features we probably want but haven't placed yet. Some are provisional,
+some aspirational. **Every new feature proposal starts here.**
+
+When adding an entry:
+1. Check the milestones, the parity checklist and Not planned for overlap.
+   Note any partial overlap or clear duplicate in the entry. A clear
+   duplicate goes into the existing item, not here.
+2. Link the research behind it (`docs/prior-art/`, a `todos/` memo).
+
+When reviewing, each entry ends up in one of three places:
+- folded into an existing milestone, which usually means a new slice;
+- a new milestone, if several pending entries share a theme;
+- Not planned, with a reason.
+
+Entries leave this section when they're placed.
+
+### Export to Markdown
+
+Export a document, or a page range, as Markdown: headings, paragraphs,
+lists and tables in reading order. This makes binder content usable in
+notes, wikis and LLM tools. Bookmarks could supply the heading structure.
+
+- **Overlap:**
+  - M7 Export text (plain done; "with layout ❓" left open). This would be
+    another format in that same export dialog and `sheaf export`.
+  - M14 accessibility (tags tree, reading order). Tagged PDFs give the
+    structure directly, and both need a reading-order model.
+  - M5 OCR. Scans need a text layer first.
+- **Approach:** born-digital pages use PDFium's text plus heuristics
+  (font size for headings, x-alignment for columns and tables). Scans can
+  use the structure pipeline in `oar-ocr`, which `sheaf-ocr` already
+  depends on: layout detection and table recognition, with
+  `to_markdown()`. See
+  [prior-art/vision-models.md §2](docs/prior-art/vision-models.md#2-page-parsing-layout-tables-markdown).
+- **Open:** which milestone. It fits as an M7 follow-up slice (text-only
+  heuristics) or M14 (once reading order exists).
+
+### ML document restoration (DocRes)
+
+Opt-in model-based cleanup for photos and degraded scans: deblurring,
+better binarization of faded copies, and shadow and appearance correction
+where background division leaves artifacts. One 15 M-parameter model
+covers all of these.
+- **Overlap:** M5 scan cleanup and camera capture (done). This extends
+  them; UVDoc already covers dewarping.
+- **Research:** [prior-art/vision-models.md §1](docs/prior-art/vision-models.md#1-docres).
+- **Open:**
+  - CPU time per page;
+  - whether it improves OCR accuracy, not just looks;
+  - the license of the weights;
+  - we'd have to make the ONNX export ourselves.
+
+  If it's worth it, it's an M5 follow-up slice beside UVDoc.
+
+### PDFlyer parity gaps
+
+PDFlyer tools that sheaf lacks or does differently, from
+[prior-art/pdflyer.md §6](docs/prior-art/pdflyer.md#6-corrections-and-implications-for-sheafs-readme-and-roadmap)
+and [prior-art/README.md](docs/prior-art/README.md#what-the-prior-art-says-about-useful)
+(researched 2026-10-13). Multi-page TIFF with marks rendered in is left
+out: M7's TIFF export already renders sheaf's marks.
+
+| Gap | Overlap |
+|---|---|
+| **Connector groups**: every instance of a label (1–50, A–ZZ) linked, with Prev/Next and "all pages with / without" navigation | M3 connectors are pairwise Link annotations. Keep those so links still work in Acrobat, and add groups on top. |
+| **Set Status**: bookmark color + page border + text/date stamp | Partial duplicate of M9 "Sign-off / review stamps", which PDFlyer doesn't have. Probably replaces it. |
+| Split Bookmark | M8 split document splits files, not bookmarks. New. |
+| Delete Bookmark *with its pages* | M2 move-with-pages (Shift+drag); same machinery. |
+| Delete Page re-attaches its bookmark to the next page | M2 delete pages. Check today's behavior first. |
+| Hide/Show empty bookmarks; colorize by populated vs empty | M8 colorize by level. |
+| Insert PDF modes: merge by parent bookmarks / append as one bookmark at a chosen level / one bookmark per page / none; offer to delete the source | M2 Insert Pages (merge only) and M8 Combine Files (bookmark per file). Mostly options on the existing dialog. |
+| Stamp Summary (page, author, time; export) and Note Summary | M9 comment summary report and comment filters. Likely the same feature. |
+| Recent and Favorite stamps; sticky stamp mode; user stamps from images, exported/imported to share across staff | M9 custom stamps. Sharing is new. |
+| Calculator tape: section/row format (`1-0` title, `1-1`…, `1-T`, `GT`), re-editable after placing, rotatable and resizable, PDFlyer's calculator keys | M3 Calculator panel. M9's "picks up numbers from page text" is a sheaf extension, not PDFlyer. |
+| Insert Target Sheets | M5 separator sheets (planned as a generic replacement). |
+| **Read existing PDFlyer workpapers** (stamps, connectors, tapes) | None. Blocked on getting a PDFlyer-marked sample file. Highest value. |
+
+**Open:**
+- Most rows are follow-up slices to done milestones (M2, M3, M8) rather
+  than new work. One "PDFlyer parity" milestone before M9 may be cleaner
+  than scattering them.
+- Check each row against current sheaf before slicing. The research
+  predates M7–M8.
+- The doc corrections from the same §6 were applied to README.md and
+  this file on 2026-10-14.
 
 ## Not planned
 

@@ -49,12 +49,29 @@ pub fn info(id: &str) -> Option<Info> {
             "Save a copy with annotations burned into the page, so they can't be changed or removed.",
             &["burn", "bake"],
         ),
+        "workspace::CombineFiles" => (
+            "combine-files",
+            "Make one PDF from several PDFs and images, choosing which pages of each, with a bookmark per file.",
+            &[
+                "merge",
+                "join",
+                "append",
+                "concatenate",
+                "binder",
+                "assemble",
+            ],
+        ),
         "workspace::CreateFromScans" => (
             "create-from-scans",
             "Make a PDF from photos or scans of paper: find each page, straighten it, even out shadows, and optionally recognize the text.",
             &[
                 "camera", "photo", "image", "scan", "phone", "receipt", "import", "deskew", "ocr",
             ],
+        ),
+        "workspace::SplitDocument" => (
+            "split-document",
+            "Split this document into several files: every so many pages, at each top-level bookmark, by file size, or by page ranges.",
+            &["divide", "break", "burst", "separate", "chunk"],
         ),
         "workspace::ExportPages" => (
             "export-pages",
@@ -245,6 +262,80 @@ pub fn info(id: &str) -> Option<Info> {
             "rotate-left",
             "Rotate the selected pages a quarter turn counterclockwise.",
             &["turn", "orientation"],
+        ),
+        "workspace::InsertBlankPages" => (
+            "insert-blank",
+            "Insert blank pages, the size of the current page or a standard sheet.",
+            &["empty", "add page", "new page", "separator"],
+        ),
+        "workspace::InsertFromImages" => (
+            "insert-image",
+            "Insert pages made from images (JPEG, PNG, TIFF…), fitted to a page size or at their own.",
+            &[
+                "picture",
+                "photo",
+                "scan",
+                "jpeg",
+                "png",
+                "tiff",
+                "add pages",
+            ],
+        ),
+        "workspace::HeaderFooter" => (
+            "header-footer",
+            "Add, update or remove a header and footer: text with the page number, page count, date and file name.",
+            &["page numbers", "running head", "footer", "stamp"],
+        ),
+        "workspace::BatesNumbering" => (
+            "bates",
+            "Number every page with a Bates number, like ABC000123, in the header or footer.",
+            &[
+                "legal",
+                "discovery",
+                "production",
+                "endorse",
+                "control number",
+            ],
+        ),
+        "workspace::AddWatermark" => (
+            "watermark",
+            "Add, update or remove a watermark: text like DRAFT, or an image, across the pages in front of their content.",
+            &["draft", "confidential", "stamp", "copy", "overlay"],
+        ),
+        "workspace::AddBackground" => (
+            "background",
+            "Add, update or remove a background: text or an image behind the pages' content.",
+            &["letterhead", "underlay", "behind", "stationery"],
+        ),
+        "workspace::BookmarksFromPages" => (
+            "bookmarks-from-pages",
+            "Make a bookmark for each page of a range, titled from a template like \"Page <<label>>\".",
+            &["outline", "page bookmarks", "index"],
+        ),
+        "workspace::ColorBookmarksByLevel" => (
+            "color-bookmarks",
+            "Color every bookmark by how deeply it's nested, as PDFlyer does.",
+            &["outline", "colour", "level", "depth"],
+        ),
+        "workspace::FindBlankPages" => (
+            "find-blank-pages",
+            "Find blank pages (duplex backs, scanner fillers, \"intentionally left blank\") and review them before deleting.",
+            &["blank", "empty", "remove", "scan", "duplex", "delete"],
+        ),
+        "workspace::PageLabels" => (
+            "page-labels",
+            "Number pages your way: roman numerals for the front matter, a prefix like A- for exhibits, or a new start.",
+            &["numbering", "roman", "prefix", "exhibit", "page numbers"],
+        ),
+        "workspace::CropPages" => (
+            "crop-pages",
+            "Crop pages by margins, or trim them to their content. What's cropped is hidden, not deleted.",
+            &["trim", "margins", "cropbox", "cut"],
+        ),
+        "workspace::ReplacePages" => (
+            "replace-pages",
+            "Replace pages with pages from another PDF, keeping their bookmarks and comments.",
+            &["swap", "substitute", "update pages"],
         ),
         "docview::InsertPdf" => (
             "insert-pdf",

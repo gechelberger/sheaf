@@ -26,6 +26,7 @@ fn scripted_save() -> Option<PathBuf> {
 pub enum Filter {
     Pdf,
     Images,
+    PdfAndImages,
 }
 
 pub fn open(cx: &App, options: PathPromptOptions) -> Dialog<Vec<PathBuf>> {
@@ -55,6 +56,10 @@ pub fn open_filtered(cx: &App, options: PathPromptOptions, filter: Filter) -> Di
                 Filter::Images => {
                     "--file-filter=Images | *.jpg *.jpeg *.png *.tif *.tiff *.bmp *.gif *.webp \
                      *.JPG *.JPEG *.PNG *.TIF *.TIFF *.BMP *.GIF *.WEBP"
+                }
+                Filter::PdfAndImages => {
+                    "--file-filter=PDFs and images | *.pdf *.PDF *.jpg *.jpeg *.png *.tif \
+                     *.tiff *.bmp *.gif *.webp *.JPG *.JPEG *.PNG *.TIF *.TIFF *.BMP *.GIF *.WEBP"
                 }
             });
             command.arg("--file-filter=All files | *");

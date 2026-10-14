@@ -17,7 +17,8 @@ use anyhow::{Context, Result};
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use sheaf_core::{PageSize, Rotation};
 use sheaf_doc::{PageId, SourceId, TextLayer};
-use sheaf_render::{Job, PixelFormat, Raster, RenderHandle, RenderRequest};
+use sheaf_image::raster::{PixelFormat, Raster};
+use sheaf_render::{Job, RenderHandle, RenderRequest};
 
 use crate::config::OcrConfig;
 use crate::engine::{EngineError, EngineKind, OcrEngine, OcrImage, build_engine};

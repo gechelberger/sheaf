@@ -1,12 +1,10 @@
-//! File > Export Pages: the dialog's choices run as `sheaf_ops::export`
-//! on a background thread, with progress in the status bar; Escape stops it.
+//! File > Export Pages: the dialog's choices run as `sheaf_ops::export`,
+//! a background job (see jobs.rs).
 
 use std::path::PathBuf;
-use std::time::Duration;
 
 use sheaf_doc::PageId;
 use sheaf_ops::export::{ExportJob, existing, run, stem_of};
-use sheaf_ops::{Cancelled, Tracker};
 
 impl crate::docview::DocView {
     /// What File > Export Pages needs from the view.
@@ -138,99 +136,24 @@ impl crate::docview::DocView {
     }
 
     fn run_export(&mut self, job: ExportJob, cx: &mut gpui::Context<Self>) {
-        use futures::FutureExt;
-        if self.export_run.is_some() {
-            self.set_notice("An export is already running — Esc stops it", cx);
-            return;
-        }
-        let crate::docview::State::Ready(doc) = &mut self.state else {
+        let crate::docview::State::Ready(doc) = &self.state else {
             return;
         };
         let snapshot = doc.model.snapshot();
-        doc.notice = Some(format!("Exporting to {}…", job.dir.display()));
-        let tracker = Tracker::new();
-        self.export_run = Some(tracker.clone());
-        cx.notify();
         let dir = job.dir.clone();
-        let progress = tracker.clone();
-        let work = cx
-            .background_executor()
-            .spawn(async move { run(&snapshot, &job, &progress) });
-        cx.spawn(async move |this, cx| {
-            let mut work = work.fuse();
-            let result = loop {
-                let mut tick = cx
-                    .background_executor()
-                    .timer(Duration::from_millis(100))
-                    .fuse();
-                futures::select_biased! {
-                    r = work => break r,
-                    _ = tick => {}
-                }
-                let snap = tracker.snapshot();
-                let alive = this.update(cx, |v, cx| {
-                    if let (crate::docview::State::Ready(doc), Some(of), false) =
-                        (&mut v.state, snap.total, snap.cancelled)
-                    {
-                        doc.notice = Some(format!("Exporting page {} of {of}…", snap.done));
-                    }
-                    cx.notify();
-                });
-                if alive.is_err() {
-                    // The view closed: stop the work too.
-                    tracker.cancel();
-                }
-            };
-            this.update(cx, |v, cx| {
-                v.export_run = None;
-                if let crate::docview::State::Ready(doc) = &mut v.state {
-                    doc.notice = Some(match result {
-                        Ok(files) => format!(
-                            "Exported {} file{} to {}",
-                            files.len(),
-                            if files.len() == 1 { "" } else { "s" },
-                            dir.display()
-                        ),
-                        Err(e) if e.is::<Cancelled>() => "Export stopped".into(),
-                        Err(e) => format!("Export failed: {e:#}"),
-                    });
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// Fraction of the running export done, while one runs.
-    pub(crate) fn export_progress(&self) -> Option<f32> {
-        let run = self.export_run.as_ref()?;
-        Some(run.snapshot().fraction.unwrap_or(0.0))
-    }
-
-    /// Ask the running plugin command to stop (it does at its next check).
-    /// Returns whether one was running and had reported progress.
-    pub(crate) fn cancel_plugin_run(&mut self, cx: &mut gpui::Context<Self>) -> bool {
-        let Some((label, t)) = &self.plugin_run else {
-            return false;
-        };
-        let s = t.snapshot();
-        if s.total.is_none() && s.fraction.is_none() {
-            return false;
-        }
-        t.cancel();
-        let msg = format!("{label}: stopping…");
-        self.set_notice(msg, cx);
-        true
-    }
-
-    /// Stop the running export. Returns whether there was one.
-    pub(crate) fn cancel_export(&mut self, cx: &mut gpui::Context<Self>) -> bool {
-        let Some(run) = &self.export_run else {
-            return false;
-        };
-        run.cancel();
-        self.set_notice("Export: stopping after the current page…", cx);
-        true
+        self.run_job(
+            "Export",
+            move |p| run(&snapshot, &job, p),
+            |s| Some(format!("Exporting page {} of {}…", s.done, s.total?)),
+            move |files| {
+                format!(
+                    "Exported {} file{} to {}",
+                    files.len(),
+                    if files.len() == 1 { "" } else { "s" },
+                    dir.display()
+                )
+            },
+            cx,
+        );
     }
 }

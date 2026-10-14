@@ -3,16 +3,16 @@
 //! marks come out as they look, then PDFium renders each at the chosen
 //! resolution.
 
-use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use image::{ImageEncoder, RgbaImage};
 use sheaf_core::{PageIndex, Rotation};
 use sheaf_doc::{PageId, Snapshot};
+use sheaf_image::encode::{TiffPage, TiffWriter};
+use sheaf_image::raster::{PixelFormat, Raster};
 use sheaf_progress::{Progress, Unit};
 use sheaf_render::pdfium::PdfiumEngine;
-use sheaf_render::{Job, PixelFormat, Raster, Renderer};
+use sheaf_render::{Job, Renderer};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
@@ -198,107 +198,34 @@ fn write_tiff_to(
     tmp: &Path,
     progress: &dyn Progress,
 ) -> Result<()> {
-    use tiff::encoder::{Compression, Rational, TiffEncoder, colortype};
-    use tiff::tags::{ResolutionUnit, Tag};
     let file = std::fs::File::create(tmp).with_context(|| format!("creating {}", tmp.display()))?;
-    let mut enc =
-        TiffEncoder::new(std::io::BufWriter::new(file))?.with_compression(Compression::Lzw);
-    let res = || Rational { n: dpi, d: 1 };
+    let mut tiff = TiffWriter::new(std::io::BufWriter::new(file), dpi, n)?;
     for i in 0..n {
         progress.check()?;
         let raster = render_at(engine, i as u32, dpi)?;
-        let (w, h) = (raster.width, raster.height);
-        let rgba = RgbaImage::from_raw(w, h, raster.data).context("raster size")?;
-        let page = [i as u16, n.min(u16::MAX as usize) as u16];
         match mode {
-            TiffMode::Color => {
-                let rgb = image::DynamicImage::ImageRgba8(rgba).into_rgb8();
-                let mut im = enc.new_image::<colortype::RGB8>(w, h)?;
-                im.resolution(ResolutionUnit::Inch, res());
-                im.encoder().write_tag(Tag::Unknown(297), &page[..])?;
-                im.write_data(rgb.as_raw())?;
-            }
+            TiffMode::Color => tiff.add(TiffPage::Rgb(&raster.to_rgb().context("raster size")?))?,
             TiffMode::Gray => {
-                let gray = image::DynamicImage::ImageRgba8(rgba).into_luma8();
-                let mut im = enc.new_image::<colortype::Gray8>(w, h)?;
-                im.resolution(ResolutionUnit::Inch, res());
-                im.encoder().write_tag(Tag::Unknown(297), &page[..])?;
-                im.write_data(gray.as_raw())?;
+                tiff.add(TiffPage::Gray(&raster.to_gray().context("raster size")?))?
             }
             TiffMode::BlackWhite => {
-                let gray = image::DynamicImage::ImageRgba8(rgba).into_luma8();
-                let data = sheaf_doc::images::g4(gray.as_raw(), w, h);
-                let mut dir = enc.image_directory()?;
-                let offset = dir.write_data(&data[..])?;
-                dir.write_tag(Tag::NewSubfileType, 2u32)?;
-                dir.write_tag(Tag::ImageWidth, w)?;
-                dir.write_tag(Tag::ImageLength, h)?;
-                dir.write_tag(Tag::BitsPerSample, 1u16)?;
-                // CCITT T.6.
-                dir.write_tag(Tag::Compression, 4u16)?;
-                // WhiteIsZero, as fax data is.
-                dir.write_tag(Tag::PhotometricInterpretation, 0u16)?;
-                dir.write_tag(Tag::StripOffsets, u32::try_from(offset)?)?;
-                dir.write_tag(Tag::SamplesPerPixel, 1u16)?;
-                dir.write_tag(Tag::RowsPerStrip, h)?;
-                dir.write_tag(Tag::StripByteCounts, data.len() as u32)?;
-                dir.write_tag(Tag::XResolution, res())?;
-                dir.write_tag(Tag::YResolution, res())?;
-                dir.write_tag(Tag::ResolutionUnit, 2u16)?;
-                // T6Options: no uncompressed mode.
-                dir.write_tag(Tag::Unknown(293), 0u32)?;
-                dir.write_tag(Tag::Unknown(297), &page[..])?;
-                dir.finish()?;
+                tiff.add(TiffPage::Bilevel(&raster.to_gray().context("raster size")?))?
             }
         }
         progress.set(i as u64 + 1);
     }
-    drop(enc);
     Ok(())
 }
 
-/// Encode an RGBA raster, recording its resolution where the format can.
+/// Encode a raster, recording its resolution where the format can.
 pub fn encode(raster: Raster, format: Format, dpi: u32) -> Result<Vec<u8>> {
-    debug_assert_eq!(raster.format, PixelFormat::Rgba);
-    let (w, h) = (raster.width, raster.height);
-    let rgba = RgbaImage::from_raw(w, h, raster.data).context("raster size")?;
-    let mut out = Vec::new();
+    // Pages are opaque: RGB is a quarter smaller.
+    let rgb = || raster.to_rgb().context("raster size");
     match format {
-        Format::Png => {
-            // Pages are opaque: RGB is a quarter smaller.
-            let rgb = image::DynamicImage::ImageRgba8(rgba).into_rgb8();
-            let mut enc = png_with_dpi(&mut out, w, h, dpi);
-            enc.set_color(png::ColorType::Rgb);
-            enc.set_depth(png::BitDepth::Eight);
-            enc.set_compression(png::Compression::Balanced);
-            enc.write_header()?.write_image_data(rgb.as_raw())?;
-        }
+        Format::Png => sheaf_image::encode::png(&rgb()?, dpi),
+        Format::Jpeg(q) => sheaf_image::encode::jpeg(&rgb()?, q, dpi),
         Format::Tiff(_) | Format::Text => bail!("this format goes into one file"),
-        Format::Jpeg(q) => {
-            let rgb = image::DynamicImage::ImageRgba8(rgba).into_rgb8();
-            let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(
-                Cursor::new(&mut out),
-                q.clamp(1, 100),
-            );
-            enc.set_pixel_density(image::codecs::jpeg::PixelDensity::dpi(
-                dpi.min(u16::MAX as u32) as u16,
-            ));
-            enc.write_image(rgb.as_raw(), w, h, image::ExtendedColorType::Rgb8)?;
-        }
     }
-    Ok(out)
-}
-
-/// A PNG encoder that writes `pHYs` with the resolution.
-fn png_with_dpi(out: &mut Vec<u8>, w: u32, h: u32, dpi: u32) -> png::Encoder<'_, &mut Vec<u8>> {
-    let mut enc = png::Encoder::new(out, w, h);
-    let per_meter = (dpi as f64 / 0.0254).round() as u32;
-    enc.set_pixel_dims(Some(png::PixelDimensions {
-        xppu: per_meter,
-        yppu: per_meter,
-        unit: png::Unit::Meter,
-    }));
-    enc
 }
 
 /// Where a single-page export would land, to warn before overwriting.
@@ -357,17 +284,6 @@ mod tests {
     fn names_sort() {
         assert_eq!(file_name("Return", 7, 120, "png"), "Return_Page_007.png");
         assert_eq!(file_name("Return", 1, 1, "jpg"), "Return_Page_1.jpg");
-    }
-
-    #[test]
-    fn png_keeps_size_and_resolution() {
-        let bytes = encode(raster(30, 20), Format::Png, 300).unwrap();
-        let dec = png::Decoder::new(Cursor::new(bytes));
-        let reader = dec.read_info().unwrap();
-        let info = reader.info();
-        assert_eq!((info.width, info.height), (30, 20));
-        let dims = info.pixel_dims.unwrap();
-        assert_eq!(dims.xppu, 11811);
     }
 
     #[test]

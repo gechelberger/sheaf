@@ -335,6 +335,25 @@ pub struct Workspace {
     /// File > Export Pages, while open.
     export: Option<(Entity<crate::export_dialog::ExportDialog>, Subscription)>,
     scan: Option<(Entity<crate::scan_dialog::ScanDialog>, Subscription)>,
+    combine: Option<(Entity<crate::combine_dialog::CombineDialog>, Subscription)>,
+    split: Option<(Entity<crate::split_dialog::SplitDialog>, Subscription)>,
+    insert_dialog: Option<(Entity<crate::insert_dialog::InsertDialog>, Subscription)>,
+    replace_dialog: Option<(Entity<crate::insert_dialog::ReplaceDialog>, Subscription)>,
+    crop: Option<(Entity<crate::crop_dialog::CropDialog>, Subscription)>,
+    labels: Option<(Entity<crate::labels_dialog::LabelsDialog>, Subscription)>,
+    header_footer: Option<(
+        Entity<crate::header_footer_dialog::HeaderFooterDialog>,
+        Subscription,
+    )>,
+    watermark: Option<(
+        Entity<crate::watermark_dialog::WatermarkDialog>,
+        Subscription,
+    )>,
+    bookmark_tool: Option<(
+        Entity<crate::bookmark_tools::BookmarkToolsDialog>,
+        Subscription,
+    )>,
+    blanks: Option<(Entity<crate::blanks_dialog::BlanksDialog>, Subscription)>,
     /// File > Print, while open.
     print: Option<(Entity<crate::print_dialog::PrintDialog>, Subscription)>,
     /// File > Properties, while open.
@@ -429,6 +448,16 @@ impl Workspace {
             palette: None,
             export: None,
             scan: None,
+            combine: None,
+            split: None,
+            insert_dialog: None,
+            replace_dialog: None,
+            crop: None,
+            labels: None,
+            header_footer: None,
+            watermark: None,
+            bookmark_tool: None,
+            blanks: None,
             print: None,
             properties: None,
             ocr_dialog: None,
@@ -986,6 +1015,67 @@ impl Workspace {
         crate::recent::forget(&path, cx);
     }
 
+    /// File > Create > Combine Files: pick some files, then the dialog
+    /// (where more can be added).
+    fn combine_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.combine.is_some() {
+            return;
+        }
+        let rx = crate::file_dialog::open_filtered(
+            cx,
+            gpui::PathPromptOptions {
+                files: true,
+                directories: false,
+                multiple: true,
+                prompt: Some("Choose Files to Combine".into()),
+            },
+            crate::file_dialog::Filter::PdfAndImages,
+        );
+        cx.spawn_in(window, async move |ws, cx| {
+            let Ok(Ok(Some(files))) = rx.await else {
+                return;
+            };
+            ws.update_in(cx, |ws, window, cx| {
+                ws.open_combine_dialog(files, window, cx)
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn open_combine_dialog(
+        &mut self,
+        files: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let params = self.settings.combine.clone();
+        let dialog =
+            cx.new(|cx| crate::combine_dialog::CombineDialog::new(files, params, window, cx));
+        let sub = cx.subscribe_in(
+            &dialog,
+            window,
+            |ws, _, ev: &crate::combine_dialog::CombineEvent, window, cx| {
+                ws.combine = None;
+                ws.focus_active(window, cx);
+                if let crate::combine_dialog::CombineEvent::Created { path, params } = ev {
+                    ws.settings.combine = params.clone();
+                    if let Err(e) = ws.settings.save() {
+                        log::warn!("saving settings: {e:#}");
+                    }
+                    let origin = window.window_handle().downcast::<Workspace>();
+                    let path = path.clone();
+                    if let Some(origin) = origin {
+                        cx.defer(move |cx| open_paths(origin, vec![path], cx));
+                    }
+                }
+                cx.notify();
+            },
+        );
+        self.combine = Some((dialog, sub));
+        cx.notify();
+    }
+
     /// File > Create > From Scans/Photos: pick the images, then the dialog.
     fn create_from_scans(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.scan.is_some() {
@@ -1005,7 +1095,7 @@ impl Workspace {
             let Ok(Ok(Some(mut files))) = rx.await else {
                 return;
             };
-            files.retain(|p| sheaf_doc::images::is_image_path(p));
+            files.retain(|p| sheaf_image::io::is_image_path(p));
             files.sort();
             if files.is_empty() {
                 return;
@@ -1046,6 +1136,467 @@ impl Workspace {
             },
         );
         self.scan = Some((dialog, sub));
+        cx.notify();
+    }
+
+    /// What the insert and replace dialogs asked for, done on the document.
+    fn on_insert_event(
+        &mut self,
+        ev: &crate::insert_dialog::InsertEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::insert_dialog::InsertEvent;
+        self.insert_dialog = None;
+        self.replace_dialog = None;
+        self.focus_active(window, cx);
+        let Some(doc) = self.doc().cloned() else {
+            cx.notify();
+            return;
+        };
+        match ev {
+            InsertEvent::Blank { count, size, at } => {
+                let (count, size, at) = (*count, *size, *at);
+                doc.update(cx, |d, cx| d.insert_blank(count, size, at, cx));
+            }
+            InsertEvent::Images { files, size, at } => {
+                let (files, size, at) = (files.clone(), *size, *at);
+                doc.update(cx, |d, cx| d.insert_images(files, size, at, cx));
+            }
+            InsertEvent::Replace { pages, file, from } => {
+                let (file, from) = (file.clone(), from.clone());
+                let pages = pages.clone();
+                doc.update(cx, |d, cx| {
+                    let ids = d.page_ids_at(&pages);
+                    d.replace_pages_with(file, ids, from, cx)
+                });
+            }
+            InsertEvent::Dismiss => {}
+        }
+        cx.notify();
+    }
+
+    fn open_insert_dialog(
+        &mut self,
+        kind: crate::insert_dialog::Insert,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.doc().is_none() || self.insert_dialog.is_some() {
+            return;
+        }
+        let dialog = cx.new(|cx| crate::insert_dialog::InsertDialog::new(kind, window, cx));
+        let sub = cx.subscribe_in(&dialog, window, |ws, _, ev, window, cx| {
+            ws.on_insert_event(ev, window, cx)
+        });
+        self.insert_dialog = Some((dialog, sub));
+        cx.notify();
+    }
+
+    fn insert_from_images(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.doc().is_none() {
+            return;
+        }
+        let rx = crate::file_dialog::open_filtered(
+            cx,
+            gpui::PathPromptOptions {
+                files: true,
+                directories: false,
+                multiple: true,
+                prompt: Some("Insert Images".into()),
+            },
+            crate::file_dialog::Filter::Images,
+        );
+        cx.spawn_in(window, async move |ws, cx| {
+            let Ok(Ok(Some(mut files))) = rx.await else {
+                return;
+            };
+            files.retain(|p| sheaf_image::io::is_image_path(p));
+            if files.is_empty() {
+                return;
+            }
+            ws.update_in(cx, |ws, window, cx| {
+                ws.open_insert_dialog(crate::insert_dialog::Insert::Images(files), window, cx)
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Replace Pages: pick the PDF, read its page count, then the dialog.
+    fn replace_pages(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.doc().is_none() || self.replace_dialog.is_some() {
+            return;
+        }
+        let rx = crate::file_dialog::open(
+            cx,
+            gpui::PathPromptOptions {
+                files: true,
+                directories: false,
+                multiple: false,
+                prompt: Some("Replace With".into()),
+            },
+        );
+        cx.spawn_in(window, async move |ws, cx| {
+            let Ok(Ok(Some(mut files))) = rx.await else {
+                return;
+            };
+            let Some(file) = files.pop() else { return };
+            let p = file.clone();
+            let counted = cx
+                .background_executor()
+                .spawn(async move { sheaf_ops::open::describe(&p, None) })
+                .await;
+            ws.update_in(cx, |ws, window, cx| {
+                let Some(doc) = ws.doc().cloned() else { return };
+                let file_pages = match counted {
+                    Ok((info, _)) => info.page_count as usize,
+                    Err(e) => {
+                        doc.update(cx, |d, cx| d.set_notice(format!("Replace: {e:#}"), cx));
+                        return;
+                    }
+                };
+                let (doc_pages, targets) = doc.read_with(cx, |d, _| d.target_indexes());
+                let dialog = cx.new(|cx| {
+                    crate::insert_dialog::ReplaceDialog::new(
+                        file, file_pages, doc_pages, &targets, window, cx,
+                    )
+                });
+                let sub = cx.subscribe_in(&dialog, window, |ws, _, ev, window, cx| {
+                    ws.on_insert_event(ev, window, cx)
+                });
+                ws.replace_dialog = Some((dialog, sub));
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Document > Find Blank Pages….
+    fn open_blanks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.blanks.is_some() {
+            return;
+        }
+        let Some(doc) = self.doc().cloned() else {
+            return;
+        };
+        let (count, targets) = doc.read(cx).target_indexes();
+        let params = self.settings.blanks;
+        let dialog = cx
+            .new(|cx| crate::blanks_dialog::BlanksDialog::new(count, targets, params, window, cx));
+        let sub = cx.subscribe_in(
+            &dialog,
+            window,
+            |ws, _, ev: &crate::blanks_dialog::BlanksEvent, window, cx| {
+                ws.blanks = None;
+                ws.focus_active(window, cx);
+                if let crate::blanks_dialog::BlanksEvent::Find(pages, params) = ev
+                    && let Some(doc) = ws.doc().cloned()
+                {
+                    ws.settings.blanks = *params;
+                    if let Err(e) = ws.settings.save() {
+                        log::warn!("saving settings: {e:#}");
+                    }
+                    let (pages, params) = (pages.clone(), *params);
+                    doc.update(cx, |d, cx| d.find_blank_pages(pages, params, cx));
+                }
+                cx.notify();
+            },
+        );
+        self.blanks = Some((dialog, sub));
+        cx.notify();
+    }
+
+    /// Bookmarks from Pages… or Color Bookmarks by Level….
+    fn open_bookmark_tool(&mut self, color: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.bookmark_tool.is_some() {
+            return;
+        }
+        let Some(doc) = self.doc().cloned() else {
+            return;
+        };
+        let tool = if color {
+            crate::bookmark_tools::Tool::ColorByLevel
+        } else {
+            let (page_count, targets) = doc.read(cx).target_indexes();
+            crate::bookmark_tools::Tool::FromPages {
+                page_count,
+                targets,
+            }
+        };
+        let dialog = cx.new(|cx| crate::bookmark_tools::BookmarkToolsDialog::new(tool, window, cx));
+        let sub = cx.subscribe_in(
+            &dialog,
+            window,
+            |ws, _, ev: &crate::bookmark_tools::BookmarkToolsEvent, window, cx| {
+                use crate::bookmark_tools::BookmarkToolsEvent;
+                ws.bookmark_tool = None;
+                ws.focus_active(window, cx);
+                if let Some(doc) = ws.doc().cloned() {
+                    match ev {
+                        BookmarkToolsEvent::FromPages {
+                            pages,
+                            template,
+                            parent,
+                        } => {
+                            let (p, t, par) = (pages.clone(), template.clone(), parent.clone());
+                            doc.update(cx, |d, cx| d.bookmarks_from_pages(p, t, par, cx));
+                        }
+                        BookmarkToolsEvent::ColorByLevel(colors) => {
+                            let colors = *colors;
+                            doc.update(cx, |d, cx| d.color_bookmarks_by_level(colors, cx));
+                        }
+                        BookmarkToolsEvent::Dismiss => {}
+                    }
+                }
+                cx.notify();
+            },
+        );
+        self.bookmark_tool = Some((dialog, sub));
+        cx.notify();
+    }
+
+    /// Watermark… or Background…: read what's there (in the background,
+    /// since it means opening the files), then the dialog.
+    fn open_watermark(&mut self, behind: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.watermark.is_some() {
+            return;
+        }
+        let Some(doc) = self.doc().cloned() else {
+            return;
+        };
+        let Some(snapshot) = doc.read(cx).model_snapshot() else {
+            return;
+        };
+        let page_count = snapshot.state.pages.len();
+        cx.spawn_in(window, async move |ws, cx| {
+            let current = cx
+                .background_executor()
+                .spawn(async move { sheaf_ops::derive::current_watermark(&snapshot, behind) })
+                .await;
+            ws.update_in(cx, |ws, window, cx| {
+                let ctx = crate::watermark_dialog::WatermarkContext {
+                    behind,
+                    current,
+                    page_count,
+                };
+                let dialog =
+                    cx.new(|cx| crate::watermark_dialog::WatermarkDialog::new(ctx, window, cx));
+                let sub = cx.subscribe_in(
+                    &dialog,
+                    window,
+                    move |ws, _, ev: &crate::watermark_dialog::WatermarkEvent, window, cx| {
+                        use crate::watermark_dialog::WatermarkEvent;
+                        ws.watermark = None;
+                        ws.focus_active(window, cx);
+                        if let Some(doc) = ws.doc().cloned() {
+                            match ev {
+                                WatermarkEvent::Apply(wm, pages) => {
+                                    let (wm, pages) = ((**wm).clone(), pages.clone());
+                                    doc.update(cx, |d, cx| {
+                                        d.apply_watermark(behind, Some(wm), pages, cx)
+                                    });
+                                }
+                                WatermarkEvent::Remove => {
+                                    doc.update(cx, |d, cx| {
+                                        d.apply_watermark(behind, None, None, cx)
+                                    });
+                                }
+                                WatermarkEvent::Dismiss => {}
+                            }
+                        }
+                        cx.notify();
+                    },
+                );
+                ws.watermark = Some((dialog, sub));
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Header & Footer… (or Bates Numbering…, which starts with Bates on).
+    fn open_header_footer(&mut self, bates: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.header_footer.is_some() {
+            return;
+        }
+        let Some(doc) = self.doc().cloned() else {
+            return;
+        };
+        let ctx = doc.read_with(cx, |d, _| {
+            let current = d.header_footer();
+            let (page_count, _) = d.target_indexes();
+            let scope = current
+                .as_ref()
+                .and_then(|h| h.pages.as_ref())
+                .map(|ids| crate::insert_dialog::ranges_text(&d.indexes_of(ids)))
+                .unwrap_or_default();
+            crate::header_footer_dialog::HeaderFooterContext {
+                current,
+                page_count,
+                file: d
+                    .path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+                scope,
+                bates,
+            }
+        });
+        let dialog =
+            cx.new(|cx| crate::header_footer_dialog::HeaderFooterDialog::new(ctx, window, cx));
+        let sub = cx.subscribe_in(
+            &dialog,
+            window,
+            |ws, _, ev: &crate::header_footer_dialog::HeaderFooterEvent, window, cx| {
+                use crate::header_footer_dialog::HeaderFooterEvent;
+                ws.header_footer = None;
+                ws.focus_active(window, cx);
+                if let Some(doc) = ws.doc().cloned() {
+                    match ev {
+                        HeaderFooterEvent::Apply(hf, pages) => {
+                            let (mut hf, pages) = ((**hf).clone(), pages.clone());
+                            doc.update(cx, |d, cx| {
+                                hf.pages = pages.map(|ix| d.page_ids_at(&ix));
+                                d.set_header_footer(Some(hf), cx)
+                            });
+                        }
+                        HeaderFooterEvent::Remove => {
+                            doc.update(cx, |d, cx| d.set_header_footer(None, cx));
+                        }
+                        HeaderFooterEvent::Dismiss => {}
+                    }
+                }
+                cx.notify();
+            },
+        );
+        self.header_footer = Some((dialog, sub));
+        cx.notify();
+    }
+
+    fn toggle_labels(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.labels.take().is_some() {
+            self.focus_active(window, cx);
+            cx.notify();
+            return;
+        }
+        let Some(doc) = self.doc().cloned() else {
+            return;
+        };
+        let (count, targets, has) = doc.read_with(cx, |d, _| {
+            let (count, targets) = d.target_indexes();
+            (count, targets, d.has_page_labels())
+        });
+        if count == 0 {
+            return;
+        }
+        let dialog =
+            cx.new(|cx| crate::labels_dialog::LabelsDialog::new(count, &targets, has, window, cx));
+        let sub = cx.subscribe_in(
+            &dialog,
+            window,
+            |ws, _, ev: &crate::labels_dialog::LabelsEvent, window, cx| {
+                use crate::labels_dialog::LabelsEvent;
+                ws.labels = None;
+                ws.focus_active(window, cx);
+                if let Some(doc) = ws.doc().cloned() {
+                    match ev {
+                        LabelsEvent::Apply {
+                            from,
+                            to,
+                            style,
+                            prefix,
+                            first,
+                        } => {
+                            let change = (*from, *to, *style, prefix.clone(), *first);
+                            doc.update(cx, |d, cx| d.set_page_labels(Some(change), cx));
+                        }
+                        LabelsEvent::RemoveAll => {
+                            doc.update(cx, |d, cx| d.set_page_labels(None, cx));
+                        }
+                        LabelsEvent::Dismiss => {}
+                    }
+                }
+                cx.notify();
+            },
+        );
+        self.labels = Some((dialog, sub));
+        cx.notify();
+    }
+
+    fn toggle_crop(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.crop.take().is_some() {
+            self.focus_active(window, cx);
+            cx.notify();
+            return;
+        }
+        let Some(doc) = self.doc().cloned() else {
+            return;
+        };
+        let ctx = doc.read_with(cx, |d, _| {
+            let (page_count, targets) = d.target_indexes();
+            crate::crop_dialog::CropContext {
+                page_count,
+                current: d.current_index(),
+                selected: if targets.len() > 1 {
+                    targets
+                } else {
+                    Vec::new()
+                },
+                size: d.current_size(),
+            }
+        });
+        if ctx.page_count == 0 {
+            return;
+        }
+        let dialog = cx.new(|cx| crate::crop_dialog::CropDialog::new(ctx, window, cx));
+        let sub = cx.subscribe_in(
+            &dialog,
+            window,
+            |ws, _, ev: &crate::crop_dialog::CropEvent, window, cx| {
+                ws.crop = None;
+                ws.focus_active(window, cx);
+                if let crate::crop_dialog::CropEvent::Crop { pages, spec } = ev
+                    && let Some(doc) = ws.doc().cloned()
+                {
+                    let (pages, spec) = (pages.clone(), *spec);
+                    doc.update(cx, |d, cx| d.crop_pages(pages, spec, cx));
+                }
+                cx.notify();
+            },
+        );
+        self.crop = Some((dialog, sub));
+        cx.notify();
+    }
+
+    fn toggle_split(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.split.take().is_some() {
+            self.focus_active(window, cx);
+            cx.notify();
+            return;
+        }
+        let Some(snapshot) = self.doc().and_then(|d| d.read(cx).model_snapshot()) else {
+            return;
+        };
+        let dialog = cx.new(|cx| crate::split_dialog::SplitDialog::new(snapshot, window, cx));
+        let sub = cx.subscribe_in(
+            &dialog,
+            window,
+            |ws, _, ev: &crate::split_dialog::SplitEvent, window, cx| {
+                ws.split = None;
+                ws.focus_active(window, cx);
+                if let crate::split_dialog::SplitEvent::Split(by) = ev
+                    && let Some(doc) = ws.doc().cloned()
+                {
+                    let by = by.clone();
+                    doc.update(cx, |d, cx| d.split_document(by, window, cx));
+                }
+                cx.notify();
+            },
+        );
+        self.split = Some((dialog, sub));
         cx.notify();
     }
 
@@ -2086,6 +2637,52 @@ impl Render for Workspace {
                 ws.create_from_scans(window, cx)
             }))
             .on_action(
+                cx.listener(|ws, _: &crate::CombineFiles, window, cx| ws.combine_files(window, cx)),
+            )
+            .on_action(
+                cx.listener(|ws, _: &crate::SplitDocument, window, cx| ws.toggle_split(window, cx)),
+            )
+            .on_action(cx.listener(|ws, _: &crate::InsertBlankPages, window, cx| {
+                ws.open_insert_dialog(crate::insert_dialog::Insert::Blank, window, cx)
+            }))
+            .on_action(cx.listener(|ws, _: &crate::InsertFromImages, window, cx| {
+                ws.insert_from_images(window, cx)
+            }))
+            .on_action(
+                cx.listener(|ws, _: &crate::ReplacePages, window, cx| ws.replace_pages(window, cx)),
+            )
+            .on_action(
+                cx.listener(|ws, _: &crate::CropPages, window, cx| ws.toggle_crop(window, cx)),
+            )
+            .on_action(
+                cx.listener(|ws, _: &crate::PageLabels, window, cx| ws.toggle_labels(window, cx)),
+            )
+            .on_action(cx.listener(|ws, _: &crate::HeaderFooter, window, cx| {
+                ws.open_header_footer(false, window, cx)
+            }))
+            .on_action(cx.listener(|ws, _: &crate::BatesNumbering, window, cx| {
+                ws.open_header_footer(true, window, cx)
+            }))
+            .on_action(cx.listener(|ws, _: &crate::AddWatermark, window, cx| {
+                ws.open_watermark(false, window, cx)
+            }))
+            .on_action(cx.listener(|ws, _: &crate::AddBackground, window, cx| {
+                ws.open_watermark(true, window, cx)
+            }))
+            .on_action(
+                cx.listener(|ws, _: &crate::BookmarksFromPages, window, cx| {
+                    ws.open_bookmark_tool(false, window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|ws, _: &crate::ColorBookmarksByLevel, window, cx| {
+                    ws.open_bookmark_tool(true, window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|ws, _: &crate::FindBlankPages, window, cx| ws.open_blanks(window, cx)),
+            )
+            .on_action(
                 cx.listener(|ws, a: &crate::recent::OpenRecent, window, cx| {
                     ws.open_recent(a.path.clone(), window, cx)
                 }),
@@ -2196,6 +2793,56 @@ impl Render for Workspace {
             )
             .children(
                 self.scan
+                    .as_ref()
+                    .map(|(d, _)| deferred(d.clone()).with_priority(2)),
+            )
+            .children(
+                self.combine
+                    .as_ref()
+                    .map(|(d, _)| deferred(d.clone()).with_priority(2)),
+            )
+            .children(
+                self.split
+                    .as_ref()
+                    .map(|(d, _)| deferred(d.clone()).with_priority(2)),
+            )
+            .children(
+                self.insert_dialog
+                    .as_ref()
+                    .map(|(d, _)| deferred(d.clone()).with_priority(2)),
+            )
+            .children(
+                self.replace_dialog
+                    .as_ref()
+                    .map(|(d, _)| deferred(d.clone()).with_priority(2)),
+            )
+            .children(
+                self.crop
+                    .as_ref()
+                    .map(|(d, _)| deferred(d.clone()).with_priority(2)),
+            )
+            .children(
+                self.labels
+                    .as_ref()
+                    .map(|(d, _)| deferred(d.clone()).with_priority(2)),
+            )
+            .children(
+                self.header_footer
+                    .as_ref()
+                    .map(|(d, _)| deferred(d.clone()).with_priority(2)),
+            )
+            .children(
+                self.watermark
+                    .as_ref()
+                    .map(|(d, _)| deferred(d.clone()).with_priority(2)),
+            )
+            .children(
+                self.bookmark_tool
+                    .as_ref()
+                    .map(|(d, _)| deferred(d.clone()).with_priority(2)),
+            )
+            .children(
+                self.blanks
                     .as_ref()
                     .map(|(d, _)| deferred(d.clone()).with_priority(2)),
             )

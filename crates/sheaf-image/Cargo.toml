@@ -1,16 +1,20 @@
 [package]
-name = "sheaf-scan"
+name = "sheaf-image"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Scan and phone-photo cleanup for sheaf: find the page, straighten it, even out the light"
+description = "Image in, image out: scan cleanup, blank pages and other pixel work for sheaf, with no PDFs"
 
 [dependencies]
 sheaf-progress.workspace = true
 anyhow.workspace = true
 log.workspace = true
 serde.workspace = true
-image = { workspace = true, features = ["jpeg", "tiff", "bmp", "webp"] }
+image = { workspace = true, features = ["jpeg", "tiff", "bmp", "gif", "webp"] }
+# Multi-page TIFF in and out, CCITT G4, and PNG with its resolution.
+tiff = "0.11"
+fax = "0.2"
+png = "0.18"
 imageproc = { version = "0.27", default-features = false, features = ["rayon"] }
 
 [dev-dependencies]

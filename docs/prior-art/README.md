@@ -12,6 +12,7 @@ links its sources inline and marks claims it could not confirm as
 | [foxit.md](foxit.md) | Foxit PDF Editor: shortcuts compared with Acrobat, feature inventory with what Foxit does differently, performance claims, and its ribbon and plug-in UX |
 | [other-tools.md](other-tools.md) | PDF-XChange, SumatraPDF, Okular, zathura, macOS Preview, Apryse/Xodo, PDF.js, Chrome's PDF viewer, and a table of performance techniques |
 | [rust-ecosystem.md](rust-ecosystem.md) | Our reviews of gpui, gpui-pre, gpui-ce, gpui-kit, gpui-pdf, pdfium-render, hayro, lopdf, mupdf-rs, krilla, and pdfplumber ports |
+| [vision-models.md](vision-models.md) | ML models for scans and photos: DocRes (dewarp, deshadow, appearance, deblur, binarize) against our current cleanup, and the layout/table/page-to-Markdown models in `oar-ocr` (researched 2026-10-14) |
 
 The gpui-kit spike itself is in [../gpui-kit-eval.md](../gpui-kit-eval.md).
 
@@ -193,7 +194,9 @@ column, `Insert`/`Delete` add/delete line, `G H J K L` for MC MS MR M− M+.
 ## Corrections to sheaf's own docs
 
 From [pdflyer.md §6](pdflyer.md#6-corrections-and-implications-for-sheafs-readme-and-roadmap).
-Not yet applied to README.md or ROADMAP.md.
+Applied to README.md and ROADMAP.md on 2026-10-14. The feature gaps from
+the same section are under ROADMAP.md
+[Pending](../../ROADMAP.md#pdflyer-parity-gaps).
 
 | sheaf currently says | Finding |
 |---|---|
