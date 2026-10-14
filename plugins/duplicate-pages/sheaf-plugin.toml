@@ -1,0 +1,15 @@
+id = "duplicate-pages"
+name = "Find Duplicate Pages"
+version = "0.1.0"
+api = "^0.1"
+description = "Finds pages that appear twice in a binder (the same statement scanned twice, a W-2 sent in two batches, pages repeated by a merge) and lets you remove the extra copies."
+
+[[commands]]
+id = "find"
+label = "Find &Duplicate Pages…"
+category = "Pages"
+menu = "Document"
+
+[[panels]]
+id = "duplicates"
+label = "Duplicate Pages"

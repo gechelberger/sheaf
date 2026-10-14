@@ -128,9 +128,6 @@ impl Tool {
     ];
 }
 
-/// The PDFlyer-style tickmark palette.
-pub const TICKS: &[&str] = &["✓", "✗", "F", "T", "C", "R", "V", "X", "?"];
-
 /// Colors offered in the toolbar, with their tooltip names.
 pub const COLORS: &[([u8; 3], &str)] = &[
     ([255, 230, 0], "Yellow"),
@@ -384,6 +381,13 @@ impl DocView {
             return;
         };
         window.focus(&self.focus_handle, cx);
+        // Shift+drag selects a region, whatever the tool; a plain click
+        // drops the region and goes on as usual.
+        if ev.modifiers.shift {
+            self.start_region(page, p, cx);
+            return;
+        }
+        self.clear_region(cx);
         // A calculator tape waiting to be placed takes the click, whatever
         // the tool.
         let under = match &self.state {
@@ -436,12 +440,13 @@ impl DocView {
                 self.start_annot_editor(page_id, window, cx);
             }
             Tool::Tick => {
+                let w = crate::contrib::mark_width(&glyph, 24.0);
                 let a = self.new_annot(
                     AnnotKind::Stamp {
                         rect: Box2 {
-                            x: p.x - 12.0,
+                            x: p.x - w / 2.0,
                             y: p.y - 12.0,
-                            w: 24.0,
+                            w,
                             h: 24.0,
                         },
                         glyph,
@@ -515,6 +520,9 @@ impl DocView {
         let Some((page, p)) = self.page_point(ev.position) else {
             return;
         };
+        if self.drag_region(page, p, cx) {
+            return;
+        }
         let tool = self.tool;
         let State::Ready(doc) = &mut self.state else {
             return;
@@ -537,6 +545,9 @@ impl DocView {
         cx: &mut Context<Self>,
     ) {
         if ev.button != MouseButton::Left {
+            return;
+        }
+        if self.end_region(cx) {
             return;
         }
         let tool = self.tool;
@@ -763,14 +774,18 @@ impl DocView {
             })
             .collect();
         let tick = self.tick_glyph.clone();
-        let ticks: Vec<_> = TICKS
-            .iter()
+        let marks = cx.global::<crate::contrib::Contributions>().toolbar_marks();
+        let ticks: Vec<_> = marks
+            .into_iter()
             .enumerate()
-            .map(|(i, &g)| {
+            .map(|(i, g)| {
                 let active = tool == Tool::Tick && g == tick;
+                let wide = g.chars().count() > 1;
+                let pick = g.clone();
                 div()
                     .id(("tick", i))
-                    .w(px(22.0))
+                    .when(!wide, |d| d.w(px(22.0)))
+                    .when(wide, |d| d.px_1p5())
                     .h(px(20.0))
                     .rounded_sm()
                     .flex()
@@ -782,12 +797,12 @@ impl DocView {
                     .bg(if active { rgb(0x4a9eff) } else { rgb(0x3a3a3a) })
                     .hover(|s| s.bg(rgb(0x4a4a4a)))
                     .tooltip(Tooltip::for_action(
-                        format!("Tickmark {g}"),
+                        format!("{} {g}", if wide { "Stamp" } else { "Tickmark" }),
                         "Click on the page to stamp this mark",
                         Box::new(crate::ToolTick),
                     ))
                     .on_click(cx.listener(move |v, _, _, cx| {
-                        v.tick_glyph = g.to_string();
+                        v.tick_glyph = pick.clone();
                         v.set_tool(Tool::Tick, cx);
                     }))
                     .child(g)

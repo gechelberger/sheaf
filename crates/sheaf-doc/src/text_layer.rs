@@ -24,12 +24,13 @@ use std::cmp::Ordering;
 use std::ops::Range;
 
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
+use serde::{Deserialize, Serialize};
 use sheaf_core::{PageSize, Rotation};
 
 use crate::annot::{Box2, PageGeom, Pt};
 
 /// One recognized word.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OcrWord {
     pub text: String,
     /// Source-displayed space (see module docs).
@@ -39,7 +40,7 @@ pub struct OcrWord {
 }
 
 /// The OCR result for one page.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TextLayer {
     /// Sorted by line (top to bottom in the upright frame), then left to right.
     pub words: Vec<OcrWord>,
@@ -85,6 +86,11 @@ impl TextLayer {
 
     pub fn is_empty(&self) -> bool {
         self.words.is_empty()
+    }
+
+    /// The recognized text: words joined by spaces, lines by newlines.
+    pub fn text(&self) -> String {
+        page_text(self).s
     }
 
     /// Rough heap bytes, for the history memory policy.
@@ -226,6 +232,9 @@ fn rotate_pt(p: Pt, frame: PageSize, by: Rotation) -> Pt {
 pub struct TextHit {
     pub rects: Vec<Box2>,
     pub text: String,
+    /// A pattern's capture groups 1…n (None where a group didn't take
+    /// part); empty for a literal search.
+    pub groups: Vec<Option<String>>,
 }
 
 /// The page as one string: words joined by a space within a line, lines
@@ -308,13 +317,21 @@ pub fn pattern_search(layer: &TextLayer, re: &regex::Regex) -> Vec<TextHit> {
     }
     let t = page_text(layer);
     let mut hits = Vec::new();
-    for m in re.find_iter(&t.s) {
+    for caps in re.captures_iter(&t.s) {
+        let m = caps.get(0).expect("group 0 always matches");
         if m.is_empty() {
             continue;
         }
         let first = t.starts.partition_point(|&b| b < m.start());
         let last = t.starts.partition_point(|&b| b < m.end());
-        hits.extend(hit_from_span(layer, &t, first, last));
+        if let Some(mut hit) = hit_from_span(layer, &t, first, last) {
+            hit.groups = caps
+                .iter()
+                .skip(1)
+                .map(|g| g.map(|g| g.as_str().to_string()))
+                .collect();
+            hits.push(hit);
+        }
     }
     hits
 }
@@ -355,6 +372,7 @@ fn hit_from_span(layer: &TextLayer, t: &PageText, start: usize, end: usize) -> O
     Some(TextHit {
         rects: rects.into_iter().map(|(_, r)| r).collect(),
         text: t.chars[start..end].iter().collect(),
+        groups: Vec::new(),
     })
 }
 

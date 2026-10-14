@@ -31,6 +31,9 @@ vendor="vendor/pdfium/${os}-${arch}"
 if (( build )); then
   cargo build --release -p sheaf-app
 fi
+# The plugins that ship with sheaf; installed into the user's plugin
+# directory on first run.
+scripts/build-plugins.sh target/plugins
 [[ -f "target/release/$exe" ]] || { echo "missing target/release/$exe" >&2; exit 1; }
 
 name="sheaf-${version}-${os}-${arch}"
@@ -51,6 +54,7 @@ cp vendor/ocr/models/*.onnx vendor/ocr/models/*.txt "$stage/ocr/models/"
 cp vendor/ocr/lib/libonnxruntime.* vendor/ocr/lib/onnxruntime.dll "$stage/ocr/lib/" 2>/dev/null || true
 [[ -n "$(ls "$stage/ocr/lib")" ]] || { echo "missing vendor/ocr/lib — run scripts/fetch-ocr-data.sh" >&2; exit 1; }
 cp packaging/licenses/* "$stage/licenses/"
+cp -r target/plugins "$stage/plugins"
 cp README.md "$stage/"
 if [[ "$os" == linux ]]; then
   cp packaging/sheaf.desktop "$stage/"

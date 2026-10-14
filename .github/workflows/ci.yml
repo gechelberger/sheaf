@@ -33,6 +33,11 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      # Plugin fixtures and examples are WASI components. Installed for the
+      # pinned toolchain, which this runs under inside the checkout.
+      - name: WASI target
+        run: rustup target add wasm32-wasip2
+
       - uses: Swatinem/rust-cache@v2
 
       # tesseract-rs builds Tesseract and Leptonica from source into this
@@ -65,7 +70,19 @@ jobs:
       - name: OCR engine smoke tests
         run: cargo test -p sheaf-ocr --features tesseract,oar -- --ignored
 
-      - name: Check without OCR engines
+      # Bundled plugins and the host test fixture build in their own
+      # workspaces for wasm32-wasip2; check them like the rest.
+      - name: Plugins (fmt, clippy, unit tests, staged build)
+        shell: bash
+        run: |
+          for dir in plugins/*/ crates/sheaf-plugin/tests/fixtures/test-plugin/; do
+            (cd "$dir" && cargo fmt -- --check \
+              && cargo clippy --target wasm32-wasip2 -- -D warnings)
+          done
+          for dir in plugins/*/; do (cd "$dir" && cargo test); done
+          scripts/build-plugins.sh
+
+      - name: Check without OCR engines or plugins
         run: cargo check -p sheaf-app --no-default-features
 
       - name: Build

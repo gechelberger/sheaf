@@ -1,11 +1,15 @@
 [workspace]
 resolver = "3"
+# Plugins build for wasm32-wasip2 in their own workspaces.
+exclude = ["plugins", "crates/sheaf-plugin/tests/fixtures"]
 members = [
     "crates/sheaf-core",
     "crates/sheaf-doc",
     "crates/sheaf-render",
     "crates/sheaf-ui",
     "crates/sheaf-ocr",
+    "crates/sheaf-plugin",
+    "crates/sheaf-plugin-api",
     "crates/sheaf-app",
 ]
 
@@ -22,6 +26,7 @@ sheaf-doc = { path = "crates/sheaf-doc" }
 sheaf-render = { path = "crates/sheaf-render" }
 sheaf-ui = { path = "crates/sheaf-ui" }
 sheaf-ocr = { path = "crates/sheaf-ocr" }
+sheaf-plugin = { path = "crates/sheaf-plugin" }
 
 # GPUI is pre-1.0 and only published sporadically; track Zed main at a pinned rev.
 # Bump ZED_REV deliberately — breaking changes are routine.
@@ -43,8 +48,9 @@ smallvec = "1"
 unicode-segmentation = "1"
 im = "15"
 regex = "1"
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
+schemars = { version = "1", default-features = false, features = ["derive", "std"] }
 
 # Zed's workspace patches that GPUI's Linux backend relies on. Mirrored from
 # zed/Cargo.toml [patch.crates-io] at the pinned rev; patches here are not

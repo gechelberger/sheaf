@@ -5,7 +5,9 @@
 mod assets;
 mod brand;
 mod calc_panel;
+mod commands;
 mod comments_panel;
+mod contrib;
 mod docview;
 mod file_dialog;
 mod frame;
@@ -19,6 +21,17 @@ mod outline_panel;
 mod palette;
 mod pattern_panel;
 mod patterns;
+#[cfg(feature = "plugins")]
+mod plugin_form;
+#[cfg(feature = "plugins")]
+mod plugin_manager;
+#[cfg(feature = "plugins")]
+mod plugin_panel;
+#[cfg(feature = "plugins")]
+mod plugins;
+mod prompts;
+mod region;
+mod script;
 mod settings;
 mod text_area;
 mod text_input;
@@ -129,7 +142,8 @@ actions!(
         ActivateMenuBar,
         About,
         CommandPalette,
-        RecognizeText
+        RecognizeText,
+        ManagePlugins
     ]
 );
 actions!(
@@ -174,6 +188,8 @@ struct Cli {
     pattern: Option<String>,
     /// Dev: open the menu with this mnemonic letter at startup.
     menu: Option<char>,
+    /// Dev: drive the first window from these steps (see script.rs).
+    script: Option<PathBuf>,
 }
 
 fn parse_cli() -> Cli {
@@ -193,6 +209,7 @@ fn parse_cli() -> Cli {
         panel: None,
         pattern: None,
         menu: None,
+        script: None,
     };
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {
@@ -227,6 +244,7 @@ fn parse_cli() -> Cli {
                     .next()
                     .and_then(|m| m.to_str().and_then(|m| m.chars().next()))
             }
+            Some("--script") => cli.script = args.next().map(PathBuf::from),
             Some(s) if s.starts_with("--") => eprintln!("unknown flag {s}"),
             _ => cli.paths.push(arg.into()),
         }
@@ -259,6 +277,9 @@ fn main() {
             let pal = Some(palette::KEY_CONTEXT);
             let od = Some(ocr_dialog::KEY_CONTEXT);
             let od_keys = Some("OcrDialog && !TextInput");
+            let pf = Some("PluginForm");
+            let pm = Some("PluginManager");
+            let pf_keys = Some("PluginForm && !TextInput");
             cx.bind_keys([
                 KeyBinding::new("right", NextPage, doc_keys),
                 KeyBinding::new("left", PrevPage, doc_keys),
@@ -388,6 +409,15 @@ fn main() {
                 KeyBinding::new("space", DialogRight, od_keys),
                 KeyBinding::new("enter", DialogRun, od_keys),
                 KeyBinding::new("escape", DialogCancel, od_keys),
+                // Plugin forms: same keys as the OCR card.
+                KeyBinding::new("tab", DialogNext, pf),
+                KeyBinding::new("shift-tab", DialogPrev, pf),
+                KeyBinding::new("left", DialogLeft, pf_keys),
+                KeyBinding::new("right", DialogRight, pf_keys),
+                KeyBinding::new("space", DialogRight, pf_keys),
+                KeyBinding::new("enter", DialogRun, pf_keys),
+                KeyBinding::new("escape", DialogCancel, pf_keys),
+                KeyBinding::new("escape", DialogCancel, pm),
                 // Menu bar: Alt tapped alone or F10 highlights it, as on Windows.
                 KeyBinding::new("alt", ActivateMenuBar, ws),
                 KeyBinding::new("f10", ActivateMenuBar, ws),
@@ -399,15 +429,21 @@ fn main() {
                 KeyBinding::new("space", menu_bar::MenuConfirm, mb),
                 KeyBinding::new("escape", menu_bar::MenuCancel, mb),
             ]);
+            cx.set_global(commands::CommandRegistry::builtin());
+            cx.set_global(contrib::Contributions::load());
+            // Plugin bindings first, so the user's keymap can override them.
+            #[cfg(feature = "plugins")]
+            plugins::init(cx);
             for e in keymap::load(cx) {
                 log::warn!("keymap.json: {e}");
                 eprintln!("keymap.json: {e}");
             }
-            cx.set_menus(menus::app_menus());
+            cx.set_menus(menus::app_menus(cx));
+            prompts::install(cx);
 
             let mut groups = window_paths(cli.paths, cli.separate_windows).into_iter();
             let password = cli.password.clone();
-            open_workspace(
+            let first = open_workspace(
                 Launch {
                     paths: groups.next().expect("at least one window"),
                     timing: cli.timing,
@@ -429,6 +465,9 @@ fn main() {
                 cx,
             )
             .expect("open window");
+            if let Some(path) = cli.script.take() {
+                script::start(path, first, cx);
+            }
             for paths in groups {
                 let mut launch = Launch::files(paths);
                 launch.timing = cli.timing;

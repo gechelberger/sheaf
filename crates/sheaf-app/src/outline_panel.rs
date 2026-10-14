@@ -10,9 +10,11 @@ use gpui::{
     AnchoredPositionMode, AnyElement, Context, DragMoveEvent, Entity, Focusable, MouseButton,
     Pixels, Point, Subscription, Window, anchored, deferred, div, point, prelude::*, px, rgb, rgba,
 };
-use sheaf_doc::{Edit, OutlineId, OutlineNode, PageId};
+use sheaf_core::Rotation;
+use sheaf_doc::{DestView, Edit, OutlineId, OutlineNode, PageId, Pt};
 
-use crate::docview::{DocView, State};
+use crate::docview::{DocView, ScrollTo, State};
+use crate::markup_tools::rotate_pt;
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::{
     CollapseAllBookmarks, DeleteBookmark, DeselectBookmark, ExpandAllBookmarks, NewBookmark, Redo,
@@ -89,11 +91,93 @@ fn locate(
 }
 
 impl DocView {
+    /// The current view as a bookmark destination, as Acrobat records it:
+    /// the page in view and how far down it the top of the window is. None
+    /// for the position when the page's top is in view.
+    pub(crate) fn current_view(&self) -> Option<(PageId, Option<DestView>)> {
+        let State::Ready(doc) = &self.state else {
+            return None;
+        };
+        let pref = doc.page_ref(doc.current_page)?;
+        let Some(layout) = &doc.layout else {
+            return Some((pref.id, None));
+        };
+        let i = doc.current_page.min(layout.heights.len().checked_sub(1)?);
+        let scroll_y = -f32::from(doc.scroll.offset().y);
+        let fy = (scroll_y - layout.tops[i]) / layout.heights[i];
+        if fy <= 0.0 {
+            return Some((pref.id, None));
+        }
+        // Back from the page as shown (with our rotation) to the page as the
+        // file draws it, where positions are kept.
+        let shown = doc.model.page_size(&pref);
+        let p = Pt {
+            x: 0.0,
+            y: fy.min(1.0) * shown.height,
+        };
+        let back = rotate_pt(p, shown, Rotation::R0.minus(pref.rotation));
+        Some((
+            pref.id,
+            Some(DestView::Xyz {
+                left: Some(back.x),
+                top: Some(back.y),
+                zoom: None,
+            }),
+        ))
+    }
+
+    /// Show a bookmark's page, at its position when it has one.
+    pub(crate) fn go_to_bookmark(
+        &mut self,
+        index: usize,
+        view: Option<&DestView>,
+        cx: &mut Context<Self>,
+    ) {
+        let point = match (view, &self.state) {
+            (Some(DestView::Xyz { left, top, .. }), State::Ready(doc)) => {
+                doc.page_ref(index).map(|pref| {
+                    // Positions are on the page as the file draws it; ours
+                    // may be turned.
+                    let src = doc
+                        .model
+                        .page_size(&pref)
+                        .rotated(Rotation::R0.minus(pref.rotation));
+                    let shown = doc.model.page_size(&pref);
+                    let p = rotate_pt(
+                        Pt {
+                            x: left.unwrap_or(0.0),
+                            y: top.unwrap_or(0.0),
+                        },
+                        src,
+                        pref.rotation,
+                    );
+                    (p.x / shown.width.max(1.0), p.y / shown.height.max(1.0))
+                })
+            }
+            _ => None,
+        };
+        match point {
+            Some((fx, fy)) => self.scroll(
+                ScrollTo::Point {
+                    page: index,
+                    fx: fx.clamp(0.0, 1.0),
+                    fy: fy.clamp(0.0, 1.0),
+                },
+                cx,
+            ),
+            None => self.go_to_page(index, cx),
+        }
+    }
+
     pub(crate) fn new_bookmark(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let here = self.current_view();
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        let target = doc.page_ref(doc.current_page).map(|p| p.id);
+        let (target, view) = match here {
+            Some((p, v)) => (Some(p), v),
+            None => (None, None),
+        };
         // Acrobat places the new bookmark as a sibling after the selected one.
         let (parent, after) = match doc
             .outline_selected
@@ -108,6 +192,7 @@ impl DocView {
                 after,
                 title: "Untitled".into(),
                 target,
+                view,
             },
             "New bookmark",
             cx,
@@ -163,6 +248,7 @@ impl DocView {
                             title: Some(text),
                             target: None,
                             color: None,
+                            view: None,
                         },
                         "Rename bookmark",
                         cx,
@@ -209,19 +295,20 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        let (Some(id), Some(page)) = (
-            doc.outline_selected,
-            doc.page_ref(doc.current_page).map(|p| p.id),
-        ) else {
+        let Some(id) = doc.outline_selected else {
             return;
         };
         doc.outline_menu = None;
+        let Some((page, view)) = self.current_view() else {
+            return;
+        };
         self.apply(
             Edit::OutlineEdit {
                 id,
                 title: None,
                 target: Some(Some(page)),
                 color: None,
+                view: Some(view),
             },
             "Set destination",
             cx,
@@ -242,6 +329,7 @@ impl DocView {
                 title: None,
                 target: None,
                 color: Some(color),
+                view: None,
             },
             "Bookmark color",
             cx,
@@ -427,6 +515,7 @@ impl DocView {
         let mut els = Vec::new();
         for (r, &(ix, id, depth, target)) in rows.iter().enumerate().take(r1).skip(r0) {
             let node = flat[ix].1;
+            let view = node.view.clone();
             let orphan = node.target.is_some() && target.is_none();
             let expanded = doc.outline_expanded.contains(&id);
             let active = node.target.is_some() && node.target == cur_id;
@@ -485,7 +574,7 @@ impl DocView {
                             window.focus(&doc.outline_focus, cx);
                         }
                         if let Some(p) = target {
-                            v.go_to_page(p, cx);
+                            v.go_to_bookmark(p, view.as_ref(), cx);
                         }
                         cx.notify();
                     }))

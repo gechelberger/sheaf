@@ -26,7 +26,7 @@ use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, Pt};
 
 use crate::markup_tools::{Drag, Tool, arrow_head, rotate_pt, stroke_canvas};
 use sheaf_doc::{
-    Document, Edit, FlatOutlineItem, OutlineId, PageId, PageRef, SourceId, SourceInfo,
+    Document, Edit, EditOutcome, FlatOutlineItem, OutlineId, PageId, PageRef, SourceId, SourceInfo,
 };
 use sheaf_render::{
     Job, OutlineItem, PixelFormat, Rect, RenderHandle, RenderRequest, Rendered, SearchEvent,
@@ -359,6 +359,13 @@ pub(crate) enum ScrollTo {
         fx: f32,
         fy: f32,
     },
+    /// Put a page point (fractions of the page as shown) at the top-left of
+    /// the viewport: a bookmark's position.
+    Point {
+        page: usize,
+        fx: f32,
+        fy: f32,
+    },
     /// Keep the document point (`page`, `fx`, `fy` as fractions of the page)
     /// under viewport-local point (`vx`, `vy`). Used to anchor zooms.
     Anchor {
@@ -378,6 +385,39 @@ pub(crate) struct AnnotEditor {
     pub _sub: Subscription,
     pub _blur: Subscription,
 }
+
+/// What happened to a document, for listeners outside the view (plugins,
+/// see `todos/plugins.md`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum DocEvent {
+    /// The file is open and its model exists.
+    Opened,
+    /// The model changed: an edit, a batch, an undo or a redo. `label` is
+    /// the undo label ("Undo: …"/"Redo: …" for those two).
+    Edited {
+        label: String,
+        outcome: EditOutcome,
+        /// The plugin whose edits these were, if any.
+        plugin: Option<String>,
+    },
+    Saved {
+        path: PathBuf,
+    },
+    /// The set of selected pages changed.
+    SelectionChanged,
+    /// The selected region (Shift+drag) changed: live while dragging.
+    Region {
+        page: PageId,
+        /// Source-displayed space, like annotations.
+        rect: Box2,
+    },
+    /// The region was cleared.
+    RegionCleared,
+    /// The tab closed. Emitted by the workspace just before it drops the view.
+    Closed,
+}
+
+impl gpui::EventEmitter<DocEvent> for DocView {}
 
 pub struct DocView {
     pub(crate) focus_handle: FocusHandle,
@@ -419,6 +459,14 @@ pub struct DocView {
     pub(crate) tool: Tool,
     pub(crate) tool_color: [u8; 3],
     pub(crate) tick_glyph: String,
+    /// Set while a plugin's edits are applied, so its own edits aren't
+    /// reported back to it.
+    pub(crate) edit_source: Option<String>,
+    /// Shift+drag region (see region.rs).
+    pub(crate) region: Option<crate::region::Region>,
+    /// Rows of plugin panels for this document, by `<plugin>.<panel>`.
+    #[cfg(feature = "plugins")]
+    pub(crate) plugin_panels: HashMap<String, crate::plugin_panel::PluginPanelState>,
 }
 
 /// A search match, addressed by page id so it survives reordering and so
@@ -488,6 +536,10 @@ impl DocView {
             tool: Tool::Select,
             tool_color: [255, 230, 0],
             tick_glyph: "✓".into(),
+            edit_source: None,
+            region: None,
+            #[cfg(feature = "plugins")]
+            plugin_panels: HashMap::new(),
         };
         this.open(cx);
         this
@@ -643,6 +695,7 @@ impl DocView {
         self.fetch_page_sizes(cx);
         self.fetch_outline(cx);
         self.load_sheaf_annots(cx);
+        cx.emit(DocEvent::Opened);
         if let Some(p) = self.selftest_save.take() {
             self.selftest_save(p, cx);
         }
@@ -682,12 +735,18 @@ impl DocView {
         cx: &mut Context<Self>,
     ) {
         let name = self.file_name();
-        let rx = window.prompt(
+        let rx = crate::prompts::ask(
+            window,
+            cx,
             gpui::PromptLevel::Warning,
             &format!("Recover unsaved changes to \"{name}\"?"),
-            Some("sheaf found edits that weren't saved when it last closed. Recovered changes stay unsaved until you save."),
-            &[gpui::PromptButton::ok("Recover"), gpui::PromptButton::new("Discard")],
-            cx,
+            Some(
+                "sheaf found edits that weren't saved when it last closed. Recovered changes stay unsaved until you save.",
+            ),
+            &[
+                gpui::PromptButton::ok("Recover"),
+                gpui::PromptButton::new("Discard"),
+            ],
         );
         let path = self.path.clone();
         cx.spawn(async move |this, cx| match rx.await {
@@ -920,7 +979,46 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        match doc.model.apply(edit, label) {
+        let result = doc.model.apply(edit, label);
+        self.finish_edit(label, result, cx);
+    }
+
+    /// Apply edits as one undo step; if any fails, none are applied.
+    #[cfg_attr(not(feature = "plugins"), allow(dead_code))]
+    pub(crate) fn apply_batch(&mut self, edits: Vec<Edit>, label: &str, cx: &mut Context<Self>) {
+        let State::Ready(doc) = &mut self.state else {
+            return;
+        };
+        let before: HashSet<OutlineId> = doc
+            .model
+            .state()
+            .outline_flat()
+            .iter()
+            .map(|(_, n)| n.id)
+            .collect();
+        let result = doc.model.apply_batch(edits, label);
+        if result.is_ok() {
+            reveal_new_bookmarks(
+                &doc.model.state().outline,
+                &before,
+                &mut doc.outline_expanded,
+            );
+        }
+        self.finish_edit(label, result, cx);
+    }
+
+    /// After `apply`/`apply_batch`: notice, redraw, autosave, and tell
+    /// listeners.
+    fn finish_edit(
+        &mut self,
+        label: &str,
+        result: anyhow::Result<EditOutcome>,
+        cx: &mut Context<Self>,
+    ) {
+        let State::Ready(doc) = &mut self.state else {
+            return;
+        };
+        match result {
             Ok(out) => {
                 let mut parts = Vec::new();
                 if out.pages_removed > 0 {
@@ -943,15 +1041,59 @@ impl DocView {
                     format!("{label}: removed {} — Ctrl+Z to undo", parts.join(" and "))
                 });
                 doc.touched();
-                self.prune_selection();
-                self.schedule_autosave(cx);
-                cx.notify();
+                self.after_model_change(label.to_string(), out, cx);
             }
             Err(e) => {
                 doc.notice = Some(format!("{label} failed: {e:#}"));
                 cx.notify();
             }
         }
+    }
+
+    /// Bookkeeping after any change to the model.
+    pub(crate) fn after_model_change(
+        &mut self,
+        label: String,
+        outcome: EditOutcome,
+        cx: &mut Context<Self>,
+    ) {
+        if self.prune_selection() {
+            cx.emit(DocEvent::SelectionChanged);
+        }
+        self.prune_region(cx);
+        self.schedule_autosave(cx);
+        let plugin = self.edit_source.clone();
+        cx.emit(DocEvent::Edited {
+            label,
+            outcome,
+            plugin,
+        });
+        cx.notify();
+    }
+
+    /// What a plugin command sees of this document.
+    #[cfg(feature = "plugins")]
+    pub(crate) fn plugin_context(&self) -> Option<sheaf_plugin::DocContext> {
+        let State::Ready(doc) = &self.state else {
+            return None;
+        };
+        let selection = doc
+            .model
+            .state()
+            .pages
+            .iter()
+            .filter(|p| doc.selection.contains(&p.id))
+            .map(|p| p.id)
+            .collect();
+        Some(sheaf_plugin::DocContext {
+            path: self.path.clone(),
+            snapshot: doc.model.snapshot(),
+            selection,
+            current_page: doc.page_ref(doc.current_page).map(|p| p.id),
+            text: crate::plugins::text_source(&doc.handles),
+            ocr: Some(crate::plugins::ocr_source(&doc.handles)),
+            render: Some(crate::plugins::render_source(&doc.handles)),
+        })
     }
 
     /// Pages an operation applies to: the selection, or the current page.
@@ -1012,6 +1154,7 @@ impl DocView {
             return;
         };
         doc.selection = doc.model.state().pages.iter().map(|p| p.id).collect();
+        cx.emit(DocEvent::SelectionChanged);
         cx.notify();
     }
 
@@ -1021,14 +1164,16 @@ impl DocView {
         };
         if !doc.selection.is_empty() {
             doc.selection.clear();
+            cx.emit(DocEvent::SelectionChanged);
             cx.notify();
         }
     }
 
-    /// Drop pages that no longer exist (after delete/undo/redo).
-    fn prune_selection(&mut self) {
+    /// Drop pages that no longer exist (after delete/undo/redo). True if
+    /// the page selection changed.
+    fn prune_selection(&mut self) -> bool {
         let State::Ready(doc) = &mut self.state else {
-            return;
+            return false;
         };
         if let Some((pid, aid)) = doc.selected_annot
             && !doc
@@ -1040,7 +1185,9 @@ impl DocView {
             doc.selected_annot = None;
         }
         let live: HashSet<PageId> = doc.model.state().pages.iter().map(|p| p.id).collect();
+        let before = doc.selection.len();
         doc.selection.retain(|id| live.contains(id));
+        doc.selection.len() != before
     }
 
     /// Thumbnail click: plain selects just that page, Ctrl toggles, Shift
@@ -1075,6 +1222,7 @@ impl DocView {
             doc.selection.insert(id);
             doc.sel_anchor = Some(index);
         }
+        cx.emit(DocEvent::SelectionChanged);
         self.go_to_page(index, cx);
     }
 
@@ -1101,6 +1249,7 @@ impl DocView {
         self.apply(Edit::MovePages { ids, before }, &label, cx);
         if let State::Ready(doc) = &mut self.state {
             doc.selection = moving;
+            cx.emit(DocEvent::SelectionChanged);
         }
     }
 
@@ -1108,28 +1257,28 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        doc.notice = match doc.model.undo() {
-            Some(label) => Some(format!("Undid: {label}")),
-            None => Some("Nothing to undo".into()),
+        let Some(label) = doc.model.undo().map(str::to_string) else {
+            doc.notice = Some("Nothing to undo".into());
+            cx.notify();
+            return;
         };
+        doc.notice = Some(format!("Undid: {label}"));
         doc.touched();
-        self.prune_selection();
-        self.schedule_autosave(cx);
-        cx.notify();
+        self.after_model_change(format!("Undo: {label}"), EditOutcome::default(), cx);
     }
 
     pub(crate) fn redo(&mut self, cx: &mut Context<Self>) {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        doc.notice = match doc.model.redo() {
-            Some(label) => Some(format!("Redid: {label}")),
-            None => Some("Nothing to redo".into()),
+        let Some(label) = doc.model.redo().map(str::to_string) else {
+            doc.notice = Some("Nothing to redo".into());
+            cx.notify();
+            return;
         };
+        doc.notice = Some(format!("Redid: {label}"));
         doc.touched();
-        self.prune_selection();
-        self.schedule_autosave(cx);
-        cx.notify();
+        self.after_model_change(format!("Redo: {label}"), EditOutcome::default(), cx);
     }
 
     // ----- save --------------------------------------------------------------
@@ -1270,6 +1419,7 @@ impl DocView {
                         }
                         doc.touched();
                         view.fetch_page_sizes(cx);
+                        cx.emit(DocEvent::Saved { path: path.clone() });
                         true
                     }
                     Err(e) => {
@@ -1600,6 +1750,15 @@ impl DocView {
         );
         self.add_annot(p0, tick, "Tickmark", cx);
         self.export_clean_to(path, cx);
+    }
+
+    /// Every page's id, in document order.
+    #[cfg_attr(not(feature = "plugins"), allow(dead_code))]
+    pub(crate) fn page_ids(&self) -> Vec<PageId> {
+        match &self.state {
+            State::Ready(doc) => doc.model.state().pages.iter().map(|p| p.id).collect(),
+            _ => Vec::new(),
+        }
     }
 
     fn doc_page_id(&self, index: usize) -> Option<PageId> {
@@ -2043,6 +2202,7 @@ impl DocView {
                     .unwrap_or("file")
                     .to_string();
                 let label = format!("Insert {name}");
+                let mut outcome = None;
                 match doc.model.apply(
                     Edit::InsertPages {
                         source: sid,
@@ -2053,6 +2213,7 @@ impl DocView {
                     &label,
                 ) {
                     Ok(out) => {
+                        outcome = Some(out.clone());
                         doc.notice = Some(format!(
                             "Inserted {} page{} from {name}; {} bookmark{} merged",
                             out.pages_added,
@@ -2070,9 +2231,10 @@ impl DocView {
                     Err(e) => doc.notice = Some(format!("Insert failed: {e:#}")),
                 }
                 doc.touched();
-                view.prune_selection();
-                view.schedule_autosave(cx);
-                cx.notify();
+                match outcome {
+                    Some(out) => view.after_model_change(label, out, cx),
+                    None => cx.notify(),
+                }
                 // Sizes for the new source arrive on their own.
                 cx.spawn(async move |this, cx| {
                     if let Ok(Ok(sizes)) = sizes_rx.await {
@@ -2350,7 +2512,7 @@ impl DocView {
 
     // ----- scrolling and zoom ------------------------------------------------
 
-    fn scroll(&mut self, to: ScrollTo, cx: &mut Context<Self>) {
+    pub(crate) fn scroll(&mut self, to: ScrollTo, cx: &mut Context<Self>) {
         if let State::Ready(doc) = &mut self.state {
             doc.pending_scroll = Some(to);
             cx.notify();
@@ -2524,6 +2686,7 @@ fn flat_item(i: &OutlineItem) -> FlatOutlineItem {
         title: i.title.clone(),
         page: i.page,
         depth: i.depth,
+        view: i.view.clone(),
     }
 }
 
@@ -2611,6 +2774,10 @@ impl Render for DocView {
         let (tool, tool_color) = (self.tool, self.tool_color);
         let mut body = None;
         let mut wants: Vec<(PageRef, RenderRequest)> = Vec::new();
+        let region = self.region.clone();
+        // The status bar: where you are, then the latest notice, which
+        // gives way (ellipsis, full text on hover) when space is short.
+        let mut status_notice: Option<SharedString> = None;
         let status: SharedString = match &mut self.state {
             State::Loading => "Opening…".into(),
             State::Failed(e) => format!("Failed: {e}").into(),
@@ -2685,6 +2852,14 @@ impl Render for DocView {
                             }
                             if x < scroll_x || x > scroll_x + view_w {
                                 scroll_x = x - view_w / 2.0;
+                            }
+                        }
+                        ScrollTo::Point { page, fx, fy } => {
+                            let p = page.min(last);
+                            scroll_y = layout.tops[p] + fy * layout.heights[p];
+                            let x = layout.lefts[p] + fx * layout.widths[p];
+                            if x < scroll_x || x > scroll_x + view_w {
+                                scroll_x = x;
                             }
                         }
                         ScrollTo::Anchor {
@@ -3091,6 +3266,15 @@ impl Render for DocView {
                                     k,
                                 ));
                             }
+                            if let Some(overlay) = crate::region::overlay(
+                                region.as_ref(),
+                                pl.pref.id,
+                                src,
+                                pl.pref.rotation,
+                                k,
+                            ) {
+                                page_div = page_div.child(overlay);
+                            }
                             if let Some(preview) = DocView::drag_preview(
                                 doc,
                                 tool,
@@ -3162,13 +3346,9 @@ impl Render for DocView {
                 let size = ps
                     .map(|s| format!("{:.0}×{:.0} pt", s.width, s.height))
                     .unwrap_or_default();
-                let notice = doc
-                    .notice
-                    .as_deref()
-                    .map(|n| format!("  —  {n}"))
-                    .unwrap_or_default();
+                status_notice = doc.notice.clone().map(Into::into);
                 format!(
-                    "page {} / {}  —  {size}  —  {:.0}% ({mode}){notice}",
+                    "page {} / {}  —  {size}  —  {:.0}% ({mode})",
                     (doc.current_page + 1).min(count),
                     count,
                     layout.zoom_percent(),
@@ -3213,7 +3393,9 @@ impl Render for DocView {
             .on_action(cx.listener(|v, _: &ZoomFitPage, _, cx| v.set_zoom(Zoom::FitPage, None, cx)))
             .on_action(cx.listener(|v, _: &Find, window, cx| v.open_search(window, cx)))
             .on_action(cx.listener(|v, _: &CloseSearch, window, cx| {
-                if v.search.is_some() {
+                if v.clear_region(cx) {
+                    // Esc drops a selected region first.
+                } else if v.search.is_some() {
                     v.close_search(window, cx)
                 } else if v.cancel_ocr(cx) {
                     // Esc during a Recognize Text run stops it.
@@ -3298,7 +3480,20 @@ impl Render for DocView {
                     .items_center()
                     .bg(rgb(0x1e1e1e))
                     .text_sm()
-                    .child(status),
+                    .whitespace_nowrap()
+                    .child(div().flex_shrink_0().child(status))
+                    .when_some(status_notice, |d, notice| {
+                        d.child(
+                            div()
+                                .id("status-notice")
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .tooltip(crate::tooltip::Tooltip::text(notice.clone()))
+                                .child(format!("  —  {notice}")),
+                        )
+                    }),
             )
     }
 }
@@ -3840,4 +4035,68 @@ fn locked_card(path: &std::path::Path, l: &Locked, cx: &mut Context<DocView>) ->
                 ),
         )
         .into_any_element()
+}
+
+/// Expand what's needed to see bookmarks a batch added: their parents,
+/// and new headings with children of their own. Everything else keeps its
+/// expanded or collapsed state.
+fn reveal_new_bookmarks(
+    tree: &im::Vector<sheaf_doc::OutlineNode>,
+    before: &HashSet<OutlineId>,
+    expanded: &mut HashSet<OutlineId>,
+) {
+    fn walk(
+        nodes: &im::Vector<sheaf_doc::OutlineNode>,
+        path: &mut Vec<OutlineId>,
+        before: &HashSet<OutlineId>,
+        expanded: &mut HashSet<OutlineId>,
+    ) {
+        for n in nodes {
+            if !before.contains(&n.id) {
+                expanded.extend(path.iter().copied());
+                if !n.children.is_empty() {
+                    expanded.insert(n.id);
+                }
+            }
+            path.push(n.id);
+            walk(&n.children, path, before, expanded);
+            path.pop();
+        }
+    }
+    walk(tree, &mut Vec::new(), before, expanded);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sheaf_doc::OutlineNode;
+
+    fn node(id: u64, children: Vec<OutlineNode>) -> OutlineNode {
+        OutlineNode {
+            id: OutlineId(id),
+            title: id.to_string(),
+            target: None,
+            view: None,
+            color: None,
+            children: children.into(),
+        }
+    }
+
+    #[test]
+    fn new_bookmarks_are_revealed() {
+        // 1 (old, collapsed) > 2 (old) > 3 (new); 4 (new heading) > 5 (new);
+        // 6 (old, collapsed, untouched) > 7 (old).
+        let tree: im::Vector<OutlineNode> = vec![
+            node(1, vec![node(2, vec![node(3, vec![])])]),
+            node(4, vec![node(5, vec![])]),
+            node(6, vec![node(7, vec![])]),
+        ]
+        .into();
+        let before: HashSet<OutlineId> = [1, 2, 6, 7].map(OutlineId).into();
+        let mut expanded = HashSet::new();
+        reveal_new_bookmarks(&tree, &before, &mut expanded);
+        let mut got: Vec<u64> = expanded.iter().map(|i| i.0).collect();
+        got.sort();
+        assert_eq!(got, [1, 2, 4]);
+    }
 }

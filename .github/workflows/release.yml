@@ -43,6 +43,11 @@ jobs:
             libvulkan1 libasound2-dev libglib2.0-dev libssl-dev libzstd-dev
 
       - uses: dtolnay/rust-toolchain@stable
+
+      # The bundled plugins are WASI components (package.sh builds them).
+      - name: WASI target
+        run: rustup target add wasm32-wasip2
+
       - uses: Swatinem/rust-cache@v2
 
       - name: Cache Tesseract build

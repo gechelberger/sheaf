@@ -7,8 +7,10 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PageIndex(pub u32);
 
+use serde::{Deserialize, Serialize};
+
 /// A size in PDF points (1/72 inch).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PageSize {
     pub width: f32,
     pub height: f32,
@@ -29,7 +31,7 @@ impl PageSize {
 }
 
 /// A clockwise quarter-turn rotation, as in the `/Rotate` entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum Rotation {
     #[default]
     R0,
@@ -101,5 +103,87 @@ mod tests {
         };
         assert_eq!(s.rotated(Rotation::R90).width, 792.0);
         assert_eq!(s.rotated(Rotation::R180).width, 612.0);
+    }
+}
+
+/// Where a bookmark lands on its page.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum DestView {
+    /// PDF `/XYZ`: show this point at the window's top-left, at this zoom
+    /// (1.0 = 100%). Coordinates are in the page's displayed space (points,
+    /// top-left origin, after the file's own `/Rotate`), like annotations.
+    /// `None` keeps the viewer's current value.
+    Xyz {
+        left: Option<f32>,
+        top: Option<f32>,
+        zoom: Option<f32>,
+    },
+    /// Any other kind (`Fit`, `FitH`, `FitR`, …), kept as the file had it:
+    /// its name and its numbers in user space (`None` for null), written
+    /// back unchanged.
+    Other {
+        kind: String,
+        params: Vec<Option<f32>>,
+    },
+}
+
+/// A page's geometry for mapping between user space (PDF coordinates,
+/// bottom-left origin, before `/Rotate`) and displayed space (top-left
+/// origin, after `/Rotate`): its MediaBox (x0, y0, x1, y1) and `/Rotate`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PageFrame {
+    pub media: [f32; 4],
+    pub rotate: i32,
+}
+
+impl PageFrame {
+    /// Displayed (x, y) → user (x, y), one axis at a time, so a missing
+    /// coordinate stays missing. Each displayed axis maps to exactly one
+    /// user axis (which one depends on the rotation).
+    pub fn to_user(&self, x: Option<f32>, y: Option<f32>) -> (Option<f32>, Option<f32>) {
+        let [x0, y0, x1, y1] = self.media;
+        match self.rotate.rem_euclid(360) {
+            90 => (y.map(|y| x0 + y), x.map(|x| y0 + x)),
+            180 => (x.map(|x| x1 - x), y.map(|y| y0 + y)),
+            270 => (y.map(|y| x1 - y), x.map(|x| y1 - x)),
+            _ => (x.map(|x| x0 + x), y.map(|y| y1 - y)),
+        }
+    }
+
+    /// User (x, y) → displayed (x, y), one axis at a time.
+    pub fn to_display(&self, ux: Option<f32>, uy: Option<f32>) -> (Option<f32>, Option<f32>) {
+        let [x0, y0, x1, y1] = self.media;
+        match self.rotate.rem_euclid(360) {
+            90 => (uy.map(|uy| uy - y0), ux.map(|ux| ux - x0)),
+            180 => (ux.map(|ux| x1 - ux), uy.map(|uy| uy - y0)),
+            270 => (uy.map(|uy| y1 - uy), ux.map(|ux| x1 - ux)),
+            _ => (ux.map(|ux| ux - x0), uy.map(|uy| y1 - uy)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod frame_tests {
+    use super::*;
+
+    #[test]
+    fn axes_round_trip_in_every_rotation() {
+        for rotate in [0, 90, 180, 270] {
+            let f = PageFrame {
+                media: [10.0, 20.0, 622.0, 812.0],
+                rotate,
+            };
+            let (ux, uy) = f.to_user(Some(100.0), Some(50.0));
+            assert_eq!(f.to_display(ux, uy), (Some(100.0), Some(50.0)), "{rotate}");
+            // A missing coordinate stays missing on the matching axis.
+            let (ux, uy) = f.to_user(None, Some(50.0));
+            assert_eq!(f.to_display(ux, uy), (None, Some(50.0)), "{rotate}");
+        }
+        // Unrotated: displayed top 0 is the top of the MediaBox.
+        let f = PageFrame {
+            media: [0.0, 0.0, 612.0, 792.0],
+            rotate: 0,
+        };
+        assert_eq!(f.to_user(Some(0.0), Some(0.0)), (Some(0.0), Some(792.0)));
     }
 }

@@ -1,0 +1,16 @@
+id = "tax-form-bookmarks"
+name = "Tax Form Bookmarks"
+version = "0.1.0"
+api = "^0.1"
+description = "Bookmarks each tax form in a return or source-document binder: Form 1040, Schedule C, W-2, 1099-INT — Chase, and so on."
+
+[[commands]]
+id = "scan"
+label = "Bookmarks from Tax &Forms"
+category = "Bookmarks"
+menu = "Tools/Tax"
+keys = "ctrl-alt-b"
+
+[[presets]]
+name = "Tax form"
+regex = '''\b(?:Form\s+\d{4}[A-Z-]*|Schedule\s+(?:[A-Z]{1,2}|\d)\b|W-2G?|1099-[A-Z]+|1098(?:-[A-Z]+)?|K-1)\b'''

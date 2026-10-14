@@ -1,0 +1,14 @@
+id = "test-plugin"
+name = "Test Plugin"
+version = "0.1.0"
+api = "^0.1"
+events = ["opened", "edited", "closed"]
+
+[[commands]]
+id = "bookmark"
+label = "Bookmark Pages"
+menu = "Tools/Test"
+
+[[panels]]
+id = "matches"
+label = "Matches"

@@ -59,7 +59,8 @@ Why WASM: one `.wasm` file runs unchanged on Windows and Linux, with no Rust ABI
 
 ## Slices
 
-### Slice 1: data-driven host (no WASM yet)
+### Slice 1: data-driven host (no WASM yet) — done 2026-10-13
+Landed as `commands.rs` (registry + `plugin::Run`), `contrib.rs` (presets, tickmark sets, stamps; user marks in `marks.json`), `DocEvent` in `docview.rs`, `Panel::Plugin` (saved as `plugin:<id>`), and `Document::apply_batch` plus serde on `Edit` in `sheaf-doc`. `plugin::Run` only reports "plugins aren't supported yet" until slice 2. Deviation: the palette lists each command once (it used to list an action once per menu it appeared in).
 - **`CommandRegistry`** (a global in `sheaf-app`):
   - Entries hold id, label, category and target. The target is either `Builtin(Box<dyn Action>)` or `Plugin{plugin, command}`.
   - Built-in commands register from the current `app_menus()` data.
@@ -75,27 +76,37 @@ Why WASM: one `.wasm` file runs unchanged on Windows and Linux, with no Rust ABI
   - Tickmark sets and stamps become data the same way.
   - `Panel` gets a `Plugin(String)` variant.
 
-### Slice 2: WASM runtime core
+### Slice 2: WASM runtime core — done 2026-10-13
+Landed: `crates/sheaf-plugin` (wasmtime 49 component host, manifest loader, `discover`), `crates/sheaf-plugin-api` (minimal guest SDK over wit-bindgen 0.62, `export!`), `wit/sheaf.wit`, app `plugins.rs` (startup discovery, registration, `plugin::Run` applies each `edits.submit` as one undo step), Cargo feature `plugins` (default on), `settings.plugins.disabled`, `RenderHandle::page_text`. Host tests build the fixture and the example for `wasm32-wasip2` on first use (target pinned in `rust-toolchain.toml`).
+Pulled forward from later slices: a minimal `text.page-text` (slice 2's example needs it; unsaved OCR layers win over the engine), WASI with no preopens and no network, the trap/timeout/memory/file-denied tests, and the `sheaf-plugin-api` crate.
+Decisions: edits a plugin submits are applied after its command returns (so it can't see ids of what it just created within the same call); each `submit` is one undo step. Plugin ids can't take a built-in action namespace (`docview`, `tools`, …). Plugin key bindings use the `Workspace` context and load before `keymap.json`, so users can override them.
 - `sheaf-plugin` crate: wasmtime component host and manifest loader.
 - WIT covering the `document`, `edits`, `log` and `run-command` interfaces.
 - Plugin discovery at startup.
 - Commands contributed by plugins appear in menus and the palette.
-- First plugin, `examples/plugins/tax-form-bookmarks` (chosen 2026-10-11): scans page text (including OCR layers) for form headers such as "Form 1040", "Schedule C", "W-2", "1099-INT" and inserts bookmarks named like "1099-INT — Chase". It targets `wasm32-wasip2` and exercises `text` plus batch edits.
+- First plugin, `plugins/tax-form-bookmarks` (chosen 2026-10-11): scans page text (including OCR layers) for form headers such as "Form 1040", "Schedule C", "W-2", "1099-INT" and inserts bookmarks named like "1099-INT — Chase". It targets `wasm32-wasip2` and exercises `text` plus batch edits.
 
-### Slice 3: declarative UI
+### Slice 3: declarative UI — done 2026-10-13
+Landed: WIT `ui` interface (`show-form`, `notice`, `set-panel`) and `panel-action` export; `text.pattern-search` (pulled forward from slice 4 for amount-crossref); `plugin_form.rs` (form card, same keys as the OCR card); `plugin_panel.rs` (per-document rows; row click shows the page; actions dispatch `plugin::PanelAction`); panels declared in manifests get a View → Plugin Panels entry and join the right dock unless the saved layout places them. Time a call spends waiting on a form doesn't count against its time limit (wall-clock deadline in the epoch callback). The SDK derives `PartialEq` on WIT types.
+**Bundled plugins (Greg, 2026-10-13):** plugins that make sense as plugins ship with sheaf so we dogfood the API — `plugins/` (was `examples/plugins/`): `tax-form-bookmarks`, `amount-crossref`. No difference from user plugins except being available at install: `scripts/build-plugins.sh` stages them, `package.sh` puts them in `plugins/` beside the binary, and on startup sheaf installs any it hasn't installed before into `<config>/plugins` (recorded in `.bundled.json`, so a deleted one stays deleted and a replaced one isn't overwritten; untouched copies upgrade). Debug builds read `target/plugins`.
 - `ui.show-form`: a modal with text, number, choice, checkbox, file-picker and page-range fields. The host draws it with the existing `text_input.rs`.
 - Notices.
 - Panel contribution: a plugin supplies a tree/list model (rows with label, icon, badge and actions). The host draws it in the dock and saves its layout by string ID.
-- Second plugin, `examples/plugins/amount-crossref` (chosen 2026-10-11): finds the same dollar amount on different pages (a K-1 total and the 1040 line it flows to) via pattern search, lists the candidate pairs in a panel, and places `ConnectorAdd` pairs for the ones the user accepts. Exercises text boxes, a review panel and connector edits.
+- Second plugin, `plugins/amount-crossref` (chosen 2026-10-11): finds the same dollar amount on different pages (a K-1 total and the 1040 line it flows to) via pattern search, lists the candidate pairs in a panel, and places `ConnectorAdd` pairs for the ones the user accepts. Exercises text boxes, a review panel and connector edits.
 
-### Slice 4: events, storage, permissions, manager
+### Slice 4: events, storage, permissions, manager — done 2026-10-13
+Landed: WIT `doc-event` + `on-event` export (manifest `events = [...]`; a plugin isn't told about its own edits), `text.search` and `text.text-boxes`, `storage` (per-plugin key/value with a 4 MiB quota plus a user-edited `settings.json`, in `<config>/plugin-data/<id>/`), WASI preopens for granted `read`/`write` dirs and network only when granted. Consent: a plugin asking for permissions runs without them until the user answers a prompt in the first window; answers live in `<config>/plugins.json` (with the disabled list — moved out of `settings.json` so windows saving their settings can't clobber it); asking for more later asks again. Plugins → Manage Plugins…: status/errors, turn on/off live (commands, menus, presets, marks and panels are added/removed; key bindings stay until restart and report the plugin is off), allow/revoke permissions, uninstall (storage kept), install from a folder or a `.sheafplugin` zip (only known file names are extracted; duplicates rejected).
+Not yet: the `ocr` host capability from the architecture section isn't in any slice; tracked under slice 5 below.
 - `on-event` subscriptions, declared in the manifest.
 - `text` interface, proxied to the render worker.
 - `storage` interface.
 - Permissions enforced through WASI preopens, with a first-run consent prompt for each permission.
 - Plugins → Manage dialog: list plugins, enable/disable, show errors and permissions, install from folder or `.sheafplugin` zip.
 
-### Slice 5: SDK, docs, CI, packaging
+### Slice 5: SDK, docs, CI, packaging — done 2026-10-13
+Landed: `ocr` host interface (`recognize`, `page-text-layer`; the engine's time isn't charged to the plugin); SDK `Plugin` trait (only `run_command` required, blanket `Guest` impl), `FormBuilder`/`Answers`, `Batch`, `info`/`warn` — the bundled plugins use them; `docs/plugins.md` (guide, manifest reference, API, limits, versioning, trust model, bundled plugins); CI checks fmt/clippy/unit tests of `plugins/*` and the fixture and stages them; the release workflow installs the WASI target since `package.sh` builds the bundled plugins; README M6 row, building and configuration notes.
+Still open: the "host keeps N-1 worlds" policy has nothing to keep yet (0.1.0 is the first world); the manual GUI check below hasn't been run (no display in the session that built this), nor the Windows build.
+- `ocr` host interface (`recognize(page, options)`, `page-text-layer(page)`), proxied to `sheaf_ocr`. Not in the original slices; added here so the architecture section's capability exists.
 - `sheaf-plugin-api` polished.
 - `docs/plugins.md`: authoring guide, API versioning policy (semver on the WIT package; the host keeps N-1 worlds), and the trust model.
 - CI builds the example plugins on ubuntu and windows and runs host integration tests against them on both.
@@ -111,7 +122,7 @@ Why WASM: one `.wasm` file runs unchanged on Windows and Linux, with no Rust ABI
 ## Critical files
 - `crates/sheaf-app/src/{main.rs, menus.rs, palette.rs, keymap.rs, workspace.rs, docview.rs, settings.rs, pattern_panel.rs, markup_tools.rs}`
 - `crates/sheaf-doc/src/model.rs` (serde on `Edit`, `apply_batch`)
-- New: `crates/sheaf-plugin/`, `crates/sheaf-plugin-api/`, `wit/sheaf.wit`, `examples/plugins/*`, `docs/plugins.md`
+- New: `crates/sheaf-plugin/`, `crates/sheaf-plugin-api/`, `wit/sheaf.wit`, `plugins/*`, `docs/plugins.md`
 - `.github/workflows/ci.yml`, `scripts/package.sh`, `README.md`
 
 ## Verification

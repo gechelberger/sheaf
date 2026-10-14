@@ -378,6 +378,35 @@ impl DocView {
                     .into_any_element()
             })
             .collect();
+        // Plugin presets: usable, but edited in the plugin, not here.
+        let plugin_presets = cx
+            .global::<crate::contrib::Contributions>()
+            .plugin_presets()
+            .to_vec();
+        chips.extend(plugin_presets.into_iter().enumerate().map(|(i, p)| {
+            let re = p.preset.regex.clone();
+            let input = input.clone();
+            div()
+                .id(("plugin-preset", i))
+                .px_2()
+                .py_0p5()
+                .rounded_sm()
+                .text_xs()
+                .cursor_pointer()
+                .border_1()
+                .border_color(rgb(0x4a4a4a))
+                .hover(|s| s.bg(rgb(0x4a4a4a)))
+                .tooltip(crate::tooltip::Tooltip::text(format!(
+                    "From the {} plugin",
+                    p.plugin
+                )))
+                .on_click(cx.listener(move |v, _, _, cx| {
+                    input.update(cx, |i, cx| i.set_text(re.clone(), cx));
+                    v.start_pattern_search(re.clone(), cx);
+                }))
+                .child(p.preset.name.clone())
+                .into_any_element()
+        }));
         chips.push(
             div()
                 .id("preset-save")

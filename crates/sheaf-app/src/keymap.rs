@@ -10,7 +10,8 @@
 //! [
 //!   { "context": "DocView", "bindings": { "ctrl-shift-k": "tools::ToolTick", "f9": null } },
 //!   { "context": "DocView && !TextInput && !TextArea", "bindings": { "x": "tools::ToolTick" } },
-//!   { "bindings": { "ctrl-shift-p": "workspace::CommandPalette" } }
+//!   { "bindings": { "ctrl-shift-p": "workspace::CommandPalette" } },
+//!   { "bindings": { "ctrl-alt-b": ["plugin::Run", { "plugin": "tax-form-bookmarks", "command": "scan" }] } }
 //! ]
 //! ```
 

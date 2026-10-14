@@ -1,0 +1,19 @@
+# Fixture for sheaf-plugin's integration tests; built for wasm32-wasip2 by
+# the tests themselves (see tests/host.rs).
+[package]
+name = "test-plugin"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+sheaf-plugin-api = { path = "../../../../sheaf-plugin-api" }
+
+[workspace]
+
+[profile.release]
+opt-level = "s"
+strip = true

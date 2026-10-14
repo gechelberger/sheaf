@@ -1,0 +1,14 @@
+id = "currency-convert"
+name = "Currency Convert"
+version = "0.1.2"
+api = "^0.1"
+description = "Finds foreign-currency amounts (€1.234,56, GBP 980.00, 1 200 CHF, …) and notes each one's value in your chosen currency at the ECB rate for a date you pick."
+
+[[commands]]
+id = "convert"
+label = "Convert &Currency…"
+category = "Workpapers"
+menu = "Tools"
+
+[permissions]
+network = ["api.frankfurter.dev"]

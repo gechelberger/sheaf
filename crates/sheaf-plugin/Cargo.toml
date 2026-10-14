@@ -1,0 +1,25 @@
+[package]
+name = "sheaf-plugin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sheaf-core.workspace = true
+sheaf-doc.workspace = true
+anyhow.workspace = true
+log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+futures.workspace = true
+toml = "0.9"
+semver = { version = "1", features = ["serde"] }
+regex.workspace = true
+wasmtime = { version = "49.0.2", default-features = false, features = ["component-model", "cranelift", "runtime", "std", "parallel-compilation", "anyhow"] }
+wasmtime-wasi = { version = "49.0.2", default-features = false, features = ["p2"] }
+wasmtime-wasi-http = { version = "49.0.2", default-features = false, features = ["p2", "default-send-request"] }
+http = "1"
+http-body-util = "0.1"
+
+[dev-dependencies]
+env_logger.workspace = true

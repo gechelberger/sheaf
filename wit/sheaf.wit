@@ -1,0 +1,450 @@
+/// The sheaf plugin API. Plugins are WebAssembly components targeting the
+/// `plugin` world. See docs/plugins.md.
+///
+/// Versioning: semver on this package. The host keeps serving the previous
+/// minor/major world when it moves on (N-1), so a plugin built against an
+/// older API keeps loading.
+package sheaf:plugin@0.1.0;
+
+/// Shared data types. Ids are opaque and stable for the life of an open
+/// document; they are not page numbers.
+interface types {
+    type page-id = u64;
+    type outline-id = u64;
+    type annot-id = u64;
+
+    /// Clockwise quarter turns.
+    enum rotation { r0, r90, r180, r270 }
+
+    record rgb { r: u8, g: u8, b: u8 }
+
+    /// Page coordinates: points, top-left origin, in the page's displayed
+    /// space (after the file's own /Rotate, before any rotation added in
+    /// sheaf).
+    record pt { x: f32, y: f32 }
+    record box2 { x: f32, y: f32, w: f32, h: f32 }
+
+    record page-info {
+        id: page-id,
+        /// Rotation added in sheaf on top of the file's.
+        rotation: rotation,
+        /// Displayed size in points, including `rotation`.
+        width: f32,
+        height: f32,
+    }
+
+    /// `/XYZ`: this point at the window's top-left, at this zoom (1.0 =
+    /// 100%). Page coordinates; none keeps the viewer's current value.
+    record dest-xyz { left: option<f32>, top: option<f32>, zoom: option<f32> }
+
+    /// Another destination kind (`Fit`, `FitH`, `FitR`, ...) as the file has
+    /// it: its name and its numbers in PDF user space (none for null).
+    record dest-other { kind: string, params: list<option<f32>> }
+
+    /// Where a bookmark lands on its page.
+    variant dest-view {
+        xyz(dest-xyz),
+        other(dest-other),
+    }
+
+    /// A bookmark, in pre-order with its depth (0 = top level).
+    record outline-item {
+        id: outline-id,
+        title: string,
+        target: option<page-id>,
+        /// Where on `target` it lands; none is the top of the page.
+        view: option<dest-view>,
+        color: option<rgb>,
+        depth: u16,
+    }
+
+    /// A piece of page text and where it is: one box per line it spans.
+    record text-match {
+        text: string,
+        rects: list<box2>,
+        /// For a pattern, its capture groups 1, 2, ... (none where a group
+        /// didn't take part). Empty for a literal search.
+        groups: list<option<string>>,
+    }
+
+    record line-shape { a: pt, b: pt, arrow: bool }
+    record text-box { rect: box2, size: f32 }
+    record stamp-shape { rect: box2, glyph: string }
+    record connector-shape {
+        rect: box2,
+        label: string,
+        /// Set by the host; ignored in edits.
+        partner: option<annot-id>,
+    }
+
+    variant annot-kind {
+        highlight(list<box2>),
+        note(pt),
+        free-text(text-box),
+        square(box2),
+        ellipse(box2),
+        line(line-shape),
+        ink(list<list<pt>>),
+        stamp(stamp-shape),
+        connector(connector-shape),
+        tape(text-box),
+    }
+
+    record annot {
+        /// Assigned by the host; ignored when adding.
+        id: annot-id,
+        kind: annot-kind,
+        color: rgb,
+        /// 0 to 1.
+        opacity: f32,
+        stroke: f32,
+        /// Empty means the user's name.
+        author: string,
+        contents: string,
+    }
+
+    record move-pages { ids: list<page-id>, before: option<page-id> }
+    record rotate-pages { ids: list<page-id>, by: rotation }
+    record outline-insert {
+        parent: option<outline-id>,
+        /// Insert after this sibling; none means first.
+        after: option<outline-id>,
+        title: string,
+        target: option<page-id>,
+        /// Where on `target` it lands; none is the top of the page.
+        view: option<dest-view>,
+    }
+    /// One bookmark of a subtree, in pre-order. `depth` is relative to the
+    /// insert point: 0 is a sibling there, 1 a child of the item above at
+    /// depth 0, and so on.
+    record new-outline-item {
+        title: string,
+        target: option<page-id>,
+        view: option<dest-view>,
+        depth: u16,
+    }
+    /// Several bookmarks in one edit, nested by depth: a new parent and its
+    /// children, say. They go after `after` under `parent`, in order.
+    record outline-insert-tree {
+        parent: option<outline-id>,
+        after: option<outline-id>,
+        items: list<new-outline-item>,
+    }
+    record outline-move {
+        id: outline-id,
+        parent: option<outline-id>,
+        after: option<outline-id>,
+        with-pages: bool,
+    }
+    /// None leaves a field as it is; for target and color, some(none)
+    /// clears it.
+    record outline-edit {
+        id: outline-id,
+        title: option<string>,
+        target: option<option<page-id>>,
+        color: option<option<rgb>>,
+        view: option<option<dest-view>>,
+    }
+    record page-annot { page: page-id, annot: annot }
+    record annot-ref { page: page-id, id: annot-id }
+    record connector-pair { a: page-annot, b: page-annot }
+
+    /// A region the user selected (Shift+drag) on a page.
+    record region { page: page-id, rect: box2 }
+
+    /// Something that happened to a document, for plugins that subscribe
+    /// (manifest `events`).
+    variant doc-event {
+        opened,
+        /// The document changed: an edit, an undo or a redo. The undo
+        /// label. Not sent for the plugin's own edits.
+        edited(string),
+        /// Saved, to this path.
+        saved(string),
+        selection-changed,
+        closed,
+        /// The selected region changed, live while the user drags. Sent
+        /// latest-wins: a plugin still busy with one gets only the newest
+        /// next. Subscribe with `"region"`.
+        region(region),
+        /// The region was cleared (also under `"region"`).
+        region-cleared,
+    }
+
+    /// One change to the document; mirrors sheaf's own edits.
+    variant edit {
+        move-pages(move-pages),
+        rotate-pages(rotate-pages),
+        delete-pages(list<page-id>),
+        duplicate-pages(list<page-id>),
+        outline-insert(outline-insert),
+        outline-insert-tree(outline-insert-tree),
+        outline-move(outline-move),
+        outline-edit(outline-edit),
+        outline-delete(outline-id),
+        annot-add(page-annot),
+        annot-update(page-annot),
+        annot-delete(annot-ref),
+        connector-add(connector-pair),
+    }
+}
+
+/// The document the command runs against, as it was when the call started.
+/// With no document open, `path` is none and the lists are empty.
+interface document {
+    use types.{page-id, page-info, outline-item, annot};
+
+    path: func() -> option<string>;
+    /// In document order.
+    pages: func() -> list<page-info>;
+    outline: func() -> list<outline-item>;
+    annotations: func(page: page-id) -> list<annot>;
+    /// Selected pages in document order; empty when nothing is selected.
+    selection: func() -> list<page-id>;
+    current-page: func() -> option<page-id>;
+}
+
+/// Page text, including OCR layers not yet saved.
+interface text {
+    use types.{page-id, text-match, box2};
+
+    page-text: func(page: page-id) -> result<string, string>;
+    /// Every match of a regular expression (Rust `regex` syntax) on one
+    /// page, with its position.
+    pattern-search: func(page: page-id, regex: string) -> result<list<text-match>, string>;
+    /// Every occurrence of `query`, like Find.
+    search: func(page: page-id, query: string, match-case: bool) -> result<list<text-match>, string>;
+    /// Boxes of the text under `rect`, merged per line.
+    text-boxes: func(page: page-id, rect: box2) -> result<list<box2>, string>;
+    /// The page's words with their boxes, in reading order; only those
+    /// whose box centre is in `rect`, if given. For live work, fetch a
+    /// page's words once and filter yourself.
+    words: func(page: page-id, rect: option<box2>) -> result<list<text-match>, string>;
+}
+
+/// Read-only page images. A renderer draws a page (or part of it) at the
+/// resolution and in the pixel format you ask for; the pixels stay in
+/// sheaf until you read them, a strip or a tile at a time. Pages render as
+/// the file draws them (the orientation text and annotations use), without
+/// sheaf's own unsaved markup. Handles last for one call. Rendering time
+/// doesn't count against the call's limit; rendered pixels per call and
+/// images alive at once are capped.
+interface render {
+    use types.{page-id, box2, pt};
+
+    enum pixel-format {
+        /// One byte per pixel, 0 black to 255 white.
+        gray8,
+        /// Four bytes per pixel: red, green, blue, alpha.
+        rgba8,
+    }
+
+    record render-options {
+        /// Resolution, 1 to 600.
+        dpi: u32,
+        /// Part of the page in page coordinates; none for all of it.
+        region: option<box2>,
+        format: pixel-format,
+    }
+
+    /// Rendered pixels, rows top to bottom.
+    resource image {
+        width: func() -> u32;
+        height: func() -> u32;
+        format: func() -> pixel-format;
+        /// The page point under pixel (x, y).
+        to-page: func(x: f32, y: f32) -> pt;
+        /// `count` whole rows starting at row `y`.
+        read-rows: func(y: u32, count: u32) -> list<u8>;
+        /// A `w` by `h` tile at (`x`, `y`), row by row.
+        read-rect: func(x: u32, y: u32, w: u32, h: u32) -> list<u8>;
+    }
+
+    resource page-renderer {
+        constructor(page: page-id);
+        /// The page's size in points, as the file draws it.
+        size: func() -> tuple<f32, f32>;
+        render: func(options: render-options) -> result<image, string>;
+    }
+}
+
+/// The user's pattern-search presets.
+interface patterns {
+    record preset { name: string, regex: string }
+
+    /// The Patterns panel's presets (the user's own, in their order), then
+    /// those plugins ship.
+    presets: func() -> list<preset>;
+}
+
+/// Text recognition with the engines built into sheaf, so plugins don't
+/// carry their own.
+interface ocr {
+    use types.{page-id, box2};
+
+    record ocr-word {
+        text: string,
+        /// Page coordinates, like annotations.
+        rect: box2,
+        /// 0 to 1.
+        confidence: f32,
+    }
+
+    record text-layer {
+        words: list<ocr-word>,
+        /// Index ranges into `words` (start, end), one per line, top to
+        /// bottom.
+        lines: list<tuple<u32, u32>>,
+        /// Which engine produced it, e.g. "tesseract 5.5.2".
+        engine: string,
+    }
+
+    record ocr-options {
+        /// An engine language or model set, e.g. "eng"; none uses the
+        /// user's choice from Recognize Text.
+        language: option<string>,
+        /// Render resolution; none uses the user's choice.
+        dpi: option<u32>,
+    }
+
+    /// Recognize one page now with the user's OCR engine. Doesn't change the
+    /// document. Time spent here doesn't count against the call's limit.
+    recognize: func(page: page-id, options: ocr-options) -> result<text-layer, string>;
+    /// The page's OCR layer that hasn't been saved yet, if any.
+    page-text-layer: func(page: page-id) -> option<text-layer>;
+}
+
+/// A small per-plugin store that survives restarts, and the plugin's
+/// settings. Kept in `<config>/plugin-data/<id>/`.
+interface storage {
+    get: func(key: string) -> option<string>;
+    /// Fails when the store would pass its size limit (4 MiB).
+    set: func(key: string, value: string) -> result<_, string>;
+    delete: func(key: string);
+    keys: func() -> list<string>;
+    /// The plugin's settings: the JSON in its `settings.json`, which the
+    /// user edits. "{}" when there is none.
+    settings: func() -> string;
+}
+
+/// Changes to the document. Each `submit` becomes one undo step, applied
+/// after the command returns, in order; if any edit in a batch fails, that
+/// batch is skipped and the user is told.
+interface edits {
+    use types.{edit};
+
+    submit: func(label: string, edits: list<edit>);
+}
+
+/// Declarative UI: plugins describe it as data and sheaf draws it.
+interface ui {
+    use types.{page-id};
+
+    record text-field { default: string, placeholder: string }
+    record number-field { default: f64, min: option<f64>, max: option<f64> }
+    record choice-field { options: list<string>, default: u32 }
+    /// `extensions` filters the picker, e.g. ["pdf", "csv"]; empty means any.
+    record file-field { save: bool, extensions: list<string> }
+
+    variant field-kind {
+        text(text-field),
+        number(number-field),
+        choice(choice-field),
+        checkbox(bool),
+        file(file-field),
+        /// Pages as the user types them, e.g. "1-3, 7"; this is the initial
+        /// text. Empty means every page.
+        page-range(string),
+    }
+
+    record field { id: string, label: string, kind: field-kind }
+
+    record form {
+        title: string,
+        fields: list<field>,
+        /// The confirm button; "OK" if none.
+        submit-label: option<string>,
+    }
+
+    variant field-value {
+        text(string),
+        number(f64),
+        /// Index into the choice's options.
+        choice(u32),
+        checkbox(bool),
+        /// None if the user picked nothing.
+        file(option<string>),
+        /// In document order.
+        page-range(list<page-id>),
+    }
+
+    record field-answer { id: string, value: field-value }
+
+    /// Ask the user and wait for the answer: one entry per field, or none
+    /// if they cancelled. Time spent waiting doesn't count against the
+    /// call's time limit.
+    show-form: func(form: form) -> option<list<field-answer>>;
+
+    /// A one-line message in the document's status area; an empty message
+    /// clears it.
+    notice: func(message: string);
+
+    enum icon { none, check, cross, link, warning, info, page }
+
+    record row-action { id: string, label: string }
+
+    record panel-row {
+        /// Passed back to `panel-action`.
+        id: string,
+        label: string,
+        detail: string,
+        badge: option<string>,
+        icon: icon,
+        /// Indent level, for trees.
+        depth: u16,
+        /// Clicking the row shows this page.
+        page: option<page-id>,
+        actions: list<row-action>,
+    }
+
+    /// Replace the rows of one of this plugin's panels (declared in its
+    /// manifest) for the document the call is running against.
+    set-panel: func(panel: string, rows: list<panel-row>);
+
+    /// Bring a panel into view: one of this plugin's panels (by its
+    /// manifest id), or one of sheaf's own: "pages", "bookmarks",
+    /// "patterns", "calc" or "comments". Doesn't take keyboard focus.
+    show-panel: func(panel: string);
+}
+
+interface log {
+    enum level { trace, debug, info, warn, error }
+
+    log: func(level: level, message: string);
+}
+
+world plugin {
+    use types.{doc-event};
+
+    import document;
+    import text;
+    import edits;
+    import ui;
+    import storage;
+    import patterns;
+    import render;
+    import ocr;
+    import log;
+
+    /// Called once after loading.
+    export activate: func() -> result<_, string>;
+    /// Run a command declared in the manifest. `args-json` is what a key
+    /// binding passed, if anything.
+    export run-command: func(id: string, args-json: option<string>) -> result<_, string>;
+    /// The user clicked `action` on row `row` of `panel`. Edits and UI
+    /// calls work as in `run-command`.
+    export panel-action: func(panel: string, row: string, action: string) -> result<_, string>;
+    /// A document event the manifest subscribes to. Edits and UI calls work
+    /// as in `run-command`.
+    export on-event: func(event: doc-event) -> result<_, string>;
+}

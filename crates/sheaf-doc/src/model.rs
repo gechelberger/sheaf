@@ -7,20 +7,21 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use im::Vector;
-use sheaf_core::{PageSize, Rotation};
+use serde::{Deserialize, Serialize};
+use sheaf_core::{DestView, PageSize, Rotation};
 
 use crate::annot::{Annot, AnnotId, AnnotKind};
 use crate::history::{HistoryPolicy, HistoryStats};
 use crate::text_layer::TextLayer;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SourceId(pub u32);
 
 /// Stable identity of a page in the virtual document. Never reused.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct PageId(pub u64);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct OutlineId(pub u64);
 
 /// What the model knows about an opened file. Sizes are as the engine
@@ -63,15 +64,32 @@ pub struct OutlineNode {
     pub id: OutlineId,
     pub title: String,
     pub target: Option<PageId>,
+    /// Where on `target` it lands; None is the top of the page.
+    pub view: Option<DestView>,
     pub color: Option<[u8; 3]>,
     pub children: Vector<OutlineNode>,
 }
 
 /// A bookmark as read from a file: pre-order with depth.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FlatOutlineItem {
     pub title: String,
     pub page: Option<u32>,
+    pub depth: u16,
+    /// Where on `page` it lands (see [`OutlineNode::view`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<DestView>,
+}
+
+/// One bookmark of a subtree inserted by [`Edit::OutlineInsertTree`], in
+/// pre-order. `depth` is relative to the insert point: 0 is a sibling there,
+/// 1 a child of the item above at 0, and so on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NewOutlineItem {
+    pub title: String,
+    pub target: Option<PageId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<DestView>,
     pub depth: u16,
 }
 
@@ -155,7 +173,9 @@ impl DocState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+/// One change to the document. Serializable so plugins can submit edits
+/// as data (see `todos/plugins.md`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Edit {
     /// Move `ids` (kept in document order) to just before `before`, or to the end.
     MovePages {
@@ -198,6 +218,16 @@ pub enum Edit {
         after: Option<OutlineId>,
         title: String,
         target: Option<PageId>,
+        /// Where on `target` it lands; None is the top of the page.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<DestView>,
+    },
+    /// Insert several bookmarks at once, nested by depth (a new parent and
+    /// its children, say), after `after` under `parent`, in order.
+    OutlineInsertTree {
+        parent: Option<OutlineId>,
+        after: Option<OutlineId>,
+        items: Vec<NewOutlineItem>,
     },
     /// Move a bookmark subtree. With `with_pages`, the pages it spans (from
     /// its first target up to the next bookmark's target) move with it.
@@ -207,11 +237,31 @@ pub enum Edit {
         after: Option<OutlineId>,
         with_pages: bool,
     },
+    /// `None` fields are left unchanged. For `target` and `color`,
+    /// `Some(None)` clears the value; in JSON that is `null`, and an absent
+    /// key means unchanged.
     OutlineEdit {
         id: OutlineId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "double_option"
+        )]
         target: Option<Option<PageId>>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "double_option"
+        )]
         color: Option<Option<[u8; 3]>>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "double_option"
+        )]
+        view: Option<Option<DestView>>,
     },
     /// Delete a bookmark and its subtree.
     OutlineDelete {
@@ -249,6 +299,28 @@ pub enum Edit {
     ClearTextLayers {
         ids: Vec<PageId>,
     },
+}
+
+/// Serde for `Option<Option<T>>` fields that distinguishes "absent"
+/// (outer `None`, via `#[serde(default)]`) from `null` (`Some(None)`).
+mod double_option {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<T: Serialize, S: Serializer>(
+        v: &Option<Option<T>>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        match v {
+            Some(inner) => inner.serialize(s),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, T: Deserialize<'de>, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<Option<Option<T>>, D::Error> {
+        Option::<T>::deserialize(d).map(Some)
+    }
 }
 
 /// Identifies a long-running job whose results arrive in batches but
@@ -569,6 +641,32 @@ impl Document {
         Ok(outcome)
     }
 
+    /// Apply several edits in order as one version, so one undo reverts them
+    /// all. Each edit sees the result of the ones before it. If any edit
+    /// fails, none are applied.
+    pub fn apply_batch(
+        &mut self,
+        edits: Vec<Edit>,
+        label: impl Into<String>,
+    ) -> Result<EditOutcome> {
+        let mut state = self.state().clone();
+        let mut total = EditOutcome::default();
+        for (i, edit) in edits.into_iter().enumerate() {
+            let (next, out) = self
+                .compute(state, edit)
+                .with_context(|| format!("edit {} of batch", i + 1))?;
+            state = next;
+            total.pages_removed += out.pages_removed;
+            total.pages_added += out.pages_added;
+            total.bookmarks_removed += out.bookmarks_removed;
+            total.bookmarks_added += out.bookmarks_added;
+        }
+        if state != *self.state() {
+            self.push_version(state, label.into(), None);
+        }
+        Ok(total)
+    }
+
     /// Start a job whose batches of edits should undo as one step.
     pub fn begin_job(&mut self) -> JobId {
         let id = JobId(self.next_job);
@@ -711,6 +809,48 @@ impl Document {
         id
     }
 
+    /// Nodes for [`Edit::OutlineInsertTree`]: pre-order items with depths
+    /// that start at 0 and go down at most one level at a time.
+    fn tree_from_items(&mut self, items: &[NewOutlineItem]) -> Result<Vec<OutlineNode>> {
+        let mut roots: Vec<OutlineNode> = Vec::new();
+        // Open path: (depth, node) from the current root down.
+        let mut stack: Vec<(u16, OutlineNode)> = Vec::new();
+        let close = |stack: &mut Vec<(u16, OutlineNode)>, roots: &mut Vec<OutlineNode>, d: u16| {
+            while let Some((top, _)) = stack.last()
+                && *top >= d
+            {
+                let (_, node) = stack.pop().unwrap();
+                match stack.last_mut() {
+                    Some((_, parent)) => parent.children.push_back(node),
+                    None => roots.push(node),
+                }
+            }
+        };
+        let mut prev: Option<u16> = None;
+        for item in items {
+            match prev {
+                None if item.depth != 0 => bail!("the first bookmark must be at depth 0"),
+                Some(p) if item.depth > p + 1 => {
+                    bail!("bookmark depth jumps from {p} to {}", item.depth)
+                }
+                _ => {}
+            }
+            prev = Some(item.depth);
+            close(&mut stack, &mut roots, item.depth);
+            let node = OutlineNode {
+                id: self.fresh_outline_id(),
+                title: item.title.clone(),
+                target: item.target,
+                view: item.target.and(item.view.clone()),
+                color: None,
+                children: Vector::new(),
+            };
+            stack.push((item.depth, node));
+        }
+        close(&mut stack, &mut roots, 0);
+        Ok(roots)
+    }
+
     fn outline_from_flat(
         &mut self,
         items: &[FlatOutlineItem],
@@ -737,6 +877,7 @@ impl Document {
                 id: self.fresh_outline_id(),
                 title: item.title.clone(),
                 target: item.page.and_then(|p| by_index.get(p as usize).copied()),
+                view: item.view.clone(),
                 color: None,
                 children: Vector::new(),
             };
@@ -949,16 +1090,32 @@ impl Document {
                 after,
                 title,
                 target,
+                view,
             } => {
                 let node = OutlineNode {
                     id: self.fresh_outline_id(),
                     title,
+                    view: target.and(view),
                     target,
                     color: None,
                     children: Vector::new(),
                 };
                 st.outline = outline_insert(&st.outline, parent, after, node)?;
                 out.bookmarks_added = 1;
+            }
+            Edit::OutlineInsertTree {
+                parent,
+                after,
+                items,
+            } => {
+                let roots = self.tree_from_items(&items)?;
+                out.bookmarks_added = items.len();
+                let mut after = after;
+                for node in roots {
+                    let id = node.id;
+                    st.outline = outline_insert(&st.outline, parent, after, node)?;
+                    after = Some(id);
+                }
             }
             Edit::OutlineMove {
                 id,
@@ -1030,6 +1187,7 @@ impl Document {
                 title,
                 target,
                 color,
+                view,
             } => {
                 let updated = outline_update(&st.outline, id, |n| {
                     if let Some(t) = &title {
@@ -1037,6 +1195,16 @@ impl Document {
                     }
                     if let Some(t) = target {
                         n.target = t;
+                        // A new page: the old position meant the old page.
+                        if view.is_none() {
+                            n.view = None;
+                        }
+                    }
+                    if let Some(v) = &view {
+                        n.view = v.clone();
+                    }
+                    if n.target.is_none() {
+                        n.view = None;
                     }
                     if let Some(c) = color {
                         n.color = c;
@@ -1296,6 +1464,7 @@ fn strip_targets(nodes: &Vector<OutlineNode>, sentinel: PageId) -> Vector<Outlin
             let mut n = n.clone();
             if n.target == Some(sentinel) {
                 n.target = None;
+                n.view = None;
             }
             n.children = strip_targets(&n.children, sentinel);
             n
@@ -1401,6 +1570,7 @@ mod tests {
                 title: t.to_string(),
                 page: *p,
                 depth: *d,
+                view: None,
             })
             .collect()
     }
@@ -1634,6 +1804,7 @@ mod tests {
                 title: Some("Alpha".into()),
                 target: None,
                 color: Some(Some([255, 0, 0])),
+                view: None,
             },
             "e",
         )
@@ -1645,6 +1816,7 @@ mod tests {
                 after: Some(bm(&d, "A1")),
                 title: "A1b".into(),
                 target: None,
+                view: None,
             },
             "ins",
         )
@@ -2174,5 +2346,207 @@ mod tests {
         let m2 = d.stats().marginal_bytes;
         let pages = d.page_count() * std::mem::size_of::<PageRef>();
         assert!(*m2.last().unwrap() <= *m.last().unwrap() + pages);
+    }
+
+    #[test]
+    fn apply_batch_is_one_undo_step() {
+        let mut d = doc();
+        let before = d.state().clone();
+        let p0 = id_at(&d, 0);
+        let p3 = id_at(&d, 3);
+        d.apply_batch(
+            vec![
+                Edit::OutlineInsert {
+                    parent: None,
+                    after: None,
+                    title: "W-2".into(),
+                    target: Some(p0),
+                    view: None,
+                },
+                Edit::OutlineInsert {
+                    parent: None,
+                    after: None,
+                    title: "1099-INT".into(),
+                    target: Some(p3),
+                    view: None,
+                },
+                Edit::RotatePages {
+                    ids: vec![p3],
+                    by: Rotation::R90,
+                },
+            ],
+            "Plugin edits",
+        )
+        .unwrap();
+        assert_eq!(d.state().outline.len(), before.outline.len() + 2);
+        assert_eq!(d.undo_label(), Some("Plugin edits"));
+        d.undo();
+        assert_eq!(*d.state(), before);
+        assert!(!d.can_undo());
+    }
+
+    #[test]
+    fn apply_batch_failure_applies_nothing() {
+        let mut d = doc();
+        let before = d.state().clone();
+        let p0 = id_at(&d, 0);
+        let err = d.apply_batch(
+            vec![
+                Edit::DeletePages { ids: vec![p0] },
+                Edit::MovePages {
+                    ids: vec![id_at(&d, 1)],
+                    before: Some(PageId(9999)),
+                },
+            ],
+            "bad",
+        );
+        assert!(err.is_err());
+        assert_eq!(*d.state(), before);
+        assert!(!d.can_undo());
+    }
+
+    #[test]
+    fn apply_batch_sums_outcomes() {
+        let mut d = doc();
+        let ids = vec![id_at(&d, 0)];
+        let out = d
+            .apply_batch(
+                vec![
+                    Edit::DuplicatePages { ids: ids.clone() },
+                    Edit::DuplicatePages { ids },
+                ],
+                "dup twice",
+            )
+            .unwrap();
+        assert_eq!(out.pages_added, 2);
+        assert_eq!(d.page_count(), 8);
+    }
+
+    #[test]
+    fn insert_tree_nests_in_one_step() {
+        let mut d = doc();
+        let (p0, p3) = (id_at(&d, 0), id_at(&d, 3));
+        let first_top = d.state().outline[0].id;
+        let item = |title: &str, target, depth| NewOutlineItem {
+            title: title.into(),
+            target,
+            view: None,
+            depth,
+        };
+        d.apply(
+            Edit::OutlineInsertTree {
+                parent: None,
+                after: Some(first_top),
+                items: vec![
+                    item("Accounts", None, 0),
+                    item("…4821", Some(p0), 1),
+                    item("…9930", Some(p3), 1),
+                    item("Loose", Some(p3), 0),
+                ],
+            },
+            "Bookmark matches",
+        )
+        .unwrap();
+        let titles: Vec<(u16, String)> = d
+            .state()
+            .outline_flat()
+            .into_iter()
+            .map(|(depth, n)| (depth, n.title.clone()))
+            .filter(|(_, t)| {
+                ["Accounts", "…4821", "…9930", "Loose", "A", "B"].contains(&t.as_str())
+            })
+            .collect();
+        assert_eq!(
+            titles,
+            [
+                (0, "A".to_string()),
+                (0, "Accounts".to_string()),
+                (1, "…4821".to_string()),
+                (1, "…9930".to_string()),
+                (0, "Loose".to_string()),
+                (0, "B".to_string()),
+            ]
+        );
+        assert_eq!(d.undo_label(), Some("Bookmark matches"));
+        d.undo();
+        assert_eq!(d.state().outline.len(), 3);
+        // Depths must nest properly.
+        let bad = d.apply(
+            Edit::OutlineInsertTree {
+                parent: None,
+                after: None,
+                items: vec![item("x", None, 0), item("y", None, 2)],
+            },
+            "bad",
+        );
+        assert!(bad.is_err());
+    }
+
+    #[test]
+    fn edit_serde_round_trip() {
+        let annot = Annot {
+            id: AnnotId(0),
+            kind: AnnotKind::Connector {
+                rect: crate::annot::Box2 {
+                    x: 1.0,
+                    y: 2.0,
+                    w: 3.0,
+                    h: 4.0,
+                },
+                label: "1".into(),
+                partner: None,
+            },
+            color: [255, 0, 0],
+            opacity: 1.0,
+            stroke: 1.0,
+            author: "me".into(),
+            contents: String::new(),
+            modified: "D:20261013000000".into(),
+        };
+        let edits = vec![
+            Edit::MovePages {
+                ids: vec![PageId(1), PageId(2)],
+                before: None,
+            },
+            Edit::RotatePages {
+                ids: vec![PageId(0)],
+                by: Rotation::R270,
+            },
+            Edit::InsertPages {
+                source: SourceId(1),
+                range: 0..3,
+                before: Some(PageId(4)),
+                outline: Some(flat(&[("X", Some(0), 0)])),
+            },
+            Edit::OutlineEdit {
+                id: OutlineId(3),
+                title: Some("T".into()),
+                target: Some(None),
+                color: Some(Some([1, 2, 3])),
+                view: None,
+            },
+            Edit::ConnectorAdd {
+                a: (PageId(0), annot.clone()),
+                b: (PageId(1), annot),
+            },
+            Edit::SetTextLayers {
+                layers: vec![(PageId(0), tl("hi"))],
+            },
+        ];
+        let json = serde_json::to_string(&edits).unwrap();
+        let back: Vec<Edit> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, edits);
+        // Absent keys leave a bookmark field unchanged; null clears it.
+        let e: Edit = serde_json::from_str(r#"{"OutlineEdit":{"id":3,"target":null}}"#).unwrap();
+        assert_eq!(
+            e,
+            Edit::OutlineEdit {
+                id: OutlineId(3),
+                title: None,
+                target: Some(None),
+                color: None,
+                view: None,
+            }
+        );
     }
 }
