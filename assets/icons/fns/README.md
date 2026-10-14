@@ -42,6 +42,30 @@ an image element does not inherit the parent element's color.
 | [bookmark](bookmark/icon.svg) | New bookmark | `NewBookmark` |
 | [flatten](flatten/icon.svg) | Export flattened copy | `ExportFlattened` |
 | [export-clean](export-clean/icon.svg) | Export clean copy | `ExportCleanCopy` |
+| [about](about/icon.svg) | About sheaf | `About` |
+| [quit](quit/icon.svg) | Quit | `Quit` |
+| [new-window](new-window/icon.svg) | New window | `NewWindow` |
+| [save-as](save-as/icon.svg) | Save as | `SaveAs` |
+| [close-document](close-document/icon.svg) | Close document | `CloseDocument` |
+| [close-window](close-window/icon.svg) | Close window | `CloseWindow` |
+| [select-all-pages](select-all-pages/icon.svg) | Select all pages | `SelectAllPages` |
+| [actual-size](actual-size/icon.svg) | Actual size | `ZoomActual` |
+| [first-page](first-page/icon.svg) | First page | `FirstPage` |
+| [prev-page](prev-page/icon.svg) | Previous page | `PrevPage` |
+| [next-page](next-page/icon.svg) | Next page | `NextPage` |
+| [last-page](last-page/icon.svg) | Last page | `LastPage` |
+| [thumbnails](thumbnails/icon.svg) | Thumbnails | `ShowThumbnails` |
+| [outline](outline/icon.svg) | Bookmarks | `ShowOutline` |
+| [calculator](calculator/icon.svg) | Calculator | `ShowCalc` |
+| [comments](comments/icon.svg) | Comments | `ShowComments` |
+| [command-palette](command-palette/icon.svg) | Command palette | `CommandPalette` |
+| [navigation-panes](navigation-panes/icon.svg) | Navigation panes | `ToggleSidebar` |
+| [left-dock](left-dock/icon.svg) | Left dock | `ToggleLeftDock` |
+| [right-dock](right-dock/icon.svg) | Right dock | `ToggleRightDock` |
+| [bottom-dock](bottom-dock/icon.svg) | Bottom dock | `ToggleBottomDock` |
+| [recognize-text](recognize-text/icon.svg) | Recognize text (OCR) | `RecognizeText` |
+| [cancel-ocr](cancel-ocr/icon.svg) | Cancel OCR | `CancelOcr` |
+| [manage-plugins](manage-plugins/icon.svg) | Manage plugins | `ManagePlugins` |
 
 ## Pattern-search alternatives
 
