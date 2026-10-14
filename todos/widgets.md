@@ -90,3 +90,8 @@ check them with screenshots (the `--script` UI harness).
    its primary button hovers in accent rather than gray, and the prompt's
    selected answer no longer has a light-blue outline (it's the accent
    one). Checked with before/after screenshots of all four.
+4. Done. `sheaf_ui::palette::Palette::new(commands, window, cx)` takes
+   the list; running one emits `PaletteEvent::Run(action)` as before. Its
+   actions (`palette::PaletteUp` etc., same names for `keymap.json`) and
+   bindings moved into sheaf-ui; `commands::palette_commands(cx)` builds
+   the list from the registry. It uses the dialog backdrop and card.

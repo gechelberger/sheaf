@@ -1,7 +1,7 @@
 //! Reusable GPUI widgets: text fields, buttons and chips, dialogs and
 //! prompts, tooltips, the title bar and menu bar, and the named colors
-//! they share. The page canvas, tiled viewport, sidebars and palette are
-//! to follow.
+//! they share, and the command palette. The page canvas, tiled viewport
+//! and sidebars are to follow.
 
 use gpui::{App, KeyBinding};
 
@@ -9,6 +9,7 @@ pub mod button;
 pub mod dialog;
 pub mod frame;
 pub mod menu_bar;
+pub mod palette;
 pub mod prompts;
 pub mod text_area;
 pub mod text_input;
@@ -17,11 +18,12 @@ pub mod tooltip;
 
 /// The widgets' own key bindings. Call once at startup, after the app's
 /// bindings: these are in the widgets' contexts (`TextInput`, `TextArea`,
-/// `MenuBar`), which sit deeper than the app's and so win for shared keys.
+/// `MenuBar`, `Palette`), which sit deeper than the app's and so win for shared keys.
 pub fn bind_keys(cx: &mut App) {
     let ti = Some(text_input::KEY_CONTEXT);
     let ta = Some(text_area::KEY_CONTEXT);
     let mb = Some(menu_bar::KEY_CONTEXT);
+    let pal = Some(palette::KEY_CONTEXT);
     cx.bind_keys([
         // Text input (deeper context wins over DocView for shared keys).
         KeyBinding::new("backspace", text_input::Backspace, ti),
@@ -68,5 +70,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("enter", menu_bar::MenuConfirm, mb),
         KeyBinding::new("space", menu_bar::MenuConfirm, mb),
         KeyBinding::new("escape", menu_bar::MenuCancel, mb),
+        KeyBinding::new("up", palette::PaletteUp, pal),
+        KeyBinding::new("down", palette::PaletteDown, pal),
+        KeyBinding::new("pageup", palette::PalettePageUp, pal),
+        KeyBinding::new("pagedown", palette::PalettePageDown, pal),
     ]);
 }

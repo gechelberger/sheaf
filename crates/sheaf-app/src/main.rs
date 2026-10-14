@@ -16,7 +16,6 @@ mod menus;
 mod ocr_dialog;
 mod ocr_run;
 mod outline_panel;
-mod palette;
 mod pattern_panel;
 mod patterns;
 #[cfg(feature = "plugins")]
@@ -97,10 +96,6 @@ actions!(
     ]
 );
 actions!(comments, [EditComment, DeleteComment]);
-actions!(
-    palette,
-    [PaletteUp, PaletteDown, PalettePageUp, PalettePageDown]
-);
 actions!(
     outline,
     [
@@ -265,7 +260,6 @@ fn main() {
             let outline = Some(outline_panel::KEY_CONTEXT);
             let comments = Some(comments_panel::KEY_CONTEXT);
             let either = Some("DocView || Outline || Comments");
-            let pal = Some(palette::KEY_CONTEXT);
             let od = Some(ocr_dialog::KEY_CONTEXT);
             let od_keys = Some("OcrDialog && !TextInput");
             let pf = Some("PluginForm");
@@ -347,10 +341,6 @@ fn main() {
                 KeyBinding::new("ctrl-q", Quit, None),
                 // Acrobat has no palette; Ctrl+Shift+P is its Page Setup, so not that.
                 KeyBinding::new("ctrl-shift-k", CommandPalette, None),
-                KeyBinding::new("up", PaletteUp, pal),
-                KeyBinding::new("down", PaletteDown, pal),
-                KeyBinding::new("pageup", PalettePageUp, pal),
-                KeyBinding::new("pagedown", PalettePageDown, pal),
                 // Recognize Text (OCR). Acrobat has no default shortcut for it.
                 KeyBinding::new("ctrl-shift-t", RecognizeText, ws),
                 KeyBinding::new("tab", DialogNext, od),

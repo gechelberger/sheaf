@@ -1,28 +1,34 @@
-//! Command palette: every registered command, built-in or from a plugin, in
-//! one searchable list. Type to filter, Up/Down to pick, Enter to run. Each
-//! row also shows the command's id, which is what `keymap.json` binds (see
-//! `keymap.rs`).
+//! Command palette: a searchable list of commands. Type to filter, Up/Down
+//! to pick, Enter to run. The app supplies the commands; running one emits
+//! its action for the app to dispatch. Each row also shows the command's
+//! id (in sheaf, what `keymap.json` binds).
 
 use gpui::{
-    Action, AnyElement, App, Context, Entity, EventEmitter, Focusable, MouseButton, Subscription,
-    Window, div, prelude::*, px,
+    Action, AnyElement, Context, Entity, EventEmitter, Focusable, MouseButton, Subscription,
+    Window, actions, div, prelude::*, px,
 };
-use sheaf_ui::menu_bar::parse_label;
-use sheaf_ui::text_input::{TextInput, TextInputEvent};
-use sheaf_ui::theme;
 
-use crate::commands::CommandRegistry;
-use crate::{PaletteDown, PalettePageDown, PalettePageUp, PaletteUp};
+use crate::text_input::{TextInput, TextInputEvent};
+use crate::{dialog, theme};
+
+actions!(
+    palette,
+    [PaletteUp, PaletteDown, PalettePageUp, PalettePageDown]
+);
 
 pub const KEY_CONTEXT: &str = "Palette";
 
 const ROW_H: f32 = 30.0;
 const MAX_ROWS: usize = 12;
 
+/// One row of the palette.
 pub struct Command {
+    /// Shown faintly after the label.
     pub id: String,
+    /// Shown before the label ("View: Fit Width") and searched with it.
     pub category: String,
     pub label: String,
+    /// What running the command emits, in `PaletteEvent::Run`.
     pub action: Box<dyn Action>,
     pub shortcut: Option<String>,
 }
@@ -44,24 +50,6 @@ pub struct Palette {
 }
 
 impl EventEmitter<PaletteEvent> for Palette {}
-
-/// Every registered command, in registration (built-ins: menu) order.
-pub fn commands(cx: &App) -> Vec<Command> {
-    cx.global::<CommandRegistry>()
-        .commands()
-        .iter()
-        .map(|c| {
-            let action = c.target.action();
-            Command {
-                id: c.id.clone(),
-                category: c.category.clone(),
-                label: parse_label(&c.label).0.trim_end_matches('…').to_string(),
-                shortcut: sheaf_ui::menu_bar::shortcut(action.as_ref(), cx).map(|s| s.to_string()),
-                action,
-            }
-        })
-        .collect()
-}
 
 /// Subsequence match of `query` against `hay` (both lowercase). Higher is
 /// better; None when it doesn't match. Contiguous runs and matches at word
@@ -90,14 +78,15 @@ fn score(query: &str, hay: &str) -> Option<i32> {
 }
 
 impl Palette {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// A palette over `commands`, listed in the given order until a query
+    /// ranks them. Takes focus.
+    pub fn new(commands: Vec<Command>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let input = cx.new(|cx| TextInput::new("Type a command", cx));
         let sub = cx.subscribe(&input, |this, _, ev: &TextInputEvent, cx| match ev {
             TextInputEvent::Confirm => this.run_selected(cx),
             TextInputEvent::Cancel => cx.emit(PaletteEvent::Dismiss),
         });
         window.focus(&input.read(cx).focus_handle(cx), cx);
-        let commands = commands(cx);
         let matches = (0..commands.len()).collect();
         Self {
             input,
@@ -216,36 +205,20 @@ impl Render for Palette {
             .collect();
         let list_h = ROW_H * n.clamp(1, MAX_ROWS) as f32;
 
-        div()
-            .id("palette-backdrop")
+        dialog::backdrop("palette-backdrop")
             .key_context(KEY_CONTEXT)
             .on_action(cx.listener(|this, _: &PaletteUp, _, cx| this.step(-1, cx)))
             .on_action(cx.listener(|this, _: &PaletteDown, _, cx| this.step(1, cx)))
             .on_action(cx.listener(|this, _: &PalettePageUp, _, cx| this.step(-8, cx)))
             .on_action(cx.listener(|this, _: &PalettePageDown, _, cx| this.step(8, cx)))
-            .absolute()
-            .inset_0()
-            .bg(theme::BACKDROP)
-            .flex()
-            .justify_center()
-            .items_start()
-            .pt(px(80.0))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|_, _, _, cx| cx.emit(PaletteEvent::Dismiss)),
             )
             .child(
-                div()
-                    .id("palette")
-                    .w(px(620.0))
-                    .flex()
-                    .flex_col()
-                    .bg(theme::CARD)
-                    .border_1()
-                    .border_color(theme::BORDER_CARD)
-                    .rounded_md()
-                    .shadow_lg()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                dialog::card("palette", px(620.0))
+                    .p_0()
+                    .gap_0()
                     .child(
                         div()
                             .p_2()

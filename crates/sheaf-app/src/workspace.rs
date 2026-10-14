@@ -13,12 +13,12 @@ use gpui::{
 };
 use sheaf_ui::frame;
 use sheaf_ui::menu_bar::MenuBar;
+use sheaf_ui::palette::{Palette, PaletteEvent};
 use sheaf_ui::theme;
 
 use crate::commands::{PanelAction, Run, ShowPluginPanel};
 use crate::docview::{DocEvent, DocView};
 use crate::ocr_dialog::{OcrDialog, OcrDialogContext, OcrDialogEvent, OcrSpec};
-use crate::palette::{Palette, PaletteEvent};
 use crate::settings::{DockLayout, DockState, Settings, WindowPlacement};
 use crate::{
     About, ActivateMenuBar, CloseTab, CloseWindow, CommandPalette, MoveTabToNewWindow, NewWindow,
@@ -814,7 +814,8 @@ impl Workspace {
             cx.notify();
             return;
         }
-        let palette = cx.new(|cx| Palette::new(window, cx));
+        let commands = crate::commands::palette_commands(cx);
+        let palette = cx.new(|cx| Palette::new(commands, window, cx));
         let sub = cx.subscribe_in(&palette, window, |ws, _, ev: &PaletteEvent, window, cx| {
             ws.palette = None;
             ws.focus_active(window, cx);
