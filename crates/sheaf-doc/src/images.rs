@@ -353,6 +353,40 @@ fn flatten_alpha(image: DynamicImage) -> DynamicImage {
     DynamicImage::ImageRgba8(rgba).into_rgb8().into()
 }
 
+/// Where an image goes on its page, as shown (upright, top-left origin,
+/// points).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Placement {
+    /// Page width and height.
+    pub page: (f32, f32),
+    pub image: crate::Box2,
+}
+
+pub fn placement(page: &PageImage, fit: PageFit) -> Placement {
+    let (iw, ih) = page.size_pt();
+    let (pw, ph, x, y, w, h) = match fit {
+        PageFit::Original => (iw, ih, 0.0, 0.0, iw, ih),
+        PageFit::Paper {
+            width,
+            height,
+            margin,
+        } => {
+            let (pw, ph) = if (iw > ih) == (width > height) {
+                (width, height)
+            } else {
+                (height, width)
+            };
+            let s = ((pw - 2.0 * margin) / iw).min((ph - 2.0 * margin) / ih);
+            let (w, h) = (iw * s, ih * s);
+            (pw, ph, (pw - w) / 2.0, (ph - h) / 2.0, w, h)
+        }
+    };
+    Placement {
+        page: (pw, ph),
+        image: crate::Box2 { x, y, w, h },
+    }
+}
+
 /// A PDF with one page per image.
 pub fn to_pdf(pages: &[PageImage], fit: PageFit) -> Result<Vec<u8>> {
     if pages.is_empty() {
@@ -363,25 +397,11 @@ pub fn to_pdf(pages: &[PageImage], fit: PageFit) -> Result<Vec<u8>> {
     let mut kids = Vec::with_capacity(pages.len());
     for page in pages {
         let image = pdf.add_object(image_stream(page)?);
-        let (iw, ih) = page.size_pt();
-        // Page box and image rect as shown (upright).
-        let (pw, ph, x, y, w, h) = match fit {
-            PageFit::Original => (iw, ih, 0.0, 0.0, iw, ih),
-            PageFit::Paper {
-                width,
-                height,
-                margin,
-            } => {
-                let (pw, ph) = if (iw > ih) == (width > height) {
-                    (width, height)
-                } else {
-                    (height, width)
-                };
-                let s = ((pw - 2.0 * margin) / iw).min((ph - 2.0 * margin) / ih);
-                let (w, h) = (iw * s, ih * s);
-                (pw, ph, (pw - w) / 2.0, (ph - h) / 2.0, w, h)
-            }
-        };
+        let place = placement(page, fit);
+        let (pw, ph) = place.page;
+        let (x, w, h) = (place.image.x, place.image.w, place.image.h);
+        // PDF space runs bottom up.
+        let y = ph - place.image.y - h;
         // The file's page is the unrotated one; `/Rotate` turns it upright.
         // The image is centered, so its rect only swaps axes.
         let (pw, ph, x, y, w, h) = if page.rotate % 2 == 1 {

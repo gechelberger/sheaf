@@ -12,9 +12,10 @@ use std::ffi::{OsStr, OsString};
 mod export;
 mod images;
 mod progress;
+mod scan;
 
 /// The subcommands, for the app to recognize its hand-off.
-pub const SUBCOMMANDS: &[&str] = &["export", "images-to-pdf"];
+pub const SUBCOMMANDS: &[&str] = &["export", "images-to-pdf", "scan"];
 
 /// Whether `arg` (the first argument after the program name) names a
 /// subcommand. A file of that name in the current directory still opens
@@ -37,6 +38,7 @@ struct Cli {
 enum Command {
     Export(export::ExportArgs),
     ImagesToPdf(images::ImagesArgs),
+    Scan(scan::ScanArgs),
 }
 
 /// Exit status when an op was cancelled (as for SIGINT).
@@ -59,6 +61,7 @@ where
     let result = match cli.command {
         Command::Export(args) => export::run(args, cli.quiet),
         Command::ImagesToPdf(args) => images::run(args, cli.quiet),
+        Command::Scan(args) => scan::run(args, cli.quiet),
     };
     match result {
         Ok(()) => 0,

@@ -40,11 +40,13 @@ bar shows on stderr (`-q` hides it), and Ctrl-C stops the work cleanly
 sheaf export binder.pdf -o pngs/ --pages "1-3, 10-" --dpi 200
 sheaf export binder.pdf -f tiff --tiff bw -o binder.tif
 sheaf-cli export binder.pdf -f text -o binder.txt
+sheaf scan photos/*.jpg -o receipts.pdf --mode bw --ocr
 ```
 
 | Subcommand | Does |
 |---|---|
 | `export` | Pages to PNG, JPEG, TIFF or text, as File > Export Pages. Prints the files written; refuses to overwrite without `--force` |
+| `scan` | Photos or scans of paper to a clean PDF: finds the page in the photo and straightens it, turns it upright, levels the text, evens out shadows and color casts. `--mode color\|gray\|bw`, `--page letter\|a4\|original`, `--dpi`, `--ocr` (searchable text that lines up with the page), `--no-crop`/`--no-deskew`/… to skip a step |
 | `images-to-pdf` | JPEG, PNG, TIFF (every page), BMP, GIF and WebP files to one PDF, a page each: `--page original\|letter\|a4`, `--margin`, `--dpi` |
 
 ## Why

@@ -284,3 +284,38 @@ handwritten notes (an MIT algorithm, about 150 lines), and blank-page removal.
    Insert from Image adds that helper (a content-addressed file in the
    cache directory) when the GUI needs it. HEIC isn't readable: there's no
    permissive pure-Rust decoder.
+4. Done: `sheaf-scan`, `sheaf_ops::scan`, and `sheaf scan … [--mode bw]
+   [--page letter] [--ocr]`. Deviations, found by running it:
+   - **Order.** Crop → clear edges → flatten → orient → deskew → fit →
+     mode. Flatten comes before deskew because deskew fills the rotated
+     corners with white: before flattening, that white beside the still-tan
+     paper made dark strips. The orientation model reads flattened pages
+     far better (0.8 against 0.5 confidence), so orientation waits for it.
+   - **Background slivers.** The crop is insetted 0.75%, and `clear_edges`
+     whitens dark shapes touching a cropped page's border, as unpaper's
+     border filter does. It runs before flattening: afterwards Sauvola
+     can't see a uniform dark strip.
+   - **White point.** The contrast stretch also maps the median (paper) to
+     white, clamped at 200 so mostly-picture pages aren't blown out.
+   - **Despeckle size.** "0.02% of the page area" would erase punctuation
+     (1,700 px at 300 dpi Letter). It drops shapes under 1/200,000 of the
+     page instead, about 42 px (half a millimeter across) at 300 dpi.
+   - **Orientation.** Projection profiles got a real page wrong (row/column
+     energy 0.65 when upright). `quarter_turns` uses word shape instead:
+     with letters smeared into words, words lie wide. That gives the axis.
+     When the oar model is present (`sheaf_ocr::orient::scores`), it picks
+     between the two turns on that axis; on its own the model was wrong
+     about a sideways shaded page. The model's label is how far the
+     content is turned clockwise (checked by an ignored test in
+     `sheaf-ocr/tests/engines.rs`).
+   - `sheaf-ops` depends on `sheaf-ocr` outright: without engine features
+     it's light, and the binaries choose the engines (`sheaf-cli` has the
+     same `ocr-tesseract`/`ocr-oar` defaults as the app).
+   - **Fixtures.** There are no real phone shots in the repo yet (none were
+     on this machine). The unit tests build synthetic photos in code
+     instead: an angled shot on a dark background, a skewed page, a
+     sideways page, and a shadow with a warm cast. An end-to-end run on a
+     synthetic photo of rendered text, in all four orientations, came out
+     upright and straight with clean edges, and OCR read it back. Real
+     photos should still be added to `crates/sheaf-scan/tests/fixtures`
+     for tuning.

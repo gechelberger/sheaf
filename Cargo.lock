@@ -6490,8 +6490,10 @@ dependencies = [
  "log",
  "lopdf",
  "sheaf-doc",
+ "sheaf-ocr",
  "sheaf-ops",
  "sheaf-progress",
+ "sheaf-scan",
 ]
 
 [[package]]
@@ -6554,8 +6556,10 @@ dependencies = [
  "serde_json",
  "sheaf-core",
  "sheaf-doc",
+ "sheaf-ocr",
  "sheaf-progress",
  "sheaf-render",
+ "sheaf-scan",
  "tiff",
 ]
 
@@ -6620,6 +6624,19 @@ dependencies = [
  "sheaf-core",
  "sheaf-doc",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "sheaf-scan"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "anyhow",
+ "image",
+ "imageproc",
+ "log",
+ "serde",
+ "serde_json",
+ "sheaf-progress",
 ]
 
 [[package]]

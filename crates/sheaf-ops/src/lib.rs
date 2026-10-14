@@ -9,6 +9,7 @@ pub mod export;
 pub mod images;
 pub mod open;
 pub mod pages;
+pub mod scan;
 
 pub use open::open;
 

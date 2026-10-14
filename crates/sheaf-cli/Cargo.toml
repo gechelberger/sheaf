@@ -9,7 +9,15 @@ description = "sheaf on the command line: the same operations as the app, with n
 name = "sheaf-cli"
 path = "src/bin/sheaf-cli.rs"
 
+[features]
+# The OCR engines for `scan --ocr`, as in the app.
+default = ["ocr-tesseract", "ocr-oar"]
+ocr-tesseract = ["sheaf-ocr/tesseract"]
+ocr-oar = ["sheaf-ocr/oar"]
+
 [dependencies]
+sheaf-ocr.workspace = true
+sheaf-scan.workspace = true
 sheaf-ops.workspace = true
 sheaf-progress.workspace = true
 sheaf-doc.workspace = true

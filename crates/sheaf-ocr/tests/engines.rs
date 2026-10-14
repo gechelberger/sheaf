@@ -133,3 +133,66 @@ fn image_kinds_match_engines() {
         1
     );
 }
+
+/// A page of text lines, rendered at 100 dpi.
+#[cfg(feature = "oar")]
+fn text_page() -> image::RgbImage {
+    let dir = std::env::temp_dir().join(format!("sheaf-ocr-orient-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("lines.pdf");
+    let mut pdf = Pdf::with_version("1.5");
+    let pages_id = pdf.new_object_id();
+    let font = pdf.add_object(
+        dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" },
+    );
+    let mut ops = String::from("BT /F1 14 Tf 72 720 Td 18 TL\n");
+    for i in 0..30 {
+        ops.push_str(&format!(
+            "(Line {i}: the quick brown fox jumps over the lazy dog, again.) '\n"
+        ));
+    }
+    ops.push_str("ET");
+    let content = pdf.add_object(Stream::new(dictionary! {}, ops.into_bytes()));
+    let page = pdf.add_object(dictionary! {
+        "Type" => "Page", "Parent" => pages_id, "Contents" => content,
+        "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } },
+    });
+    pdf.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages", "Kids" => vec![Object::Reference(page)], "Count" => 1,
+        }),
+    );
+    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    pdf.trailer.set("Root", catalog);
+    pdf.save(&path).unwrap();
+    let pdfium = sheaf_render::pdfium::PdfiumEngine::open(&path, None).unwrap();
+    let raster = pdfium
+        .render(
+            PageIndex(0),
+            Job::Page {
+                width: 850,
+                rotation: Rotation::R0,
+            },
+            PixelFormat::Rgba,
+        )
+        .unwrap();
+    let rgba = image::RgbaImage::from_raw(raster.width, raster.height, raster.data).unwrap();
+    image::DynamicImage::ImageRgba8(rgba).into_rgb8()
+}
+
+#[test]
+#[ignore = "needs OCR data and libpdfium"]
+#[cfg(feature = "oar")]
+fn oar_orientation_undoes_a_turn() {
+    use image::imageops::{rotate90, rotate180, rotate270};
+    assert!(sheaf_ocr::orient::available());
+    let page = text_page();
+    let turns = sheaf_ocr::orient::quarter_turns;
+    assert_eq!(turns(&page), Some(0));
+    // Turned clockwise once, it takes three more to come back.
+    assert_eq!(turns(&rotate90(&page)), Some(3));
+    assert_eq!(turns(&rotate180(&page)), Some(2));
+    assert_eq!(turns(&rotate270(&page)), Some(1));
+}

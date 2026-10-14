@@ -15,6 +15,7 @@ pub mod data;
 pub mod engine;
 pub mod geom;
 pub mod job;
+pub mod orient;
 
 #[cfg(feature = "oar")]
 mod oar;
