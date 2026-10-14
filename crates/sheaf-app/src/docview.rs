@@ -989,7 +989,21 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
+        let before: HashSet<OutlineId> = doc
+            .model
+            .state()
+            .outline_flat()
+            .iter()
+            .map(|(_, n)| n.id)
+            .collect();
         let result = doc.model.apply_batch(edits, label);
+        if result.is_ok() {
+            reveal_new_bookmarks(
+                &doc.model.state().outline,
+                &before,
+                &mut doc.outline_expanded,
+            );
+        }
         self.finish_edit(label, result, cx);
     }
 
@@ -4021,4 +4035,68 @@ fn locked_card(path: &std::path::Path, l: &Locked, cx: &mut Context<DocView>) ->
                 ),
         )
         .into_any_element()
+}
+
+/// Expand what's needed to see bookmarks a batch added: their parents,
+/// and new headings with children of their own. Everything else keeps its
+/// expanded or collapsed state.
+fn reveal_new_bookmarks(
+    tree: &im::Vector<sheaf_doc::OutlineNode>,
+    before: &HashSet<OutlineId>,
+    expanded: &mut HashSet<OutlineId>,
+) {
+    fn walk(
+        nodes: &im::Vector<sheaf_doc::OutlineNode>,
+        path: &mut Vec<OutlineId>,
+        before: &HashSet<OutlineId>,
+        expanded: &mut HashSet<OutlineId>,
+    ) {
+        for n in nodes {
+            if !before.contains(&n.id) {
+                expanded.extend(path.iter().copied());
+                if !n.children.is_empty() {
+                    expanded.insert(n.id);
+                }
+            }
+            path.push(n.id);
+            walk(&n.children, path, before, expanded);
+            path.pop();
+        }
+    }
+    walk(tree, &mut Vec::new(), before, expanded);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sheaf_doc::OutlineNode;
+
+    fn node(id: u64, children: Vec<OutlineNode>) -> OutlineNode {
+        OutlineNode {
+            id: OutlineId(id),
+            title: id.to_string(),
+            target: None,
+            view: None,
+            color: None,
+            children: children.into(),
+        }
+    }
+
+    #[test]
+    fn new_bookmarks_are_revealed() {
+        // 1 (old, collapsed) > 2 (old) > 3 (new); 4 (new heading) > 5 (new);
+        // 6 (old, collapsed, untouched) > 7 (old).
+        let tree: im::Vector<OutlineNode> = vec![
+            node(1, vec![node(2, vec![node(3, vec![])])]),
+            node(4, vec![node(5, vec![])]),
+            node(6, vec![node(7, vec![])]),
+        ]
+        .into();
+        let before: HashSet<OutlineId> = [1, 2, 6, 7].map(OutlineId).into();
+        let mut expanded = HashSet::new();
+        reveal_new_bookmarks(&tree, &before, &mut expanded);
+        let mut got: Vec<u64> = expanded.iter().map(|i| i.0).collect();
+        got.sort();
+        assert_eq!(got, [1, 2, 4]);
+    }
 }
