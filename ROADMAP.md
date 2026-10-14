@@ -49,16 +49,25 @@ below are a first cut.
   engines, Tesseract 5 (static) and PaddleOCR PP-OCRv5 on ONNX Runtime
   (`oar-ocr`); Document > Recognize Text (OCR)…; one undo step; Find and
   Patterns search unsaved layers. Design in [`todos/ocr.md`](todos/ocr.md).
-- Scan cleanup: deskew, despeckle, auto-rotate by detected text orientation,
-  blank-page removal.
-- Create PDF from images (JPEG/PNG/TIFF; multi-page TIFF in).
+- ✅ Scan cleanup (`sheaf-scan`): deskew, despeckle, auto-rotate by detected
+  text orientation (word shape, plus PaddleOCR's orientation model when
+  present), black-and-white by Sauvola thresholding. Blank-page removal is
+  still to do.
+- ✅ Camera capture: phone photos of paper. Find the page and correct the
+  perspective, clear the background left at its edges, even out shadows,
+  lighting and white balance, and optionally flatten curled pages (UVDoc,
+  opt-in). File > Create > From Scans/Photos…, with a preview of each step,
+  and `sheaf scan`. Design in [`todos/cleanup-cli.md`](todos/cleanup-cli.md).
+- ✅ Create PDF from images (JPEG/PNG/TIFF/BMP/GIF/WebP; multi-page TIFF in;
+  JPEG kept as is, black and white as CCITT G4): `sheaf_doc::images`,
+  `sheaf images-to-pdf`.
 - Scanner intake: WIA/TWAIN on Windows, SANE on Linux.
 - Separator sheet → bookmark: a generic barcode/patch-code/keyword separator
   that splits or bookmarks a scanned batch. This replaces PDFlyer/CCH Scan
   "Target Sheets".
 
-Slices: OCR engine + text layer ✅ → batch OCR over binder ✅ → image import →
-cleanup filters → scanner intake → separator sheets.
+Slices: OCR engine + text layer ✅ → batch OCR over binder ✅ → image import ✅
+→ cleanup filters ✅ (with camera capture) → scanner intake → separator sheets.
 
 **Decided at kickoff (2026-10-11):** OCR is a core feature, not a plugin
 (Tesseract and ONNX Runtime are native code and can't run in wasmtime), with
@@ -254,10 +263,15 @@ archival requirements but not for daily binder work.
 
 - Action Wizard-style batch actions: run a sequence of commands (OCR, Bates,
   optimize, redact by pattern, flatten, export) over files and folders.
-- Built on the M5 plugin host API, which settles the README's Rhai vs Lua
+- Built on the M6 plugin host API, which settles the README's Rhai vs Lua
   question: plugins first, with an optional Rhai front end for quick macros
   if users want one.
-- Headless CLI batch mode (`sheaf batch …`).
+- Headless CLI batch mode (`sheaf batch …`). The split is in place: GUI-free
+  operations live in `sheaf-ops` (with `sheaf-progress` for progress and
+  cancellation), and `sheaf-cli` holds the subcommands. They're reachable
+  as `sheaf <subcommand>` or through the GPUI-free `sheaf-cli` binary;
+  `export`, `images-to-pdf` and `scan` ship today. Ops move into
+  `sheaf-ops` as subcommands need them, and `batch` chains them.
 - Parity audit: walk Acrobat Pro's menus and tools and PDFlyer's toolbar
   item by item; anything still missing becomes a slice here or is moved to
   Not planned with a reason.
@@ -281,14 +295,14 @@ Every remaining 📋 / ❓ row from the README feature tables, with its mileston
 | Combine Files (PDFs + images, page subsets) | M8 |
 | Split document (range, bookmark, size) | M8 |
 | Insert blank page / from image | M8 |
-| Insert from scanner | M6 |
+| Insert from scanner | M5 |
 | Crop pages | M8 |
 | Page labels | M7 (display), M8 (edit) |
 | Headers / footers / Bates numbering | M8 |
 | Watermarks / backgrounds | M8 |
 | Colorize bookmarks by level | M8 |
 | Bookmark from page range | M8 |
-| Target sheets / auto-bookmark from scan separators | M6 (separator sheets) |
+| Target sheets / auto-bookmark from scan separators | M5 (separator sheets) |
 | Underline / strikethrough | M9 |
 | Polygon | M9 |
 | Custom stamps | M9 |
@@ -304,8 +318,8 @@ Every remaining 📋 / ❓ row from the README feature tables, with its mileston
 | Create / edit form fields | M10 |
 | Export pages to PNG / JPEG | M7 |
 | Export to multi-page TIFF (PDFlyer) | M7 |
-| Create PDF from images | M6 |
-| OCR | M6 |
+| Create PDF from images | M5 ✅ |
+| OCR | M5 ✅ |
 | Export text | M7 |
 | Print | M7 |
 | PDF/A conversion ❓ | M14 |
@@ -329,6 +343,6 @@ Every remaining 📋 / ❓ row from the README feature tables, with its mileston
 - **3D, rich media, audio/video annotations.**
 - **Mobile.**
 - **CCH Workpaper Manager / Engagement integration** in core. This is a good
-  fit for a plugin (M5).
+  fit for a plugin (M6).
 - **General-purpose document JavaScript.** Only the form-scripting subset in
   M10; everything else goes through plugins.

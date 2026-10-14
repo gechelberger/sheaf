@@ -1,6 +1,6 @@
 # Plan: ops layer, CLI, shared progress, scan cleanup
 
-Status: **in progress** (2026-10-14), branch `cleanup-cli`. See "Slice notes" at the end.
+Status: **done** (2026-10-14), branch `cleanup-cli`. See "Slice notes" at the end.
 
 ## Why
 
@@ -373,3 +373,27 @@ handwritten notes (an MIT algorithm, about 150 lines), and blank-page removal.
    - **A bundled user.** `tax-form-bookmarks` 0.2.2 (`api = "^0.2.1"`)
      reports as it reads pages. On the 3,837-page Title 26 PDF the status
      bar read "Reading pages: 646 of 3837 pages…", and Esc stopped it.
+8. Done. In `ROADMAP.md`:
+   - M5 gains camera capture and marks image import and cleanup done
+     (blank-page removal is still open).
+   - M15's CLI line describes the ops/CLI split.
+   - The parity rows for scanner intake, separator sheets, images and OCR
+     say M5. Two stray "M5 plugin host" references now say M6.
+
+Verification:
+- **Automated.** `cargo test --workspace`, clippy, the
+  `--no-default-features` app build, and `cargo tree -p sheaf-cli | grep
+  gpui` (empty) all pass.
+- **CLI.**
+  - `sheaf export` through the main binary matches File > Export Pages,
+    since both run the same op.
+  - Ctrl-C on a 400-page `sheaf-cli export` exits with status 130 through
+    `check()`.
+  - `sheaf-cli scan --mode bw --ocr` on a synthetic phone photo gives a
+    straight, white page whose text reads back.
+- **GUI.** Esc stops a running export, a plugin command, and a scan in the
+  dialog.
+
+Still open: real phone-photo fixtures; blank-page removal; and the two
+"Open" questions above (keeping the raw photos as attachments, and cleaning
+pages already in a PDF).
