@@ -695,6 +695,9 @@ pub mod pdfium {
                         .set_fixed_size(w as i32, h as i32)
                         .rotate(rot, false)
                         .set_format(PdfBitmapFormat::BGRA)
+                        // pdfium-render asks PDFium for RGBA order by
+                        // default; keep the bitmap's own BGRA.
+                        .set_reverse_byte_order(false)
                         .render_form_data(true);
                     p.render_with_config(&cfg)?
                 }
@@ -718,6 +721,7 @@ pub mod pdfium {
                         .set_origin(-(x as i32), -(y as i32))
                         .rotate(rot, false)
                         .set_format(PdfBitmapFormat::BGRA)
+                        .set_reverse_byte_order(false)
                         .render_form_data(true);
                     p.render_into_bitmap_with_config(&mut bmp, &cfg)?;
                     bmp
