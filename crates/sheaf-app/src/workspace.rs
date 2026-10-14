@@ -1178,8 +1178,17 @@ impl Render for Workspace {
                 ))
                 .into_any_element(),
         };
-        let show =
-            |ws: &Self, side: Side| !ws.all_hidden && ws.doc.is_some() && ws.dock(side).shows();
+        // Read Mode and Full Screen put the docks (and in full screen, the
+        // title bar) away.
+        let presentation = self
+            .doc()
+            .map(|d| d.read(cx).presentation())
+            .unwrap_or_default();
+        let bare = presentation != crate::presentation::Presentation::Normal;
+        let full = presentation == crate::presentation::Presentation::FullScreen;
+        let show = |ws: &Self, side: Side| {
+            !bare && !ws.all_hidden && ws.doc.is_some() && ws.dock(side).shows()
+        };
         let left = show(self, Side::Left).then(|| self.render_dock(Side::Left, window, cx));
         let right = show(self, Side::Right).then(|| self.render_dock(Side::Right, window, cx));
         let bottom = show(self, Side::Bottom).then(|| self.render_dock(Side::Bottom, window, cx));
@@ -1357,7 +1366,7 @@ impl Render for Workspace {
             .size_full()
             .bg(theme::RAISED)
             .text_color(theme::TEXT_SOFT)
-            .child(title_bar)
+            .when(!full, |d| d.child(title_bar))
             .child(
                 div()
                     .relative()

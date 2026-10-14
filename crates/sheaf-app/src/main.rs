@@ -29,6 +29,7 @@ mod plugin_manager;
 mod plugin_panel;
 #[cfg(feature = "plugins")]
 mod plugins;
+mod presentation;
 mod region;
 mod script;
 mod settings;
@@ -88,7 +89,9 @@ actions!(
         RotateViewCw,
         RotateViewCcw,
         SplitView,
-        NextPane
+        NextPane,
+        FullScreen,
+        ReadMode
     ]
 );
 actions!(
@@ -292,6 +295,8 @@ fn main() {
                 KeyBinding::new("ctrl-shift--", RotateViewCcw, doc),
                 KeyBinding::new("ctrl-\\", SplitView, doc),
                 KeyBinding::new("f6", NextPane, doc),
+                KeyBinding::new("ctrl-l", FullScreen, doc),
+                KeyBinding::new("ctrl-h", ReadMode, doc),
                 KeyBinding::new("r", RotatePageCw, doc_keys),
                 KeyBinding::new("shift-r", RotatePageCcw, doc_keys),
                 KeyBinding::new("delete", DeletePage, doc_keys),

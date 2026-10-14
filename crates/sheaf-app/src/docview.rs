@@ -32,6 +32,7 @@ use sheaf_ui::theme;
 use crate::markup_tools::{Drag, Tool, arrow_head, rotate_pt, stroke_canvas};
 pub(crate) use crate::pane::Zoom;
 use crate::pane::{Layout, LayoutSpec, MARGIN, PageMode, Pane, Spread};
+use crate::{FullScreen, ReadMode};
 use sheaf_doc::{
     Document, Edit, EditOutcome, FlatOutlineItem, OutlineId, PageId, PageRef, SourceId, SourceInfo,
 };
@@ -406,6 +407,9 @@ pub struct DocView {
     pub(crate) edit_source: Option<String>,
     /// Shift+drag region (see region.rs).
     pub(crate) region: Option<crate::region::Region>,
+    /// Full Screen / Read Mode (see presentation.rs).
+    pub(crate) presentation: crate::presentation::Presentation,
+    pub(crate) saved_view: Option<crate::presentation::SavedView>,
     /// Rows of plugin panels for this document, by `<plugin>.<panel>`.
     #[cfg(feature = "plugins")]
     pub(crate) plugin_panels: HashMap<String, crate::plugin_panel::PluginPanelState>,
@@ -480,6 +484,8 @@ impl DocView {
             tick_glyph: "✓".into(),
             edit_source: None,
             region: None,
+            presentation: Default::default(),
+            saved_view: None,
             #[cfg(feature = "plugins")]
             plugin_panels: HashMap::new(),
         };
@@ -2963,6 +2969,27 @@ fn plan_pane(
             || (l.view_h - view_h).abs() > 0.5
     });
     if stale {
+        // A resize (or zoom to fit following one) keeps the point at the
+        // top centre of the pane where it is, unless a scroll is queued.
+        if pane.pending_scroll.is_none()
+            && let Some(old) = &pane.layout
+            && ((old.view_w - view_w).abs() > 0.5 || (old.view_h - view_h).abs() > 0.5)
+        {
+            let sx = -f32::from(pane.scroll.offset().x);
+            let sy = -f32::from(pane.scroll.offset().y);
+            let (vx, vy) = (old.view_w.min(view_w) / 2.0, 0.0);
+            if let Some(page) = old.page_at(sx + vx, sy + vy)
+                && let Some(r) = old.rect(page)
+            {
+                pane.pending_scroll = Some(ScrollTo::Anchor {
+                    page,
+                    fx: (sx + vx - r.left) / r.w,
+                    fy: (sy + vy - r.top) / r.h,
+                    vx,
+                    vy,
+                });
+            }
+        }
         let layout = Layout::build(
             LayoutSpec {
                 zoom: pane.zoom,
@@ -3436,9 +3463,16 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             unreachable!("render_ready on a document that isn't ready");
         };
-        let panes = doc.panes.len();
+        let full = self.presentation == crate::presentation::Presentation::FullScreen;
+        // Full screen shows only the active pane.
+        let shown: Vec<usize> = if full {
+            vec![doc.active]
+        } else {
+            (0..doc.panes.len()).collect()
+        };
+        let panes = shown.len();
         let mut frames = Vec::with_capacity(panes);
-        for ix in 0..panes {
+        for &ix in &shown {
             // The scroll container's bounds lag a frame behind on first
             // layout; fall back to the window size until we have them.
             let bounds = doc.panes[ix].scroll.bounds();
@@ -3463,7 +3497,7 @@ impl DocView {
             tool_color: self.tool_color,
         };
         let mut pane_els = Vec::with_capacity(panes);
-        for (ix, frame) in frames.iter().enumerate() {
+        for (&ix, frame) in shown.iter().zip(&frames) {
             let pane = &doc.panes[ix];
             let layout = pane.layout.as_ref().expect("planned");
             let pages: Vec<_> = frame
@@ -3483,14 +3517,25 @@ impl DocView {
                     .cursor(page_cursor)
                     .on_mouse_down(
                         gpui::MouseButton::Left,
-                        cx.listener(move |v, ev, window, cx| {
+                        cx.listener(move |v, ev: &gpui::MouseDownEvent, window, cx| {
+                            if v.presentation == crate::presentation::Presentation::FullScreen {
+                                // Acrobat: click for the next page, Shift+click back.
+                                v.turn_page(if ev.modifiers.shift { -1 } else { 1 }, cx);
+                                return;
+                            }
                             v.activate_pane(ix, cx);
                             v.on_page_mouse_down(ev, window, cx)
                         }),
                     )
                     .on_mouse_down(
                         gpui::MouseButton::Right,
-                        cx.listener(move |v, _, _, cx| v.activate_pane(ix, cx)),
+                        cx.listener(move |v, _, _, cx| {
+                            if v.presentation == crate::presentation::Presentation::FullScreen {
+                                v.turn_page(-1, cx);
+                                return;
+                            }
+                            v.activate_pane(ix, cx)
+                        }),
                     )
                     .on_mouse_move(
                         cx.listener(|v, ev, window, cx| v.on_page_mouse_move(ev, window, cx)),
@@ -3639,8 +3684,11 @@ impl Render for DocView {
             }
         }
 
-        let search_bar = self.render_search_bar(cx);
-        let toolbar = self.render_toolbar(cx);
+        use crate::presentation::Presentation;
+        let presentation = self.presentation;
+        let full = presentation == Presentation::FullScreen;
+        let search_bar = (!full).then(|| self.render_search_bar(cx)).flatten();
+        let toolbar = (presentation == Presentation::Normal).then(|| self.render_toolbar(cx));
         let mut body: Option<AnyElement> = None;
         // The status bar: where you are, then the latest notice, which
         // gives way (ellipsis, full text on hover) when space is short.
@@ -3718,8 +3766,16 @@ impl Render for DocView {
             .on_action(cx.listener(|v, _: &RotateViewCw, _, cx| v.rotate_view(Rotation::R90, cx)))
             .on_action(cx.listener(|v, _: &RotateViewCcw, _, cx| v.rotate_view(Rotation::R270, cx)))
             .on_action(cx.listener(|v, _: &Find, window, cx| v.open_search(window, cx)))
+            .on_action(
+                cx.listener(|v, _: &FullScreen, window, cx| v.toggle_full_screen(window, cx)),
+            )
+            .on_action(cx.listener(|v, _: &ReadMode, window, cx| v.toggle_read_mode(window, cx)))
             .on_action(cx.listener(|v, _: &CloseSearch, window, cx| {
-                if v.clear_region(cx) {
+                if v.presentation == crate::presentation::Presentation::FullScreen
+                    && v.leave_presentation(window, cx)
+                {
+                    // Esc leaves full screen before anything else.
+                } else if v.clear_region(cx) {
                     // Esc drops a selected region first.
                 } else if v.search.is_some() {
                     v.close_search(window, cx)
@@ -3736,7 +3792,8 @@ impl Render for DocView {
                     if v.tool != Tool::Select {
                         v.set_tool(Tool::Select, cx);
                     }
-                    v.clear_selection(cx)
+                    v.clear_selection(cx);
+                    v.leave_presentation(window, cx);
                 }
             }))
             .on_action(cx.listener(|v, _: &SearchNext, _, cx| v.search_step(1, cx)))
@@ -3783,10 +3840,14 @@ impl Render for DocView {
             .flex()
             .flex_col()
             .size_full()
-            .bg(theme::RAISED)
+            .bg(if full {
+                theme::FULL_SCREEN
+            } else {
+                theme::RAISED
+            })
             .text_color(theme::TEXT_SOFT)
             .children(search_bar)
-            .child(toolbar)
+            .children(toolbar)
             .child(div().flex_grow(1.0).min_h(px(0.0)).children(body))
             .when_some(ocr_progress, |d, frac| {
                 d.child(
@@ -3797,30 +3858,32 @@ impl Render for DocView {
                         .child(div().h_full().w(relative(frac)).bg(theme::ACCENT)),
                 )
             })
-            .child(
-                div()
-                    .h(px(STATUS_H))
-                    .flex_shrink_0()
-                    .px_2()
-                    .flex()
-                    .items_center()
-                    .bg(theme::BACKGROUND)
-                    .text_sm()
-                    .whitespace_nowrap()
-                    .child(div().flex_shrink_0().child(status))
-                    .when_some(status_notice, |d, notice| {
-                        d.child(
-                            div()
-                                .id("status-notice")
-                                .flex_1()
-                                .min_w(px(0.0))
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .tooltip(sheaf_ui::tooltip::Tooltip::text(notice.clone()))
-                                .child(format!("  —  {notice}")),
-                        )
-                    }),
-            )
+            .when(!full, |d| {
+                d.child(
+                    div()
+                        .h(px(STATUS_H))
+                        .flex_shrink_0()
+                        .px_2()
+                        .flex()
+                        .items_center()
+                        .bg(theme::BACKGROUND)
+                        .text_sm()
+                        .whitespace_nowrap()
+                        .child(div().flex_shrink_0().child(status))
+                        .when_some(status_notice, |d, notice| {
+                            d.child(
+                                div()
+                                    .id("status-notice")
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .tooltip(sheaf_ui::tooltip::Tooltip::text(notice.clone()))
+                                    .child(format!("  —  {notice}")),
+                            )
+                        }),
+                )
+            })
     }
 }
 

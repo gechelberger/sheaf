@@ -40,6 +40,8 @@ pub const CARD: Rgba = hex(0x262626);
 pub const POPOVER: Rgba = hex(0x2a2a2a);
 /// Tooltips, the active tab, the status bar.
 pub const RAISED: Rgba = hex(0x2b2b2b);
+/// Behind the page in Full Screen.
+pub const FULL_SCREEN: Rgba = hex(0x000000);
 /// A row or item with keyboard focus; a menu-bar title under the pointer.
 pub const ROW_FOCUS: Rgba = hex(0x2e2e2e);
 pub const HOVER_FAINT: Rgba = hex(0x303030);
