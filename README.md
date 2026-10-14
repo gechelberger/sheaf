@@ -58,7 +58,8 @@ sheaf remove-blanks scans.pdf -o clean.pdf --rejects removed.pdf
 Acrobat has become slow enough that routine work — opening a 400-page scanned
 workpaper binder, reordering pages, dropping a tickmark — is painful,
 especially on older hardware. PDFlyer makes the workflow tolerable but is
-locked to 32-bit Acrobat on Windows.
+Windows-only and runs inside a paid copy of Acrobat Standard or Pro (64-bit
+Acrobat since PDFlyer v20; v22 dropped Windows 10).
 
 Sheaf's bet is that a PDF editor written in Rust, with a GPU-accelerated UI and
 a render pipeline designed around tiling and caching, can be an order of
@@ -200,7 +201,7 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 |---|---|
 | Create / rename / delete / nest bookmarks | ✅ |
 | Move bookmark **with its pages** | ✅ Shift+drag |
-| Colorize bookmarks by level / status | ✅ per bookmark; Document > Color Bookmarks by Level… |
+| Colorize bookmarks | ✅ per bookmark; Document > Color Bookmarks by Level…. PDFlyer colors by populated vs empty and, separately, by status; both 📋 ([Pending](ROADMAP.md#pdflyer-parity-gaps)) |
 | Bookmark from page range | ✅ Document > Bookmarks from Pages…: one per page, titled from a template (`Page <<label>>`), optionally under a new parent |
 | Bookmark pattern matches | ✅ Patterns panel > Bookmark matches: one per match, pointing at it |
 | Target sheets / auto-bookmark from scan separators | ❓ |
@@ -213,7 +214,7 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 | Ink / freehand | ✅ |
 | Stamps (built-in + custom) | ✅ tickmark library; custom 📋 |
 | **Tickmarks** (PDFlyer): quick-stamp library, keyboard-driven | ✅ |
-| **Connectors** (PDFlyer): linked markers that jump between pages | ✅ saved as Link annotations, so they jump in Acrobat too |
+| **Connectors** (PDFlyer): linked markers that jump between pages | ✅ pairs saved as Link annotations, so they jump in Acrobat too. PDFlyer's are label *groups* (1–50, A–ZZ) with Prev/Next and "all pages with / without"; groups are 📋 ([Pending](ROADMAP.md#pdflyer-parity-gaps)) |
 | **Calculator tape** (PDFlyer): 10-key calc, tape placed as annotation | ✅ Calculator panel (Ctrl+Alt+4) |
 | Comments list / review panel, status, replies | ✅ Comments panel (Ctrl+Alt+5) lists ours and third-party; status/replies 📋 |
 | Flatten annotations | ✅ File > Export Flattened Copy… (links and form fields kept) |
@@ -320,8 +321,10 @@ M8 onward (viewing and output through v1.0 parity) is laid out in [ROADMAP.md](R
 - **One parser or two?** PDFium for rendering + lopdf for editing means two
   parsers of the same bytes. Alternative: do everything through PDFium's
   (limited) write API, or write our own object layer. Spike in M0.
-- **PDFlyer "Target Sheets" / Scan integration.** These depend on CCH Scan.
-  Do we want a generic "barcode/separator-sheet → bookmark" feature instead?
+- ~~**PDFlyer "Target Sheets" / Scan integration.**~~ Decided: CCH target
+  sheets are proprietary barcodes read by CCH Scan, so sheaf gets a generic
+  barcode / patch-code / keyword separator sheet → bookmark or split instead
+  (ROADMAP M5).
 - **Scripting language** for batch actions: Rhai (pure Rust, easy embed) vs
   Lua (familiar). Post-MVP, but affects the command architecture.
 
