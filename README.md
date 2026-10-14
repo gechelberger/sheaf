@@ -41,6 +41,7 @@ sheaf export binder.pdf -o pngs/ --pages "1-3, 10-" --dpi 200
 sheaf export binder.pdf -f tiff --tiff bw -o binder.tif
 sheaf-cli export binder.pdf -f text -o binder.txt
 sheaf scan photos/*.jpg -o receipts.pdf --mode bw --ocr
+sheaf remove-blanks scans.pdf -o clean.pdf --rejects removed.pdf
 ```
 
 | Subcommand | Does |
@@ -48,6 +49,7 @@ sheaf scan photos/*.jpg -o receipts.pdf --mode bw --ocr
 | `combine` | PDFs and images into one PDF in order; `file:range` takes some pages (`a.pdf:1-3,7`). A bookmark per file (`--no-file-bookmarks` to skip), `--image-page` |
 | `export` | Pages to PNG, JPEG, TIFF or text, as File > Export Pages. Prints the files written; refuses to overwrite without `--force` |
 | `split` | One PDF into several: `--every N`, `--bookmarks` (a file per top-level bookmark), `--max-size 10MB`, or `--ranges "1-3; 4-10; 11-"` |
+| `remove-blanks` | Blank, and "intentionally left blank", pages out of a PDF, as Document > Find Blank Pages…. Prints each page found and whether it goes; `--dry-run` writes nothing; `--rejects` keeps the removed pages in a file of their own, bookmarked "p. 4 — blank". Nearly blank pages (a signature) stay unless `--nearly-blank`; `--sensitivity strict\|normal\|lenient`, `--keep-intentional`, `--pages` |
 | `scan` | Photos or scans of paper to a clean PDF: finds the page in the photo and straightens it, turns it upright, levels the text, evens out shadows and color casts. `--mode color\|gray\|bw`, `--page letter\|a4\|original`, `--dpi`, `--ocr` (searchable text that lines up with the page), `--no-crop`/`--no-deskew`/… to skip a step, `--flatten-curl` for curled or bent pages (UVDoc model; `scripts/fetch-ocr-data.sh --uvdoc`) |
 | `images-to-pdf` | JPEG, PNG, TIFF (every page), BMP, GIF and WebP files to one PDF, a page each: `--page original\|letter\|a4`, `--margin`, `--dpi` |
 
@@ -185,7 +187,7 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 | Combine Files: many PDFs and images into one, choosing pages from each | ✅ File > Create > Combine Files…: add files or a folder or drop them, reorder, a page range per file, a bookmark per file holding its own bookmarks, images at their size or fitted to Letter/A4. `sheaf combine -o out.pdf a.pdf:1-3 scan.tif b.png` |
 | Split document (by page range, by bookmark, by size) | ✅ Document > Split Document…: every N pages, at each top-level bookmark (files named after them), by maximum file size, or by page ranges; unsaved changes included; Esc stops it. `sheaf split` |
 | Insert blank page / from image | ✅ Document > Insert Pages > Blank Pages… (size of the current page or Letter/A4/Legal, how many, where) and From Images… (fitted to a page size or at their own) |
-| Remove blank pages | ✅ Document > Find Blank Pages…: blank, nearly blank (a signature) and "intentionally left blank" pages found by content and pixels (margins, off-white paper, bleed-through and dust ignored); reviewed with thumbnails before one undoable delete |
+| Remove blank pages | ✅ Document > Find Blank Pages…: blank, nearly blank (a signature) and "intentionally left blank" pages found by content and pixels (margins, off-white paper, bleed-through and dust ignored); reviewed with thumbnails before one undoable delete. `sheaf remove-blanks` |
 | Replace pages | ✅ Document > Replace Pages…: pages of this document with a run of another PDF's; bookmarks and comments on them stay |
 | Insert from scanner | 📋 M5 |
 | Crop pages | ✅ Document > Crop Pages…: margins (in, mm or pt, as the page is shown) or trim white margins, on the current, selected, all or a range of pages; marks and OCR text stay on their content; saved as `/CropBox` |

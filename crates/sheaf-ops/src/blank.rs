@@ -22,14 +22,16 @@
 //!   ink are tiny. One short line (a signature) is "nearly blank", which a
 //!   UI leaves unticked.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::LazyLock;
 
 use anyhow::{Context, Result};
 use image::GrayImage;
 use serde::{Deserialize, Serialize};
 use sheaf_core::{PageIndex, Rotation};
-use sheaf_doc::{PageId, Snapshot, SourceId};
+use std::path::Path;
+
+use sheaf_doc::{Document, Edit, NewOutlineItem, PageId, Snapshot, SourceId};
 use sheaf_progress::{Progress, Unit};
 use sheaf_render::pdfium::PdfiumEngine;
 use sheaf_render::{Job, PixelFormat, Renderer};
@@ -345,6 +347,58 @@ pub fn find(
     }
     out.sort_by_key(|c| c.index);
     Ok(out)
+}
+
+/// Write `doc` without the `drop` pages to `kept`, and, with `rejects`,
+/// the dropped pages to a file of their own, each bookmarked with where it
+/// was and why ("p. 4 — blank"), so nothing is lost for good. Returns how
+/// many pages `kept` has.
+pub fn write(
+    doc: &mut Document,
+    drop: &[Candidate],
+    kept: &Path,
+    rejects: Option<&Path>,
+) -> Result<usize> {
+    let gone: HashSet<PageId> = drop.iter().map(|c| c.id).collect();
+    let snap = doc.snapshot();
+    let keep: Vec<PageId> = snap
+        .state
+        .pages
+        .iter()
+        .map(|p| p.id)
+        .filter(|id| !gone.contains(id))
+        .collect();
+    if keep.is_empty() {
+        anyhow::bail!("every page is blank; nothing to keep");
+    }
+    sheaf_doc::save::extract_pages(&snap, &keep, kept)?;
+    let Some(rejects) = rejects.filter(|_| !drop.is_empty()) else {
+        return Ok(keep.len());
+    };
+    // The rejects' own bookmarks replace the document's.
+    let mut edits: Vec<Edit> = snap
+        .state
+        .outline
+        .iter()
+        .map(|n| Edit::OutlineDelete { id: n.id })
+        .collect();
+    edits.push(Edit::DeletePages { ids: keep.clone() });
+    edits.push(Edit::OutlineInsertTree {
+        parent: None,
+        after: None,
+        items: drop
+            .iter()
+            .map(|c| NewOutlineItem {
+                title: format!("p. {} — {}", c.index + 1, c.reason.label()),
+                target: Some(c.id),
+                view: None,
+                depth: 0,
+            })
+            .collect(),
+    });
+    doc.apply_batch(edits, "Rejected pages")?;
+    sheaf_doc::save::rewrite_to_path(&doc.snapshot(), rejects)?;
+    Ok(keep.len())
 }
 
 #[cfg(test)]

@@ -9,6 +9,7 @@
 use clap::{Parser, Subcommand};
 use std::ffi::{OsStr, OsString};
 
+mod blanks;
 mod combine;
 mod export;
 mod images;
@@ -17,7 +18,14 @@ mod scan;
 mod split;
 
 /// The subcommands, for the app to recognize its hand-off.
-pub const SUBCOMMANDS: &[&str] = &["combine", "export", "images-to-pdf", "scan", "split"];
+pub const SUBCOMMANDS: &[&str] = &[
+    "combine",
+    "export",
+    "images-to-pdf",
+    "remove-blanks",
+    "scan",
+    "split",
+];
 
 /// Whether `arg` (the first argument after the program name) names a
 /// subcommand. A file of that name in the current directory still opens
@@ -41,6 +49,7 @@ enum Command {
     Combine(combine::CombineArgs),
     Export(export::ExportArgs),
     ImagesToPdf(images::ImagesArgs),
+    RemoveBlanks(blanks::BlanksArgs),
     Scan(scan::ScanArgs),
     Split(split::SplitArgs),
 }
@@ -66,6 +75,7 @@ where
         Command::Combine(args) => combine::run(args, cli.quiet),
         Command::Export(args) => export::run(args, cli.quiet),
         Command::ImagesToPdf(args) => images::run(args, cli.quiet),
+        Command::RemoveBlanks(args) => blanks::run(args, cli.quiet),
         Command::Scan(args) => scan::run(args, cli.quiet),
         Command::Split(args) => split::run(args, cli.quiet),
     };
