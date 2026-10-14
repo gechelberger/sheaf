@@ -223,6 +223,7 @@ pub fn builtin(id: &str) -> Builtin {
         | "workspace::AddBackground"
         | "workspace::BookmarksFromPages"
         | "workspace::ColorBookmarksByLevel"
+        | "workspace::FindBlankPages"
         | "workspace::Print"
         | "workspace::DocumentProperties"
         | "workspace::CloseDocument"

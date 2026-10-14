@@ -242,6 +242,7 @@ fn builtin_menus() -> Vec<(&'static str, Vec<Item>)> {
                 item("E&xtract Pages…", ExtractPages),
                 item("&Split Document…", SplitDocument),
                 item("&Delete Pages", DeletePage),
+                item("Find Bla&nk Pages…", FindBlankPages),
                 sep(),
                 item("Recognize &Text (OCR)…", RecognizeText),
                 item("Cancel OC&R", CancelOcr),

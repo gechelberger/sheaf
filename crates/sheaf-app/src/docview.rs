@@ -123,6 +123,8 @@ pub(crate) struct Doc {
     pub(crate) thumb_scroll: ScrollHandle,
     /// Pages whose previews the thumbnail panel is showing; kept cached.
     pub(crate) thumb_keep: HashSet<(PageId, Rotation)>,
+    /// Previews the blank-page review is showing; kept cached.
+    pub(crate) review_keep: HashSet<(PageId, Rotation)>,
     /// Last page the thumbnail panel auto-scrolled to follow.
     pub(crate) thumb_followed: Option<PageId>,
     pub(crate) outline_loaded: bool,
@@ -436,6 +438,8 @@ pub struct DocView {
     pub(crate) ocr: Option<crate::ocr_run::OcrRun>,
     /// A background job in progress: Export Pages, Split (see jobs.rs).
     pub(crate) job: Option<crate::jobs::Job>,
+    /// Blank pages found, waiting for review (see blank_review.rs).
+    pub(crate) blank_review: Option<crate::blank_review::Review>,
     /// A plugin command running on this document, with its progress
     /// (see plugins.rs).
     #[cfg_attr(not(feature = "plugins"), allow(dead_code))]
@@ -539,6 +543,7 @@ impl DocView {
             comments: None,
             ocr: None,
             job: None,
+            blank_review: None,
             plugin_run: None,
             pending_comments_focus: false,
             initial_query: None,
@@ -702,6 +707,7 @@ impl DocView {
             notice: None,
             thumb_scroll: ScrollHandle::new(),
             thumb_keep: HashSet::new(),
+            review_keep: HashSet::new(),
             thumb_followed: None,
             outline_loaded: false,
             outline_expanded: HashSet::new(),
@@ -2892,7 +2898,12 @@ impl DocView {
 
     // ----- rendering pipeline -------------------------------------------------
 
-    fn ensure_rendered(&mut self, pref: PageRef, want: RenderRequest, cx: &mut Context<Self>) {
+    pub(crate) fn ensure_rendered(
+        &mut self,
+        pref: PageRef,
+        want: RenderRequest,
+        cx: &mut Context<Self>,
+    ) {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
@@ -3530,7 +3541,9 @@ fn evict(doc: &mut Doc, frames: &[PaneFrame]) {
         }
     }
     let keep_preview = |doc: &Doc, &(p, r): &(PageId, Rotation)| {
-        kept.get(&p).is_some_and(|rots| rots.contains(&r)) || doc.thumb_keep.contains(&(p, r))
+        kept.get(&p).is_some_and(|rots| rots.contains(&r))
+            || doc.thumb_keep.contains(&(p, r))
+            || doc.review_keep.contains(&(p, r))
     };
     let evict: Vec<(PageId, Rotation)> = doc
         .previews
@@ -4057,6 +4070,7 @@ impl Render for DocView {
                 State::Ready(_) => unreachable!(),
             }
         };
+        let review = self.render_blank_review(cx);
         let ocr_progress = self
             .ocr_progress()
             .or_else(|| self.job_progress())
@@ -4145,6 +4159,8 @@ impl Render for DocView {
                     v.close_search(window, cx)
                 } else if v.cancel_ocr(cx) {
                     // Esc during a Recognize Text run stops it.
+                } else if v.close_blank_review(cx) {
+                    // Esc closes the blank-page review.
                 } else if v.cancel_job(cx) {
                     // Likewise an export or a split.
                 } else if v.cancel_plugin_run(cx) {
@@ -4216,7 +4232,14 @@ impl Render for DocView {
             .text_color(theme::TEXT_SOFT)
             .children(search_bar)
             .children(goto_bar)
-            .child(div().flex_grow(1.0).min_h(px(0.0)).children(body))
+            .child(
+                div()
+                    .relative()
+                    .flex_grow(1.0)
+                    .min_h(px(0.0))
+                    .children(body)
+                    .children(review),
+            )
             .when_some(ocr_progress, |d, frac| {
                 d.child(
                     div()

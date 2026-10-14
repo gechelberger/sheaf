@@ -353,6 +353,7 @@ pub struct Workspace {
         Entity<crate::bookmark_tools::BookmarkToolsDialog>,
         Subscription,
     )>,
+    blanks: Option<(Entity<crate::blanks_dialog::BlanksDialog>, Subscription)>,
     /// File > Print, while open.
     print: Option<(Entity<crate::print_dialog::PrintDialog>, Subscription)>,
     /// File > Properties, while open.
@@ -456,6 +457,7 @@ impl Workspace {
             header_footer: None,
             watermark: None,
             bookmark_tool: None,
+            blanks: None,
             print: None,
             properties: None,
             ocr_dialog: None,
@@ -1269,6 +1271,41 @@ impl Workspace {
             .ok();
         })
         .detach();
+    }
+
+    /// Document > Find Blank Pages….
+    fn open_blanks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.blanks.is_some() {
+            return;
+        }
+        let Some(doc) = self.doc().cloned() else {
+            return;
+        };
+        let (count, targets) = doc.read(cx).target_indexes();
+        let params = self.settings.blanks;
+        let dialog = cx
+            .new(|cx| crate::blanks_dialog::BlanksDialog::new(count, targets, params, window, cx));
+        let sub = cx.subscribe_in(
+            &dialog,
+            window,
+            |ws, _, ev: &crate::blanks_dialog::BlanksEvent, window, cx| {
+                ws.blanks = None;
+                ws.focus_active(window, cx);
+                if let crate::blanks_dialog::BlanksEvent::Find(pages, params) = ev
+                    && let Some(doc) = ws.doc().cloned()
+                {
+                    ws.settings.blanks = *params;
+                    if let Err(e) = ws.settings.save() {
+                        log::warn!("saving settings: {e:#}");
+                    }
+                    let (pages, params) = (pages.clone(), *params);
+                    doc.update(cx, |d, cx| d.find_blank_pages(pages, params, cx));
+                }
+                cx.notify();
+            },
+        );
+        self.blanks = Some((dialog, sub));
+        cx.notify();
     }
 
     /// Bookmarks from Pages… or Color Bookmarks by Level….
@@ -2643,6 +2680,9 @@ impl Render for Workspace {
                 }),
             )
             .on_action(
+                cx.listener(|ws, _: &crate::FindBlankPages, window, cx| ws.open_blanks(window, cx)),
+            )
+            .on_action(
                 cx.listener(|ws, a: &crate::recent::OpenRecent, window, cx| {
                     ws.open_recent(a.path.clone(), window, cx)
                 }),
@@ -2798,6 +2838,11 @@ impl Render for Workspace {
             )
             .children(
                 self.bookmark_tool
+                    .as_ref()
+                    .map(|(d, _)| deferred(d.clone()).with_priority(2)),
+            )
+            .children(
+                self.blanks
                     .as_ref()
                     .map(|(d, _)| deferred(d.clone()).with_priority(2)),
             )

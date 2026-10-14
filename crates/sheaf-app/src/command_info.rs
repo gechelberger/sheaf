@@ -317,6 +317,11 @@ pub fn info(id: &str) -> Option<Info> {
             "Color every bookmark by how deeply it's nested, as PDFlyer does.",
             &["outline", "colour", "level", "depth"],
         ),
+        "workspace::FindBlankPages" => (
+            "find-blank-pages",
+            "Find blank pages (duplex backs, scanner fillers, \"intentionally left blank\") and review them before deleting.",
+            &["blank", "empty", "remove", "scan", "duplex", "delete"],
+        ),
         "workspace::PageLabels" => (
             "page-labels",
             "Number pages your way: roman numerals for the front matter, a prefix like A- for exhibits, or a new start.",

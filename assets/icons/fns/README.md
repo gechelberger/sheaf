@@ -81,6 +81,7 @@ an image element does not inherit the parent element's color.
 | [background](background/icon.svg) | Background | `AddBackground` |
 | [bookmarks-from-pages](bookmarks-from-pages/icon.svg) | Bookmarks from pages | `BookmarksFromPages` |
 | [color-bookmarks](color-bookmarks/icon.svg) | Color bookmarks by level | `ColorBookmarksByLevel` |
+| [find-blank-pages](find-blank-pages/icon.svg) | Find blank pages | `FindBlankPages` |
 | [create-from-scans](create-from-scans/icon.svg) | Create from scans/photos | `CreateFromScans` |
 | [export-pages](export-pages/icon.svg) | Export pages | `ExportPages` |
 | [print](print/icon.svg) | Print | `Print` |

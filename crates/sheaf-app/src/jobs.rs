@@ -27,6 +27,19 @@ impl DocView {
         done: impl FnOnce(T) -> String + 'static,
         cx: &mut Context<Self>,
     ) -> bool {
+        self.run_job_then(name, work, status, |_, out, _| Some(done(out)), cx)
+    }
+
+    /// [`Self::run_job`], with `done` given the view to act on the result
+    /// too; it returns the status line, if any.
+    pub(crate) fn run_job_then<T: Send + 'static>(
+        &mut self,
+        name: &str,
+        work: impl FnOnce(&Tracker) -> anyhow::Result<T> + Send + 'static,
+        status: impl Fn(&Snapshot) -> Option<String> + 'static,
+        done: impl FnOnce(&mut DocView, T, &mut Context<DocView>) -> Option<String> + 'static,
+        cx: &mut Context<Self>,
+    ) -> bool {
         use futures::FutureExt;
         if let Some(job) = &self.job {
             let msg = format!("{} is still running — Esc stops it", job.name);
@@ -72,12 +85,13 @@ impl DocView {
             };
             this.update(cx, |v, cx| {
                 v.job = None;
-                if let State::Ready(doc) = &mut v.state {
-                    doc.notice = Some(match result {
-                        Ok(out) => done(out),
-                        Err(e) if e.is::<Cancelled>() => format!("{name} stopped"),
-                        Err(e) => format!("{name} failed: {e:#}"),
-                    });
+                let line = match result {
+                    Ok(out) => done(v, out, cx),
+                    Err(e) if e.is::<Cancelled>() => Some(format!("{name} stopped")),
+                    Err(e) => Some(format!("{name} failed: {e:#}")),
+                };
+                if let (Some(line), State::Ready(doc)) = (line, &mut v.state) {
+                    doc.notice = Some(line);
                 }
                 cx.notify();
             })

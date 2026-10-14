@@ -185,6 +185,7 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 | Combine Files: many PDFs and images into one, choosing pages from each | ✅ File > Create > Combine Files…: add files or a folder or drop them, reorder, a page range per file, a bookmark per file holding its own bookmarks, images at their size or fitted to Letter/A4. `sheaf combine -o out.pdf a.pdf:1-3 scan.tif b.png` |
 | Split document (by page range, by bookmark, by size) | ✅ Document > Split Document…: every N pages, at each top-level bookmark (files named after them), by maximum file size, or by page ranges; unsaved changes included; Esc stops it. `sheaf split` |
 | Insert blank page / from image | ✅ Document > Insert Pages > Blank Pages… (size of the current page or Letter/A4/Legal, how many, where) and From Images… (fitted to a page size or at their own) |
+| Remove blank pages | ✅ Document > Find Blank Pages…: blank, nearly blank (a signature) and "intentionally left blank" pages found by content and pixels (margins, off-white paper, bleed-through and dust ignored); reviewed with thumbnails before one undoable delete |
 | Replace pages | ✅ Document > Replace Pages…: pages of this document with a run of another PDF's; bookmarks and comments on them stay |
 | Insert from scanner | 📋 M5 |
 | Crop pages | ✅ Document > Crop Pages…: margins (in, mm or pt, as the page is shown) or trim white margins, on the current, selected, all or a range of pages; marks and OCR text stay on their content; saved as `/CropBox` |

@@ -52,6 +52,7 @@ const FILES: &[(&str, &[u8])] = icons![
     "export-pages",
     "extract-pages",
     "find",
+    "find-blank-pages",
     "first-page",
     "fit-page",
     "fit-width",

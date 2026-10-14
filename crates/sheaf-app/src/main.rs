@@ -7,6 +7,8 @@
 mod assets;
 mod attachments_panel;
 mod availability;
+mod blank_review;
+mod blanks_dialog;
 mod bookmark_tools;
 mod brand;
 mod calc_panel;
@@ -192,6 +194,7 @@ actions!(
         AddBackground,
         BookmarksFromPages,
         ColorBookmarksByLevel,
+        FindBlankPages,
         ToggleToolbar,
         CustomizeToolbar
     ]
@@ -343,6 +346,8 @@ fn main() {
             let hfd = Some(header_footer_dialog::KEY_CONTEXT);
             let wmd = Some(watermark_dialog::KEY_CONTEXT);
             let bmd = Some(bookmark_tools::KEY_CONTEXT);
+            let bld = Some(blanks_dialog::KEY_CONTEXT);
+            let bld_keys = Some("BlanksDialog && !TextInput");
             let lbd_keys = Some("LabelsDialog && !TextInput");
             let crd_keys = Some("CropDialog && !TextInput");
             let ind_keys = Some("InsertDialog && !TextInput");
@@ -489,6 +494,13 @@ fn main() {
                 KeyBinding::new("shift-tab", DialogPrev, bmd),
                 KeyBinding::new("enter", DialogRun, bmd),
                 KeyBinding::new("escape", DialogCancel, bmd),
+                KeyBinding::new("tab", DialogNext, bld),
+                KeyBinding::new("shift-tab", DialogPrev, bld),
+                KeyBinding::new("left", DialogLeft, bld_keys),
+                KeyBinding::new("right", DialogRight, bld_keys),
+                KeyBinding::new("space", DialogRight, bld_keys),
+                KeyBinding::new("enter", DialogRun, bld_keys),
+                KeyBinding::new("escape", DialogCancel, bld_keys),
                 KeyBinding::new("tab", DialogNext, pd),
                 KeyBinding::new("shift-tab", DialogPrev, pd),
                 KeyBinding::new("left", DialogLeft, pd_keys),
