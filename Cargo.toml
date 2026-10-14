@@ -4,6 +4,8 @@ resolver = "3"
 exclude = ["plugins", "crates/sheaf-plugin/tests/fixtures"]
 members = [
     "crates/sheaf-core",
+    "crates/sheaf-progress",
+    "crates/sheaf-ops",
     "crates/sheaf-doc",
     "crates/sheaf-render",
     "crates/sheaf-ui",
@@ -29,6 +31,8 @@ sheaf-ui = { path = "crates/sheaf-ui" }
 sheaf-ocr = { path = "crates/sheaf-ocr" }
 sheaf-print = { path = "crates/sheaf-print" }
 sheaf-plugin = { path = "crates/sheaf-plugin" }
+sheaf-progress = { path = "crates/sheaf-progress" }
+sheaf-ops = { path = "crates/sheaf-ops" }
 
 # GPUI is pre-1.0 and only published sporadically; track Zed main at a pinned rev.
 # Bump ZED_REV deliberately — breaking changes are routine.

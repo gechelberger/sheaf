@@ -1,0 +1,19 @@
+[package]
+name = "sheaf-ops"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "sheaf's document operations without a GUI: what both the app and the command line run"
+
+[dependencies]
+sheaf-core.workspace = true
+sheaf-doc.workspace = true
+sheaf-render.workspace = true
+sheaf-progress.workspace = true
+anyhow.workspace = true
+log.workspace = true
+image = { workspace = true, features = ["jpeg"] }
+# PNG resolution (pHYs) and multi-page TIFF (with CCITT G4) for export.
+png = "0.18"
+tiff = "0.11"
+fax = "0.2"

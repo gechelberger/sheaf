@@ -6451,14 +6451,12 @@ dependencies = [
  "anyhow",
  "embed-resource",
  "env_logger",
- "fax",
  "futures",
  "gpui",
  "gpui_platform",
  "im",
  "image",
  "log",
- "png 0.18.1",
  "regex",
  "resvg",
  "schemars",
@@ -6468,12 +6466,12 @@ dependencies = [
  "sheaf-core",
  "sheaf-doc",
  "sheaf-ocr",
+ "sheaf-ops",
  "sheaf-plugin",
  "sheaf-print",
  "sheaf-render",
  "sheaf-ui",
  "smallvec",
- "tiff",
  "unicode-segmentation",
  "zip 9.0.2",
 ]
@@ -6523,6 +6521,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "sheaf-ops"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "anyhow",
+ "fax",
+ "image",
+ "log",
+ "png 0.18.1",
+ "sheaf-core",
+ "sheaf-doc",
+ "sheaf-progress",
+ "sheaf-render",
+ "tiff",
+]
+
+[[package]]
 name = "sheaf-plugin"
 version = "0.1.0-alpha.1"
 dependencies = [
@@ -6563,6 +6577,10 @@ dependencies = [
  "sheaf-render",
  "windows 0.61.3",
 ]
+
+[[package]]
+name = "sheaf-progress"
+version = "0.1.0-alpha.1"
 
 [[package]]
 name = "sheaf-render"

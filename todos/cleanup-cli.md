@@ -1,6 +1,6 @@
 # Plan: ops layer, CLI, shared progress, scan cleanup
 
-Status: **planned** (2026-10-14). Not started.
+Status: **in progress** (2026-10-14), branch `cleanup-cli`. See "Slice notes" at the end.
 
 ## Why
 
@@ -246,3 +246,13 @@ handwritten notes (an MIT algorithm, about 150 lines), and blank-page removal.
   [`plugin-image-writes.md`](plugin-image-writes.md)). It's a separate later
   slice, and it probably reruns OCR and refuses to run on pages that have
   annotations.
+
+## Slice notes
+
+1. Done. `sheaf_progress::Tracker` places a child after its previous
+   sibling's share as well as after the parent's own count, so steps
+   ("render, then OCR") line up without the parent counting them. Export
+   now stops with `Cancelled` instead of returning the partial list: per-page
+   files already written stay, and a TIFF's `.part` file is removed. The GUI
+   gained what it lacked before: Esc stops a running Export Pages, and the
+   OCR progress strip shows export progress too.

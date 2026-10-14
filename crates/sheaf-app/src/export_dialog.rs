@@ -10,8 +10,8 @@ use sheaf_ui::button::{Button, Chip};
 use sheaf_ui::text_input::{TextInput, TextInputEvent};
 use sheaf_ui::{dialog, theme};
 
-use crate::export::{Format, TiffMode};
 use crate::{DialogCancel, DialogLeft, DialogNext, DialogPrev, DialogRight, DialogRun};
+use sheaf_ops::export::{Format, TiffMode};
 
 pub const KEY_CONTEXT: &str = "ExportDialog";
 
