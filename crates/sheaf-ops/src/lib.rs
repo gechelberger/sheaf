@@ -13,4 +13,4 @@ pub mod scan;
 
 pub use open::open;
 
-pub use sheaf_progress::{Cancelled, NoProgress, Progress, Tracker};
+pub use sheaf_progress::{Cancelled, NoProgress, Progress, Snapshot, Tracker};

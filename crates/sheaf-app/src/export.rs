@@ -208,6 +208,22 @@ impl crate::docview::DocView {
         Some(run.snapshot().fraction.unwrap_or(0.0))
     }
 
+    /// Ask the running plugin command to stop (it does at its next check).
+    /// Returns whether one was running and had reported progress.
+    pub(crate) fn cancel_plugin_run(&mut self, cx: &mut gpui::Context<Self>) -> bool {
+        let Some((label, t)) = &self.plugin_run else {
+            return false;
+        };
+        let s = t.snapshot();
+        if s.total.is_none() && s.fraction.is_none() {
+            return false;
+        }
+        t.cancel();
+        let msg = format!("{label}: stopping…");
+        self.set_notice(msg, cx);
+        true
+    }
+
     /// Stop the running export. Returns whether there was one.
     pub(crate) fn cancel_export(&mut self, cx: &mut gpui::Context<Self>) -> bool {
         let Some(run) = &self.export_run else {

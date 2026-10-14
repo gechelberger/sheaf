@@ -6580,6 +6580,7 @@ dependencies = [
  "serde_json",
  "sheaf-core",
  "sheaf-doc",
+ "sheaf-progress",
  "toml 0.9.12+spec-1.1.0",
  "usvg",
  "wasmtime",
@@ -6589,7 +6590,7 @@ dependencies = [
 
 [[package]]
 name = "sheaf-plugin-api"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "wasi 0.14.7+wasi-0.2.4",
  "wit-bindgen 0.62.0",

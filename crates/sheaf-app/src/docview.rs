@@ -393,6 +393,10 @@ pub struct DocView {
     pub(crate) ocr: Option<crate::ocr_run::OcrRun>,
     /// An Export Pages run in progress (see export.rs).
     pub(crate) export_run: Option<sheaf_ops::Tracker>,
+    /// A plugin command running on this document, with its progress
+    /// (see plugins.rs).
+    #[cfg_attr(not(feature = "plugins"), allow(dead_code))]
+    pub(crate) plugin_run: Option<(String, sheaf_ops::Tracker)>,
     pub(crate) pending_comments_focus: bool,
     pub(crate) initial_query: Option<String>,
     pub(crate) search_started: Option<Instant>,
@@ -492,6 +496,7 @@ impl DocView {
             comments: None,
             ocr: None,
             export_run: None,
+            plugin_run: None,
             pending_comments_focus: false,
             initial_query: None,
             search_started: None,
@@ -3961,7 +3966,13 @@ impl Render for DocView {
                 State::Ready(_) => unreachable!(),
             }
         };
-        let ocr_progress = self.ocr_progress().or_else(|| self.export_progress());
+        let ocr_progress = self
+            .ocr_progress()
+            .or_else(|| self.export_progress())
+            .or_else(|| {
+                let (_, t) = self.plugin_run.as_ref()?;
+                t.snapshot().fraction
+            });
 
         div()
             .key_context(KEY_CONTEXT)
@@ -4045,6 +4056,8 @@ impl Render for DocView {
                     // Esc during a Recognize Text run stops it.
                 } else if v.cancel_export(cx) {
                     // Likewise an Export Pages run.
+                } else if v.cancel_plugin_run(cx) {
+                    // And a plugin command that reports progress.
                 } else if v.cancel_tape_placing(cx) || v.cancel_pending_connector(cx) {
                     // Esc with a tape or connector half-placed just drops it.
                 } else {

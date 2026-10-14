@@ -25,6 +25,7 @@ pub(crate) mod bindings {
         with: {
             "sheaf:plugin/render.page-renderer": crate::render::PageRenderer,
             "sheaf:plugin/render.image": crate::render::RenderedImage,
+            "sheaf:plugin/progress.task": crate::progress::Task,
         },
     });
 }
@@ -159,6 +160,9 @@ pub struct CallContext {
     pub ui: Option<Arc<dyn Ui>>,
     /// The user's pattern presets, then plugin-shipped ones.
     pub presets: Vec<Preset>,
+    /// Where the plugin's `progress` tasks report, and how the call is
+    /// cancelled. None: tasks report nowhere and are never cancelled.
+    pub progress: Option<sheaf_progress::Tracker>,
 }
 
 /// One entry point into a plugin.
@@ -446,6 +450,7 @@ impl Instance {
             },
             credit,
             render_handles: Default::default(),
+            task_handles: Vec::new(),
             call: None,
             batches: Vec::new(),
             deadline: Instant::now() + rt.limits.call_timeout,
@@ -505,6 +510,7 @@ impl Instance {
         };
         let data = store.data_mut();
         data.drop_render_handles();
+        data.drop_task_handles();
         data.call = None;
         let batches = std::mem::take(&mut data.batches);
         match result {
@@ -620,6 +626,8 @@ pub(crate) struct HostState {
     credit: Arc<std::sync::atomic::AtomicU64>,
     /// Render handles this call made, freed when it returns.
     pub(crate) render_handles: crate::render::CallHandles,
+    /// `progress.task` handles this call made, freed when it returns.
+    pub(crate) task_handles: Vec<u32>,
     call: Option<CallContext>,
     batches: Vec<EditBatch>,
     /// When the running call times out.
@@ -629,6 +637,10 @@ pub(crate) struct HostState {
 impl HostState {
     pub(crate) fn doc(&self) -> Option<&DocContext> {
         self.call.as_ref()?.doc.as_ref()
+    }
+
+    pub(crate) fn progress(&self) -> Option<&sheaf_progress::Tracker> {
+        self.call.as_ref()?.progress.as_ref()
     }
 
     fn ui(&self) -> Option<Arc<dyn Ui>> {

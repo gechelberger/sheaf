@@ -1,6 +1,6 @@
 # Writing sheaf plugins
 
-Status: API `sheaf:plugin@0.2.0`, 2026-10-14. Design notes live in
+Status: API `sheaf:plugin@0.2.1`, 2026-10-14. Design notes live in
 [`todos/plugins.md`](../todos/plugins.md).
 
 A sheaf plugin is a WebAssembly component plus a manifest. It can add
@@ -229,6 +229,26 @@ and returns its words with boxes. It doesn't change the document.
 the JSON the user puts in `<config>/plugin-data/<id>/settings.json` (`"{}"`
 when there is none). Uninstalling keeps this data.
 
+**`progress`** (0.2.1): for long commands. `task(label, total, unit)` shows
+in the document's status bar as "label: 12 of 300 pages…" with a progress
+strip; `set`, `inc` and `set-total` move it, `message` replaces the line,
+and `child(label, weight)` makes a step covering part of it. Escape asks
+the command to stop: `is-cancelled` turns true, and the plugin should
+return (an error like "Stopped" is fine). The call's time limit still
+applies. The SDK's `progress::pages(label, n)` and `progress::check(&task)?`
+cover the usual loop:
+
+```rust
+let task = progress::pages("Reading pages", pages.len() as u64);
+for p in &pages {
+    progress::check(&task)?;
+    // … work on p …
+    task.inc(1);
+}
+```
+
+A plugin using it declares `api = "^0.2.1"`.
+
 **`log`**: `log(level, message)` goes to sheaf's log with the plugin id.
 
 **HTTP** is standard `wasi:http`: sheaf makes the request (and the TLS
@@ -267,6 +287,10 @@ current one, so a plugin built against the last API keeps loading for at
 least one more release. A manifest's `api` range says which worlds it can
 take; sheaf refuses one it can't satisfy, with a message, rather than
 guessing.
+
+**0.2.1** (2026-10-14) added the `progress` interface. Adding an interface
+is backward compatible, so it's a patch: plugins built against 0.2.0 import
+`@0.2.0` names, and wasmtime links them to the 0.2.1 host unchanged.
 
 **0.2.0** (2026-10-14) changed the manifest, not the WIT: every command
 needs `icon` and `help`, and a plugin package is a folder (or archive) with

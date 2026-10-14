@@ -36,6 +36,27 @@ impl Guest for TestPlugin {
                 edits::submit("Bookmark pages", &batch);
                 Ok(())
             }
+            // Counts to 400 with progress, a millisecond a step, stopping
+            // when cancelled: "Stopped at <n>".
+            "count" => {
+                let task = sheaf_plugin_api::progress::items("Counting", 400);
+                let half = task.child("first half", 0.5);
+                half.set_total(Some(200), sheaf_plugin_api::progress::Unit::Items);
+                for i in 0..400u64 {
+                    if task.is_cancelled() {
+                        return Err(format!("Stopped at {i}"));
+                    }
+                    if i < 200 {
+                        half.set(i + 1);
+                    }
+                    task.set(i + 1);
+                    if i == 10 {
+                        task.message(sheaf_plugin_api::progress::Level::Info, "ten done");
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Ok(())
+            }
             // Two submits: two undo steps.
             "two-batches" => {
                 for title in ["one", "two"] {

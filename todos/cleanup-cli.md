@@ -354,3 +354,22 @@ handwritten notes (an MIT algorithm, about 150 lines), and blank-page removal.
 
    Covered by a test of the curled-page crop, and an ignored UVDoc smoke
    test next to the orientation one.
+7. Done. The WIT has a `progress` interface with a `task` resource; each
+   task is a `Tracker` under the call's own (`CallContext::progress`, a
+   new field). The app creates one for every command and panel action,
+   shows it in the document's status bar and progress strip, and Esc
+   cancels it once it has reported something.
+   - **Version.** Deviation: 0.2.1, not a minor bump. Adding an interface
+     is backward compatible, and the package version is part of every
+     import name. A 0.3.0 bump would have stopped every 0.2 plugin from
+     linking; with 0.2.1, the six bundled plugins still built against
+     0.2.0 all load Ready.
+   - **Pieces.** `sheaf_progress::Tracker::child_tracker` gives an owned
+     child for the resource table; tasks are freed when the call returns,
+     and at most 256 per call are tracked. The SDK adds
+     `sheaf_plugin_api::progress` (`pages`, `items`, `check`).
+   - **Tests.** The fixture's `count` command reports, posts a message,
+     and stops when cancelled (`progress_reports_and_cancels`).
+   - **A bundled user.** `tax-form-bookmarks` 0.2.2 (`api = "^0.2.1"`)
+     reports as it reads pages. On the 3,837-page Title 26 PDF the status
+     bar read "Reading pages: 646 of 3837 pages…", and Esc stopped it.

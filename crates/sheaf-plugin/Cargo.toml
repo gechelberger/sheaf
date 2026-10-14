@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 sheaf-core.workspace = true
 sheaf-doc.workspace = true
+sheaf-progress.workspace = true
 anyhow.workspace = true
 log.workspace = true
 serde.workspace = true

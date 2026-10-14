@@ -212,6 +212,22 @@ impl Tracker {
         }
     }
 
+    /// [`Progress::child`] as an owned `Tracker`, for holders that can't
+    /// borrow this one (a plugin's handle, say).
+    pub fn child_tracker(&self, name: &str, weight: f32) -> Tracker {
+        let node = &self.node;
+        let lo = node
+            .position()
+            .max(f32::from_bits(node.next.load(Ordering::Relaxed)))
+            .min(node.hi);
+        let hi = (lo + (node.hi - node.lo) * weight.clamp(0.0, 1.0)).min(node.hi);
+        node.next.store(hi.to_bits(), Ordering::Relaxed);
+        Tracker {
+            shared: self.shared.clone(),
+            node: Arc::new(Node::new(name, lo, hi)),
+        }
+    }
+
     /// Ask the work to stop; it does at its next `check()`.
     pub fn cancel(&self) {
         self.shared.cancelled.store(true, Ordering::Relaxed);
@@ -279,17 +295,7 @@ impl Progress for Tracker {
     }
 
     fn child(&self, name: &str, weight: f32) -> Box<dyn Progress + '_> {
-        let node = &self.node;
-        let lo = node
-            .position()
-            .max(f32::from_bits(node.next.load(Ordering::Relaxed)))
-            .min(node.hi);
-        let hi = (lo + (node.hi - node.lo) * weight.clamp(0.0, 1.0)).min(node.hi);
-        node.next.store(hi.to_bits(), Ordering::Relaxed);
-        Box::new(Tracker {
-            shared: self.shared.clone(),
-            node: Arc::new(Node::new(name, lo, hi)),
-        })
+        Box::new(self.child_tracker(name, weight))
     }
 }
 
