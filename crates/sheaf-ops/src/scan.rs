@@ -94,9 +94,20 @@ pub fn clean_image(
     stage: &mut dyn FnMut(sheaf_scan::Stage, &image::RgbImage),
 ) -> Result<sheaf_scan::Cleaned> {
     let orienter = |img: &image::RgbImage| sheaf_ocr::orient::scores(img);
-    let model = (params.orient && sheaf_ocr::orient::available())
-        .then_some(&orienter as sheaf_scan::Orienter);
-    sheaf_scan::clean_with(image, params, model, progress, stage)
+    let unwarper = |img: &image::RgbImage| sheaf_ocr::rectify::unwarp(img);
+    let models = sheaf_scan::Models {
+        orient: (params.orient && sheaf_ocr::orient::available())
+            .then_some(&orienter as sheaf_scan::Orienter),
+        unwarp: (params.flatten_curl && sheaf_ocr::rectify::available())
+            .then_some(&unwarper as sheaf_scan::Unwarper),
+    };
+    if params.flatten_curl && models.unwarp.is_none() {
+        anyhow::bail!(
+            "can't flatten curled pages: {}",
+            sheaf_ocr::rectify::unavailable_reason().unwrap_or_default()
+        );
+    }
+    sheaf_scan::clean_with(image, params, models, progress, stage)
 }
 
 /// Clean up `inputs` and write them to `out` as a PDF, a page each.

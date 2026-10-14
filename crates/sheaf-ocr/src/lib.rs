@@ -16,6 +16,7 @@ pub mod engine;
 pub mod geom;
 pub mod job;
 pub mod orient;
+pub mod rectify;
 
 #[cfg(feature = "oar")]
 mod oar;

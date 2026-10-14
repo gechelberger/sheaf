@@ -335,3 +335,22 @@ handwritten notes (an MIT algorithm, about 150 lines), and blank-page removal.
    pages are now JPEG (quality 80, 0.8 MB); black and white stays G4
    (50 KB). New `SHEAF_SCRIPT_SAVE` answers save pickers in scripts, so
    a scripted scan doesn't write its PDF over the photo it picked.
+6. Done. `sheaf_ocr::rectify` wraps oar-ocr's `DocumentRectificationPredictor`.
+   `ScanParams::flatten_curl` (off by default; `--flatten-curl`, and a
+   dialog toggle greyed out with the reason) runs it right after the
+   crop, through `sheaf_scan::Models` (the orientation model moved in there
+   too). The model is `uvdoc.onnx` from the oar-ocr v0.3.0 release, the
+   same tag as the other models. `fetch-ocr-data.sh --uvdoc` gets it, and
+   `package.sh` bundles it only with `SHEAF_PACKAGE_UVDOC=1`. Asking for
+   it without the model is an error, not a silent no-op.
+
+   On a synthetic curled page it straightened arcing text lines well
+   (about 1 s extra). Found along the way, both in the classic path:
+   - A curled page's bowed edges aren't a 4-gon, so nothing was cropped.
+     Now it falls back to `min_area_rect`, as planned.
+   - `clear_edges` missed the wide wedges that leaves. It now also counts
+     as dark anything under 60% of the paper brightness nearby (a 4%-radius
+     max filter, so gradual shadows don't count).
+
+   Covered by a test of the curled-page crop, and an ignored UVDoc smoke
+   test next to the orientation one.

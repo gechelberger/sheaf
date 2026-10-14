@@ -52,7 +52,11 @@ cp LICENSE-MIT LICENSE-APACHE "$stage/licenses/"
 # with the engines' and models' licenses.
 mkdir -p "$stage/ocr/tessdata" "$stage/ocr/models" "$stage/ocr/lib"
 cp vendor/ocr/tessdata/*.traineddata "$stage/ocr/tessdata/"
-cp vendor/ocr/models/*.onnx vendor/ocr/models/*.txt "$stage/ocr/models/"
+# UVDoc (31 MB, opt-in curl flattening) only when asked for.
+for m in vendor/ocr/models/*.onnx vendor/ocr/models/*.txt; do
+  [[ "$(basename "$m")" == uvdoc.onnx && "${SHEAF_PACKAGE_UVDOC:-0}" != 1 ]] && continue
+  cp "$m" "$stage/ocr/models/"
+done
 # ONNX Runtime is loaded from here at run time, only when PaddleOCR is used.
 cp vendor/ocr/lib/libonnxruntime.* vendor/ocr/lib/onnxruntime.dll "$stage/ocr/lib/" 2>/dev/null || true
 [[ -n "$(ls "$stage/ocr/lib")" ]] || { echo "missing vendor/ocr/lib — run scripts/fetch-ocr-data.sh" >&2; exit 1; }

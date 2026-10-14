@@ -148,7 +148,7 @@ fn the_whole_pipeline() {
         fit: Some((850, 1100)),
         ..Default::default()
     };
-    let out = clean(img, &params, None, &NoProgress).unwrap();
+    let out = clean(img, &params, Models::default(), &NoProgress).unwrap();
     assert!(out.quad.is_some());
     assert_eq!(out.turns, 0);
     assert!((out.skew - 3.0).abs() <= 0.5, "skew {}", out.skew);
@@ -165,4 +165,36 @@ fn params_from_json() {
     let p: ScanParams = serde_json::from_str(r#"{"mode":"bw","deskew":false}"#).unwrap();
     assert_eq!(p.mode, Mode::Bw);
     assert!(!p.deskew && p.crop && p.flatten);
+}
+
+#[test]
+fn a_curled_page_is_cropped_and_its_edges_cleared() {
+    // Each column of the page dropped by a sine: edges bow, lines arc.
+    let p = page();
+    let (w, h) = p.dimensions();
+    let lift = 50;
+    let mut img = RgbImage::from_pixel(w + 300, h + 2 * lift + 300, Rgb([80, 60, 45]));
+    for x in 0..w {
+        let dy = (lift as f32 * (std::f32::consts::PI * x as f32 / w as f32).sin()) as u32;
+        for y in 0..h {
+            img.put_pixel(x + 150, y + 150 + lift - dy, *p.get_pixel(x, y));
+        }
+    }
+    assert!(find_page(&img).is_some(), "falls back to a rectangle");
+    let params = ScanParams {
+        mode: Mode::Bw,
+        deskew: false,
+        ..Default::default()
+    };
+    let bw = clean(img, &params, Models::default(), &NoProgress)
+        .unwrap()
+        .image
+        .into_luma8();
+    let (w, h) = bw.dimensions();
+    // No background left along the edges.
+    let border = (0..w)
+        .flat_map(|x| [(x, 0), (x, h - 1)])
+        .chain((0..h).flat_map(|y| [(0, y), (w - 1, y)]));
+    let dark = border.filter(|&(x, y)| bw.get_pixel(x, y)[0] == 0).count();
+    assert_eq!(dark, 0);
 }

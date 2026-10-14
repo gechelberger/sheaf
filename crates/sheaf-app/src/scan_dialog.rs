@@ -65,6 +65,7 @@ impl View {
         match self {
             View::Photo => "Photo",
             View::Stage(Stage::Cropped) => "Page",
+            View::Stage(Stage::Uncurled) => "Uncurled",
             View::Stage(Stage::Flattened) => "Lighting",
             View::Stage(Stage::Upright) => "Upright",
             View::Stage(Stage::Straightened) => "Straight",
@@ -83,6 +84,7 @@ const ROW_FLATTEN: usize = 6;
 const ROW_OCR: usize = 7;
 const ROW_IMAGE: usize = 8;
 const ROW_VIEW: usize = 9;
+const ROW_CURL: usize = 10;
 
 pub struct ScanDialog {
     focus: FocusHandle,
@@ -91,6 +93,8 @@ pub struct ScanDialog {
     ocr: OcrConfig,
     /// Why OCR can't run, when it can't.
     ocr_unavailable: Option<String>,
+    /// Why curled pages can't be flattened, when they can't.
+    curl_unavailable: Option<String>,
     row: usize,
     /// Which file the preview shows.
     index: usize,
@@ -127,9 +131,13 @@ impl ScanDialog {
         let ocr_unavailable = sheaf_ocr::check_engine(ocr.engine, &ocr)
             .err()
             .map(|e| e.to_string());
+        let curl_unavailable = sheaf_ocr::rectify::unavailable_reason();
         let mut opts = opts;
         if ocr_unavailable.is_some() {
             opts.ocr = false;
+        }
+        if curl_unavailable.is_some() {
+            opts.clean.flatten_curl = false;
         }
         let mut d = Self {
             focus,
@@ -137,6 +145,7 @@ impl ScanDialog {
             opts,
             ocr,
             ocr_unavailable,
+            curl_unavailable,
             row: ROW_MODE,
             index: 0,
             view: View::Result,
@@ -159,6 +168,7 @@ impl ScanDialog {
             ROW_PAGE,
             ROW_DPI,
             ROW_CROP,
+            ROW_CURL,
             ROW_ORIENT,
             ROW_DESKEW,
             ROW_FLATTEN,
@@ -207,6 +217,12 @@ impl ScanDialog {
             }
             ROW_DPI => o.dpi = cycle(&DPIS, o.dpi, by),
             ROW_CROP => o.clean.crop = !o.clean.crop,
+            ROW_CURL => {
+                if self.curl_unavailable.is_some() {
+                    return;
+                }
+                o.clean.flatten_curl = !o.clean.flatten_curl;
+            }
             ROW_ORIENT => o.clean.orient = !o.clean.orient,
             ROW_DESKEW => o.clean.deskew = !o.clean.deskew,
             ROW_FLATTEN => o.clean.flatten = !o.clean.flatten,
@@ -550,6 +566,21 @@ impl Render for ScanDialog {
             true,
             cx,
         );
+        let curl = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(self.toggle(
+                ROW_CURL,
+                "Flatten curled pages (slower)",
+                o.clean.flatten_curl,
+                self.curl_unavailable.is_none(),
+                cx,
+            ))
+            .when_some(self.curl_unavailable.clone(), |d, why| {
+                d.child(dialog::subtitle(why))
+            })
+            .into_any_element();
         let orient = self.toggle(ROW_ORIENT, "Turn it upright", o.clean.orient, true, cx);
         let deskew = self.toggle(ROW_DESKEW, "Straighten the text", o.clean.deskew, true, cx);
         let flatten = self.toggle(
@@ -648,6 +679,7 @@ impl Render for ScanDialog {
             .child(self.row_el(ROW_PAGE, "Page size", page))
             .child(self.row_el(ROW_DPI, "Resolution", dpi))
             .child(self.row_el(ROW_CROP, "Clean up", crop))
+            .child(self.row_el(ROW_CURL, "", curl))
             .child(self.row_el(ROW_ORIENT, "", orient))
             .child(self.row_el(ROW_DESKEW, "", deskew))
             .child(self.row_el(ROW_FLATTEN, "", flatten))

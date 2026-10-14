@@ -40,6 +40,11 @@ pub struct ScanArgs {
     /// OCR language, e.g. "eng" or "eng+deu" (tesseract) or a PaddleOCR set.
     #[arg(long)]
     lang: Option<String>,
+    /// Flatten curled or bent pages (book pages, folded letters) with the
+    /// UVDoc model. Slower; can make flat pages wobble slightly. Needs
+    /// scripts/fetch-ocr-data.sh --uvdoc.
+    #[arg(long)]
+    flatten_curl: bool,
     /// Keep the whole photo: don't look for the page's edges.
     #[arg(long)]
     no_crop: bool,
@@ -94,6 +99,7 @@ pub fn run(args: ScanArgs, quiet: bool) -> anyhow::Result<()> {
         ModeArg::Bw => Mode::Bw,
     };
     opts.clean.crop = !args.no_crop;
+    opts.clean.flatten_curl = args.flatten_curl;
     opts.clean.orient = !args.no_orient;
     opts.clean.deskew = !args.no_deskew;
     opts.clean.flatten = !args.no_flatten;

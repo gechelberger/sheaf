@@ -48,6 +48,9 @@ pub struct ScanParams {
     pub deskew: bool,
     /// Even out lighting and make the paper white.
     pub flatten: bool,
+    /// Flatten curled or bent pages with a model (see [`Models::unwarp`]).
+    /// Off by default: it can make flat pages wobble slightly.
+    pub flatten_curl: bool,
     pub mode: Mode,
     /// Sauvola's k: higher keeps less of faint strokes.
     pub threshold_k: f32,
@@ -65,6 +68,7 @@ impl Default for ScanParams {
             orient: true,
             deskew: true,
             flatten: true,
+            flatten_curl: false,
             mode: Mode::Color,
             threshold_k: 0.25,
             despeckle: true,
@@ -75,6 +79,18 @@ impl Default for ScanParams {
 
 /// Corners in image pixels: top-left, top-right, bottom-right, bottom-left.
 pub type Quad = [(f32, f32); 4];
+
+/// A model that flattens a curled page, or `None` when it can't.
+pub type Unwarper<'a> = &'a (dyn Fn(&RgbImage) -> Option<RgbImage> + Sync);
+
+/// The machine-learning models the pipeline can use, when the caller has
+/// them. Without them it falls back to what it can do alone.
+#[derive(Default, Clone, Copy)]
+pub struct Models<'a> {
+    pub orient: Option<Orienter<'a>>,
+    /// Used only with [`ScanParams::flatten_curl`].
+    pub unwarp: Option<Unwarper<'a>>,
+}
 
 /// Asks a model which way is up: its confidence, for k = 0..4, that the
 /// page needs k clockwise quarter turns; `None` when it can't say.
@@ -113,6 +129,8 @@ pub fn load(path: &std::path::Path) -> Result<RgbImage> {
 pub enum Stage {
     /// The page cut out of the photo, edges cleared.
     Cropped,
+    /// A curled page flattened by the model.
+    Uncurled,
     /// Lighting evened out.
     Flattened,
     /// Turned upright.
@@ -125,17 +143,17 @@ pub enum Stage {
 pub fn clean(
     image: RgbImage,
     params: &ScanParams,
-    orienter: Option<Orienter>,
+    models: Models,
     progress: &dyn Progress,
 ) -> Result<Cleaned> {
-    clean_with(image, params, orienter, progress, &mut |_, _| {})
+    clean_with(image, params, models, progress, &mut |_, _| {})
 }
 
 /// [`clean`], showing `stage` the image after each step that ran.
 pub fn clean_with(
     image: RgbImage,
     params: &ScanParams,
-    orienter: Option<Orienter>,
+    models: Models,
     progress: &dyn Progress,
     stage: &mut dyn FnMut(Stage, &RgbImage),
 ) -> Result<Cleaned> {
@@ -150,6 +168,13 @@ pub fn clean_with(
     }
     progress.set(1);
     progress.check()?;
+    if params.flatten_curl
+        && let Some(model) = models.unwarp
+        && let Some(flat) = model(&image)
+    {
+        image = flat;
+        stage(Stage::Uncurled, &image);
+    }
     if quad.is_some() {
         clear_edges(&mut image, params.threshold_k);
         stage(Stage::Cropped, &image);
@@ -165,7 +190,7 @@ pub fn clean_with(
         // The text's direction says sideways or not; the model, if any,
         // picks between the two turns that leaves.
         let axis = quarter_turns(&small_gray(&image));
-        turns = match orienter.and_then(|model| model(&small_rgb(&image))) {
+        turns = match models.orient.and_then(|model| model(&small_rgb(&image))) {
             Some(s) if s[axis as usize + 2] > s[axis as usize] => axis + 2,
             _ => axis,
         };
@@ -265,6 +290,12 @@ pub fn find_page(img: &RgbImage) -> Option<Quad> {
         imageproc::contrast::threshold(&blurred, level, imageproc::contrast::ThresholdType::Binary);
     bright = imageproc::morphology::open(&bright, imageproc::distance_transform::Norm::LInf, 3);
     consider(&bright, 0.0);
+    // No clean four-sided outline (a curled page's edges bow): the
+    // smallest rectangle around the largest outline, and clear_edges
+    // whitens the background it takes in.
+    if best.is_none() {
+        best = rect_fallback(&edges, frame).or_else(|| rect_fallback(&bright, frame));
+    }
     let (_, q) = best?;
     // A quad hugging the whole frame means the photo is the page already.
     let (w, h) = (gray.width() as f32, gray.height() as f32);
@@ -302,6 +333,21 @@ fn quads_in(mask: &GrayImage, frame: f64, shrink: f32) -> Vec<(f64, Quad)> {
         out.push((area, pull_in(q, shrink)));
     }
     out
+}
+
+/// The minimum-area rectangle around the largest outline covering 20%+
+/// of the frame.
+fn rect_fallback(mask: &GrayImage, frame: f64) -> Option<(f64, Quad)> {
+    use imageproc::contours::{BorderType, find_contours};
+    use imageproc::geometry::{contour_area, convex_hull, min_area_rect};
+    find_contours::<i32>(mask)
+        .into_iter()
+        .filter(|c| c.border_type == BorderType::Outer && c.points.len() >= 4)
+        .map(|c| convex_hull(c.points))
+        .map(|hull| (contour_area(&hull).abs(), hull))
+        .filter(|(area, _)| *area >= 0.2 * frame)
+        .max_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(area, hull)| (area, order_corners(&min_area_rect(&hull))))
 }
 
 /// Top-left, top-right, bottom-right, bottom-left.
@@ -679,10 +725,25 @@ fn window_for(gray: &GrayImage) -> u32 {
 }
 
 /// Paint white whatever dark touches the edges of a cropped page: what's
-/// left of the background around it.
+/// left of the background around it. Dark means ink to Sauvola, or well
+/// below the paper's brightness nearby: Sauvola alone misses a wide
+/// uniform strip, since its window then sees nothing else.
 pub fn clear_edges(img: &mut RgbImage, k: f32) {
     let gray = DynamicImage::ImageRgb8(img.clone()).into_luma8();
-    let bw = sauvola(&gray, window_for(&gray), k);
+    let mut bw = sauvola(&gray, window_for(&gray), k);
+    let small = small_gray(img);
+    let r = (small.width().max(small.height()) / 25).max(3);
+    let paper = image::imageops::resize(
+        &imageproc::filter::median_filter(&max_filter(&small, r), r, r),
+        gray.width(),
+        gray.height(),
+        FilterType::Triangle,
+    );
+    for (x, y, p) in bw.enumerate_pixels_mut() {
+        if (gray.get_pixel(x, y)[0] as u32) * 10 < paper.get_pixel(x, y)[0] as u32 * 6 {
+            p[0] = 0;
+        }
+    }
     for (x, y) in edge_ink(&bw) {
         img.put_pixel(x, y, Rgb([255, 255, 255]));
     }

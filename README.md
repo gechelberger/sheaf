@@ -46,7 +46,7 @@ sheaf scan photos/*.jpg -o receipts.pdf --mode bw --ocr
 | Subcommand | Does |
 |---|---|
 | `export` | Pages to PNG, JPEG, TIFF or text, as File > Export Pages. Prints the files written; refuses to overwrite without `--force` |
-| `scan` | Photos or scans of paper to a clean PDF: finds the page in the photo and straightens it, turns it upright, levels the text, evens out shadows and color casts. `--mode color\|gray\|bw`, `--page letter\|a4\|original`, `--dpi`, `--ocr` (searchable text that lines up with the page), `--no-crop`/`--no-deskew`/… to skip a step |
+| `scan` | Photos or scans of paper to a clean PDF: finds the page in the photo and straightens it, turns it upright, levels the text, evens out shadows and color casts. `--mode color\|gray\|bw`, `--page letter\|a4\|original`, `--dpi`, `--ocr` (searchable text that lines up with the page), `--no-crop`/`--no-deskew`/… to skip a step, `--flatten-curl` for curled or bent pages (UVDoc model; `scripts/fetch-ocr-data.sh --uvdoc`) |
 | `images-to-pdf` | JPEG, PNG, TIFF (every page), BMP, GIF and WebP files to one PDF, a page each: `--page original\|letter\|a4`, `--margin`, `--dpi` |
 
 ## Why
@@ -328,6 +328,7 @@ sudo apt install build-essential clang lld cmake pkg-config libfontconfig-dev \
 
 scripts/fetch-pdfium.sh          # prebuilt libpdfium → vendor/pdfium/<os>-<arch>/
 scripts/fetch-ocr-data.sh        # Tesseract language data + PaddleOCR models → vendor/ocr/
+                                 #   (--uvdoc adds the curled-page model scan cleanup can use)
 scripts/build-plugins.sh         # the bundled plugins (plugins/) → target/plugins/
 cargo run -p sheaf-app           # the GPUI window
 ```

@@ -196,3 +196,20 @@ fn oar_orientation_undoes_a_turn() {
     assert_eq!(turns(&rotate180(&page)), Some(2));
     assert_eq!(turns(&rotate270(&page)), Some(1));
 }
+
+#[test]
+#[ignore = "needs the UVDoc model (fetch-ocr-data.sh --uvdoc) and libpdfium"]
+#[cfg(feature = "oar")]
+fn uvdoc_returns_a_page() {
+    assert!(sheaf_ocr::rectify::available());
+    let page = text_page();
+    let flat = sheaf_ocr::rectify::unwarp(&page).expect("an image");
+    // Same page, roughly the same size.
+    let ratio = flat.width() as f32 / page.width() as f32;
+    assert!(
+        (0.5..2.0).contains(&ratio),
+        "{}×{}",
+        flat.width(),
+        flat.height()
+    );
+}
