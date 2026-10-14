@@ -6467,6 +6467,7 @@ dependencies = [
  "sheaf-doc",
  "sheaf-ocr",
  "sheaf-plugin",
+ "sheaf-print",
  "sheaf-render",
  "sheaf-ui",
  "smallvec",
@@ -6546,6 +6547,17 @@ version = "0.1.0"
 dependencies = [
  "wasi 0.14.7+wasi-0.2.4",
  "wit-bindgen 0.62.0",
+]
+
+[[package]]
+name = "sheaf-print"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "anyhow",
+ "log",
+ "sheaf-core",
+ "sheaf-render",
+ "windows 0.61.3",
 ]
 
 [[package]]

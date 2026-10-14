@@ -287,6 +287,8 @@ pub struct Workspace {
     dock_menu: Option<(Panel, Point<Pixels>)>,
     /// The command palette, while open.
     palette: Option<(Entity<Palette>, Subscription)>,
+    /// File > Print, while open.
+    print: Option<(Entity<crate::print_dialog::PrintDialog>, Subscription)>,
     /// File > Properties, while open.
     properties: Option<(
         Entity<crate::properties_dialog::PropertiesDialog>,
@@ -354,6 +356,7 @@ impl Workspace {
             resizing: None,
             dock_menu: None,
             palette: None,
+            print: None,
             properties: None,
             ocr_dialog: None,
             #[cfg(feature = "plugins")]
@@ -848,6 +851,42 @@ impl Workspace {
             &["OK"],
         ));
         crate::recent::forget(&path, cx);
+    }
+
+    fn toggle_print(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((d, _)) = self.print.take() {
+            d.update(cx, |d, _| d.release(window));
+            self.focus_active(window, cx);
+            cx.notify();
+            return;
+        }
+        let prefs = self.settings.print.clone();
+        let Some(ctx) = self.doc().and_then(|d| d.read(cx).print_context(prefs)) else {
+            return;
+        };
+        let dialog = cx.new(|cx| crate::print_dialog::PrintDialog::new(ctx, window, cx));
+        let sub = cx.subscribe_in(
+            &dialog,
+            window,
+            |ws, dialog, ev: &crate::print_dialog::PrintEvent, window, cx| {
+                dialog.update(cx, |d, _| d.release(window));
+                ws.print = None;
+                ws.focus_active(window, cx);
+                if let crate::print_dialog::PrintEvent::Print(req) = ev {
+                    ws.settings.print = req.prefs.clone();
+                    if let Err(e) = ws.settings.save() {
+                        log::warn!("saving settings: {e:#}");
+                    }
+                    if let Some(doc) = ws.doc().cloned() {
+                        let req = (**req).clone();
+                        doc.update(cx, |d, cx| d.print(req, cx));
+                    }
+                }
+                cx.notify();
+            },
+        );
+        self.print = Some((dialog, sub));
+        cx.notify();
     }
 
     fn toggle_properties(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1391,6 +1430,7 @@ impl Render for Workspace {
             .on_action(
                 cx.listener(|ws, _: &RecognizeText, window, cx| ws.toggle_ocr_dialog(window, cx)),
             )
+            .on_action(cx.listener(|ws, _: &crate::Print, window, cx| ws.toggle_print(window, cx)))
             .on_action(
                 cx.listener(|ws, a: &crate::recent::OpenRecent, window, cx| {
                     ws.open_recent(a.path.clone(), window, cx)
@@ -1486,6 +1526,11 @@ impl Render for Workspace {
             )
             .children(
                 self.properties
+                    .as_ref()
+                    .map(|(d, _)| deferred(d.clone()).with_priority(2)),
+            )
+            .children(
+                self.print
                     .as_ref()
                     .map(|(d, _)| deferred(d.clone()).with_priority(2)),
             );

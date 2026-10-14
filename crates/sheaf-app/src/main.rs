@@ -33,6 +33,7 @@ mod plugin_panel;
 #[cfg(feature = "plugins")]
 mod plugins;
 mod presentation;
+mod print_dialog;
 mod properties_dialog;
 mod recent;
 mod region;
@@ -157,7 +158,8 @@ actions!(
         RecognizeText,
         ManagePlugins,
         DocumentProperties,
-        ClearRecent
+        ClearRecent,
+        Print
     ]
 );
 actions!(
@@ -287,6 +289,8 @@ fn main() {
             let pf = Some("PluginForm");
             let pm = Some("PluginManager");
             let props = Some(properties_dialog::KEY_CONTEXT);
+            let pd = Some(print_dialog::KEY_CONTEXT);
+            let pd_keys = Some("PrintDialog && !TextInput");
             let pf_keys = Some("PluginForm && !TextInput");
             cx.bind_keys([
                 KeyBinding::new("right", NextPage, doc_keys),
@@ -375,6 +379,16 @@ fn main() {
                 // Recognize Text (OCR). Acrobat has no default shortcut for it.
                 KeyBinding::new("ctrl-shift-t", RecognizeText, ws),
                 KeyBinding::new("alt-enter", DocumentProperties, ws),
+                KeyBinding::new("ctrl-p", Print, ws),
+                KeyBinding::new("tab", DialogNext, pd),
+                KeyBinding::new("shift-tab", DialogPrev, pd),
+                KeyBinding::new("left", DialogLeft, pd_keys),
+                KeyBinding::new("right", DialogRight, pd_keys),
+                KeyBinding::new("space", DialogRight, pd_keys),
+                KeyBinding::new("enter", DialogRun, pd_keys),
+                KeyBinding::new("escape", DialogCancel, pd_keys),
+                KeyBinding::new("pageup", print_dialog::PreviewPrev, pd),
+                KeyBinding::new("pagedown", print_dialog::PreviewNext, pd),
                 KeyBinding::new("tab", DialogNext, props),
                 KeyBinding::new("shift-tab", DialogPrev, props),
                 KeyBinding::new("left", DialogLeft, props),

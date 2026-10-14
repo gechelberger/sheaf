@@ -23,6 +23,7 @@ sheaf-render.workspace = true
 sheaf-doc.workspace = true
 sheaf-ui.workspace = true
 sheaf-ocr.workspace = true
+sheaf-print.workspace = true
 sheaf-plugin = { workspace = true, optional = true }
 semver = { version = "1", features = ["serde"], optional = true }
 # Reading .sheafplugin archives.

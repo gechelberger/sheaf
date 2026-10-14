@@ -17,6 +17,8 @@ pub struct Settings {
     pub docks: Option<DockLayout>,
     /// OCR engine, resolution and last-used options (see `sheaf_ocr`).
     pub ocr: sheaf_ocr::OcrConfig,
+    /// File > Print's last choices.
+    pub print: crate::print_dialog::PrintPrefs,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -171,6 +173,11 @@ mod tests {
             ocr: sheaf_ocr::OcrConfig {
                 engine: sheaf_ocr::EngineKind::Oar,
                 dpi: 200,
+                ..Default::default()
+            },
+            print: crate::print_dialog::PrintPrefs {
+                printer: Some("Office".into()),
+                markup: false,
                 ..Default::default()
             },
         };

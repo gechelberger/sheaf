@@ -2876,6 +2876,138 @@ impl DocView {
         }
     }
 
+    /// What File > Print needs from the view.
+    pub(crate) fn print_context(
+        &self,
+        prefs: crate::print_dialog::PrintPrefs,
+    ) -> Option<crate::print_dialog::PrintContext> {
+        let State::Ready(doc) = &self.state else {
+            return None;
+        };
+        let st = doc.model.state();
+        let selected: Vec<usize> = st
+            .pages
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| doc.selection.contains(&p.id))
+            .map(|(i, _)| i)
+            .collect();
+        let bookmark = doc.outline_selected.and_then(|id| {
+            let title = st
+                .outline_flat()
+                .into_iter()
+                .find(|(_, n)| n.id == id)
+                .map(|(_, n)| n.title.clone())?;
+            let pages = st
+                .bookmark_pages(id)?
+                .into_iter()
+                .filter_map(|p| st.index_of(p))
+                .collect();
+            Some((title, pages))
+        });
+        Some(crate::print_dialog::PrintContext {
+            title: self.file_name(),
+            snapshot: doc.model.snapshot(),
+            handles: doc.handles.clone(),
+            current: doc.current_page(),
+            selected,
+            bookmark,
+            prefs,
+        })
+    }
+
+    /// Run a print job: write the print file in the background, then hand
+    /// it to the printer (or, for Save as PDF, ask where to save it).
+    pub(crate) fn print(&mut self, req: crate::print_dialog::PrintRequest, cx: &mut Context<Self>) {
+        let State::Ready(doc) = &mut self.state else {
+            return;
+        };
+        let snapshot = doc.model.snapshot();
+        let n = req.pages.len();
+        let pages = format!("{n} page{}", if n == 1 { "" } else { "s" });
+        if req.save_pdf {
+            let dir = self
+                .path
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_default();
+            let suggested = self
+                .path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| format!("{s} - print.pdf"));
+            let rx = crate::file_dialog::save(cx, &dir, suggested.as_deref());
+            cx.spawn(async move |this, cx| {
+                let Ok(Ok(Some(path))) = rx.await else { return };
+                let result = cx
+                    .background_executor()
+                    .spawn({
+                        let path = path.clone();
+                        async move {
+                            let bytes = save::print_pdf(&snapshot, &req.pages, req.markup)?;
+                            std::fs::write(&path, bytes)?;
+                            anyhow::Ok(())
+                        }
+                    })
+                    .await;
+                this.update(cx, |v, cx| {
+                    if let State::Ready(doc) = &mut v.state {
+                        doc.notice = Some(match result {
+                            Ok(()) => format!("Saved {pages} to {}", path.display()),
+                            Err(e) => format!("Couldn't save: {e:#}"),
+                        });
+                    }
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+            return;
+        }
+        let printer = req.job.printer.clone();
+        doc.notice = Some(format!("Printing {pages} to {printer}…"));
+        cx.notify();
+        let timing = self.timing;
+        cx.spawn(async move |this, cx| {
+            let t = Instant::now();
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let bytes = save::print_pdf(&snapshot, &req.pages, req.markup)?;
+                    let tmp = std::env::temp_dir().join(format!(
+                        "sheaf-print-{}-{}.pdf",
+                        std::process::id(),
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis())
+                            .unwrap_or(0)
+                    ));
+                    std::fs::write(&tmp, bytes)?;
+                    let sent = sheaf_print::submit(&req.job, &tmp);
+                    let _ = std::fs::remove_file(&tmp);
+                    sent
+                })
+                .await;
+            this.update(cx, |v, cx| {
+                if timing {
+                    eprintln!(
+                        "[timing] print job of {pages} built and sent in {:?}",
+                        t.elapsed()
+                    );
+                }
+                if let State::Ready(doc) = &mut v.state {
+                    doc.notice = Some(match result {
+                        Ok(what) => format!("Sent {pages} to {printer} ({what})"),
+                        Err(e) => format!("Printing failed: {e:#}"),
+                    });
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// What File > Properties needs from the view.
     pub(crate) fn properties_context(&self) -> Option<crate::properties_dialog::PropertiesContext> {
         let State::Ready(doc) = &self.state else {
@@ -2914,7 +3046,7 @@ fn flat_item(i: &OutlineItem) -> FlatOutlineItem {
 
 /// Wrap a BGRA raster as a GPUI image without copying the pixel data.
 /// `RenderImage` is documented as BGRA; `RgbaImage` here is just the container.
-fn to_render_image(raster: sheaf_render::Raster) -> RenderImage {
+pub(crate) fn to_render_image(raster: sheaf_render::Raster) -> RenderImage {
     debug_assert_eq!(raster.format, PixelFormat::Bgra);
     let buf = image::RgbaImage::from_raw(raster.width, raster.height, raster.data)
         .expect("raster size matches buffer");
