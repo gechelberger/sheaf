@@ -147,6 +147,7 @@ fn builtin_menus() -> Vec<(&'static str, Vec<Item>)> {
                 item("Pre&vious Page", PrevPage),
                 item("&Next Page", NextPage),
                 item("&Last Page", LastPage),
+                item("&Go to Page…", GoToPage),
                 sep(),
                 item("&Thumbnails", ShowThumbnails),
                 item("&Bookmarks", ShowOutline),

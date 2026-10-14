@@ -12,6 +12,7 @@ mod comments_panel;
 mod contrib;
 mod docview;
 mod file_dialog;
+mod goto;
 mod keymap;
 mod markup_tools;
 mod menus;
@@ -95,7 +96,8 @@ actions!(
         ReadMode,
         ToggleRulers,
         ToggleGrid,
-        ClearGuides
+        ClearGuides,
+        GoToPage
     ]
 );
 actions!(
@@ -302,6 +304,8 @@ fn main() {
                 KeyBinding::new("ctrl-l", FullScreen, doc),
                 KeyBinding::new("ctrl-h", ReadMode, doc),
                 KeyBinding::new("ctrl-r", ToggleRulers, doc),
+                // Acrobat: Go to Page.
+                KeyBinding::new("ctrl-shift-n", GoToPage, doc),
                 KeyBinding::new("ctrl-u", ToggleGrid, doc),
                 KeyBinding::new("r", RotatePageCw, doc_keys),
                 KeyBinding::new("shift-r", RotatePageCcw, doc_keys),

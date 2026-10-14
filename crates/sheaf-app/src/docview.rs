@@ -32,7 +32,7 @@ use sheaf_ui::theme;
 use crate::markup_tools::{Drag, Tool, arrow_head, rotate_pt, stroke_canvas};
 pub(crate) use crate::pane::Zoom;
 use crate::pane::{Layout, LayoutSpec, MARGIN, PageMode, Pane, Spread};
-use crate::{ClearGuides, FullScreen, ReadMode, ToggleGrid, ToggleRulers};
+use crate::{ClearGuides, FullScreen, GoToPage, ReadMode, ToggleGrid, ToggleRulers};
 use sheaf_doc::{
     Document, Edit, EditOutcome, FlatOutlineItem, OutlineId, PageId, PageRef, SourceId, SourceInfo,
 };
@@ -149,6 +149,8 @@ pub(crate) struct Doc {
     /// Comments other tools left in the primary file (read-only).
     pub(crate) foreign_annots: Vec<sheaf_doc::file::ForeignAnnot>,
     pub(crate) selected_foreign: Option<usize>,
+    /// The primary file's page labels, by its page index.
+    pub(crate) labels: Option<(SourceId, Vec<String>)>,
     /// With two panes: the top pane's share of the height.
     pub(crate) split: f32,
     /// The split divider is being dragged.
@@ -410,6 +412,8 @@ pub struct DocView {
     /// Full Screen / Read Mode (see presentation.rs).
     pub(crate) presentation: crate::presentation::Presentation,
     pub(crate) saved_view: Option<crate::presentation::SavedView>,
+    /// View > Go to Page, while open.
+    pub(crate) goto: Option<crate::goto::GoTo>,
     /// View > Rulers / Grid, and the guides dragged out of the rulers.
     pub(crate) rulers: bool,
     pub(crate) grid: bool,
@@ -491,6 +495,7 @@ impl DocView {
             region: None,
             presentation: Default::default(),
             saved_view: None,
+            goto: None,
             rulers: false,
             grid: false,
             guides: Vec::new(),
@@ -645,6 +650,7 @@ impl DocView {
             pending_connector: None,
             foreign_annots: Vec::new(),
             selected_foreign: None,
+            labels: None,
             split: 0.5,
             split_drag: false,
         }));
@@ -1426,10 +1432,10 @@ impl DocView {
             let t = Instant::now();
             let found = cx
                 .background_executor()
-                .spawn(async move { sheaf_doc::file::read_annots(&path, password.as_deref()) })
+                .spawn(async move { sheaf_doc::file::read_open(&path, password.as_deref()) })
                 .await;
-            let (by_index, foreign) = match found {
-                Ok(a) => (a.sheaf, a.foreign),
+            let (by_index, foreign, facts) = match found {
+                Ok((a, facts)) => (a.sheaf, a.foreign, facts),
                 Err(e) => {
                     log::warn!("reading annotations: {e:#}");
                     return;
@@ -1447,6 +1453,8 @@ impl DocView {
                     );
                 }
                 doc.foreign_annots = foreign;
+                let primary = doc.model.primary();
+                doc.set_labels(primary, facts.labels);
                 if by_index.is_empty() {
                     cx.notify();
                     return;
@@ -3684,9 +3692,8 @@ impl DocView {
             view_mode.push_str(&format!("  —  view rotated {}°", pane.rotation.degrees()));
         }
         let status = format!(
-            "page {} / {}  —  {size}  —  {:.0}% ({zoom_mode}){view_mode}",
-            (doc.current_page() + 1).min(count),
-            count,
+            "page {}  —  {size}  —  {:.0}% ({zoom_mode}){view_mode}",
+            doc.page_position(doc.current_page(), count),
             layout.zoom_percent(),
         );
         let notice = doc.notice.clone().map(Into::into);
@@ -3723,6 +3730,7 @@ impl Render for DocView {
         let presentation = self.presentation;
         let full = presentation == Presentation::FullScreen;
         let search_bar = (!full).then(|| self.render_search_bar(cx)).flatten();
+        let goto_bar = (!full).then(|| self.render_goto()).flatten();
         let toolbar = (presentation == Presentation::Normal).then(|| self.render_toolbar(cx));
         let mut body: Option<AnyElement> = None;
         // The status bar: where you are, then the latest notice, which
@@ -3806,6 +3814,7 @@ impl Render for DocView {
             )
             .on_action(cx.listener(|v, _: &ReadMode, window, cx| v.toggle_read_mode(window, cx)))
             .on_action(cx.listener(|v, _: &ToggleRulers, _, cx| v.toggle_rulers(cx)))
+            .on_action(cx.listener(|v, _: &GoToPage, window, cx| v.open_goto(window, cx)))
             .on_action(cx.listener(|v, _: &ToggleGrid, _, cx| v.toggle_grid(cx)))
             .on_action(cx.listener(|v, _: &ClearGuides, _, cx| v.clear_guides(cx)))
             .when(self.guide_drag.is_some(), |d| {
@@ -3900,6 +3909,7 @@ impl Render for DocView {
             })
             .text_color(theme::TEXT_SOFT)
             .children(search_bar)
+            .children(goto_bar)
             .children(toolbar)
             .child(div().flex_grow(1.0).min_h(px(0.0)).children(body))
             .when_some(ocr_progress, |d, frac| {
@@ -4017,6 +4027,8 @@ impl DocView {
             .filter_map(|(_, n)| n.target)
             .collect();
         let selection = doc.selection.clone();
+        let labels: Vec<String> = visible.clone().map(|i| doc.page_label(i)).collect();
+        let visible_start = visible.start;
 
         let mut wants = Vec::new();
         let mut items = Vec::new();
@@ -4108,7 +4120,7 @@ impl DocView {
                             } else {
                                 theme::TEXT_MUTED
                             })
-                            .child(format!("{}", i + 1)),
+                            .child(labels[i - visible_start].clone()),
                     ),
             );
         }

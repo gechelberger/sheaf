@@ -9,6 +9,7 @@ pub mod annot;
 pub mod file;
 pub mod history;
 pub mod incremental;
+pub mod labels;
 pub mod model;
 pub mod recovery;
 pub mod save;
