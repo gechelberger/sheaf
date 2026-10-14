@@ -135,6 +135,7 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 | Pattern search (regex: SSNs, EINs, amounts, dates) — separate tool from Find, shared engine with redaction | ✅ Patterns panel, Ctrl+Shift+F |
 | User-defined patterns: add, save, and delete presets; several date formats built in | ✅ `patterns.json`; right-click a preset |
 | Multiple documents, one window each | ✅ |
+| Split view (same document, two places) | ✅ View > Split (Ctrl+\\); F6 switches pane |
 | Split view (same doc, two positions) | 📋 |
 | Attachments panel | 📋 |
 | Open PDF Portfolios (browse and extract embedded files) | 📋 |

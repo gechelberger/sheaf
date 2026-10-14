@@ -367,6 +367,21 @@ impl Pane {
         }
     }
 
+    /// A second view of the same document, starting where this one is.
+    pub(crate) fn split(&self) -> Self {
+        Self {
+            zoom: self.zoom,
+            mode: self.mode,
+            rotation: self.rotation,
+            row: self.row,
+            scroll: ScrollHandle::new(),
+            layout: None,
+            pending_scroll: Some(ScrollTo::Page(self.current_page)),
+            current_page: self.current_page,
+            last_turn: None,
+        }
+    }
+
     /// Page `p` as this pane shows it: with rotate view added.
     pub(crate) fn shown(&self, p: PageRef) -> PageRef {
         PageRef {

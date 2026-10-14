@@ -86,7 +86,9 @@ actions!(
         TwoUpContinuous,
         ToggleCoverPage,
         RotateViewCw,
-        RotateViewCcw
+        RotateViewCcw,
+        SplitView,
+        NextPane
     ]
 );
 actions!(
@@ -288,6 +290,8 @@ fn main() {
                 // Acrobat: Rotate View Clockwise / Counterclockwise.
                 KeyBinding::new("ctrl-shift-=", RotateViewCw, doc),
                 KeyBinding::new("ctrl-shift--", RotateViewCcw, doc),
+                KeyBinding::new("ctrl-\\", SplitView, doc),
+                KeyBinding::new("f6", NextPane, doc),
                 KeyBinding::new("r", RotatePageCw, doc_keys),
                 KeyBinding::new("shift-r", RotatePageCcw, doc_keys),
                 KeyBinding::new("delete", DeletePage, doc_keys),

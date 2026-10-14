@@ -136,6 +136,7 @@ fn builtin_menus() -> Vec<(&'static str, Vec<Item>)> {
                 item("Show Co&ver Page in Two-Up", ToggleCoverPage),
                 item("Rotate View Clock&wise", RotateViewCw),
                 item("Rotate View Counterclockwi&se", RotateViewCcw),
+                item("Spl&it", SplitView),
                 sep(),
                 item("&First Page", FirstPage),
                 item("Pre&vious Page", PrevPage),

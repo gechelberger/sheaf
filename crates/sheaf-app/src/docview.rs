@@ -43,16 +43,18 @@ use sheaf_render::{
 use crate::{
     CancelOcr, CloseSearch, DeletePage, DuplicatePages, ExportCleanCopy, ExportFlattened,
     ExtractPages, Find, FirstPage, InsertPdf, LastPage, LineDown, LineUp, NewBookmark, NextPage,
-    PrevPage, Redo, RotatePageCcw, RotatePageCw, RotateViewCcw, RotateViewCw, Save, SaveAs,
-    ScreenDown, ScreenUp, SearchNext, SearchPrev, SelectAllPages, SinglePage, SinglePageContinuous,
-    ToggleCoverPage, ToolArrow, ToolConnector, ToolEllipse, ToolFreeText, ToolHighlight, ToolInk,
-    ToolLine, ToolNote, ToolSelect, ToolSquare, ToolTick, TwoUp, TwoUpContinuous, Undo, ZoomActual,
-    ZoomFitPage, ZoomFitWidth, ZoomIn, ZoomOut,
+    NextPane, PrevPage, Redo, RotatePageCcw, RotatePageCw, RotateViewCcw, RotateViewCw, Save,
+    SaveAs, ScreenDown, ScreenUp, SearchNext, SearchPrev, SelectAllPages, SinglePage,
+    SinglePageContinuous, SplitView, ToggleCoverPage, ToolArrow, ToolConnector, ToolEllipse,
+    ToolFreeText, ToolHighlight, ToolInk, ToolLine, ToolNote, ToolSelect, ToolSquare, ToolTick,
+    TwoUp, TwoUpContinuous, Undo, ZoomActual, ZoomFitPage, ZoomFitWidth, ZoomIn, ZoomOut,
 };
 
 pub const KEY_CONTEXT: &str = "DocView";
 
 const STATUS_H: f32 = 24.0;
+/// Height of the divider between split panes, logical px.
+const SPLITTER_H: f32 = 5.0;
 /// Pages beyond the visible range to prefetch previews for.
 const PREFETCH: usize = 1;
 /// Pages beyond the visible range to keep cached before releasing textures.
@@ -146,6 +148,10 @@ pub(crate) struct Doc {
     /// Comments other tools left in the primary file (read-only).
     pub(crate) foreign_annots: Vec<sheaf_doc::file::ForeignAnnot>,
     pub(crate) selected_foreign: Option<usize>,
+    /// With two panes: the top pane's share of the height.
+    pub(crate) split: f32,
+    /// The split divider is being dragged.
+    pub(crate) split_drag: bool,
 }
 
 impl Doc {
@@ -624,6 +630,8 @@ impl DocView {
             pending_connector: None,
             foreign_annots: Vec::new(),
             selected_foreign: None,
+            split: 0.5,
+            split_drag: false,
         }));
         self.fetch_page_sizes(cx);
         self.fetch_outline(cx);
@@ -2469,6 +2477,72 @@ impl DocView {
         cx.notify();
     }
 
+    /// Window > Split: a second pane on the same document, or back to one
+    /// (keeping the active pane's view).
+    pub(crate) fn toggle_split(&mut self, cx: &mut Context<Self>) {
+        let State::Ready(doc) = &mut self.state else {
+            return;
+        };
+        if doc.panes.len() > 1 {
+            let keep = doc.panes.swap_remove(doc.active);
+            doc.panes = vec![keep];
+            doc.active = 0;
+            doc.notice = Some("Split view off".into());
+        } else {
+            let second = doc.pane().split();
+            doc.panes.push(second);
+            doc.active = 1;
+            doc.notice = Some(
+                "Split view: each pane scrolls and zooms on its own; Ctrl+\\ again to close".into(),
+            );
+        }
+        cx.notify();
+    }
+
+    /// Make pane `ix` the one keys, menus and the status bar act on.
+    fn activate_pane(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if let State::Ready(doc) = &mut self.state
+            && ix < doc.panes.len()
+            && doc.active != ix
+        {
+            doc.active = ix;
+            cx.notify();
+        }
+    }
+
+    /// F6-style: the other pane becomes active.
+    fn cycle_pane(&mut self, cx: &mut Context<Self>) {
+        if let State::Ready(doc) = &self.state {
+            let next = (doc.active + 1) % doc.panes.len();
+            self.activate_pane(next, cx);
+        }
+    }
+
+    fn drag_split(&mut self, y: gpui::Pixels, cx: &mut Context<Self>) {
+        let State::Ready(doc) = &mut self.state else {
+            return;
+        };
+        if !doc.split_drag || doc.panes.len() < 2 {
+            return;
+        }
+        let (a, b) = (doc.panes[0].scroll.bounds(), doc.panes[1].scroll.bounds());
+        let top = f32::from(a.origin.y);
+        let bottom = f32::from(b.origin.y + b.size.height);
+        if bottom - top < 1.0 {
+            return;
+        }
+        doc.split = ((f32::from(y) - top) / (bottom - top)).clamp(0.1, 0.9);
+        cx.notify();
+    }
+
+    fn end_split_drag(&mut self, cx: &mut Context<Self>) {
+        if let State::Ready(doc) = &mut self.state
+            && std::mem::take(&mut doc.split_drag)
+        {
+            cx.notify();
+        }
+    }
+
     /// Two-Up or Two-Up Continuous, keeping the cover page setting.
     fn set_two_up(&mut self, continuous: bool, cx: &mut Context<Self>) {
         let State::Ready(doc) = &self.state else {
@@ -3409,7 +3483,14 @@ impl DocView {
                     .cursor(page_cursor)
                     .on_mouse_down(
                         gpui::MouseButton::Left,
-                        cx.listener(|v, ev, window, cx| v.on_page_mouse_down(ev, window, cx)),
+                        cx.listener(move |v, ev, window, cx| {
+                            v.activate_pane(ix, cx);
+                            v.on_page_mouse_down(ev, window, cx)
+                        }),
+                    )
+                    .on_mouse_down(
+                        gpui::MouseButton::Right,
+                        cx.listener(move |v, _, _, cx| v.activate_pane(ix, cx)),
                     )
                     .on_mouse_move(
                         cx.listener(|v, ev, window, cx| v.on_page_mouse_move(ev, window, cx)),
@@ -3432,7 +3513,75 @@ impl DocView {
                     .into_any_element(),
             );
         }
-        let body = pane_els.pop().expect("at least one pane");
+        let body = if pane_els.len() == 1 {
+            pane_els.pop().expect("one pane")
+        } else {
+            // Split: the panes stacked, with a divider to drag. The active
+            // pane gets an accent edge.
+            let frac = doc.split;
+            let active = doc.active;
+            let mut els = pane_els.into_iter().enumerate();
+            let (_, top) = els.next().expect("two panes");
+            let (_, bottom) = els.next().expect("two panes");
+            let edge = |on: bool| {
+                div()
+                    .h(px(2.0))
+                    .flex_shrink_0()
+                    .bg(if on { theme::ACCENT } else { theme::RAISED })
+            };
+            div()
+                .id("split")
+                .size_full()
+                .flex()
+                .flex_col()
+                .on_mouse_move(cx.listener(|v, ev: &gpui::MouseMoveEvent, _, cx| {
+                    v.drag_split(ev.position.y, cx)
+                }))
+                .on_mouse_up(
+                    gpui::MouseButton::Left,
+                    cx.listener(|v, _, _, cx| v.end_split_drag(cx)),
+                )
+                .on_mouse_up_out(
+                    gpui::MouseButton::Left,
+                    cx.listener(|v, _, _, cx| v.end_split_drag(cx)),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .h(relative(frac))
+                        .min_h(px(0.0))
+                        .child(edge(active == 0))
+                        .child(div().flex_1().min_h(px(0.0)).child(top)),
+                )
+                .child(
+                    div()
+                        .id("split-divider")
+                        .h(px(SPLITTER_H))
+                        .flex_shrink_0()
+                        .bg(theme::DIVIDER)
+                        .cursor(gpui::CursorStyle::ResizeRow)
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(|v, _, _, cx| {
+                                if let State::Ready(doc) = &mut v.state {
+                                    doc.split_drag = true;
+                                }
+                                cx.stop_propagation();
+                            }),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_h(px(0.0))
+                        .child(edge(active == 1))
+                        .child(div().flex_1().min_h(px(0.0)).child(bottom)),
+                )
+                .into_any_element()
+        };
 
         let pane = doc.pane();
         let layout = pane.layout.as_ref().expect("planned");
@@ -3564,6 +3713,8 @@ impl Render for DocView {
             .on_action(cx.listener(|v, _: &TwoUp, _, cx| v.set_two_up(false, cx)))
             .on_action(cx.listener(|v, _: &TwoUpContinuous, _, cx| v.set_two_up(true, cx)))
             .on_action(cx.listener(|v, _: &ToggleCoverPage, _, cx| v.toggle_cover_page(cx)))
+            .on_action(cx.listener(|v, _: &SplitView, _, cx| v.toggle_split(cx)))
+            .on_action(cx.listener(|v, _: &NextPane, _, cx| v.cycle_pane(cx)))
             .on_action(cx.listener(|v, _: &RotateViewCw, _, cx| v.rotate_view(Rotation::R90, cx)))
             .on_action(cx.listener(|v, _: &RotateViewCcw, _, cx| v.rotate_view(Rotation::R270, cx)))
             .on_action(cx.listener(|v, _: &Find, window, cx| v.open_search(window, cx)))
