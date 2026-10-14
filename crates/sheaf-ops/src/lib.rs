@@ -11,7 +11,8 @@ pub mod images;
 pub mod open;
 pub mod pages;
 pub mod scan;
+pub mod split;
 
 pub use open::open;
 
-pub use sheaf_progress::{Cancelled, NoProgress, Progress, Snapshot, Tracker};
+pub use sheaf_progress::{Cancelled, NoProgress, Progress, Snapshot as ProgressSnapshot, Tracker};

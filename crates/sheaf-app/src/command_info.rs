@@ -68,6 +68,11 @@ pub fn info(id: &str) -> Option<Info> {
                 "camera", "photo", "image", "scan", "phone", "receipt", "import", "deskew", "ocr",
             ],
         ),
+        "workspace::SplitDocument" => (
+            "split-document",
+            "Split this document into several files: every so many pages, at each top-level bookmark, by file size, or by page ranges.",
+            &["divide", "break", "burst", "separate", "chunk"],
+        ),
         "workspace::ExportPages" => (
             "export-pages",
             "Save pages as PNG, JPEG or TIFF images, or as plain text.",

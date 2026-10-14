@@ -19,6 +19,7 @@ mod export;
 mod export_dialog;
 mod file_dialog;
 mod goto;
+mod jobs;
 mod keymap;
 mod layers_panel;
 mod markup_tools;
@@ -46,6 +47,7 @@ mod rulers;
 mod scan_dialog;
 mod script;
 mod settings;
+mod split_dialog;
 mod toolbar;
 mod toolbar_dialog;
 mod workspace;
@@ -171,6 +173,7 @@ actions!(
         ExportPages,
         CreateFromScans,
         CombineFiles,
+        SplitDocument,
         ToggleToolbar,
         CustomizeToolbar
     ]
@@ -315,6 +318,8 @@ fn main() {
             let ed = Some(export_dialog::KEY_CONTEXT);
             let sd = Some(scan_dialog::KEY_CONTEXT);
             let cd = Some("CombineDialog && !TextInput");
+            let spd = Some(split_dialog::KEY_CONTEXT);
+            let spd_keys = Some("SplitDialog && !TextInput");
             let ed_keys = Some("ExportDialog && !TextInput");
             let pd_keys = Some("PrintDialog && !TextInput");
             let pf_keys = Some("PluginForm && !TextInput");
@@ -423,6 +428,12 @@ fn main() {
                 KeyBinding::new("escape", DialogCancel, sd),
                 KeyBinding::new("enter", DialogRun, cd),
                 KeyBinding::new("escape", DialogCancel, cd),
+                KeyBinding::new("tab", DialogNext, spd),
+                KeyBinding::new("shift-tab", DialogPrev, spd),
+                KeyBinding::new("left", DialogLeft, spd_keys),
+                KeyBinding::new("right", DialogRight, spd_keys),
+                KeyBinding::new("enter", DialogRun, spd_keys),
+                KeyBinding::new("escape", DialogCancel, spd_keys),
                 KeyBinding::new("tab", DialogNext, pd),
                 KeyBinding::new("shift-tab", DialogPrev, pd),
                 KeyBinding::new("left", DialogLeft, pd_keys),

@@ -90,6 +90,7 @@ const FILES: &[(&str, &[u8])] = icons![
     "single-page-continuous",
     "single-page",
     "split",
+    "split-document",
     "text",
     "thumbnails",
     "toolbar",

@@ -226,6 +226,7 @@ fn builtin_menus() -> Vec<(&'static str, Vec<Item>)> {
                 item("&Insert PDF…", InsertPdf),
                 item("Du&plicate Pages", DuplicatePages),
                 item("E&xtract Pages…", ExtractPages),
+                item("&Split Document…", SplitDocument),
                 item("&Delete Pages", DeletePage),
                 sep(),
                 item("Recognize &Text (OCR)…", RecognizeText),

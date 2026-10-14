@@ -211,6 +211,7 @@ pub fn builtin(id: &str) -> Builtin {
         | "docview::ExportCleanCopy"
         | "docview::ExportFlattened"
         | "workspace::ExportPages"
+        | "workspace::SplitDocument"
         | "workspace::Print"
         | "workspace::DocumentProperties"
         | "workspace::CloseDocument"

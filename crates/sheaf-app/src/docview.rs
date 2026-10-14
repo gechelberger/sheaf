@@ -391,8 +391,8 @@ pub struct DocView {
     pub(crate) comments: Option<crate::comments_panel::Comments>,
     /// A Recognize Text run in progress (see ocr_run.rs).
     pub(crate) ocr: Option<crate::ocr_run::OcrRun>,
-    /// An Export Pages run in progress (see export.rs).
-    pub(crate) export_run: Option<sheaf_ops::Tracker>,
+    /// A background job in progress: Export Pages, Split (see jobs.rs).
+    pub(crate) job: Option<crate::jobs::Job>,
     /// A plugin command running on this document, with its progress
     /// (see plugins.rs).
     #[cfg_attr(not(feature = "plugins"), allow(dead_code))]
@@ -495,7 +495,7 @@ impl DocView {
             calc: None,
             comments: None,
             ocr: None,
-            export_run: None,
+            job: None,
             plugin_run: None,
             pending_comments_focus: false,
             initial_query: None,
@@ -3968,7 +3968,7 @@ impl Render for DocView {
         };
         let ocr_progress = self
             .ocr_progress()
-            .or_else(|| self.export_progress())
+            .or_else(|| self.job_progress())
             .or_else(|| {
                 let (_, t) = self.plugin_run.as_ref()?;
                 t.snapshot().fraction
@@ -4054,8 +4054,8 @@ impl Render for DocView {
                     v.close_search(window, cx)
                 } else if v.cancel_ocr(cx) {
                     // Esc during a Recognize Text run stops it.
-                } else if v.cancel_export(cx) {
-                    // Likewise an Export Pages run.
+                } else if v.cancel_job(cx) {
+                    // Likewise an export or a split.
                 } else if v.cancel_plugin_run(cx) {
                     // And a plugin command that reports progress.
                 } else if v.cancel_tape_placing(cx) || v.cancel_pending_connector(cx) {

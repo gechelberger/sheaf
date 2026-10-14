@@ -336,6 +336,7 @@ pub struct Workspace {
     export: Option<(Entity<crate::export_dialog::ExportDialog>, Subscription)>,
     scan: Option<(Entity<crate::scan_dialog::ScanDialog>, Subscription)>,
     combine: Option<(Entity<crate::combine_dialog::CombineDialog>, Subscription)>,
+    split: Option<(Entity<crate::split_dialog::SplitDialog>, Subscription)>,
     /// File > Print, while open.
     print: Option<(Entity<crate::print_dialog::PrintDialog>, Subscription)>,
     /// File > Properties, while open.
@@ -431,6 +432,7 @@ impl Workspace {
             export: None,
             scan: None,
             combine: None,
+            split: None,
             print: None,
             properties: None,
             ocr_dialog: None,
@@ -1109,6 +1111,35 @@ impl Workspace {
             },
         );
         self.scan = Some((dialog, sub));
+        cx.notify();
+    }
+
+    fn toggle_split(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.split.take().is_some() {
+            self.focus_active(window, cx);
+            cx.notify();
+            return;
+        }
+        let Some(snapshot) = self.doc().and_then(|d| d.read(cx).model_snapshot()) else {
+            return;
+        };
+        let dialog = cx.new(|cx| crate::split_dialog::SplitDialog::new(snapshot, window, cx));
+        let sub = cx.subscribe_in(
+            &dialog,
+            window,
+            |ws, _, ev: &crate::split_dialog::SplitEvent, window, cx| {
+                ws.split = None;
+                ws.focus_active(window, cx);
+                if let crate::split_dialog::SplitEvent::Split(by) = ev
+                    && let Some(doc) = ws.doc().cloned()
+                {
+                    let by = by.clone();
+                    doc.update(cx, |d, cx| d.split_document(by, window, cx));
+                }
+                cx.notify();
+            },
+        );
+        self.split = Some((dialog, sub));
         cx.notify();
     }
 
@@ -2152,6 +2183,9 @@ impl Render for Workspace {
                 cx.listener(|ws, _: &crate::CombineFiles, window, cx| ws.combine_files(window, cx)),
             )
             .on_action(
+                cx.listener(|ws, _: &crate::SplitDocument, window, cx| ws.toggle_split(window, cx)),
+            )
+            .on_action(
                 cx.listener(|ws, a: &crate::recent::OpenRecent, window, cx| {
                     ws.open_recent(a.path.clone(), window, cx)
                 }),
@@ -2267,6 +2301,11 @@ impl Render for Workspace {
             )
             .children(
                 self.combine
+                    .as_ref()
+                    .map(|(d, _)| deferred(d.clone()).with_priority(2)),
+            )
+            .children(
+                self.split
                     .as_ref()
                     .map(|(d, _)| deferred(d.clone()).with_priority(2)),
             )

@@ -14,9 +14,10 @@ mod export;
 mod images;
 mod progress;
 mod scan;
+mod split;
 
 /// The subcommands, for the app to recognize its hand-off.
-pub const SUBCOMMANDS: &[&str] = &["combine", "export", "images-to-pdf", "scan"];
+pub const SUBCOMMANDS: &[&str] = &["combine", "export", "images-to-pdf", "scan", "split"];
 
 /// Whether `arg` (the first argument after the program name) names a
 /// subcommand. A file of that name in the current directory still opens
@@ -41,6 +42,7 @@ enum Command {
     Export(export::ExportArgs),
     ImagesToPdf(images::ImagesArgs),
     Scan(scan::ScanArgs),
+    Split(split::SplitArgs),
 }
 
 /// Exit status when an op was cancelled (as for SIGINT).
@@ -65,6 +67,7 @@ where
         Command::Export(args) => export::run(args, cli.quiet),
         Command::ImagesToPdf(args) => images::run(args, cli.quiet),
         Command::Scan(args) => scan::run(args, cli.quiet),
+        Command::Split(args) => split::run(args, cli.quiet),
     };
     match result {
         Ok(()) => 0,

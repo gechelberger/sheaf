@@ -62,11 +62,15 @@ fn finish(mut pdf: Pdf) -> Result<Vec<u8>> {
 /// file at `path`, along with their markup and the bookmarks that point at
 /// them. Returns how many pages were written.
 pub fn extract_pages(model: &Snapshot, ids: &[PageId], path: &Path) -> Result<usize> {
-    let snap = subset(model, ids, true).context("no pages to extract")?;
-    let n = snap.state.pages.len();
-    let bytes = rewrite_with(&snap, false)?;
+    let bytes = extract_bytes(model, ids)?;
     write_atomic(path, &bytes)?;
-    Ok(n)
+    Ok(ids.len())
+}
+
+/// What [`extract_pages`] would write, in memory.
+pub fn extract_bytes(model: &Snapshot, ids: &[PageId]) -> Result<Vec<u8>> {
+    let snap = subset(model, ids, true).context("no pages to extract")?;
+    rewrite_with(&snap, false)
 }
 
 /// `ids` (in document order) with their markup and text layers, and their

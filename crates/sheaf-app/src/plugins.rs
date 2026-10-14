@@ -1245,7 +1245,7 @@ pub fn run(
 }
 
 /// The status line for a running command's progress, once it has any.
-fn progress_line(label: &str, s: &sheaf_ops::Snapshot) -> Option<String> {
+fn progress_line(label: &str, s: &sheaf_ops::ProgressSnapshot) -> Option<String> {
     if s.cancelled {
         return Some(format!("{label}: stopping…"));
     }
