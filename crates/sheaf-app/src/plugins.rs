@@ -569,7 +569,7 @@ pub fn ask_consent(window: &mut Window, cx: &mut Context<Workspace>) {
             );
             log::info!("plugin {id}: asking for permission");
             let answer = cx.update(|window, cx| {
-                crate::prompts::ask(
+                sheaf_ui::prompts::ask(
                     window,
                     cx,
                     gpui::PromptLevel::Info,
@@ -1013,7 +1013,7 @@ pub fn run(
             .global::<CommandRegistry>()
             .get(&format!("{plugin_id}::{id}"))
             .map(|c| {
-                crate::menus::parse_label(&c.label)
+                sheaf_ui::menu_bar::parse_label(&c.label)
                     .0
                     .trim_end_matches('…')
                     .to_string()

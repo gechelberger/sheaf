@@ -15,8 +15,6 @@ use sheaf_ui::theme;
 
 use crate::commands::{PanelAction, Run, ShowPluginPanel};
 use crate::docview::{DocEvent, DocView};
-use crate::frame;
-use crate::menu_bar::MenuBar;
 use crate::ocr_dialog::{OcrDialog, OcrDialogContext, OcrDialogEvent, OcrSpec};
 use crate::palette::{Palette, PaletteEvent};
 use crate::settings::{DockLayout, DockState, Settings, WindowPlacement};
@@ -26,6 +24,8 @@ use crate::{
     ShowOutline, ShowPatterns, ShowThumbnails, ToggleBottomDock, ToggleLeftDock, ToggleRightDock,
     ToggleSidebar,
 };
+use sheaf_ui::frame;
+use sheaf_ui::menu_bar::MenuBar;
 
 pub const KEY_CONTEXT: &str = "Workspace";
 
@@ -625,7 +625,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Task<bool> {
         let name = doc.read(cx).file_name();
-        let rx = crate::prompts::ask(
+        let rx = sheaf_ui::prompts::ask(
             window,
             cx,
             PromptLevel::Warning,
@@ -706,7 +706,7 @@ impl Workspace {
 
     #[cfg(not(feature = "plugins"))]
     fn toggle_plugin_manager(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        drop(crate::prompts::ask(
+        drop(sheaf_ui::prompts::ask(
             window,
             cx,
             PromptLevel::Info,
@@ -1430,7 +1430,8 @@ impl Render for Workspace {
         let menu_bar = self.menu_bar.clone().map(|m| m.into_any_element());
         let on_close =
             cx.listener(|ws, _: &gpui::ClickEvent, window, cx| ws.request_close(window, cx));
-        let title_bar = frame::title_bar(title, menu_bar, on_close, window, cx);
+        let icon = crate::brand::mark(px(16.0), window).into_any_element();
+        let title_bar = frame::title_bar(icon, title, menu_bar, on_close, window, cx);
 
         let content = div()
             .key_context(KEY_CONTEXT)
@@ -1533,7 +1534,7 @@ impl Render for Workspace {
                     env!("CARGO_PKG_VERSION"),
                     env!("SHEAF_GIT_COMMIT")
                 );
-                drop(crate::prompts::ask(
+                drop(sheaf_ui::prompts::ask(
                     window,
                     cx,
                     PromptLevel::Info,

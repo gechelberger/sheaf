@@ -156,7 +156,7 @@ impl PluginManager {
     }
 
     fn uninstall(&mut self, id: String, name: String, window: &mut Window, cx: &mut Context<Self>) {
-        let rx = crate::prompts::ask(
+        let rx = sheaf_ui::prompts::ask(
             window,
             cx,
             PromptLevel::Warning,
@@ -396,7 +396,7 @@ impl Render for PluginManager {
                                     .text_ellipsis()
                                     .text_xs()
                                     .text_color(theme::TEXT_FAINT)
-                                    .tooltip(crate::tooltip::Tooltip::text(
+                                    .tooltip(sheaf_ui::tooltip::Tooltip::text(
                                         dir.display().to_string(),
                                     ))
                                     .child(short_path(&dir)),

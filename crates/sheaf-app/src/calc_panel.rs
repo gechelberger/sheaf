@@ -13,7 +13,7 @@ use sheaf_doc::{
 use sheaf_ui::theme;
 
 use crate::docview::{DocView, State};
-use crate::text_input::{TextInput, TextInputEvent};
+use sheaf_ui::text_input::{TextInput, TextInputEvent};
 
 const ROW_H: f32 = 22.0;
 /// Point size of a placed tape.

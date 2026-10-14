@@ -5,13 +5,13 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use crate::theme;
 use futures::channel::oneshot;
 use gpui::{
     App, AppContext as _, Context, EventEmitter, FocusHandle, Focusable, Global, IntoElement,
     KeyDownEvent, PromptButton, PromptLevel, PromptResponse, Render, SharedString, Window,
     WindowId, div, prelude::*, px, relative,
 };
-use sheaf_ui::theme;
 
 struct Pending {
     level: PromptLevel,

@@ -10,8 +10,8 @@ use sheaf_doc::PageId;
 use sheaf_plugin::ui::{FieldAnswer, FieldKind, FieldValue, Form, parse_page_range};
 use sheaf_ui::theme;
 
-use crate::text_input::{TextInput, TextInputEvent};
 use crate::{DialogCancel, DialogLeft, DialogNext, DialogPrev, DialogRight, DialogRun};
+use sheaf_ui::text_input::{TextInput, TextInputEvent};
 
 pub const KEY_CONTEXT: &str = "PluginForm";
 

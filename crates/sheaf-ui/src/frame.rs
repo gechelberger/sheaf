@@ -4,12 +4,12 @@
 //! Wayland compositors such as WSLg's do. Adapted from GPUI's
 //! `window_shadow` example and Zed's workspace frame.
 
+use crate::theme;
 use gpui::{
     AnyElement, App, Bounds, CursorStyle, Decorations, HitboxBehavior, Hsla, MouseButton, Pixels,
     Point, ResizeEdge, SharedString, Size, Stateful, Styled, Tiling, Window, WindowControlArea,
     canvas, div, point, prelude::*, px, size, transparent_black,
 };
-use sheaf_ui::theme;
 
 pub const TITLE_H: f32 = 34.0;
 const SHADOW: Pixels = px(10.0);
@@ -38,9 +38,10 @@ fn caption_region() -> gpui::Div {
         })
 }
 
-/// The title bar. `menu_bar` follows the app name; `title` is shown centered; the whole bar moves the
+/// The title bar. `icon` and the app name lead; `menu_bar` follows them; `title` is shown centered; the whole bar moves the
 /// window, double-click toggles maximize, right-click opens the window menu.
 pub fn title_bar(
+    icon: AnyElement,
     title: SharedString,
     menu_bar: Option<AnyElement>,
     on_close: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
@@ -140,11 +141,7 @@ pub fn title_bar(
         })
         // Keep native caption regions separate from menus and buttons. Native
         // caption handling supplies dragging, double-click, and window menus.
-        .child(
-            caption_region()
-                .pl_3()
-                .child(crate::brand::mark(px(16.0), window)),
-        )
+        .child(caption_region().pl_3().child(icon))
         .child(
             caption_region()
                 .pl_2()

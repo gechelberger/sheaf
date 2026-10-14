@@ -10,9 +10,9 @@ use gpui::{
 use sheaf_ui::theme;
 
 use crate::commands::CommandRegistry;
-use crate::menus::parse_label;
-use crate::text_input::{TextInput, TextInputEvent};
 use crate::{PaletteDown, PalettePageDown, PalettePageUp, PaletteUp};
+use sheaf_ui::menu_bar::parse_label;
+use sheaf_ui::text_input::{TextInput, TextInputEvent};
 
 pub const KEY_CONTEXT: &str = "Palette";
 
@@ -56,7 +56,7 @@ pub fn commands(cx: &App) -> Vec<Command> {
                 id: c.id.clone(),
                 category: c.category.clone(),
                 label: parse_label(&c.label).0.trim_end_matches('…').to_string(),
-                shortcut: crate::menu_bar::shortcut(action.as_ref(), cx).map(|s| s.to_string()),
+                shortcut: sheaf_ui::menu_bar::shortcut(action.as_ref(), cx).map(|s| s.to_string()),
                 action,
             }
         })

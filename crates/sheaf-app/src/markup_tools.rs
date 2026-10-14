@@ -16,7 +16,7 @@ use sheaf_render::Rect;
 use sheaf_ui::theme;
 
 use crate::docview::{DocView, State, rotate_rect};
-use crate::tooltip::Tooltip;
+use sheaf_ui::tooltip::Tooltip;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {

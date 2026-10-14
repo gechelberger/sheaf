@@ -73,3 +73,10 @@ check them with screenshots (the `--script` UI harness).
    Values are unchanged except two near-duplicates folded together:
    `0x5aaaff` into `ACCENT_HOVER` (`0x5aaeff`) and `0x555555` into
    `CONTROL_HOVER_STRONG` (`0x5a5a5a`).
+2. Done. `text_input`, `text_area`, `prompts`, `tooltip`, `frame` and
+   `menu_bar` are in sheaf-ui. `sheaf_ui::bind_keys(cx)` holds the text
+   field and menu bar bindings (main.rs calls it after its own). The `&`
+   label helpers (`parse_label`, `mnemonic`, and `label`, now
+   `platform_label`) moved to `sheaf_ui::menu_bar`. `frame::title_bar`
+   takes the icon as its first argument. Checked with `--script`: renaming
+   a bookmark through the field gives the same result as main.

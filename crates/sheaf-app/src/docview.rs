@@ -34,8 +34,6 @@ use sheaf_render::{
     SearchHit,
 };
 
-use crate::text_area::{TextArea, TextAreaEvent};
-use crate::text_input::{TextInput, TextInputEvent};
 use crate::{
     CancelOcr, CloseSearch, DeletePage, DuplicatePages, ExportCleanCopy, ExportFlattened,
     ExtractPages, Find, FirstPage, InsertPdf, LastPage, LineDown, LineUp, NewBookmark, NextPage,
@@ -44,6 +42,8 @@ use crate::{
     ToolInk, ToolLine, ToolNote, ToolSelect, ToolSquare, ToolTick, Undo, ZoomActual, ZoomFitPage,
     ZoomFitWidth, ZoomIn, ZoomOut,
 };
+use sheaf_ui::text_area::{TextArea, TextAreaEvent};
+use sheaf_ui::text_input::{TextInput, TextInputEvent};
 
 pub const KEY_CONTEXT: &str = "DocView";
 
@@ -736,7 +736,7 @@ impl DocView {
         cx: &mut Context<Self>,
     ) {
         let name = self.file_name();
-        let rx = crate::prompts::ask(
+        let rx = sheaf_ui::prompts::ask(
             window,
             cx,
             gpui::PromptLevel::Warning,
@@ -3491,7 +3491,7 @@ impl Render for DocView {
                                 .min_w(px(0.0))
                                 .overflow_hidden()
                                 .text_ellipsis()
-                                .tooltip(crate::tooltip::Tooltip::text(notice.clone()))
+                                .tooltip(sheaf_ui::tooltip::Tooltip::text(notice.clone()))
                                 .child(format!("  —  {notice}")),
                         )
                     }),

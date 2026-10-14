@@ -6,6 +6,7 @@
 
 use std::ops::Range;
 
+use crate::theme;
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, FocusHandle, Focusable, GlobalElementId, LayoutId, MouseButton,
@@ -13,7 +14,6 @@ use gpui::{
     TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine, actions, div, fill, point,
     prelude::*, px, relative, size,
 };
-use sheaf_ui::theme;
 use unicode_segmentation::UnicodeSegmentation;
 
 actions!(

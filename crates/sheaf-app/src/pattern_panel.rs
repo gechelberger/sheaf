@@ -17,7 +17,7 @@ use sheaf_ui::theme;
 
 use crate::docview::{DocView, Hit, ScrollTo, State};
 use crate::patterns::{self, Preset};
-use crate::text_input::{TextInput, TextInputEvent};
+use sheaf_ui::text_input::{TextInput, TextInputEvent};
 
 const ROW_H: f32 = 22.0;
 const PAD: f32 = 8.0;
@@ -397,7 +397,7 @@ impl DocView {
                 .border_1()
                 .border_color(theme::BORDER_CARD)
                 .hover(|s| s.bg(theme::CONTROL_HOVER))
-                .tooltip(crate::tooltip::Tooltip::text(format!(
+                .tooltip(sheaf_ui::tooltip::Tooltip::text(format!(
                     "From the {} plugin",
                     p.plugin
                 )))

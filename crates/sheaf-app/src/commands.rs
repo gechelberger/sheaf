@@ -18,7 +18,7 @@ use gpui::{Action, Global, Menu, MenuItem};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::menus::{label as menu_label, parse_label};
+use sheaf_ui::menu_bar::{parse_label, platform_label as menu_label};
 
 /// Run a plugin command. Bindable in `keymap.json`:
 /// `["plugin::Run", { "plugin": "tax-form-bookmarks", "command": "scan" }]`.

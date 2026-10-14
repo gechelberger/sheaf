@@ -16,11 +16,11 @@ use sheaf_ui::theme;
 
 use crate::docview::{DocView, ScrollTo, State};
 use crate::markup_tools::rotate_pt;
-use crate::text_input::{TextInput, TextInputEvent};
 use crate::{
     CollapseAllBookmarks, DeleteBookmark, DeselectBookmark, ExpandAllBookmarks, NewBookmark, Redo,
     RenameBookmark, Save, SetBookmarkDestination, Undo,
 };
+use sheaf_ui::text_input::{TextInput, TextInputEvent};
 
 pub const KEY_CONTEXT: &str = "Outline";
 

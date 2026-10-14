@@ -11,14 +11,12 @@
 //! that is remembered: items are enabled and dispatched as if it still had
 //! focus, and it gets focus back when the bar closes.
 
+use crate::theme;
 use gpui::{
     Action, App, Bounds, Context, FocusHandle, HighlightStyle, KeyDownEvent, Keystroke,
     MouseButton, OwnedMenu, OwnedMenuItem, Pixels, SharedString, StyledText, Subscription,
     UnderlineStyle, Window, actions, anchored, canvas, deferred, div, prelude::*, px,
 };
-use sheaf_ui::theme;
-
-use crate::menus::{mnemonic, parse_label};
 
 pub const KEY_CONTEXT: &str = "MenuBar";
 
@@ -75,7 +73,6 @@ impl MenuBar {
     }
 
     /// Pick up changed menus (a plugin turned on or off).
-    #[cfg_attr(not(feature = "plugins"), allow(dead_code))]
     pub fn reload(&mut self, cx: &mut Context<Self>) {
         self.menus = cx.get_menus().unwrap_or_default();
         self.restore = None;
@@ -516,4 +513,33 @@ fn keystroke_text(k: &Keystroke) -> String {
     }
     out.push_str(&key);
     out
+}
+
+/// Split a `&`-marked label into display text and the byte offset of its
+/// mnemonic character, if any.
+pub fn parse_label(label: &str) -> (String, Option<usize>) {
+    match label.find('&') {
+        Some(i) if i + 1 < label.len() => {
+            let mut text = String::with_capacity(label.len() - 1);
+            text.push_str(&label[..i]);
+            text.push_str(&label[i + 1..]);
+            (text, Some(i))
+        }
+        _ => (label.to_string(), None),
+    }
+}
+
+/// The mnemonic letter of a `&`-marked label, lowercased.
+pub fn mnemonic(label: &str) -> Option<char> {
+    let (text, at) = parse_label(label);
+    text[at?..].chars().next().map(|c| c.to_ascii_lowercase())
+}
+
+/// macOS menus don't use mnemonics; strip the markers there.
+pub fn platform_label(s: &str) -> String {
+    if cfg!(target_os = "macos") {
+        parse_label(s).0
+    } else {
+        s.to_string()
+    }
 }

@@ -10,8 +10,8 @@ use sheaf_render::Rect;
 use sheaf_ui::theme;
 
 use crate::docview::{DocView, ScrollTo, State, rotate_rect};
-use crate::text_input::{TextInput, TextInputEvent};
 use crate::{DeleteComment, EditComment, Redo, Save, Undo};
+use sheaf_ui::text_input::{TextInput, TextInputEvent};
 
 pub const KEY_CONTEXT: &str = "Comments";
 
