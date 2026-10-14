@@ -8,7 +8,7 @@
 
 use gpui::{
     AnyElement, Context, CursorStyle, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    PathBuilder, Pixels, Point, Window, canvas, div, prelude::*, px, rgb, svg,
+    PathBuilder, Pixels, Point, Window, canvas, div, prelude::*, px, rgb,
 };
 use sheaf_core::{PageSize, Rotation};
 use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, Edit, PageId, Pt, annot::CONNECTOR_SIZE};
@@ -49,31 +49,6 @@ impl Tool {
             Tool::Tick => "Tick",
             Tool::Connector => "Connector",
         }
-    }
-
-    /// Embedded artwork path, from the tool's command (`command_info.rs`).
-    pub fn icon(self) -> String {
-        crate::command_info::icon_path(self.info().icon)
-    }
-
-    /// Tooltip title; fuller than the undo-history `label`.
-    pub fn title(self) -> &'static str {
-        match self {
-            Tool::Note => "Sticky Note",
-            Tool::FreeText => "Free Text",
-            Tool::Square => "Rectangle",
-            Tool::Tick => "Tickmark",
-            t => t.label(),
-        }
-    }
-
-    /// Tooltip flavor text: the command's help.
-    pub fn description(self) -> &'static str {
-        self.info().help
-    }
-
-    fn info(self) -> crate::command_info::Info {
-        crate::command_info::info(self.action().name()).expect("every tool has command info")
     }
 
     /// The action that selects this tool; its binding is the shortcut shown.
@@ -693,65 +668,6 @@ impl DocView {
         };
         self.apply(Edit::AnnotDelete { page, id }, label, cx);
         true
-    }
-
-    /// Toolbar: tools, colors, and the tickmark palette.
-    pub(crate) fn render_toolbar(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let tool = self.tool;
-        let tools: Vec<_> = Tool::ALL
-            .iter()
-            .map(|&t| {
-                let active = t == tool;
-                div()
-                    .id(("tool", t as usize))
-                    .size(px(26.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_sm()
-                    .cursor_pointer()
-                    .bg(if active {
-                        theme::ACCENT
-                    } else {
-                        theme::CONTROL
-                    })
-                    .text_color(if active {
-                        theme::TEXT_BRIGHT
-                    } else {
-                        theme::TEXT_SUBTLE
-                    })
-                    .hover(|s| {
-                        s.bg(if active {
-                            theme::ACCENT_HOVER
-                        } else {
-                            theme::CONTROL_HOVER
-                        })
-                    })
-                    .on_click(cx.listener(move |v, _, _, cx| v.set_tool(t, cx)))
-                    .tooltip(Tooltip::for_action(t.title(), t.description(), t.action()))
-                    .child(svg().path(t.icon()).size(px(18.0)).text_color(if active {
-                        theme::TEXT_BRIGHT
-                    } else {
-                        theme::TEXT_SUBTLE
-                    }))
-            })
-            .collect();
-        div()
-            .flex_shrink_0()
-            .flex()
-            .items_center()
-            .gap_1()
-            .px_2()
-            .py_1()
-            .bg(theme::PANEL)
-            .border_b_1()
-            .border_color(theme::DIVIDER)
-            .children(tools)
-            .child(div().w(px(12.0)))
-            .child(self.render_colors(cx))
-            .child(div().w(px(12.0)))
-            .child(self.render_ticks(cx))
-            .into_any_element()
     }
 
     /// The markup color swatches, and their length along a toolbar.

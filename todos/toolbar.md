@@ -1,7 +1,7 @@
 # Configurable floating toolbar (planned)
 
-Status: slices 1 (command metadata) and 2 (availability) done 2026-10-14
-on `cmd-icons`; the toolbar itself not started. Written 2026-10-13. The fixed markup
+Status: done 2026-10-14 on `cmd-icons` (all seven slices; notes under
+each below). Written 2026-10-13. The fixed markup
 toolbar (`markup_tools.rs` `render_toolbar`) covers what we have today and
 stays as is for now; this is the toolbar we want once the command set is
 big enough that no fixed layout fits everyone.
@@ -370,6 +370,20 @@ This is the part that makes it worth doing.
    - Script: `{"click": [x, y], "right": true}`.
 7. Replace the fixed markup toolbar with the default layout; remove the
    setting from slice 3.
+
+   *Done 2026-10-14.* Notes and deviations:
+   - The fixed bar (`DocView::render_toolbar`) and the `new_toolbar`
+     setting are gone; the default layout is the old bar's contents, so
+     nothing changes until someone customizes it.
+   - View was taller than the window (since M7), hiding its last items,
+     the new Toolbar ones included. It now groups Page Display, Page
+     Navigation and Panels (with the docks) into submenus, as Acrobat
+     does; Plugin Panels stays where plugins put it.
+   - README documents `toolbar.json`; `docs/plugins.md` says plugins
+     don't place themselves on the toolbar.
+   - Left for later: macOS native menus get no checkmarks or rule-based
+     greying; more than one toolbar (the file is a list, the app shows the
+     first); context-dependent bars.
 
 Each slice should get a `--script` test (`script.rs`): dispatch
 `workspace::CustomizeToolbar`, click, `dump` a new `"toolbar"` state.

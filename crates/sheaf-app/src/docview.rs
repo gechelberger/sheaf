@@ -3929,7 +3929,6 @@ impl Render for DocView {
         let full = presentation == Presentation::FullScreen;
         let search_bar = (!full).then(|| self.render_search_bar(cx)).flatten();
         let goto_bar = (!full).then(|| self.render_goto()).flatten();
-        let toolbar = (presentation == Presentation::Normal).then(|| self.render_toolbar(cx));
         let mut body: Option<AnyElement> = None;
         // The status bar: where you are, then the latest notice, which
         // gives way (ellipsis, full text on hover) when space is short.
@@ -4108,7 +4107,6 @@ impl Render for DocView {
             .text_color(theme::TEXT_SOFT)
             .children(search_bar)
             .children(goto_bar)
-            .children(toolbar)
             .child(div().flex_grow(1.0).min_h(px(0.0)).children(body))
             .when_some(ocr_progress, |d, frac| {
                 d.child(

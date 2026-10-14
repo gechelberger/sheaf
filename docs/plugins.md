@@ -144,6 +144,11 @@ stroke, so it follows the theme and the button's state. It should read at
 the plugin folder, is valid SVG and is at most 64 KB; a command whose icon
 fails is left out and the plugin manager says why.
 
+Plugins don't put themselves on the toolbar; users do, from View >
+Customize Toolbar… or by right-clicking the command in a menu or the
+command palette. A plugin command on the toolbar is hidden while the
+plugin is off and comes back with it.
+
 A command runs as the action `plugin::Run`, so users can bind it themselves:
 
 ```json

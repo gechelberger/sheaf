@@ -127,7 +127,7 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 | Feature | Status |
 |---|---|
 | Open / render PDF (incl. encrypted, forms, large scans) | ✅ (password prompt pending) |
-| Continuous / single / facing page modes | ✅ View > Single Page, Two-Up (each with Continuous), Show Cover Page |
+| Continuous / single / facing page modes | ✅ View > Page Display: Single Page, Two-Up (each with Continuous), Show Cover Page |
 | Zoom (fit page / fit width / custom), rotate view | ✅ rotate view is display only (Ctrl+Shift+Plus/Minus) |
 | Thumbnails sidebar (lazy, virtualized) | ✅ |
 | Bookmarks (outline) sidebar | ✅ |
@@ -136,15 +136,15 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 | User-defined patterns: add, save, and delete presets; several date formats built in | ✅ `patterns.json`; right-click a preset |
 | Multiple documents, one window each | ✅ |
 | Full screen / read mode | ✅ View > Full Screen (Ctrl+L; click or arrows turn pages, Esc leaves), Read Mode (Ctrl+H) |
-| Page labels (display) | ✅ status bar and thumbnails; View > Go to Page (Ctrl+Shift+N) takes a label or number |
+| Page labels (display) | ✅ status bar and thumbnails; View > Page Navigation > Go to Page (Ctrl+Shift+N) takes a label or number |
 | Rulers, grid, guides | ✅ View > Rulers (Ctrl+R), Grid (Ctrl+U); drag from a ruler for a guide |
 | Split view (same document, two places) | ✅ View > Split (Ctrl+\\); F6 switches pane |
-| Split view (same doc, two positions) | 📋 |
-| Attachments panel | ✅ View > Attachments (Ctrl+Alt+6): open (PDFs in sheaf, others with the system program after a warning) or save out |
+| Attachments panel | ✅ View > Panels > Attachments (Ctrl+Alt+6): open (PDFs in sheaf, others with the system program after a warning) or save out |
 | Open PDF Portfolios (browse and extract embedded files) | ✅ opens on its cover sheet with the Attachments panel: folders, metadata columns, open/save |
 | Recent files | ✅ File > Open Recent (last 10, shared by every window) |
 | Document Properties | ✅ File > Properties (Alt+Enter): description, security, fonts |
-| Layers (OCG) panel | ✅ View > Layers (Ctrl+Alt+7): show or hide for viewing; never saved |
+| Layers (OCG) panel | ✅ View > Panels > Layers (Ctrl+Alt+7): show or hide for viewing; never saved |
+| Configurable toolbar: any command or plugin command, docked to any edge or floating | ✅ View > Customize Toolbar…, or right-click a menu item, palette row or toolbar button; `toolbar.json` |
 
 ### Page organization
 | Feature | Status |
@@ -457,6 +457,18 @@ on macOS (`SHEAF_CONFIG_DIR` overrides).
   turned off and what each may access; `plugin-data/<id>/` holds each
   plugin's storage and the `settings.json` you can give it. Manage them from
   Plugins → Manage Plugins….
+- `toolbar.json` — the toolbar's buttons and where it sits, written when you
+  customize or move it (View > Customize Toolbar…, or drag its grip to an
+  edge or over the page). Items are command ids as the palette shows them,
+  `"separator"`, the `"toolbar::Colors"` and `"toolbar::Tickmarks"` widgets,
+  or `["plugin::Run", { "plugin": "<id>", "command": "<id>" }]`. A plugin's
+  buttons hide while it's off and come back with it.
+
+```json
+{ "toolbars": [{ "name": "Main", "dock": "top",
+    "items": ["docview::Save", "separator", "tools::ToolHighlight", "toolbar::Colors"] }] }
+```
+
 - `keymap.json` — your key bindings, loaded after the defaults so they win.
   Zed's format: a list of `{ "context", "bindings" }` entries. Actions are
   named as the command palette (Ctrl+Shift+K) shows them; `null` unbinds.

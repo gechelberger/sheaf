@@ -1,4 +1,4 @@
-//! Page labels on screen, and View > Go to Page (Ctrl+Shift+N), which
+//! Page labels on screen, and View > Page Navigation > Go to Page (Ctrl+Shift+N), which
 //! takes a label ("iv", "A-3") or a page number.
 
 use gpui::{AnyElement, Context, Entity, Focusable, Subscription, Window, div, prelude::*, px};

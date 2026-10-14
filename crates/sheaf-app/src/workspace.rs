@@ -1576,7 +1576,7 @@ impl Workspace {
 
     /// Whether the toolbar is turned on (View > Toolbar).
     pub(crate) fn toolbar_visible(&self, cx: &App) -> bool {
-        self.settings.new_toolbar && self.toolbar_spec(cx).visible
+        self.toolbar_spec(cx).visible
     }
 
     /// Change the toolbar's layout or visibility (every window's), and save.
