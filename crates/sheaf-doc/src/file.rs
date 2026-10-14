@@ -133,6 +133,8 @@ pub struct FileFacts {
     pub attachments: Vec<crate::attachments::Attachment>,
     /// Set when the file is a PDF Portfolio.
     pub collection: Option<crate::portfolio::Collection>,
+    /// Optional content groups, in display order.
+    pub layers: Vec<crate::layers::Layer>,
 }
 
 /// The facts sheaf reads from an open file's catalog.
@@ -142,6 +144,7 @@ pub fn facts_in(pdf: &lopdf::Document) -> FileFacts {
         labels: crate::labels::page_labels(pdf, pages),
         attachments: crate::attachments::attachments_in(pdf),
         collection: crate::portfolio::collection(pdf),
+        layers: crate::layers::layers_in(pdf),
     }
 }
 

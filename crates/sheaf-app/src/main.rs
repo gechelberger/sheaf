@@ -15,6 +15,7 @@ mod docview;
 mod file_dialog;
 mod goto;
 mod keymap;
+mod layers_panel;
 mod markup_tools;
 mod menus;
 mod ocr_dialog;
@@ -142,6 +143,7 @@ actions!(
         ShowCalc,
         ShowComments,
         ShowAttachments,
+        ShowLayers,
         CloseDocument,
         OpenFile,
         NewWindow,
@@ -353,6 +355,7 @@ fn main() {
                 KeyBinding::new("ctrl-alt-4", ShowCalc, ws),
                 KeyBinding::new("ctrl-alt-5", ShowComments, ws),
                 KeyBinding::new("ctrl-alt-6", ShowAttachments, ws),
+                KeyBinding::new("ctrl-alt-7", ShowLayers, ws),
                 KeyBinding::new("ctrl-alt-l", ToggleLeftDock, ws),
                 KeyBinding::new("ctrl-alt-r", ToggleRightDock, ws),
                 KeyBinding::new("ctrl-alt-j", ToggleBottomDock, ws),

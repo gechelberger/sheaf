@@ -88,6 +88,7 @@ pub enum Panel {
     Calc,
     Comments,
     Attachments,
+    Layers,
     /// A panel a plugin contributes, by its id without the `plugin:` prefix.
     /// Kept in the layout even while its plugin isn't loaded, so disabling
     /// a plugin doesn't forget where its panel was.
@@ -98,13 +99,14 @@ pub enum Panel {
 const PLUGIN_PANEL_PREFIX: &str = "plugin:";
 
 impl Panel {
-    const ALL: [Panel; 6] = [
+    const ALL: [Panel; 7] = [
         Panel::Thumbnails,
         Panel::Outline,
         Panel::Patterns,
         Panel::Calc,
         Panel::Comments,
         Panel::Attachments,
+        Panel::Layers,
     ];
 
     /// Stable id for settings and the `--panel` flag.
@@ -116,6 +118,7 @@ impl Panel {
             Panel::Calc => "calc".into(),
             Panel::Comments => "comments".into(),
             Panel::Attachments => "attachments".into(),
+            Panel::Layers => "layers".into(),
             Panel::Plugin(id) => format!("{PLUGIN_PANEL_PREFIX}{id}").into(),
         }
     }
@@ -135,6 +138,7 @@ impl Panel {
             Panel::Calc => "Calculator".into(),
             Panel::Comments => "Comments".into(),
             Panel::Attachments => "Attachments".into(),
+            Panel::Layers => "Layers".into(),
             // Plugins name their panels once they can contribute them
             // (M6 slice 3); until then, the id.
             Panel::Plugin(id) => id.clone(),
@@ -365,6 +369,7 @@ impl Workspace {
             Some("calc") => this.show_panel(Panel::Calc),
             Some("comments") => this.show_panel(Panel::Comments),
             Some("attachments") => this.show_panel(Panel::Attachments),
+            Some("layers") => this.show_panel(Panel::Layers),
             _ => {}
         }
         if let Some(p) = path {
@@ -1092,6 +1097,7 @@ impl Workspace {
                 Panel::Calc => d.render_calc(wide, window, cx),
                 Panel::Comments => d.render_comments(window, cx),
                 Panel::Attachments => d.render_attachments(window, cx),
+                Panel::Layers => d.render_layers(window, cx),
                 Panel::Plugin(id) => plugin_panel_body(d, &id, window, cx),
             }),
             _ => div().into_any_element(),
@@ -1286,6 +1292,10 @@ impl Render for Workspace {
                 if let Some(doc) = ws.doc().cloned() {
                     doc.update(cx, |d, cx| d.focus_comments(cx));
                 }
+                cx.notify();
+            }))
+            .on_action(cx.listener(|ws, _: &crate::ShowLayers, _, cx| {
+                ws.show_panel(Panel::Layers);
                 cx.notify();
             }))
             .on_action(cx.listener(|ws, _: &crate::ShowAttachments, _, cx| {

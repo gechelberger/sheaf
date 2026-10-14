@@ -142,7 +142,7 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 | Split view (same doc, two positions) | 📋 |
 | Attachments panel | ✅ View > Attachments (Ctrl+Alt+6): open (PDFs in sheaf, others with the system program after a warning) or save out |
 | Open PDF Portfolios (browse and extract embedded files) | ✅ opens on its cover sheet with the Attachments panel: folders, metadata columns, open/save |
-| Layers (OCG) panel | 📋 |
+| Layers (OCG) panel | ✅ View > Layers (Ctrl+Alt+7): show or hide for viewing; never saved |
 
 ### Page organization
 | Feature | Status |

@@ -155,6 +155,14 @@ pub(crate) struct Doc {
     pub(crate) collection: Option<sheaf_doc::portfolio::Collection>,
     pub(crate) attachment_selected: Option<usize>,
     pub(crate) facts_loaded: bool,
+    /// Optional content groups and which are hidden (see layers_panel.rs).
+    pub(crate) layers: Vec<sheaf_doc::layers::Layer>,
+    pub(crate) layers_hidden: HashSet<sheaf_doc::layers::LayerId>,
+    pub(crate) layers_default: HashSet<sheaf_doc::layers::LayerId>,
+    pub(crate) layers_generation: u64,
+    /// Pages of the primary file whose sheaf-written marks PDFium is told
+    /// not to draw; repeated when its renderer is reopened.
+    pub(crate) sheaf_pages: Vec<u32>,
     /// The primary file's page labels, by its page index.
     pub(crate) labels: Option<(SourceId, Vec<String>)>,
     /// With two panes: the top pane's share of the height.
@@ -276,7 +284,7 @@ impl Doc {
 
     /// Drop every rendered image so pages re-rasterize (after the engine's
     /// view of a page changed, e.g. annotations hidden).
-    fn invalidate_tiles(&mut self) {
+    pub(crate) fn invalidate_tiles(&mut self) {
         for (_, im) in self.tiles.drain() {
             self.retired.push(im);
         }
@@ -665,6 +673,11 @@ impl DocView {
             collection: None,
             attachment_selected: None,
             facts_loaded: false,
+            layers: Vec::new(),
+            layers_hidden: HashSet::new(),
+            layers_default: HashSet::new(),
+            layers_generation: 0,
+            sheaf_pages: Vec::new(),
             split: 0.5,
             split_drag: false,
         }));
@@ -1354,6 +1367,7 @@ impl DocView {
                             .filter(|(_, p)| doc.model.state().annots.contains_key(&p.id))
                             .map(|(i, _)| i as u32)
                             .collect();
+                        doc.sheaf_pages = pages.clone();
                         if !pages.is_empty() {
                             let rx = handle.hide_sheaf_annots(pages);
                             cx.spawn(async move |this, cx| {
@@ -1396,6 +1410,11 @@ impl DocView {
                         doc.touched();
                         view.fetch_page_sizes(cx);
                         view.refresh_facts(cx);
+                        if let State::Ready(doc) = &view.state
+                            && doc.layers_changed()
+                        {
+                            view.apply_layers(cx);
+                        }
                         cx.emit(DocEvent::Saved { path: path.clone() });
                         true
                     }
@@ -1472,6 +1491,7 @@ impl DocView {
                 doc.set_labels(primary, facts.labels);
                 doc.attachments = facts.attachments;
                 doc.collection = facts.collection;
+                doc.set_layers(facts.layers);
                 doc.facts_loaded = true;
                 if doc.collection.is_some() {
                     doc.open_portfolio();
@@ -1492,6 +1512,7 @@ impl DocView {
                                 t.elapsed()
                             );
                         }
+                        doc.sheaf_pages = pages.clone();
                         let rx = doc.primary().hide_sheaf_annots(pages);
                         doc.touched();
                         cx.spawn(async move |this, cx| {

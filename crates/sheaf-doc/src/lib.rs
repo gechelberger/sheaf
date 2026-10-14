@@ -11,6 +11,7 @@ pub mod file;
 pub mod history;
 pub mod incremental;
 pub mod labels;
+pub mod layers;
 pub mod model;
 pub mod portfolio;
 pub mod recovery;

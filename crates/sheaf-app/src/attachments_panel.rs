@@ -100,6 +100,8 @@ impl DocView {
                             doc.attachments = f.attachments;
                             doc.collection = f.collection;
                             doc.attachment_selected = None;
+                            // Same groups; keep what the user has hidden.
+                            doc.layers = f.layers;
                         }
                     }
                     Err(e) => log::warn!("re-reading the saved file: {e:#}"),
