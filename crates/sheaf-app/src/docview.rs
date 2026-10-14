@@ -359,6 +359,13 @@ pub(crate) enum ScrollTo {
         fx: f32,
         fy: f32,
     },
+    /// Put a page point (fractions of the page as shown) at the top-left of
+    /// the viewport: a bookmark's position.
+    Point {
+        page: usize,
+        fx: f32,
+        fy: f32,
+    },
     /// Keep the document point (`page`, `fx`, `fy` as fractions of the page)
     /// under viewport-local point (`vx`, `vy`). Used to anchor zooms.
     Anchor {
@@ -2472,7 +2479,7 @@ impl DocView {
 
     // ----- scrolling and zoom ------------------------------------------------
 
-    fn scroll(&mut self, to: ScrollTo, cx: &mut Context<Self>) {
+    pub(crate) fn scroll(&mut self, to: ScrollTo, cx: &mut Context<Self>) {
         if let State::Ready(doc) = &mut self.state {
             doc.pending_scroll = Some(to);
             cx.notify();
@@ -2646,6 +2653,7 @@ fn flat_item(i: &OutlineItem) -> FlatOutlineItem {
         title: i.title.clone(),
         page: i.page,
         depth: i.depth,
+        view: i.view.clone(),
     }
 }
 
@@ -2807,6 +2815,14 @@ impl Render for DocView {
                             }
                             if x < scroll_x || x > scroll_x + view_w {
                                 scroll_x = x - view_w / 2.0;
+                            }
+                        }
+                        ScrollTo::Point { page, fx, fy } => {
+                            let p = page.min(last);
+                            scroll_y = layout.tops[p] + fy * layout.heights[p];
+                            let x = layout.lefts[p] + fx * layout.widths[p];
+                            if x < scroll_x || x > scroll_x + view_w {
+                                scroll_x = x;
                             }
                         }
                         ScrollTo::Anchor {

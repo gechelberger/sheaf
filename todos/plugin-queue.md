@@ -9,7 +9,16 @@ The two already shipped are `tax-form-bookmarks` and `amount-crossref` (see
 
 ## Queue
 
-### 1. Bookmark from Pattern (`bookmark-from-pattern`)
+### 1. Bookmark from Pattern (`bookmark-from-pattern`) — done 2026-10-13
+Landed with: positioned bookmarks in core (`DestView` on bookmarks: read
+through PDFium, kept on save in both paths, `/XYZ` converted per axis and
+other kinds kept as is; clicking goes there; New Bookmark and Set
+Destination record the current view), `Edit::OutlineInsertTree` (instead of
+batch references: a new heading and its children in one edit, no ids
+needed), capture groups on pattern matches, and `patterns.presets()`. The
+form shows every field at once (no conditional fields in the declarative
+UI yet).
+
 The original first example from the plugin plan. Turn pattern-search hits
 into bookmarks: the user gives a regex (or picks a Patterns preset), and
 each match gets a bookmark at its position, titled from the match.

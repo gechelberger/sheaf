@@ -187,7 +187,25 @@ fn build(snap: &Snapshot) -> Result<(usize, Vec<u8>)> {
     if snap.outline_dirty {
         catalog.remove(b"Outlines");
         if !snap.state.outline.is_empty() {
-            let outlines_id = write_outline(&mut pdf, &snap.state.outline, &page_obj);
+            // Page dicts in `pdf` are still the originals here (rewrites
+            // go to `changed`), so their geometry is before our rotation.
+            let frames: std::collections::HashMap<crate::model::PageId, sheaf_core::PageFrame> =
+                page_obj
+                    .iter()
+                    .map(|(pid, oid)| {
+                        let g = crate::file::page_geom(&pdf, *oid);
+                        (
+                            *pid,
+                            sheaf_core::PageFrame {
+                                media: g.media,
+                                rotate: g.rotate,
+                            },
+                        )
+                    })
+                    .collect();
+            let outlines_id = write_outline(&mut pdf, &snap.state.outline, &page_obj, &|id| {
+                frames.get(&id).copied()
+            });
             catalog.set("Outlines", outlines_id);
         }
         catalog_changed = true;

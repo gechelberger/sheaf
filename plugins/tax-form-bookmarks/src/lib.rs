@@ -158,6 +158,7 @@ impl Plugin for TaxFormBookmarks {
                     after: last_top,
                     title,
                     target: Some(page),
+                    view: None,
                 }))
             })
             .submit();

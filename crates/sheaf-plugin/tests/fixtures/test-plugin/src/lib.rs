@@ -27,6 +27,7 @@ impl Guest for TestPlugin {
                         after: None,
                         title,
                         target: Some(p.id),
+                        view: None,
                     }));
                 }
                 edits::submit("Bookmark pages", &batch);
@@ -42,6 +43,7 @@ impl Guest for TestPlugin {
                             after: None,
                             title: title.into(),
                             target: None,
+                            view: None,
                         })],
                     );
                 }
@@ -94,6 +96,7 @@ impl Guest for TestPlugin {
                         after: None,
                         title,
                         target,
+                        view: None,
                     })],
                 );
                 Ok(())

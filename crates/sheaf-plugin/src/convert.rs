@@ -2,7 +2,8 @@
 
 use sheaf_core::{PageSize, Rotation};
 use sheaf_doc::{
-    Annot, AnnotId, AnnotKind, Box2, Edit, OutlineId, OutlineNode, PageId, PageRef, Pt, Snapshot,
+    Annot, AnnotId, AnnotKind, Box2, DestView, Edit, NewOutlineItem, OutlineId, OutlineNode,
+    PageId, PageRef, Pt, Snapshot,
 };
 
 use crate::runtime::bindings::sheaf::plugin::types as w;
@@ -110,11 +111,40 @@ pub fn page_info(snap: &Snapshot, p: &PageRef) -> w::PageInfo {
     }
 }
 
+pub fn dest_to_wit(v: &DestView) -> w::DestView {
+    match v {
+        DestView::Xyz { left, top, zoom } => w::DestView::Xyz(w::DestXyz {
+            left: *left,
+            top: *top,
+            zoom: *zoom,
+        }),
+        DestView::Other { kind, params } => w::DestView::Other(w::DestOther {
+            kind: kind.clone(),
+            params: params.clone(),
+        }),
+    }
+}
+
+pub fn dest_from_wit(v: w::DestView) -> DestView {
+    match v {
+        w::DestView::Xyz(x) => DestView::Xyz {
+            left: x.left,
+            top: x.top,
+            zoom: x.zoom.filter(|z| *z > 0.0),
+        },
+        w::DestView::Other(o) => DestView::Other {
+            kind: o.kind,
+            params: o.params,
+        },
+    }
+}
+
 pub fn outline_item(depth: u16, n: &OutlineNode) -> w::OutlineItem {
     w::OutlineItem {
         id: n.id.0,
         title: n.title.clone(),
         target: n.target.map(|p| p.0),
+        view: n.view.as_ref().map(dest_to_wit),
         color: n.color.map(rgb_to_wit),
         depth,
     }
@@ -255,6 +285,21 @@ pub fn edit_from_wit(e: w::Edit) -> Edit {
             after: o.after.map(OutlineId),
             title: o.title,
             target: o.target.map(PageId),
+            view: o.view.map(dest_from_wit),
+        },
+        w::Edit::OutlineInsertTree(t) => Edit::OutlineInsertTree {
+            parent: t.parent.map(OutlineId),
+            after: t.after.map(OutlineId),
+            items: t
+                .items
+                .into_iter()
+                .map(|i| NewOutlineItem {
+                    title: i.title,
+                    target: i.target.map(PageId),
+                    view: i.view.map(dest_from_wit),
+                    depth: i.depth,
+                })
+                .collect(),
         },
         w::Edit::OutlineMove(o) => Edit::OutlineMove {
             id: OutlineId(o.id),
@@ -267,6 +312,7 @@ pub fn edit_from_wit(e: w::Edit) -> Edit {
             title: o.title,
             target: o.target.map(|t| t.map(PageId)),
             color: o.color.map(|c| c.map(rgb_from_wit)),
+            view: o.view.map(|v| v.map(dest_from_wit)),
         },
         w::Edit::OutlineDelete(id) => Edit::OutlineDelete { id: OutlineId(id) },
         w::Edit::AnnotAdd(pa) => {
@@ -302,6 +348,7 @@ pub fn text_match_to_wit(m: TextMatch) -> w::TextMatch {
     w::TextMatch {
         text: m.text,
         rects: m.rects.into_iter().map(box_to_wit).collect(),
+        groups: m.groups,
     }
 }
 
@@ -423,6 +470,7 @@ mod tests {
             title: None,
             target: Some(None),
             color: None,
+            view: None,
         }));
         assert_eq!(
             e,
@@ -430,7 +478,8 @@ mod tests {
                 id: OutlineId(3),
                 title: None,
                 target: Some(None),
-                color: None
+                color: None,
+                view: None,
             }
         );
     }

@@ -767,6 +767,7 @@ impl EngineText {
             .map(|h| TextMatch {
                 text: h.text,
                 rects: h.rects.into_iter().map(to_box).collect(),
+                groups: h.groups,
             })
             .collect()
     }
@@ -876,6 +877,27 @@ impl Ui for AppUi {
     }
 }
 
+/// Pattern presets for `patterns.presets`: the user's, then plugins'.
+fn presets(cx: &App) -> Vec<sheaf_plugin::Preset> {
+    let mut out: Vec<sheaf_plugin::Preset> = crate::patterns::load()
+        .into_iter()
+        .map(|p| sheaf_plugin::Preset {
+            name: p.name,
+            regex: p.regex,
+        })
+        .collect();
+    out.extend(
+        cx.global::<Contributions>()
+            .plugin_presets()
+            .iter()
+            .map(|p| sheaf_plugin::Preset {
+                name: p.preset.name.clone(),
+                regex: p.preset.regex.clone(),
+            }),
+    );
+    out
+}
+
 /// The plugin's display name, or its id.
 pub fn plugin_name(id: &str, cx: &App) -> String {
     cx.try_global::<PluginHost>()
@@ -936,6 +958,7 @@ pub fn run(
     let ctx = CallContext {
         doc: doc.as_ref().and_then(|d| d.read(cx).plugin_context()),
         ui: Some(Arc::new(AppUi(ui_tx))),
+        presets: presets(cx),
     };
     let what = call.to_string();
     let call_kind = match &call {

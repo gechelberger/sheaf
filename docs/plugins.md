@@ -147,7 +147,8 @@ few helpers.
 `on_event(event)` for subscribed events.
 
 **`document`**: the document as it was when the call started. `path`,
-`pages` (id, rotation, displayed size), `outline` (pre-order with depth),
+`pages` (id, rotation, displayed size), `outline` (pre-order with depth,
+each bookmark's page and position),
 `annotations(page)`, `selection`, `current-page`. Ids are opaque and stable
 while the document is open; they aren't page numbers. With no document open,
 `path` is none and the lists are empty.
@@ -155,8 +156,8 @@ while the document is open; they aren't page numbers. With no document open,
 **`text`**: `page-text`, `pattern-search(page, regex)`,
 `search(page, query, match-case)` and `text-boxes(page, rect)`. Matches come
 with their boxes in page coordinates: points, top-left origin, the page as
-the file displays it (the same space annotations use). OCR text the user
-hasn't saved yet counts.
+the file displays it (the same space annotations use). Pattern matches also
+carry their capture groups. OCR text the user hasn't saved yet counts.
 
 **`edits`**: `submit(label, edits)` queues a batch that becomes one undo step
 labelled `label`. Batches are applied in order **after your call returns**,
@@ -164,8 +165,12 @@ so ids of things a batch creates (bookmarks, annotations) aren't known during
 the call. If any edit in a batch fails (a page that's gone, say), that whole
 batch is skipped and the user sees why. The edits mirror sheaf's own: move,
 rotate, delete and duplicate pages; insert, move, edit and delete bookmarks;
-add, update and delete annotations; add a connector pair. `Batch` in the SDK
-builds the common ones.
+add, update and delete annotations; add a connector pair. Bookmarks can land
+at a position on their page (`dest-view`: `/XYZ` with a point and zoom, or
+another PDF destination kind kept as is), and `outline-insert-tree` adds
+several nested bookmarks in one edit, such as a new heading with its
+children. `Batch` in the SDK builds the common ones (`bookmark_at`,
+`bookmark_tree`, `at(left, top)`).
 
 **`ui`**: `show-form(form)` asks the user and blocks until they answer (none
 if they cancel). Fields: text, number (with optional bounds), choice,
@@ -175,6 +180,9 @@ shows a line in the status area. `set-panel(panel, rows)` replaces the rows
 of one of your panels for the current document. Each row has a label,
 detail, badge, icon, indent, an optional page (clicking the row goes there)
 and buttons that call `panel-action`.
+
+**`patterns`**: `presets()` returns the user's Patterns presets, then those
+plugins ship.
 
 **`ocr`**: `recognize(page, options)` runs the user's OCR engine on one page
 and returns its words with boxes. It doesn't change the document.

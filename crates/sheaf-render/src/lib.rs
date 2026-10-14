@@ -71,6 +71,9 @@ pub struct OutlineItem {
     pub page: Option<u32>,
     pub depth: u16,
     pub has_children: bool,
+    /// Where on `page` it lands, when the file says (an `/XYZ` position
+    /// in the page's displayed space, or another destination kind as is).
+    pub view: Option<sheaf_core::DestView>,
 }
 
 /// Axis-aligned rectangle in page points, top-left origin, in the page's
@@ -91,6 +94,9 @@ pub struct SearchHit {
     pub rects: Vec<Rect>,
     /// The matched text.
     pub text: String,
+    /// A pattern's capture groups 1…n (None where a group didn't take
+    /// part); empty for a literal search.
+    pub groups: Vec<Option<String>>,
 }
 
 /// Progress of a document-wide search, streamed as pages are scanned.
@@ -168,6 +174,7 @@ impl OpenError {
 pub mod pdfium {
     use super::*;
     use pdfium_render::prelude::*;
+    use std::collections::HashMap;
     use std::sync::OnceLock;
 
     /// Locate and bind libpdfium. Search order: `$PDFIUM_LIB_DIR`, next to
@@ -288,45 +295,138 @@ pub mod pdfium {
             const MAX_DEPTH: u16 = 32;
             const MAX_ITEMS: usize = 200_000;
 
-            fn page_of(b: &PdfBookmark<'_>) -> Option<u32> {
-                if let Some(d) = b.destination()
-                    && let Ok(i) = d.page_index()
-                {
-                    return Some(i as u32);
+            /// The bookmark's page and position, from its `/Dest` or its
+            /// GoTo action.
+            fn locate(
+                b: &PdfBookmark<'_>,
+                doc: &PdfDocument<'_>,
+                frames: &mut HashMap<u32, Option<sheaf_core::PageFrame>>,
+            ) -> (Option<u32>, Option<sheaf_core::DestView>) {
+                let mut from = |d: &PdfDestination<'_>| {
+                    let page = d.page_index().ok().map(|i| i as u32);
+                    let view = page.and_then(|p| view_of(d, p, doc, frames));
+                    (page, view)
+                };
+                if let Some(d) = b.destination() {
+                    return from(&d);
                 }
-                let action = b.action()?;
-                let local = action.as_local_destination_action()?;
-                local
-                    .destination()
-                    .ok()?
-                    .page_index()
-                    .ok()
-                    .map(|i| i as u32)
+                let Some(action) = b.action() else {
+                    return (None, None);
+                };
+                let Some(local) = action.as_local_destination_action() else {
+                    return (None, None);
+                };
+                match local.destination() {
+                    Ok(d) => from(&d),
+                    Err(_) => (None, None),
+                }
             }
 
-            fn walk(first: Option<PdfBookmark<'_>>, depth: u16, out: &mut Vec<OutlineItem>) {
+            /// The page's MediaBox and `/Rotate`, for converting positions.
+            fn frame_of(doc: &PdfDocument<'_>, index: u32) -> Option<sheaf_core::PageFrame> {
+                let page = doc.pages().get(index as i32).ok()?;
+                let b = page.boundaries().media().ok()?.bounds;
+                let rotate = match page.rotation().ok()? {
+                    PdfPageRenderRotation::None => 0,
+                    PdfPageRenderRotation::Degrees90 => 90,
+                    PdfPageRenderRotation::Degrees180 => 180,
+                    PdfPageRenderRotation::Degrees270 => 270,
+                };
+                let (l, r) = (b.left().value, b.right().value);
+                let (bt, t) = (b.bottom().value, b.top().value);
+                Some(sheaf_core::PageFrame {
+                    media: [l.min(r), bt.min(t), l.max(r), bt.max(t)],
+                    rotate,
+                })
+            }
+
+            fn view_of(
+                d: &PdfDestination<'_>,
+                page: u32,
+                doc: &PdfDocument<'_>,
+                frames: &mut HashMap<u32, Option<sheaf_core::PageFrame>>,
+            ) -> Option<sheaf_core::DestView> {
+                use PdfDestinationViewSettings as V;
+                use sheaf_core::DestView;
+                let pt = |p: Option<PdfPoints>| p.map(|p| p.value);
+                let other = |kind: &str, params: Vec<Option<f32>>| {
+                    Some(DestView::Other {
+                        kind: kind.into(),
+                        params,
+                    })
+                };
+                match d.view_settings().ok()? {
+                    V::SpecificCoordinatesAndZoom(x, y, zoom) => {
+                        let (left, top) = match (x, y) {
+                            (None, None) => (None, None),
+                            (x, y) => {
+                                let frame =
+                                    *frames.entry(page).or_insert_with(|| frame_of(doc, page));
+                                frame?.to_display(pt(x), pt(y))
+                            }
+                        };
+                        if left.is_none() && top.is_none() && zoom.is_none() {
+                            return None;
+                        }
+                        Some(DestView::Xyz { left, top, zoom })
+                    }
+                    V::FitPageToWindow => other("Fit", vec![]),
+                    V::FitPageHorizontallyToWindow(y) => other("FitH", vec![pt(y)]),
+                    V::FitPageVerticallyToWindow(x) => other("FitV", vec![pt(x)]),
+                    V::FitPageToRectangle(r) => other(
+                        "FitR",
+                        vec![
+                            Some(r.left().value),
+                            Some(r.bottom().value),
+                            Some(r.right().value),
+                            Some(r.top().value),
+                        ],
+                    ),
+                    V::FitBoundsToWindow => other("FitB", vec![]),
+                    V::FitBoundsHorizontallyToWindow(y) => other("FitBH", vec![pt(y)]),
+                    V::FitBoundsVerticallyToWindow(x) => other("FitBV", vec![pt(x)]),
+                    V::Unknown => None,
+                }
+            }
+
+            fn walk(
+                first: Option<PdfBookmark<'_>>,
+                depth: u16,
+                doc: &PdfDocument<'_>,
+                frames: &mut HashMap<u32, Option<sheaf_core::PageFrame>>,
+                out: &mut Vec<OutlineItem>,
+            ) {
                 let mut node = first;
                 while let Some(b) = node {
                     if out.len() >= MAX_ITEMS {
                         return;
                     }
                     let child = b.first_child();
+                    let (page, view) = locate(&b, doc, frames);
                     out.push(OutlineItem {
                         id: out.len() as u32,
                         title: b.title().unwrap_or_default(),
-                        page: page_of(&b),
+                        page,
                         depth,
                         has_children: child.is_some(),
+                        view,
                     });
                     if depth < MAX_DEPTH {
-                        walk(child, depth + 1, out);
+                        walk(child, depth + 1, doc, frames, out);
                     }
                     node = b.next_sibling();
                 }
             }
 
             let mut out = Vec::new();
-            walk(self.doc.bookmarks().root(), 0, &mut out);
+            let mut frames = HashMap::new();
+            walk(
+                self.doc.bookmarks().root(),
+                0,
+                &self.doc,
+                &mut frames,
+                &mut out,
+            );
             Ok(out)
         }
 
@@ -383,6 +483,7 @@ pub mod pdfium {
                         page: page.0,
                         rects,
                         text,
+                        groups: Vec::new(),
                     });
                 }
             }
@@ -527,7 +628,8 @@ pub mod pdfium {
             };
 
             let mut hits = Vec::new();
-            for m in re.find_iter(&s) {
+            for caps in re.captures_iter(&s) {
+                let m = caps.get(0).expect("group 0 always matches");
                 if m.is_empty() {
                     continue;
                 }
@@ -557,6 +659,11 @@ pub mod pdfium {
                         page: page.0,
                         rects,
                         text: m.as_str().to_string(),
+                        groups: caps
+                            .iter()
+                            .skip(1)
+                            .map(|g| g.map(|g| g.as_str().to_string()))
+                            .collect(),
                     });
                 }
             }

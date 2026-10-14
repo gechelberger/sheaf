@@ -23,7 +23,7 @@
 //!
 //! The raw interfaces generated from `wit/sheaf.wit` are re-exported as
 //! modules ([`document`], [`text`], [`edits`], [`ui`], [`storage`],
-//! [`ocr`], [`log`], [`types`]); [`FormBuilder`] and [`Batch`] cover the
+//! [`patterns`], [`ocr`], [`log`], [`types`]); [`FormBuilder`] and [`Batch`] cover the
 //! common cases with less ceremony. See `docs/plugins.md` in the sheaf
 //! repository for the whole guide.
 //!
@@ -44,8 +44,8 @@ pub mod bindings {
 mod batch;
 mod form;
 
-pub use batch::Batch;
-pub use bindings::sheaf::plugin::{document, edits, log, ocr, storage, text, types, ui};
+pub use batch::{Batch, at};
+pub use bindings::sheaf::plugin::{document, edits, log, ocr, patterns, storage, text, types, ui};
 pub use bindings::{Guest, export};
 pub use form::{Answers, FormBuilder};
 

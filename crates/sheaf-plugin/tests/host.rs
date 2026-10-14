@@ -73,14 +73,21 @@ fn load(name: &str, limits: Limits) -> Plugin {
         .load(dir, manifest, LoadOptions::default())
 }
 
-/// Pattern search over plain text, with a made-up box per match.
+/// Pattern search over plain text, with a made-up box per match (x from
+/// the match's offset, y from its line).
 fn search(text: &str, re: &regex::Regex) -> Vec<TextMatch> {
-    re.find_iter(text)
-        .map(|m| TextMatch {
+    re.captures_iter(text)
+        .map(|c| (c.get(0).unwrap(), c))
+        .map(|(m, c)| TextMatch {
             text: m.as_str().to_string(),
+            groups: c
+                .iter()
+                .skip(1)
+                .map(|g| g.map(|g| g.as_str().to_string()))
+                .collect(),
             rects: vec![sheaf_doc::Box2 {
                 x: m.start() as f32,
-                y: 10.0,
+                y: 10.0 + 100.0 * text[..m.start()].matches('\n').count() as f32,
                 w: m.len() as f32,
                 h: 10.0,
             }],
@@ -156,6 +163,7 @@ fn ctx(d: &Document) -> CallContext {
             ocr: None,
         }),
         ui: None,
+        presets: Vec::new(),
     }
 }
 
@@ -444,6 +452,7 @@ fn tax_form_bookmarks_example() {
             ocr: None,
         }),
         ui: None,
+        presets: Vec::new(),
     };
     let out = run(&p, "scan", None, ctx(&d)).unwrap();
     let b = &out.batches[0];
@@ -547,6 +556,7 @@ fn forms_round_trip_and_waiting_is_free() {
             after: None,
             title: "Engagement letter".into(),
             target: Some(d.page(2).unwrap().id),
+            view: None,
         }]
     );
     // Cancelled (and no UI at all) come back as none.
@@ -627,6 +637,7 @@ fn amount_crossref_bundled_plugin() {
             ocr: None,
         }),
         ui: Some(ui.clone()),
+        presets: Vec::new(),
     };
     let all: Vec<_> = (0..3).map(|i| d.page(i).unwrap().id).collect();
     *ui.answer.lock().unwrap() = Some(vec![
@@ -850,4 +861,132 @@ fn ocr_runs_on_the_host_and_isnt_charged_to_the_plugin() {
     // Without an OCR source, it says so.
     let err = run(&p, "ocr", None, ctx(&d)).unwrap_err();
     assert_eq!(err, PluginError::Failed("OCR isn't available".into()));
+}
+
+#[test]
+fn bookmark_from_pattern_bundled_plugin() {
+    let src = workspace_root().join("plugins/bookmark-from-pattern");
+    let wasm = build_plugin(&src, "bookmark_from_pattern.wasm");
+    let dir = install("bookmark-from-pattern", &src, &wasm);
+    let p = Runtime::new(Limits::default()).unwrap().load(
+        dir.clone(),
+        Manifest::load(&dir).unwrap(),
+        LoadOptions::default(),
+    );
+    let text: Arc<dyn TextSource> = Arc::new(Pages(vec![
+        "Invoice 101\nfor services",
+        "nothing here",
+        "Invoice 102\nsecond line\nInvoice 103",
+    ]));
+    let mut d = doc(3);
+    let ui = Arc::new(FakeUi::default());
+    let ctx = |d: &Document, ui: &Arc<FakeUi>| CallContext {
+        doc: Some(DocContext {
+            path: "invoices.pdf".into(),
+            snapshot: d.snapshot(),
+            selection: Vec::new(),
+            current_page: None,
+            text: text.clone(),
+            ocr: None,
+        }),
+        ui: Some(ui.clone()),
+        presets: vec![sheaf_plugin::Preset {
+            name: "Invoice".into(),
+            regex: r"Invoice (\d+)".into(),
+        }],
+    };
+    let all: Vec<_> = (0..3).map(|i| d.page(i).unwrap().id).collect();
+    let answer = |source: usize, template: &str, placement: usize| {
+        vec![
+            FieldAnswer {
+                id: "source".into(),
+                value: FieldValue::Choice(source),
+            },
+            FieldAnswer {
+                id: "regex".into(),
+                value: FieldValue::Text(r"Invoice (?P<n>\d+)".into()),
+            },
+            FieldAnswer {
+                id: "template".into(),
+                value: FieldValue::Text(template.into()),
+            },
+            FieldAnswer {
+                id: "placement".into(),
+                value: FieldValue::Choice(placement),
+            },
+            FieldAnswer {
+                id: "heading".into(),
+                value: FieldValue::Text("Invoices".into()),
+            },
+            FieldAnswer {
+                id: "pages".into(),
+                value: FieldValue::PageRange(all.clone()),
+            },
+        ]
+    };
+
+    // Custom pattern, a named group in the title, under a new heading.
+    *ui.answer.lock().unwrap() = Some(answer(0, "Inv #{n}", 2));
+    let out = run(&p, "bookmark", None, ctx(&d, &ui)).unwrap();
+    {
+        let forms = ui.forms.lock().unwrap();
+        let FieldKind::Choice { options, .. } = &forms[0].fields[0].kind else {
+            panic!("{:?}", forms[0].fields[0])
+        };
+        assert_eq!(options[1], "Invoice", "the user's presets are offered");
+    }
+    let b = &out.batches[0];
+    assert_eq!(b.label, "Bookmark 3 matches");
+    d.apply_batch(b.edits.clone(), &b.label).unwrap();
+    let st = d.state();
+    let got: Vec<(u16, String, Option<usize>, Option<f32>)> = st
+        .outline_flat()
+        .into_iter()
+        .map(|(depth, n)| {
+            let top = match &n.view {
+                Some(sheaf_doc::DestView::Xyz { top, .. }) => *top,
+                _ => None,
+            };
+            (
+                depth,
+                n.title.clone(),
+                n.target.and_then(|t| d.index_of(t)),
+                top,
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (0, "Invoices".to_string(), Some(0), Some(0.0)),
+            (1, "Inv #101".to_string(), Some(0), Some(0.0)),
+            (1, "Inv #102".to_string(), Some(2), Some(0.0)),
+            // Two lines down on its page: the bookmark lands there.
+            (1, "Inv #103".to_string(), Some(2), Some(198.0)),
+        ]
+    );
+    d.undo();
+
+    // A preset, the whole match, top level; then a re-run adds nothing.
+    *ui.answer.lock().unwrap() = Some(answer(1, "{0}", 0));
+    let out = run(&p, "bookmark", None, ctx(&d, &ui)).unwrap();
+    d.apply_batch(out.batches[0].edits.clone(), "again")
+        .unwrap();
+    let titles: Vec<String> = d.state().outline.iter().map(|n| n.title.clone()).collect();
+    assert_eq!(titles, ["Invoice 101", "Invoice 102", "Invoice 103"]);
+    *ui.answer.lock().unwrap() = Some(answer(1, "{0}", 0));
+    let out = run(&p, "bookmark", None, ctx(&d, &ui)).unwrap();
+    assert!(out.batches.is_empty());
+    assert_eq!(
+        ui.notices.lock().unwrap().last().unwrap(),
+        "All 3 matches are already bookmarked"
+    );
+    // The form remembers the last run.
+    *ui.answer.lock().unwrap() = None;
+    run(&p, "bookmark", None, ctx(&d, &ui)).unwrap();
+    let forms = ui.forms.lock().unwrap();
+    let FieldKind::Choice { default, .. } = &forms.last().unwrap().fields[0].kind else {
+        panic!()
+    };
+    assert_eq!(*default, 1, "last time used the Invoice preset");
 }

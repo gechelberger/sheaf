@@ -2,9 +2,18 @@
 
 use crate::edits;
 use crate::types::{
-    Annot, AnnotKind, Box2, ConnectorPair, ConnectorShape, Edit, OutlineInsert, PageAnnot, Rgb,
-    StampShape,
+    Annot, AnnotKind, Box2, ConnectorPair, ConnectorShape, DestView, DestXyz, Edit, NewOutlineItem,
+    OutlineInsert, OutlineInsertTree, PageAnnot, Rgb, StampShape,
 };
+
+/// A bookmark position: this point of the page at the window's top-left.
+pub fn at(left: f32, top: f32) -> DestView {
+    DestView::Xyz(DestXyz {
+        left: Some(left),
+        top: Some(top),
+        zoom: None,
+    })
+}
 
 /// Edits that undo together. Ids of things a batch creates aren't known
 /// until sheaf applies it, after your call returns.
@@ -45,11 +54,33 @@ impl Batch {
 
     /// A top-level bookmark at the start of the outline.
     pub fn bookmark(self, title: &str, target: Option<u64>) -> Self {
+        self.bookmark_at(title, target, None)
+    }
+
+    /// A top-level bookmark at the start of the outline that lands at
+    /// `view` on its page (see [`at`]).
+    pub fn bookmark_at(self, title: &str, target: Option<u64>, view: Option<DestView>) -> Self {
         self.push(Edit::OutlineInsert(OutlineInsert {
             parent: None,
             after: None,
             title: title.to_string(),
             target,
+            view,
+        }))
+    }
+
+    /// Several bookmarks nested by depth, after `after` under `parent`:
+    /// a new heading and its children in one edit, say.
+    pub fn bookmark_tree(
+        self,
+        parent: Option<u64>,
+        after: Option<u64>,
+        items: Vec<NewOutlineItem>,
+    ) -> Self {
+        self.push(Edit::OutlineInsertTree(OutlineInsertTree {
+            parent,
+            after,
+            items,
         }))
     }
 

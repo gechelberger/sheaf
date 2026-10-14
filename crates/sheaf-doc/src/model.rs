@@ -8,7 +8,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use im::Vector;
 use serde::{Deserialize, Serialize};
-use sheaf_core::{PageSize, Rotation};
+use sheaf_core::{DestView, PageSize, Rotation};
 
 use crate::annot::{Annot, AnnotId, AnnotKind};
 use crate::history::{HistoryPolicy, HistoryStats};
@@ -64,6 +64,8 @@ pub struct OutlineNode {
     pub id: OutlineId,
     pub title: String,
     pub target: Option<PageId>,
+    /// Where on `target` it lands; None is the top of the page.
+    pub view: Option<DestView>,
     pub color: Option<[u8; 3]>,
     pub children: Vector<OutlineNode>,
 }
@@ -73,6 +75,21 @@ pub struct OutlineNode {
 pub struct FlatOutlineItem {
     pub title: String,
     pub page: Option<u32>,
+    pub depth: u16,
+    /// Where on `page` it lands (see [`OutlineNode::view`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<DestView>,
+}
+
+/// One bookmark of a subtree inserted by [`Edit::OutlineInsertTree`], in
+/// pre-order. `depth` is relative to the insert point: 0 is a sibling there,
+/// 1 a child of the item above at 0, and so on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NewOutlineItem {
+    pub title: String,
+    pub target: Option<PageId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<DestView>,
     pub depth: u16,
 }
 
@@ -201,6 +218,16 @@ pub enum Edit {
         after: Option<OutlineId>,
         title: String,
         target: Option<PageId>,
+        /// Where on `target` it lands; None is the top of the page.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<DestView>,
+    },
+    /// Insert several bookmarks at once, nested by depth (a new parent and
+    /// its children, say), after `after` under `parent`, in order.
+    OutlineInsertTree {
+        parent: Option<OutlineId>,
+        after: Option<OutlineId>,
+        items: Vec<NewOutlineItem>,
     },
     /// Move a bookmark subtree. With `with_pages`, the pages it spans (from
     /// its first target up to the next bookmark's target) move with it.
@@ -229,6 +256,12 @@ pub enum Edit {
             with = "double_option"
         )]
         color: Option<Option<[u8; 3]>>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "double_option"
+        )]
+        view: Option<Option<DestView>>,
     },
     /// Delete a bookmark and its subtree.
     OutlineDelete {
@@ -776,6 +809,48 @@ impl Document {
         id
     }
 
+    /// Nodes for [`Edit::OutlineInsertTree`]: pre-order items with depths
+    /// that start at 0 and go down at most one level at a time.
+    fn tree_from_items(&mut self, items: &[NewOutlineItem]) -> Result<Vec<OutlineNode>> {
+        let mut roots: Vec<OutlineNode> = Vec::new();
+        // Open path: (depth, node) from the current root down.
+        let mut stack: Vec<(u16, OutlineNode)> = Vec::new();
+        let close = |stack: &mut Vec<(u16, OutlineNode)>, roots: &mut Vec<OutlineNode>, d: u16| {
+            while let Some((top, _)) = stack.last()
+                && *top >= d
+            {
+                let (_, node) = stack.pop().unwrap();
+                match stack.last_mut() {
+                    Some((_, parent)) => parent.children.push_back(node),
+                    None => roots.push(node),
+                }
+            }
+        };
+        let mut prev: Option<u16> = None;
+        for item in items {
+            match prev {
+                None if item.depth != 0 => bail!("the first bookmark must be at depth 0"),
+                Some(p) if item.depth > p + 1 => {
+                    bail!("bookmark depth jumps from {p} to {}", item.depth)
+                }
+                _ => {}
+            }
+            prev = Some(item.depth);
+            close(&mut stack, &mut roots, item.depth);
+            let node = OutlineNode {
+                id: self.fresh_outline_id(),
+                title: item.title.clone(),
+                target: item.target,
+                view: item.target.and(item.view.clone()),
+                color: None,
+                children: Vector::new(),
+            };
+            stack.push((item.depth, node));
+        }
+        close(&mut stack, &mut roots, 0);
+        Ok(roots)
+    }
+
     fn outline_from_flat(
         &mut self,
         items: &[FlatOutlineItem],
@@ -802,6 +877,7 @@ impl Document {
                 id: self.fresh_outline_id(),
                 title: item.title.clone(),
                 target: item.page.and_then(|p| by_index.get(p as usize).copied()),
+                view: item.view.clone(),
                 color: None,
                 children: Vector::new(),
             };
@@ -1014,16 +1090,32 @@ impl Document {
                 after,
                 title,
                 target,
+                view,
             } => {
                 let node = OutlineNode {
                     id: self.fresh_outline_id(),
                     title,
+                    view: target.and(view),
                     target,
                     color: None,
                     children: Vector::new(),
                 };
                 st.outline = outline_insert(&st.outline, parent, after, node)?;
                 out.bookmarks_added = 1;
+            }
+            Edit::OutlineInsertTree {
+                parent,
+                after,
+                items,
+            } => {
+                let roots = self.tree_from_items(&items)?;
+                out.bookmarks_added = items.len();
+                let mut after = after;
+                for node in roots {
+                    let id = node.id;
+                    st.outline = outline_insert(&st.outline, parent, after, node)?;
+                    after = Some(id);
+                }
             }
             Edit::OutlineMove {
                 id,
@@ -1095,6 +1187,7 @@ impl Document {
                 title,
                 target,
                 color,
+                view,
             } => {
                 let updated = outline_update(&st.outline, id, |n| {
                     if let Some(t) = &title {
@@ -1102,6 +1195,16 @@ impl Document {
                     }
                     if let Some(t) = target {
                         n.target = t;
+                        // A new page: the old position meant the old page.
+                        if view.is_none() {
+                            n.view = None;
+                        }
+                    }
+                    if let Some(v) = &view {
+                        n.view = v.clone();
+                    }
+                    if n.target.is_none() {
+                        n.view = None;
                     }
                     if let Some(c) = color {
                         n.color = c;
@@ -1361,6 +1464,7 @@ fn strip_targets(nodes: &Vector<OutlineNode>, sentinel: PageId) -> Vector<Outlin
             let mut n = n.clone();
             if n.target == Some(sentinel) {
                 n.target = None;
+                n.view = None;
             }
             n.children = strip_targets(&n.children, sentinel);
             n
@@ -1466,6 +1570,7 @@ mod tests {
                 title: t.to_string(),
                 page: *p,
                 depth: *d,
+                view: None,
             })
             .collect()
     }
@@ -1699,6 +1804,7 @@ mod tests {
                 title: Some("Alpha".into()),
                 target: None,
                 color: Some(Some([255, 0, 0])),
+                view: None,
             },
             "e",
         )
@@ -1710,6 +1816,7 @@ mod tests {
                 after: Some(bm(&d, "A1")),
                 title: "A1b".into(),
                 target: None,
+                view: None,
             },
             "ins",
         )
@@ -2254,12 +2361,14 @@ mod tests {
                     after: None,
                     title: "W-2".into(),
                     target: Some(p0),
+                    view: None,
                 },
                 Edit::OutlineInsert {
                     parent: None,
                     after: None,
                     title: "1099-INT".into(),
                     target: Some(p3),
+                    view: None,
                 },
                 Edit::RotatePages {
                     ids: vec![p3],
@@ -2314,6 +2423,66 @@ mod tests {
     }
 
     #[test]
+    fn insert_tree_nests_in_one_step() {
+        let mut d = doc();
+        let (p0, p3) = (id_at(&d, 0), id_at(&d, 3));
+        let first_top = d.state().outline[0].id;
+        let item = |title: &str, target, depth| NewOutlineItem {
+            title: title.into(),
+            target,
+            view: None,
+            depth,
+        };
+        d.apply(
+            Edit::OutlineInsertTree {
+                parent: None,
+                after: Some(first_top),
+                items: vec![
+                    item("Accounts", None, 0),
+                    item("…4821", Some(p0), 1),
+                    item("…9930", Some(p3), 1),
+                    item("Loose", Some(p3), 0),
+                ],
+            },
+            "Bookmark matches",
+        )
+        .unwrap();
+        let titles: Vec<(u16, String)> = d
+            .state()
+            .outline_flat()
+            .into_iter()
+            .map(|(depth, n)| (depth, n.title.clone()))
+            .filter(|(_, t)| {
+                ["Accounts", "…4821", "…9930", "Loose", "A", "B"].contains(&t.as_str())
+            })
+            .collect();
+        assert_eq!(
+            titles,
+            [
+                (0, "A".to_string()),
+                (0, "Accounts".to_string()),
+                (1, "…4821".to_string()),
+                (1, "…9930".to_string()),
+                (0, "Loose".to_string()),
+                (0, "B".to_string()),
+            ]
+        );
+        assert_eq!(d.undo_label(), Some("Bookmark matches"));
+        d.undo();
+        assert_eq!(d.state().outline.len(), 3);
+        // Depths must nest properly.
+        let bad = d.apply(
+            Edit::OutlineInsertTree {
+                parent: None,
+                after: None,
+                items: vec![item("x", None, 0), item("y", None, 2)],
+            },
+            "bad",
+        );
+        assert!(bad.is_err());
+    }
+
+    #[test]
     fn edit_serde_round_trip() {
         let annot = Annot {
             id: AnnotId(0),
@@ -2354,6 +2523,7 @@ mod tests {
                 title: Some("T".into()),
                 target: Some(None),
                 color: Some(Some([1, 2, 3])),
+                view: None,
             },
             Edit::ConnectorAdd {
                 a: (PageId(0), annot.clone()),
@@ -2375,6 +2545,7 @@ mod tests {
                 title: None,
                 target: Some(None),
                 color: None,
+                view: None,
             }
         );
     }

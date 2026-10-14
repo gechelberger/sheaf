@@ -16,6 +16,7 @@ use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, StringFormat, diction
 use crate::annot::{Annot, AnnotId, AnnotKind, PageGeom, to_pdf};
 use crate::model::{DocState, OutlineNode, PageId, PageRef, Snapshot, SourceId};
 use crate::text_layer;
+use sheaf_core::{DestView, PageFrame};
 
 /// Page-level keys a page may inherit from its ancestors in the page tree.
 /// We flatten the tree, so these must be copied onto each page.
@@ -108,6 +109,7 @@ fn prune_outline(nodes: &Vector<OutlineNode>, keep: &HashSet<PageId>) -> Vector<
             Some(OutlineNode {
                 id: n.id,
                 title: n.title.clone(),
+                view: target.and(n.view.clone()),
                 target,
                 color: n.color,
                 children,
@@ -336,6 +338,8 @@ fn build_rewrite(model: &Snapshot, clean: bool) -> Result<Pdf> {
     let pages_id = pdf.new_object_id();
     let mut kids: Vec<Object> = Vec::with_capacity(state.pages.len());
     let mut page_obj: HashMap<PageId, ObjectId> = HashMap::new();
+    // Each page's geometry before our rotation, for bookmark positions.
+    let mut frames: HashMap<PageId, PageFrame> = HashMap::new();
     let mut used: HashSet<ObjectId> = HashSet::new();
     let mut copy_maps: HashMap<SourceId, HashMap<ObjectId, ObjectId>> = HashMap::new();
     let mut connectors = Vec::new();
@@ -393,6 +397,14 @@ fn build_rewrite(model: &Snapshot, clean: bool) -> Result<Pdf> {
             let geom = geom_of(&dict, original as i32);
             text_layer::install(&mut pdf, &mut dict, layer, &geom, &mut ocr_objects);
         }
+        let g = geom_of(&dict, original as i32);
+        frames.insert(
+            pref.id,
+            PageFrame {
+                media: g.media,
+                rotate: g.rotate,
+            },
+        );
         let rotate = (original + pref.rotation.degrees() as i64).rem_euclid(360);
         if rotate == 0 {
             dict.remove(b"Rotate");
@@ -436,7 +448,9 @@ fn build_rewrite(model: &Snapshot, clean: bool) -> Result<Pdf> {
     }
     catalog.remove(b"Outlines");
     if !state.outline.is_empty() {
-        let outlines_id = write_outline(&mut pdf, &state.outline, &page_obj);
+        let outlines_id = write_outline(&mut pdf, &state.outline, &page_obj, &|id| {
+            frames.get(&id).copied()
+        });
         pdf.get_dictionary_mut(catalog_id)?
             .set("Outlines", outlines_id);
     }
@@ -653,16 +667,42 @@ fn text_string(s: &str) -> Object {
     }
 }
 
+/// A bookmark's `/Dest`: its page and, when it has one, its position (see
+/// [`DestView`]); otherwise the top of the page.
+fn outline_dest(page: ObjectId, view: Option<&DestView>, frame: Option<PageFrame>) -> Vec<Object> {
+    let num = |v: Option<f32>| v.map(Object::Real).unwrap_or(Object::Null);
+    let mut dest = vec![Object::Reference(page)];
+    match view {
+        Some(DestView::Xyz { left, top, zoom }) => {
+            let (ux, uy) = match frame {
+                Some(f) => f.to_user(*left, *top),
+                None => (None, None),
+            };
+            dest.extend(["XYZ".into(), num(ux), num(uy), num(*zoom)]);
+        }
+        Some(DestView::Other { kind, params }) => {
+            dest.push(Object::Name(kind.as_bytes().to_vec()));
+            dest.extend(params.iter().map(|p| num(*p)));
+        }
+        None => dest.extend(["XYZ".into(), Object::Null, Object::Null, Object::Null]),
+    }
+    dest
+}
+
+/// Write the outline tree. `frame` gives a page's geometry (before any
+/// rotation added in sheaf) for converting bookmark positions to user space.
 pub(crate) fn write_outline(
     pdf: &mut Pdf,
     nodes: &Vector<OutlineNode>,
     page_obj: &HashMap<PageId, ObjectId>,
+    frame: &dyn Fn(PageId) -> Option<PageFrame>,
 ) -> ObjectId {
     fn level(
         pdf: &mut Pdf,
         parent: ObjectId,
         nodes: &Vector<OutlineNode>,
         page_obj: &HashMap<PageId, ObjectId>,
+        frame: &dyn Fn(PageId) -> Option<PageFrame>,
     ) -> (Option<ObjectId>, Option<ObjectId>, i64) {
         let ids: Vec<ObjectId> = nodes.iter().map(|_| pdf.new_object_id()).collect();
         let mut total = 0;
@@ -674,17 +714,10 @@ pub(crate) fn write_outline(
             if i + 1 < ids.len() {
                 dict.set("Next", ids[i + 1]);
             }
-            if let Some(obj) = node.target.and_then(|t| page_obj.get(&t)) {
-                dict.set(
-                    "Dest",
-                    vec![
-                        Object::Reference(*obj),
-                        "XYZ".into(),
-                        Object::Null,
-                        Object::Null,
-                        Object::Null,
-                    ],
-                );
+            if let Some(t) = node.target
+                && let Some(obj) = page_obj.get(&t)
+            {
+                dict.set("Dest", outline_dest(*obj, node.view.as_ref(), frame(t)));
             }
             if let Some([r, g, b]) = node.color {
                 dict.set(
@@ -696,7 +729,7 @@ pub(crate) fn write_outline(
                     ],
                 );
             }
-            let (first, last, count) = level(pdf, ids[i], &node.children, page_obj);
+            let (first, last, count) = level(pdf, ids[i], &node.children, page_obj, frame);
             if let (Some(f), Some(l)) = (first, last) {
                 dict.set("First", f);
                 dict.set("Last", l);
@@ -708,7 +741,7 @@ pub(crate) fn write_outline(
         (ids.first().copied(), ids.last().copied(), total)
     }
     let outlines_id = pdf.new_object_id();
-    let (first, last, count) = level(pdf, outlines_id, nodes, page_obj);
+    let (first, last, count) = level(pdf, outlines_id, nodes, page_obj, frame);
     let mut dict = dictionary! { "Type" => "Outlines" };
     if let (Some(f), Some(l)) = (first, last) {
         dict.set("First", f);
@@ -1102,6 +1135,114 @@ mod tests {
         out
     }
 
+    /// Each bookmark's `/Dest` after its page reference, as text
+    /// ("/XYZ 36 692 null"), in written order.
+    fn read_dests(bytes: &[u8]) -> Vec<String> {
+        let pdf = Pdf::load_mem(bytes).unwrap();
+        let root = pdf.trailer.get(b"Root").unwrap().as_reference().unwrap();
+        let outlines = pdf
+            .get_dictionary(root)
+            .unwrap()
+            .get(b"Outlines")
+            .unwrap()
+            .as_reference()
+            .unwrap();
+        let mut cur = pdf
+            .get_dictionary(outlines)
+            .unwrap()
+            .get(b"First")
+            .ok()
+            .and_then(|o| o.as_reference().ok());
+        let mut out = Vec::new();
+        while let Some(id) = cur {
+            let d = pdf.get_dictionary(id).unwrap();
+            let dest = d.get(b"Dest").unwrap().as_array().unwrap();
+            let parts: Vec<String> = dest[1..]
+                .iter()
+                .map(|o| match o {
+                    Object::Name(n) => format!("/{}", String::from_utf8_lossy(n)),
+                    Object::Null => "null".into(),
+                    o => format!("{}", o.as_float().unwrap()),
+                })
+                .collect();
+            out.push(parts.join(" "));
+            cur = d.get(b"Next").ok().and_then(|o| o.as_reference().ok());
+        }
+        out
+    }
+
+    #[test]
+    fn bookmark_positions_survive_saves_and_our_rotation() {
+        let dir = tempdir();
+        let a = make_pdf(&dir, "a.pdf", "A", 2, &[]);
+        let item = |title: &str, page, view| FlatOutlineItem {
+            title: title.into(),
+            page: Some(page),
+            depth: 0,
+            view,
+        };
+        let mut model = Document::new(
+            info(&a, 2),
+            &[
+                item(
+                    "At a spot",
+                    0,
+                    Some(DestView::Xyz {
+                        left: Some(36.0),
+                        top: Some(100.0),
+                        zoom: None,
+                    }),
+                ),
+                item(
+                    "Fit width",
+                    1,
+                    Some(DestView::Other {
+                        kind: "FitH".into(),
+                        params: vec![Some(500.0)],
+                    }),
+                ),
+                item("Page top", 1, None),
+            ],
+            Box::new(FixedCount(10)),
+        );
+        // Turning the page in sheaf mustn't move the stored position: it's
+        // relative to the page as the file draws it.
+        let p0 = model.page(0).unwrap().id;
+        model
+            .apply(
+                Edit::RotatePages {
+                    ids: vec![p0],
+                    by: Rotation::R90,
+                },
+                "rotate",
+            )
+            .unwrap();
+        let want = ["/XYZ 36 692 null", "/FitH 500", "/XYZ null null null"];
+        assert_eq!(read_dests(&rewrite(&model.snapshot()).unwrap()), want);
+        // The incremental path writes the outline when it changed.
+        let p1 = model.page(1).unwrap().id;
+        model
+            .apply(
+                Edit::OutlineInsert {
+                    parent: None,
+                    after: None,
+                    title: "New".into(),
+                    target: Some(p1),
+                    view: Some(DestView::Xyz {
+                        left: None,
+                        top: Some(0.0),
+                        zoom: Some(1.5),
+                    }),
+                },
+                "add",
+            )
+            .unwrap();
+        let mut want_inc = vec!["/XYZ null 792 1.5"];
+        want_inc.extend(want);
+        let bytes = crate::incremental::incremental(&model.snapshot()).unwrap();
+        assert_eq!(read_dests(&bytes), want_inc);
+    }
+
     #[test]
     fn identity_round_trip() {
         let dir = tempdir();
@@ -1113,11 +1254,13 @@ mod tests {
                     title: "One".into(),
                     page: Some(0),
                     depth: 0,
+                    view: None,
                 },
                 FlatOutlineItem {
                     title: "Three".into(),
                     page: Some(2),
                     depth: 0,
+                    view: None,
                 },
             ],
             Box::new(FixedCount(10)),
@@ -1145,11 +1288,13 @@ mod tests {
                     title: "Top".into(),
                     page: Some(0),
                     depth: 0,
+                    view: None,
                 },
                 FlatOutlineItem {
                     title: "Child é".into(),
                     page: Some(2),
                     depth: 1,
+                    view: None,
                 },
             ],
             Box::new(FixedCount(10)),
@@ -1254,6 +1399,7 @@ mod tests {
                 title: "One".into(),
                 page: Some(2),
                 depth: 0,
+                view: None,
             }],
             Box::new(FixedCount(10)),
         );
@@ -1306,6 +1452,7 @@ mod tests {
                     title: Some("Uno".into()),
                     target: Some(Some(ids[2])),
                     color: None,
+                    view: None,
                 },
                 "bm",
             )
@@ -1619,11 +1766,13 @@ mod tests {
                     title: "Top".into(),
                     page: Some(0),
                     depth: 0,
+                    view: None,
                 },
                 FlatOutlineItem {
                     title: "Second".into(),
                     page: Some(1),
                     depth: 0,
+                    view: None,
                 },
             ],
             Box::new(FixedCount(10)),
@@ -1808,6 +1957,7 @@ mod tests {
                 title: "Top".into(),
                 page: Some(0),
                 depth: 0,
+                view: None,
             }],
             Box::new(FixedCount(10)),
         );
@@ -1867,21 +2017,25 @@ mod tests {
                     title: "Part".into(),
                     page: Some(0),
                     depth: 0,
+                    view: None,
                 },
                 FlatOutlineItem {
                     title: "Second".into(),
                     page: Some(1),
                     depth: 1,
+                    view: None,
                 },
                 FlatOutlineItem {
                     title: "Fourth".into(),
                     page: Some(3),
                     depth: 1,
+                    view: None,
                 },
                 FlatOutlineItem {
                     title: "Third".into(),
                     page: Some(2),
                     depth: 0,
+                    view: None,
                 },
             ],
             Box::new(FixedCount(10)),

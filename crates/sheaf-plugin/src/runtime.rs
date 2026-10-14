@@ -127,6 +127,15 @@ pub struct LoadOptions {
 pub struct TextMatch {
     pub text: String,
     pub rects: Vec<sheaf_doc::Box2>,
+    /// A pattern's capture groups 1…n; empty for a literal search.
+    pub groups: Vec<Option<String>>,
+}
+
+/// A pattern-search preset, for `patterns.presets`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Preset {
+    pub name: String,
+    pub regex: String,
 }
 
 /// What a call can see and reach.
@@ -137,6 +146,8 @@ pub struct CallContext {
     /// Where `ui` calls go. None: forms are cancelled, notices logged,
     /// panel updates dropped.
     pub ui: Option<Arc<dyn Ui>>,
+    /// The user's pattern presets, then plugin-shipped ones.
+    pub presets: Vec<Preset>,
 }
 
 /// One entry point into a plugin.
@@ -639,6 +650,7 @@ impl api::text::Host for HostState {
                 .map(|h| TextMatch {
                     text: h.text,
                     rects: h.rects,
+                    groups: h.groups,
                 })
                 .collect(),
             None => {
@@ -670,6 +682,7 @@ impl api::text::Host for HostState {
                 .map(|h| TextMatch {
                     text: h.text,
                     rects: h.rects,
+                    groups: h.groups,
                 })
                 .collect(),
             None => d
@@ -711,6 +724,23 @@ impl HostState {
             .copied()
             .ok_or_else(|| format!("no page {page}"))?;
         Ok((d, p))
+    }
+}
+
+impl api::patterns::Host for HostState {
+    fn presets(&mut self) -> Vec<api::patterns::Preset> {
+        self.call
+            .as_ref()
+            .map(|c| {
+                c.presets
+                    .iter()
+                    .map(|p| api::patterns::Preset {
+                        name: p.name.clone(),
+                        regex: p.regex.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 }
 

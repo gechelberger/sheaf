@@ -33,17 +33,39 @@ interface types {
         height: f32,
     }
 
+    /// `/XYZ`: this point at the window's top-left, at this zoom (1.0 =
+    /// 100%). Page coordinates; none keeps the viewer's current value.
+    record dest-xyz { left: option<f32>, top: option<f32>, zoom: option<f32> }
+
+    /// Another destination kind (`Fit`, `FitH`, `FitR`, ...) as the file has
+    /// it: its name and its numbers in PDF user space (none for null).
+    record dest-other { kind: string, params: list<option<f32>> }
+
+    /// Where a bookmark lands on its page.
+    variant dest-view {
+        xyz(dest-xyz),
+        other(dest-other),
+    }
+
     /// A bookmark, in pre-order with its depth (0 = top level).
     record outline-item {
         id: outline-id,
         title: string,
         target: option<page-id>,
+        /// Where on `target` it lands; none is the top of the page.
+        view: option<dest-view>,
         color: option<rgb>,
         depth: u16,
     }
 
     /// A piece of page text and where it is: one box per line it spans.
-    record text-match { text: string, rects: list<box2> }
+    record text-match {
+        text: string,
+        rects: list<box2>,
+        /// For a pattern, its capture groups 1, 2, ... (none where a group
+        /// didn't take part). Empty for a literal search.
+        groups: list<option<string>>,
+    }
 
     record line-shape { a: pt, b: pt, arrow: bool }
     record text-box { rect: box2, size: f32 }
@@ -89,6 +111,24 @@ interface types {
         after: option<outline-id>,
         title: string,
         target: option<page-id>,
+        /// Where on `target` it lands; none is the top of the page.
+        view: option<dest-view>,
+    }
+    /// One bookmark of a subtree, in pre-order. `depth` is relative to the
+    /// insert point: 0 is a sibling there, 1 a child of the item above at
+    /// depth 0, and so on.
+    record new-outline-item {
+        title: string,
+        target: option<page-id>,
+        view: option<dest-view>,
+        depth: u16,
+    }
+    /// Several bookmarks in one edit, nested by depth: a new parent and its
+    /// children, say. They go after `after` under `parent`, in order.
+    record outline-insert-tree {
+        parent: option<outline-id>,
+        after: option<outline-id>,
+        items: list<new-outline-item>,
     }
     record outline-move {
         id: outline-id,
@@ -103,6 +143,7 @@ interface types {
         title: option<string>,
         target: option<option<page-id>>,
         color: option<option<rgb>>,
+        view: option<option<dest-view>>,
     }
     record page-annot { page: page-id, annot: annot }
     record annot-ref { page: page-id, id: annot-id }
@@ -128,6 +169,7 @@ interface types {
         delete-pages(list<page-id>),
         duplicate-pages(list<page-id>),
         outline-insert(outline-insert),
+        outline-insert-tree(outline-insert-tree),
         outline-move(outline-move),
         outline-edit(outline-edit),
         outline-delete(outline-id),
@@ -165,6 +207,15 @@ interface text {
     search: func(page: page-id, query: string, match-case: bool) -> result<list<text-match>, string>;
     /// Boxes of the text under `rect`, merged per line.
     text-boxes: func(page: page-id, rect: box2) -> result<list<box2>, string>;
+}
+
+/// The user's pattern-search presets.
+interface patterns {
+    record preset { name: string, regex: string }
+
+    /// The Patterns panel's presets (the user's own, in their order), then
+    /// those plugins ship.
+    presets: func() -> list<preset>;
 }
 
 /// Text recognition with the engines built into sheaf, so plugins don't
@@ -315,6 +366,7 @@ world plugin {
     import edits;
     import ui;
     import storage;
+    import patterns;
     import ocr;
     import log;
 
