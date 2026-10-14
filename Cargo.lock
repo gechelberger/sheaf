@@ -6467,6 +6467,7 @@ dependencies = [
  "sheaf-core",
  "sheaf-doc",
  "sheaf-image",
+ "sheaf-instance",
  "sheaf-ocr",
  "sheaf-ops",
  "sheaf-plugin",
@@ -6537,6 +6538,21 @@ dependencies = [
  "serde_json",
  "sheaf-progress",
  "tiff",
+]
+
+[[package]]
+name = "sheaf-instance"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "anyhow",
+ "futures",
+ "libc",
+ "log",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "uds_windows",
+ "windows 0.61.3",
 ]
 
 [[package]]

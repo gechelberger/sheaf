@@ -28,6 +28,13 @@ spends its effort on PDF features instead.
 
 From the command line, `sheaf one.pdf two.pdf three.pdf` opens three windows.
 
+**One sheaf at a time.** Opening a file while sheaf is running, from the
+file manager or with `sheaf file.pdf`, hands it to the running sheaf
+instead of starting another: a file that's already open comes forward, and
+the rest open in windows of their own. Each user on a machine has their
+own. `sheaf --new-instance` runs a separate sheaf beside it, which doesn't
+remember window layout or recent files.
+
 ### Command line
 
 Some work runs without a window. `sheaf <subcommand> …` runs it headless,
@@ -342,6 +349,8 @@ scripts/fetch-ocr-data.sh        # Tesseract language data + PaddleOCR models �
                                  #   (--uvdoc adds the curled-page model scan cleanup can use)
 scripts/build-plugins.sh         # the bundled plugins (plugins/) → target/plugins/
 cargo run -p sheaf-app           # the GPUI window
+                                 #   (debug builds don't hand files to a running
+                                 #   sheaf unless SHEAF_SINGLE_INSTANCE=1)
 ```
 
 **Plugins.** sheaf runs WebAssembly plugins (the `plugins` feature, on by

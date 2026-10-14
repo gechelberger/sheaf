@@ -27,6 +27,7 @@ sheaf-print.workspace = true
 sheaf-ops.workspace = true
 sheaf-image.workspace = true
 sheaf-cli.workspace = true
+sheaf-instance.workspace = true
 sheaf-plugin = { workspace = true, optional = true }
 semver = { version = "1", features = ["serde"], optional = true }
 # Reading .sheafplugin archives.

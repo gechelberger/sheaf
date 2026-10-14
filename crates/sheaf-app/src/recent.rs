@@ -46,6 +46,10 @@ fn read() -> Vec<PathBuf> {
 }
 
 fn write(paths: &[PathBuf]) {
+    // A sheaf running beside the owner keeps its list to itself.
+    if !crate::instance::owns_state() {
+        return;
+    }
     let path = file();
     let result = (|| -> anyhow::Result<()> {
         if let Some(dir) = path.parent() {

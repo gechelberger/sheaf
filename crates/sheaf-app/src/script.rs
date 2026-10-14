@@ -104,7 +104,7 @@ async fn run_step(
         return Err(format!("checkpoint {name} timed out"));
     }
     if step.get("quit").is_some() {
-        cx.update(|cx| cx.quit());
+        cx.update(crate::instance::quit);
         return Ok(());
     }
     if step.get("dump").and_then(Value::as_str) == Some("focus") {

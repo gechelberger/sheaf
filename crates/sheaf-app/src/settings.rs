@@ -139,8 +139,12 @@ impl Settings {
         }
     }
 
-    /// Write the settings file (atomically: temp file + rename).
+    /// Write the settings file (atomically: temp file + rename). A sheaf
+    /// running beside the owner writes nothing.
     pub fn save(&self) -> Result<()> {
+        if !crate::instance::owns_state() {
+            return Ok(());
+        }
         let path = path();
         let dir = path.parent().context("settings path has no parent")?;
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;

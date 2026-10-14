@@ -2885,6 +2885,55 @@ fn open_paths(origin: WindowHandle<Workspace>, paths: Vec<PathBuf>, cx: &mut App
     }
 }
 
+/// Files another launch handed over, or Finder opened: as File > Open, one
+/// that's already open comes forward, the next fills an empty window, and
+/// the rest get windows of their own. With none, the frontmost window comes
+/// forward.
+pub fn open_from_launch(paths: Vec<PathBuf>, cx: &mut App) {
+    let activate = |handle: WindowHandle<Workspace>, cx: &mut App| {
+        handle
+            .update(cx, |_, window, _| window.activate_window())
+            .ok();
+    };
+    if paths.is_empty() {
+        let front = cx
+            .window_stack()
+            .and_then(|stack| stack.into_iter().find_map(|w| w.downcast::<Workspace>()))
+            .or_else(|| {
+                cx.windows()
+                    .into_iter()
+                    .find_map(|w| w.downcast::<Workspace>())
+            });
+        match front {
+            Some(handle) => activate(handle, cx),
+            None => Workspace::new_window(None, cx),
+        }
+        return;
+    }
+    for path in crate::window_paths(paths).into_iter().flatten() {
+        if let Some(handle) = find_open(&path, cx) {
+            activate(handle, cx);
+        } else if let Some(handle) = find_empty(cx) {
+            handle
+                .update(cx, |ws, window, cx| {
+                    ws.open_path(path, window, cx);
+                    window.activate_window();
+                })
+                .ok();
+        } else {
+            Workspace::new_window(Some(path), cx);
+        }
+    }
+}
+
+/// A window with no document in it.
+fn find_empty(cx: &App) -> Option<WindowHandle<Workspace>> {
+    cx.windows()
+        .into_iter()
+        .filter_map(|w| w.downcast::<Workspace>())
+        .find(|handle| handle.read(cx).is_ok_and(|ws| ws.doc.is_none()))
+}
+
 /// The window showing this file, if any.
 fn find_open(path: &Path, cx: &App) -> Option<WindowHandle<Workspace>> {
     cx.windows()
