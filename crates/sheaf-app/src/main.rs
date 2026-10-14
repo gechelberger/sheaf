@@ -6,6 +6,7 @@
 
 mod assets;
 mod attachments_panel;
+mod availability;
 mod brand;
 mod calc_panel;
 mod command_info;

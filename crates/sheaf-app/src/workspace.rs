@@ -159,7 +159,7 @@ pub enum Side {
 }
 
 impl Side {
-    const ALL: [Side; 3] = [Side::Left, Side::Right, Side::Bottom];
+    pub(crate) const ALL: [Side; 3] = [Side::Left, Side::Right, Side::Bottom];
 
     fn label(self) -> &'static str {
         match self {
@@ -368,7 +368,13 @@ impl Workspace {
             plugin_manager: None,
             #[cfg(feature = "plugins")]
             doc_subs: Vec::new(),
-            menu_bar: frame::draws_menu_bar().then(|| cx.new(|cx| MenuBar::new(window, cx))),
+            menu_bar: frame::draws_menu_bar().then(|| {
+                cx.new(|cx| {
+                    let mut bar = MenuBar::new(window, cx);
+                    bar.set_state(std::rc::Rc::new(crate::availability::menu_item_state));
+                    bar
+                })
+            }),
             area: gpui::Bounds::default(),
             timing,
             launched,
@@ -422,6 +428,32 @@ impl Workspace {
 
     pub fn doc(&self) -> Option<&Entity<DocView>> {
         self.doc.as_ref()
+    }
+
+    /// Whether the dock on `side` is set to open (F4 aside).
+    pub(crate) fn dock_shown(&self, side: Side) -> bool {
+        self.dock(side).shows()
+    }
+
+    /// F4: every dock hidden.
+    pub(crate) fn all_hidden(&self) -> bool {
+        self.all_hidden
+    }
+
+    /// The panels on screen: each showing dock's active panel.
+    pub(crate) fn visible_panels(&self, cx: &App) -> Vec<Panel> {
+        let bare = self
+            .doc
+            .as_ref()
+            .is_none_or(|d| d.read(cx).presentation() != crate::presentation::Presentation::Normal);
+        if bare || self.all_hidden {
+            return Vec::new();
+        }
+        Side::ALL
+            .iter()
+            .filter(|&&s| self.dock(s).shows())
+            .filter_map(|&s| self.dock(s).active_panel())
+            .collect()
     }
 
     fn dock(&self, side: Side) -> &Dock {
@@ -813,7 +845,8 @@ impl Workspace {
             cx.notify();
             return;
         }
-        let commands = crate::commands::palette_commands(cx);
+        let facts = crate::availability::Facts::from_workspace(self, cx);
+        let commands = crate::commands::palette_commands(&facts, window, cx);
         let palette = cx.new(|cx| Palette::new(commands, window, cx));
         let sub = cx.subscribe_in(&palette, window, |ws, _, ev: &PaletteEvent, window, cx| {
             ws.palette = None;

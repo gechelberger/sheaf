@@ -34,6 +34,7 @@ use sheaf_plugin::{
 };
 use sheaf_render::RenderHandle;
 
+use crate::availability::When;
 use crate::commands::{Command, CommandRegistry, Run, ShowPluginPanel, Target};
 use crate::contrib::{Contributions, Marks, PluginPanel, TickSet};
 use crate::docview::DocView;
@@ -720,6 +721,9 @@ fn register(m: &Manifest, dir: &Path, cx: &mut App) -> Vec<String> {
                 icon,
                 help: c.help.clone(),
                 keywords: c.keywords.clone(),
+                when: c.when.iter().filter_map(|w| When::parse(w)).collect(),
+                enabled: None,
+                checked: None,
                 target: Target::plugin(&m.id, &c.id),
             },
             c.menu.as_deref(),
@@ -775,6 +779,9 @@ fn register(m: &Manifest, dir: &Path, cx: &mut App) -> Vec<String> {
                 icon: crate::command_info::icon_path("right-dock"),
                 help: format!("Show the {} panel from {}.", p.label, m.name),
                 keywords: Vec::new(),
+                when: Vec::new(),
+                enabled: None,
+                checked: None,
                 target: Target::Builtin(Box::new(ShowPluginPanel { panel: id })),
             },
             Some("View/Plugin Panels"),

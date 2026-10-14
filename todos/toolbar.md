@@ -1,7 +1,7 @@
 # Configurable floating toolbar (planned)
 
-Status: slice 1 (command metadata) done 2026-10-14 on `cmd-icons`; the
-toolbar itself not started. Written 2026-10-13. The fixed markup
+Status: slices 1 (command metadata) and 2 (availability) done 2026-10-14
+on `cmd-icons`; the toolbar itself not started. Written 2026-10-13. The fixed markup
 toolbar (`markup_tools.rs` `render_toolbar`) covers what we have today and
 stays as is for now; this is the toolbar we want once the command set is
 big enough that no fixed layout fits everyone.
@@ -269,6 +269,31 @@ This is the part that makes it worth doing.
    - Not done: icons in the menus (optional in the plan).
 2. `when` availability plus the built-in active/enabled hooks, used by the
    menu bar and palette first so it's exercised before the toolbar exists.
+   *Done 2026-10-14.* Notes and deviations:
+   - `availability.rs`: `Facts` snapshots one window (document open,
+     annotation/page selection, region, undo/redo, unsaved changes, OCR
+     running, guides, recent files, tool, page mode, split, rulers, grid,
+     read mode/full screen, visible panels, open docks). `Command` gains
+     `when`, `enabled` and `checked`; built-ins get theirs from
+     `availability::builtin(id)`.
+   - Only `document`, `selection`, `pages` and `region` are in the
+     vocabulary. `editable` and `text-selection` wait for the features:
+     sheaf has no read-only documents or text selection yet, and an
+     unknown word is a manifest error, so adding them later is additive.
+   - Built-ins enabled by rule: Save (unsaved changes), Undo/Redo, Clear
+     Guides, Clear Recent, cover page (two-up only), Recognize Text / Cancel
+     OCR. Checked: page modes, cover page, split, read mode, full screen,
+     rulers, grid, tools, panels on screen, docks.
+   - Title-bar menus: `MenuBar::set_state` takes a hook (`ItemState`); a
+     checkmark gutter appears in menus with toggles. Keyboard-opened menus
+     now pick their first enabled item on the next draw, since the hook
+     reads the workspace that asked the menu to open.
+   - The palette lists disabled commands greyed and won't run them; a
+     command also counts as disabled when its action has no handler where
+     focus was. Toggles show "✓ on".
+   - Bundled plugin commands declare `when = ["document"]` (0.2.1).
+   - Not done: macOS's native menus still get static items (no greying
+     beyond GPUI's own action check, no checkmarks).
 3. `sheaf-ui` toolbar widget: static items, separators, tooltips, state,
    overflow. Docked at the top only. App renders one from a hardcoded
    default layout that matches today's bar, behind a setting, beside the

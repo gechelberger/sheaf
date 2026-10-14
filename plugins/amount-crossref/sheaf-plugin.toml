@@ -1,6 +1,6 @@
 id = "amount-crossref"
 name = "Amount Cross-Reference"
-version = "0.2.0"
+version = "0.2.1"
 api = "^0.2"
 homepage = "https://github.com/gechelberger/sheaf/tree/main/plugins/amount-crossref"
 description = "Finds the same dollar amount on different pages (a K-1 total and the 1040 line it flows to) and links the pairs you accept with connectors."
@@ -11,6 +11,7 @@ label = "Find &Matching Amounts…"
 icon = "icons/find.svg"
 help = "Find amounts that appear on more than one page, such as a K-1 total and the 1040 line it flows to, and review the pairs."
 keywords = ["match", "tie out", "cross-reference", "k-1"]
+when = ["document"]
 category = "Workpapers"
 menu = "Tools/Cross-Reference"
 
@@ -20,6 +21,7 @@ label = "&Link All Matches"
 icon = "icons/link-all.svg"
 help = "Link every pair of matching amounts you accepted with connectors."
 keywords = ["connector", "tie out"]
+when = ["document"]
 category = "Workpapers"
 menu = "Tools/Cross-Reference"
 

@@ -20,6 +20,8 @@ use serde::{Deserialize, Serialize};
 
 use sheaf_ui::menu_bar::{parse_label, platform_label as menu_label};
 
+use crate::availability::{Rule, When};
+
 /// Run a plugin command. Bindable in `keymap.json`:
 /// `["plugin::Run", { "plugin": "tax-form-bookmarks", "command": "scan" }]`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema, Action)]
@@ -89,6 +91,12 @@ pub struct Command {
     pub help: String,
     /// More words the palette finds it by.
     pub keywords: Vec<String>,
+    /// What must hold for it to run; all of them.
+    pub when: Vec<When>,
+    /// A built-in's own test beyond `when` (Undo needs something to undo).
+    pub enabled: Option<Rule>,
+    /// For a built-in that switches something on and off: whether it's on.
+    pub checked: Option<Rule>,
     pub target: Target,
 }
 
@@ -98,6 +106,7 @@ impl Command {
     /// registry refuses it.
     pub fn builtin(id: &str, label: &str, category: &str, action: Box<dyn Action>) -> Self {
         let info = crate::command_info::info(id);
+        let rules = crate::availability::builtin(id);
         Command {
             id: id.to_string(),
             label: label.to_string(),
@@ -113,6 +122,9 @@ impl Command {
             keywords: info
                 .map(|i| i.keywords.iter().map(|k| k.to_string()).collect())
                 .unwrap_or_default(),
+            when: rules.when.to_vec(),
+            enabled: rules.enabled,
+            checked: rules.checked,
             target: Target::Builtin(action),
         }
     }
@@ -186,6 +198,16 @@ impl CommandRegistry {
 
     pub fn get(&self, id: &str) -> Option<&Command> {
         self.index.get(id).map(|&i| &self.commands[i])
+    }
+
+    /// The command an action runs, if it's registered: a built-in by its
+    /// action name, a plugin command by `plugin::Run`'s plugin and command.
+    pub fn for_action(&self, action: &dyn Action) -> Option<&Command> {
+        if let Some(run) = action.as_any().downcast_ref::<Run>() {
+            return self.get(&format!("{}::{}", run.plugin, run.command));
+        }
+        self.get(action.name())
+            .filter(|c| c.target.action().partial_eq(action))
     }
 
     #[cfg(test)]
@@ -419,14 +441,23 @@ fn same_name(menu: &str, name: &str) -> bool {
 }
 
 /// Every registered command, in registration (built-ins: menu) order, as
-/// the command palette lists them.
-pub fn palette_commands(cx: &App) -> Vec<sheaf_ui::palette::Command> {
+/// the command palette lists them, with their state in `window` given its
+/// `facts`. Call before the palette takes focus: a command is enabled only
+/// if its action has a handler where focus is.
+pub fn palette_commands(
+    facts: &crate::availability::Facts,
+    window: &gpui::Window,
+    cx: &App,
+) -> Vec<sheaf_ui::palette::Command> {
     cx.global::<CommandRegistry>()
         .commands()
         .iter()
         .map(|c| {
             let action = c.target.action();
+            let state = crate::availability::state(c, facts);
             sheaf_ui::palette::Command {
+                enabled: state.enabled && window.is_action_available(action.as_ref(), cx),
+                checked: state.checked,
                 id: c.id.clone(),
                 icon: c.icon.clone().into(),
                 help: c.help.clone(),
@@ -463,6 +494,9 @@ mod tests {
                 icon: "plugin-icons/x.svg".into(),
                 help: "Does a thing.".into(),
                 keywords: Vec::new(),
+                when: Vec::new(),
+                enabled: None,
+                checked: None,
                 target: Target::plugin(plugin, command),
             },
             menu,
@@ -626,6 +660,9 @@ mod tests {
             icon: icon.into(),
             help: help.into(),
             keywords: Vec::new(),
+            when: Vec::new(),
+            enabled: None,
+            checked: None,
             target: Target::plugin("tax", "scan"),
         };
         let incomplete = |missing| {

@@ -36,6 +36,10 @@ pub struct Command {
     /// More search terms. A command found only by one ranks below those
     /// whose label matches.
     pub keywords: Vec<String>,
+    /// Whether it can run now; others are listed greyed out.
+    pub enabled: bool,
+    /// For a command that switches something on and off: whether it's on.
+    pub checked: Option<bool>,
     /// What running the command emits, in `PaletteEvent::Run`.
     pub action: Box<dyn Action>,
     pub shortcut: Option<String>,
@@ -139,7 +143,9 @@ impl Palette {
     }
 
     fn run_selected(&mut self, cx: &mut Context<Self>) {
-        if let Some(&i) = self.matches.get(self.selected) {
+        if let Some(&i) = self.matches.get(self.selected)
+            && self.commands[i].enabled
+        {
             cx.emit(PaletteEvent::Run(self.commands[i].action.boxed_clone()));
         }
     }
@@ -168,6 +174,16 @@ impl Render for Palette {
             .map(|row| {
                 let c = &self.commands[self.matches[row]];
                 let selected = row == self.selected;
+                let on = c.enabled;
+                let (strong, muted, detail) = if on {
+                    (theme::TEXT_STRONG, theme::TEXT_MUTED, theme::TEXT_DETAIL)
+                } else {
+                    (
+                        theme::TEXT_DISABLED,
+                        theme::TEXT_DISABLED_DIM,
+                        theme::TEXT_DISABLED_DIM,
+                    )
+                };
                 layout
                     .place(row)
                     .id(("cmd", row))
@@ -175,9 +191,8 @@ impl Render for Palette {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .cursor_pointer()
+                    .when(on, |d| d.cursor_pointer().hover(|s| s.bg(theme::HOVER)))
                     .when(selected, |d| d.bg(theme::SELECTED))
-                    .hover(|s| s.bg(theme::HOVER))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.selected = row;
                         this.run_selected(cx);
@@ -187,11 +202,7 @@ impl Render for Palette {
                             .path(c.icon.clone())
                             .flex_shrink_0()
                             .size(px(18.0))
-                            .text_color(if selected {
-                                theme::TEXT_STRONG
-                            } else {
-                                theme::TEXT_MUTED
-                            }),
+                            .text_color(if selected { strong } else { muted }),
                     )
                     .child(
                         div()
@@ -208,16 +219,25 @@ impl Render for Palette {
                                         div()
                                             .flex_shrink_0()
                                             .text_sm()
-                                            .text_color(theme::TEXT_MUTED)
+                                            .text_color(muted)
                                             .child(format!("{}:", c.category)),
                                     )
                                     .child(
                                         div()
                                             .flex_shrink_0()
                                             .text_sm()
-                                            .text_color(theme::TEXT_STRONG)
+                                            .text_color(strong)
                                             .child(c.label.clone()),
                                     )
+                                    .when(c.checked == Some(true), |d| {
+                                        d.child(
+                                            div()
+                                                .flex_shrink_0()
+                                                .text_xs()
+                                                .text_color(theme::ACCENT)
+                                                .child("✓ on"),
+                                        )
+                                    })
                                     .child(
                                         div()
                                             .flex_1()
@@ -233,7 +253,7 @@ impl Render for Palette {
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(theme::TEXT_DETAIL)
+                                    .text_color(detail)
                                     .overflow_hidden()
                                     .whitespace_nowrap()
                                     .text_ellipsis()
@@ -241,7 +261,7 @@ impl Render for Palette {
                             ),
                     )
                     .when_some(c.shortcut.clone(), |d, s| {
-                        d.child(div().text_xs().text_color(theme::TEXT_DETAIL).child(s))
+                        d.child(div().text_xs().text_color(detail).child(s))
                     })
                     .into_any_element()
             })

@@ -104,11 +104,20 @@ pub struct CommandDecl {
     /// Default key binding in `keymap.json` syntax, e.g. `"ctrl-alt-b"`.
     #[serde(default)]
     pub keys: Option<String>,
+    /// When it can run: any of [`WHEN_WORDS`], all of which must hold.
+    /// Menus and the palette grey it out otherwise.
+    #[serde(default)]
+    pub when: Vec<String>,
     /// Where `keys` applies, as a `keymap.json` context, e.g.
     /// `"DocView && !TextInput"`. Defaults to the whole window.
     #[serde(default)]
     pub keys_context: Option<String>,
 }
+
+/// What a command's `when` may name: a document is open, an annotation
+/// is selected, pages are selected in the thumbnails, a region is
+/// Shift+dragged on a page.
+pub const WHEN_WORDS: &[&str] = &["document", "selection", "pages", "region"];
 
 /// The largest icon file a plugin may ship.
 pub const MAX_ICON_BYTES: u64 = 64 << 10;
@@ -342,6 +351,13 @@ impl Manifest {
             if c.label.trim().is_empty() {
                 bail!("command {:?} has no label", c.id);
             }
+            if let Some(w) = c.when.iter().find(|w| !WHEN_WORDS.contains(&w.as_str())) {
+                bail!(
+                    "command {:?}: unknown `when` {w:?}; use any of {}",
+                    c.id,
+                    WHEN_WORDS.join(", ")
+                );
+            }
             if c.help.trim().is_empty() {
                 bail!("command {:?} has no help", c.id);
             }
@@ -423,6 +439,7 @@ mod tests {
         icon = "icons/scan.svg"
         help = "Bookmark each tax form."
         keywords = ["irs"]
+        when = ["document"]
         keys-context = "DocView"
         menu = "Tools/Tax"
         keys = "ctrl-alt-b"
@@ -446,6 +463,7 @@ mod tests {
         assert_eq!(m.commands[0].menu.as_deref(), Some("Tools/Tax"));
         assert_eq!(m.commands[0].keys_context.as_deref(), Some("DocView"));
         assert_eq!(m.commands[0].keywords, ["irs"]);
+        assert_eq!(m.commands[0].when, ["document"]);
         assert_eq!(m.homepage.as_deref(), Some("https://example.com/tax"));
         assert_eq!(m.category(&m.commands[0]), "Tax Form Bookmarks");
         assert_eq!(m.marks.stamps, ["Agreed"]);
@@ -485,6 +503,7 @@ mod tests {
         assert!(bad(|s| s.replace("^0.2", "^2.0")).contains("built for API"));
         assert!(bad(|s| s.replace("^0.2", "^0.1")).contains("built for API"));
         assert!(bad(|s| s.replace("https://example.com/tax", "http://x")).contains("homepage"));
+        assert!(bad(|s| s.replace("[\"document\"]", "[\"editable\"]")).contains("unknown `when`"));
         assert!(
             bad(|s| s.replace("help = \"Bookmark each tax form.\"", "help = \" \""))
                 .contains("no help")
