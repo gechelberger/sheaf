@@ -1,6 +1,6 @@
 # Move reusable widgets into sheaf-ui
 
-Status: in progress on branch `widgets` (from main). A separate PR from the plugin work.
+Status: done on branch `widgets` (from main), 2026-10-14; not yet merged. A separate PR from the plugin work.
 
 `crates/sheaf-ui` exists but is an empty stub ("Empty until M1"). The
 README gives it the page canvas, tiled viewport, sidebars and command
@@ -95,3 +95,15 @@ check them with screenshots (the `--script` UI harness).
    actions (`palette::PaletteUp` etc., same names for `keymap.json`) and
    bindings moved into sheaf-ui; `commands::palette_commands(cx)` builds
    the list from the registry. It uses the dialog backdrop and card.
+5. Done. `sheaf_ui::list::ListLayout` (fixed or variable row heights,
+   with padding): visible range from the scroll handle, `row_at` for
+   drags, `reveal` to scroll a row into view, `place(i)` and `body()` for
+   the elements. Comments, Bookmarks, Patterns, the thumbnails and the
+   palette use it (the palette now draws only the rows in view). Before a
+   list's first layout it assumes a 2000px view, so the first frame isn't
+   one row; the old code drew a single row until the next repaint.
+   Checked with before/after screenshots on a 40-page file with comments,
+   bookmarks and pattern hits.
+
+Left for later, as planned: the page canvas and tile viewport inside
+`docview.rs`.

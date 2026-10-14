@@ -24,6 +24,7 @@ use sheaf_core::{PageIndex, PageSize, Rotation};
 use sheaf_doc::save;
 use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, Pt};
 use sheaf_ui::button::Button;
+use sheaf_ui::list::ListLayout;
 use sheaf_ui::text_area::{TextArea, TextAreaEvent};
 use sheaf_ui::text_input::{TextInput, TextInputEvent};
 use sheaf_ui::theme;
@@ -3538,23 +3539,17 @@ impl DocView {
         let item_h = |i: usize| {
             thumb_w * sizes[i].height / sizes[i].width.max(1.0) + THUMB_LABEL_H + THUMB_PAD
         };
-        let mut tops = Vec::with_capacity(count);
-        let mut y = THUMB_PAD;
-        for i in 0..count {
-            tops.push(y);
-            y += item_h(i);
-        }
-        let total_h = y;
+        let layout = ListLayout::variable((0..count).map(item_h)).padded(THUMB_PAD, 0.0);
         // Midpoints decide which gap a drag is over.
         let mids: Arc<Vec<f32>> = Arc::new(
             (0..count)
-                .map(|i| tops[i] + (item_h(i) - THUMB_PAD) / 2.0)
+                .map(|i| layout.top(i) + (layout.height(i) - THUMB_PAD) / 2.0)
                 .collect(),
         );
 
         let bounds = doc.thumb_scroll.bounds();
         let view_h = f32::from(bounds.size.height).max(1.0);
-        let max_y = (total_h - view_h).max(0.0);
+        let max_y = (layout.total_height() - view_h).max(0.0);
         let mut scroll_y = (-f32::from(doc.thumb_scroll.offset().y)).clamp(0.0, max_y);
 
         // Follow the main view: when the current page changes, make sure its
@@ -3562,23 +3557,15 @@ impl DocView {
         let cur = doc.current_page.min(last);
         let cur_id = refs[cur].id;
         if doc.thumb_followed != Some(cur_id) {
-            let top = tops[cur];
-            let bottom = top + item_h(cur);
-            if top < scroll_y {
-                scroll_y = (top - THUMB_PAD).clamp(0.0, max_y);
-            } else if bottom > scroll_y + view_h {
-                scroll_y = (bottom - view_h + THUMB_PAD).clamp(0.0, max_y);
+            if let Some(y) = layout.reveal_in(cur, THUMB_PAD, scroll_y, view_h) {
+                scroll_y = y;
             }
             doc.thumb_scroll.set_offset(point(px(0.0), px(-scroll_y)));
             doc.thumb_followed = Some(cur_id);
         }
 
-        let page_at = |y: f32| tops.partition_point(|&t| t <= y).saturating_sub(1);
-        let (v0, v1) = (
-            page_at(scroll_y).min(last),
-            page_at(scroll_y + view_h).min(last),
-        );
-        doc.thumb_keep = (v0.saturating_sub(2)..=(v1 + 2).min(last))
+        let visible = layout.visible_in(scroll_y, view_h);
+        doc.thumb_keep = (visible.start.saturating_sub(2)..(visible.end + 2).min(count))
             .map(|i| refs[i].id)
             .collect();
 
@@ -3594,7 +3581,8 @@ impl DocView {
 
         let mut wants = Vec::new();
         let mut items = Vec::new();
-        for (i, pref) in refs.iter().enumerate().take(v1 + 1).skip(v0) {
+        for i in visible {
+            let pref = &refs[i];
             wants.push((
                 *pref,
                 RenderRequest {
@@ -3630,7 +3618,7 @@ impl DocView {
                 div()
                     .id(("thumb", pref.id.0 as usize))
                     .absolute()
-                    .top(px(tops[i]))
+                    .top(px(layout.top(i)))
                     .left(px(THUMB_PAD))
                     .w(px(thumb_w))
                     .flex()
@@ -3693,9 +3681,9 @@ impl DocView {
         // Drop indicator: a line in the gap the drag is over.
         let indicator = doc.drop_target.map(|at| {
             let y = if at >= count {
-                tops[last] + item_h(last) - THUMB_PAD / 2.0
+                layout.top(last) + layout.height(last) - THUMB_PAD / 2.0
             } else {
-                tops[at] - THUMB_PAD / 2.0
+                layout.top(at) - THUMB_PAD / 2.0
             };
             div()
                 .absolute()
@@ -3729,7 +3717,7 @@ impl DocView {
                 div()
                     .relative()
                     .w_full()
-                    .h(px(total_h))
+                    .h(px(layout.total_height()))
                     .children(items)
                     .children(indicator),
             )

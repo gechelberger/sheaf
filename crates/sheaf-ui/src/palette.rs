@@ -8,6 +8,7 @@ use gpui::{
     Window, actions, div, prelude::*, px,
 };
 
+use crate::list::ListLayout;
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::{dialog, theme};
 
@@ -131,18 +132,7 @@ impl Palette {
             return;
         }
         self.selected = ((self.selected as i64 + by).rem_euclid(n as i64)) as usize;
-        // Keep the selection in view.
-        let top = self.selected as f32 * ROW_H;
-        let view_h = ROW_H * MAX_ROWS as f32;
-        let cur = -f32::from(self.scroll.offset().y);
-        let want = if top < cur {
-            top
-        } else if top + ROW_H > cur + view_h {
-            top + ROW_H - view_h
-        } else {
-            cur
-        };
-        self.scroll.set_offset(gpui::point(px(0.0), px(-want)));
+        ListLayout::fixed(n, ROW_H).reveal(self.selected, 0.0, &self.scroll);
         cx.notify();
     }
 }
@@ -154,16 +144,15 @@ impl Render for Palette {
             self.refilter(&text);
         }
         let n = self.matches.len();
-        let rows: Vec<AnyElement> = self
-            .matches
-            .iter()
-            .enumerate()
-            .map(|(row, &i)| {
-                let c = &self.commands[i];
+        let layout = ListLayout::fixed(n, ROW_H);
+        let rows: Vec<AnyElement> = layout
+            .visible(&self.scroll)
+            .map(|row| {
+                let c = &self.commands[self.matches[row]];
                 let selected = row == self.selected;
-                div()
+                layout
+                    .place(row)
                     .id(("cmd", row))
-                    .h(px(ROW_H))
                     .px_3()
                     .flex()
                     .items_center()
@@ -243,7 +232,7 @@ impl Render for Palette {
                                     .child("No matching commands")
                                     .into_any_element()
                             } else {
-                                div().flex().flex_col().children(rows).into_any_element()
+                                layout.body().children(rows).into_any_element()
                             }),
                     ),
             )

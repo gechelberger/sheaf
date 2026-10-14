@@ -1,13 +1,14 @@
 //! Reusable GPUI widgets: text fields, buttons and chips, dialogs and
-//! prompts, tooltips, the title bar and menu bar, and the named colors
-//! they share, and the command palette. The page canvas, tiled viewport
-//! and sidebars are to follow.
+//! prompts, tooltips, the title bar and menu bar, the command palette,
+//! virtualized lists, and the named colors they share. The page canvas,
+//! tiled viewport and sidebars are to follow.
 
 use gpui::{App, KeyBinding};
 
 pub mod button;
 pub mod dialog;
 pub mod frame;
+pub mod list;
 pub mod menu_bar;
 pub mod palette;
 pub mod prompts;

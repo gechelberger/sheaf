@@ -13,6 +13,7 @@ use gpui::{
     Subscription, Task, Window, anchored, deferred, div, prelude::*, px,
 };
 use sheaf_render::SearchEvent;
+use sheaf_ui::list::ListLayout;
 use sheaf_ui::text_input::{TextInput, TextInputEvent};
 use sheaf_ui::theme;
 
@@ -512,25 +513,13 @@ impl DocView {
                 rows.push(Row::Hit(k));
             }
         }
-        let total_h = rows.len() as f32 * ROW_H + PAD;
-        let bounds = ps.scroll.bounds();
-        let view_h = f32::from(bounds.size.height).max(1.0);
-        let scroll_y = (-f32::from(ps.scroll.offset().y)).max(0.0);
-        let r0 = ((scroll_y / ROW_H) as usize).min(rows.len());
-        let r1 = (((scroll_y + view_h) / ROW_H) as usize + 1).min(rows.len());
+        let layout = ListLayout::fixed(rows.len(), ROW_H).padded(0.0, PAD);
         let current = ps.current;
         let hits = &ps.hits;
         let mut els = Vec::new();
-        for (r, row) in rows.iter().enumerate().take(r1).skip(r0) {
-            let base = div()
-                .absolute()
-                .top(px(r as f32 * ROW_H))
-                .left(px(0.0))
-                .w_full()
-                .h(px(ROW_H))
-                .flex()
-                .items_center();
-            els.push(match row {
+        for r in layout.visible(&ps.scroll) {
+            let base = layout.place(r).flex().items_center();
+            els.push(match &rows[r] {
                 Row::Header { page, count } => base
                     .px_2()
                     .text_xs()
@@ -587,7 +576,7 @@ impl DocView {
             .flex_1()
             .min_h(px(0.0))
             .min_w(px(0.0))
-            .child(div().relative().w_full().h(px(total_h)).children(els));
+            .child(layout.body().children(els));
         if wide {
             div()
                 .size_full()

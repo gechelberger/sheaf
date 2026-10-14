@@ -7,6 +7,7 @@ use gpui::{AnyElement, Context, Entity, FocusHandle, Subscription, Window, div, 
 use sheaf_core::PageSize;
 use sheaf_doc::{Annot, AnnotId, AnnotKind, PageId, file::ForeignAnnot};
 use sheaf_render::Rect;
+use sheaf_ui::list::ListLayout;
 use sheaf_ui::text_input::{TextInput, TextInputEvent};
 use sheaf_ui::theme;
 
@@ -260,11 +261,8 @@ impl DocView {
                 .unwrap_or(1)
                 .clamp(1, MAX_TEXT_LINES)
         };
-        let mut tops = Vec::with_capacity(rows.len());
-        let mut heights = Vec::with_capacity(rows.len());
-        let mut y = 0.0;
-        for r in &rows {
-            let h = match *r {
+        let layout = ListLayout::variable(rows.iter().map(|r| {
+            match *r {
                 Row::Header { .. } => HEADER_H,
                 Row::Ours { page, id } => row_h(
                     st.annots_on(page)
@@ -276,17 +274,9 @@ impl DocView {
                         .get(ix)
                         .map_or(1, |f| text_lines(&foreign_text(f))),
                 ),
-            };
-            tops.push(y);
-            heights.push(h);
-            y += h;
-        }
-        let total_h = y + 4.0;
-        let view_h = f32::from(bounds.size.height).max(1.0);
-        let scroll_y = (-f32::from(cm.scroll.offset().y)).max(0.0);
-        let bottoms: Vec<f32> = tops.iter().zip(&heights).map(|(t, h)| t + h).collect();
-        let r0 = bottoms.partition_point(|b| *b < scroll_y);
-        let r1 = tops.partition_point(|t| *t < scroll_y + view_h);
+            }
+        }))
+        .padded(0.0, 4.0);
 
         let selected = doc.selected_annot;
         let selected_foreign = doc.selected_foreign;
@@ -297,16 +287,11 @@ impl DocView {
                 count += 1;
             }
         }
-        for (i, row) in rows.iter().enumerate().take(r1).skip(r0) {
-            let top = tops[i];
-            match *row {
+        for i in layout.visible(&cm.scroll) {
+            match rows[i] {
                 Row::Header { index, count } => els.push(
-                    div()
-                        .absolute()
-                        .top(px(top))
-                        .left(px(0.0))
-                        .w_full()
-                        .h(px(HEADER_H))
+                    layout
+                        .place(i)
                         .flex()
                         .items_center()
                         .px_2()
@@ -328,8 +313,8 @@ impl DocView {
                     let title = format!("{}  ·  {}", kind_label(&a.kind), a.author);
                     els.push(
                         comment_row(
+                            layout.place(i),
                             ("ours", id.0 as usize),
-                            (top, heights[i]),
                             is_sel,
                             title,
                             snippet,
@@ -381,8 +366,8 @@ impl DocView {
                     let title = format!("{}  ·  {author}", subtype_label(&f.subtype));
                     els.push(
                         comment_row(
+                            layout.place(i),
                             ("foreign", ix),
-                            (top, heights[i]),
                             is_sel,
                             title,
                             snippet,
@@ -435,7 +420,7 @@ impl DocView {
                     .overflow_y_scroll()
                     .flex_1()
                     .min_h(px(0.0))
-                    .child(div().relative().w_full().h(px(total_h)).children(els)),
+                    .child(layout.body().children(els)),
             )
             .into_any_element()
     }
@@ -458,22 +443,18 @@ fn foreign_text(f: &ForeignAnnot) -> String {
     }
 }
 
-/// One comment row: kind and author over the text (wrapped), date at right.
+/// One comment row, in its `place` in the list: kind and author over the
+/// text (wrapped), date at right.
 fn comment_row(
+    place: gpui::Div,
     id: (&'static str, usize),
-    (top, height): (f32, f32),
     selected: bool,
     title: String,
     snippet: String,
     modified: &str,
 ) -> gpui::Stateful<gpui::Div> {
-    div()
+    place
         .id(id)
-        .absolute()
-        .top(px(top))
-        .left(px(0.0))
-        .w_full()
-        .h(px(height))
         .px_2()
         .py(px(ROW_PAD))
         .flex()
