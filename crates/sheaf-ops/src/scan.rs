@@ -30,6 +30,9 @@ pub struct ScanOptions {
     pub dpi: u32,
     /// Recognize text with the configured OCR engine.
     pub ocr: bool,
+    /// Leave out pages that come out blank (duplex backs, separators).
+    /// Only clearly blank ones: a nearly blank page stays.
+    pub drop_blanks: bool,
 }
 
 impl Default for ScanOptions {
@@ -39,6 +42,7 @@ impl Default for ScanOptions {
             page: Paper::Letter,
             dpi: 300,
             ocr: false,
+            drop_blanks: false,
         }
     }
 }
@@ -72,6 +76,8 @@ pub struct ScanReport {
     pub cropped: usize,
     /// Words recognized, when OCR ran.
     pub words: usize,
+    /// Blank pages left out.
+    pub dropped: usize,
 }
 
 /// Clean up one photo.
@@ -192,6 +198,15 @@ pub fn scan(
                 &format!("{}: turned {}°", path.display(), cleaned.turns * 90),
             );
         }
+        if opts.drop_blanks && is_blank_page(&cleaned.image) {
+            step.message(
+                sheaf_progress::Level::Info,
+                &format!("{}: blank, left out", path.display()),
+            );
+            report.dropped += 1;
+            progress.set(i as u64 + 1);
+            continue;
+        }
         let page = match opts.clean.mode {
             // Black and white goes in as CCITT G4.
             sheaf_scan::Mode::Bw => PageImage::from_image(cleaned.image.clone(), opts.dpi as f32),
@@ -214,6 +229,9 @@ pub fn scan(
         progress.set(i as u64 + 1);
     }
     progress.check()?;
+    if pages.is_empty() {
+        anyhow::bail!("every page came out blank");
+    }
     let bytes = sheaf_doc::images::to_pdf(&pages, fit)?;
     if engine.is_none() {
         crate::images::write_atomic(out, &bytes)?;
@@ -228,6 +246,14 @@ pub fn scan(
     let _ = std::fs::remove_file(&tmp);
     result?;
     Ok(report)
+}
+
+/// Whether a cleaned page is blank enough to leave out.
+pub fn is_blank_page(image: &image::DynamicImage) -> bool {
+    matches!(
+        crate::blank::judge_image(image, crate::blank::Sensitivity::Normal),
+        crate::blank::Verdict::Blank { .. }
+    )
 }
 
 /// An engine's words on a cleaned image, in points on its page.

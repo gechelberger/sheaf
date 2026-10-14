@@ -1,6 +1,8 @@
 # Plan: Remove Blank Pages
 
-Status: **planned** (2026-10-14), not started.
+Status: **done** (2026-10-14), as M8 slices 9–12. See [`m8.md`](m8.md) for notes.
+The detector lives in `sheaf_ops::blank`, not a crate of its own, and the scan option is
+`ScanOptions::drop_blanks` (in `sheaf-ops`, where the detector is), not `ScanParams`.
 
 ## Context
 We want a way to scan a document and remove its blank pages: duplex backs, scanner

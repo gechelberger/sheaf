@@ -51,8 +51,9 @@ below are a first cut.
   Patterns search unsaved layers. Design in [`todos/ocr.md`](todos/ocr.md).
 - ✅ Scan cleanup (`sheaf-scan`): deskew, despeckle, auto-rotate by detected
   text orientation (word shape, plus PaddleOCR's orientation model when
-  present), black-and-white by Sauvola thresholding. Blank-page removal is
-  still to do.
+  present), black-and-white by Sauvola thresholding. Blank-page removal
+  (M8, `sheaf_ops::blank`): "Leave out blank pages" when scanning, Document >
+  Find Blank Pages… with a review before deleting, and `sheaf remove-blanks`.
 - ✅ Camera capture: phone photos of paper. Find the page and correct the
   perspective, clear the background left at its edges, even out shadows,
   lighting and white balance, and optionally flatten curled pages (UVDoc,

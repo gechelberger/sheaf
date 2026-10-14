@@ -45,6 +45,9 @@ pub struct ScanArgs {
     /// scripts/fetch-ocr-data.sh --uvdoc.
     #[arg(long)]
     flatten_curl: bool,
+    /// Leave out pages that come out blank (duplex backs, separators).
+    #[arg(long)]
+    drop_blanks: bool,
     /// Keep the whole photo: don't look for the page's edges.
     #[arg(long)]
     no_crop: bool,
@@ -91,6 +94,7 @@ pub fn run(args: ScanArgs, quiet: bool) -> anyhow::Result<()> {
         page: args.page.into(),
         dpi: args.dpi,
         ocr: args.ocr,
+        drop_blanks: args.drop_blanks,
         ..Default::default()
     };
     opts.clean.mode = match args.mode {
@@ -119,10 +123,15 @@ pub fn run(args: ScanArgs, quiet: bool) -> anyhow::Result<()> {
     })?;
     if !quiet {
         eprintln!(
-            "{} page{}, {} cropped from the photo{}",
+            "{} page{}, {} cropped from the photo{}{}",
             report.pages,
             if report.pages == 1 { "" } else { "s" },
             report.cropped,
+            if report.dropped > 0 {
+                format!(", {} blank left out", report.dropped)
+            } else {
+                String::new()
+            },
             if args.ocr {
                 format!(", {} words recognized", report.words)
             } else {

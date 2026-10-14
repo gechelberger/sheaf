@@ -176,6 +176,27 @@ pub fn is_blank(gray: &GrayImage, sensitivity: Sensitivity) -> Verdict {
     }
 }
 
+/// [`is_blank`] on a page image of any size: shrunk to about 60 dpi
+/// first, as [`find`] renders, so a resolution doesn't change the verdict.
+pub fn judge_image(image: &image::DynamicImage, sensitivity: Sensitivity) -> Verdict {
+    // A Letter page's long side at 60 dpi.
+    const LONG: u32 = 660;
+    let (w, h) = (image.width(), image.height());
+    let gray = if w.max(h) > LONG {
+        let s = LONG as f32 / w.max(h) as f32;
+        image
+            .resize_exact(
+                ((w as f32 * s).round() as u32).max(1),
+                ((h as f32 * s).round() as u32).max(1),
+                image::imageops::FilterType::Triangle,
+            )
+            .to_luma8()
+    } else {
+        image.to_luma8()
+    };
+    is_blank(&gray, sensitivity)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Reason {

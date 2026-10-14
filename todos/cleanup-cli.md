@@ -394,7 +394,9 @@ Verification:
 - **GUI.** Esc stops a running export, a plugin command, and a scan in the
   dialog.
 
-Still open: real phone-photo fixtures; blank-page removal; and the two
+Blank-page removal landed in M8 (slices 9–12, [`blanks.md`](blanks.md)).
+
+Still open: real phone-photo fixtures; and the two
 "Open" questions above (keeping the raw photos as attachments, and cleaning
 pages already in a PDF).
 
