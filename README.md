@@ -127,8 +127,8 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 | Feature | Status |
 |---|---|
 | Open / render PDF (incl. encrypted, forms, large scans) | ✅ (password prompt pending) |
-| Continuous / single / facing page modes | ✅ continuous; single/facing 📋 |
-| Zoom (fit page / fit width / custom), rotate view | ✅ zoom; rotate view 📋 |
+| Continuous / single / facing page modes | ✅ View > Single Page, Two-Up (each with Continuous), Show Cover Page |
+| Zoom (fit page / fit width / custom), rotate view | ✅ rotate view is display only (Ctrl+Shift+Plus/Minus) |
 | Thumbnails sidebar (lazy, virtualized) | ✅ |
 | Bookmarks (outline) sidebar | ✅ |
 | Text search (find in document) | ✅ progressive; ~6 ms/page |

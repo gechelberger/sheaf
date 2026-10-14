@@ -100,13 +100,17 @@ impl DocView {
         let State::Ready(doc) = &self.state else {
             return None;
         };
-        let pref = doc.page_ref(doc.current_page)?;
-        let Some(layout) = &doc.layout else {
+        let pref = doc.shown_ref(doc.current_page())?;
+        let pane = doc.pane();
+        let Some(r) = pane
+            .layout
+            .as_ref()
+            .and_then(|l| l.rect(doc.current_page()))
+        else {
             return Some((pref.id, None));
         };
-        let i = doc.current_page.min(layout.heights.len().checked_sub(1)?);
-        let scroll_y = -f32::from(doc.scroll.offset().y);
-        let fy = (scroll_y - layout.tops[i]) / layout.heights[i];
+        let scroll_y = -f32::from(pane.scroll.offset().y);
+        let fy = (scroll_y - r.top) / r.h;
         if fy <= 0.0 {
             return Some((pref.id, None));
         }
@@ -137,9 +141,9 @@ impl DocView {
     ) {
         let point = match (view, &self.state) {
             (Some(DestView::Xyz { left, top, .. }), State::Ready(doc)) => {
-                doc.page_ref(index).map(|pref| {
+                doc.shown_ref(index).map(|pref| {
                     // Positions are on the page as the file draws it; ours
-                    // may be turned.
+                    // may be turned, and so may the view.
                     let src = doc
                         .model
                         .page_size(&pref)
@@ -505,7 +509,7 @@ impl DocView {
 
         let layout = ListLayout::fixed(rows.len(), ROW_H).padded(0.0, PAD);
 
-        let cur_id = doc.page_ref(doc.current_page).map(|p| p.id);
+        let cur_id = doc.page_ref(doc.current_page()).map(|p| p.id);
         let selected = doc.outline_selected;
         let drop = doc.outline_drop;
         let rename = doc.outline_rename.as_ref().map(|r| (r.id, r.input.clone()));

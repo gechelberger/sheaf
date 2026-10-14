@@ -18,6 +18,7 @@ mod menus;
 mod ocr_dialog;
 mod ocr_run;
 mod outline_panel;
+mod pane;
 mod pattern_panel;
 mod patterns;
 #[cfg(feature = "plugins")]
@@ -78,7 +79,14 @@ actions!(
         ExportCleanCopy,
         ExportFlattened,
         ExtractPages,
-        CancelOcr
+        CancelOcr,
+        SinglePage,
+        SinglePageContinuous,
+        TwoUp,
+        TwoUpContinuous,
+        ToggleCoverPage,
+        RotateViewCw,
+        RotateViewCcw
     ]
 );
 actions!(
@@ -277,6 +285,9 @@ fn main() {
                 KeyBinding::new("ctrl-0", ZoomFitPage, doc),
                 KeyBinding::new("ctrl-1", ZoomActual, doc),
                 KeyBinding::new("ctrl-2", ZoomFitWidth, doc),
+                // Acrobat: Rotate View Clockwise / Counterclockwise.
+                KeyBinding::new("ctrl-shift-=", RotateViewCw, doc),
+                KeyBinding::new("ctrl-shift--", RotateViewCcw, doc),
                 KeyBinding::new("r", RotatePageCw, doc_keys),
                 KeyBinding::new("shift-r", RotatePageCcw, doc_keys),
                 KeyBinding::new("delete", DeletePage, doc_keys),

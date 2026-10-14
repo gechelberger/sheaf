@@ -30,6 +30,8 @@ use sheaf_ui::text_input::{TextInput, TextInputEvent};
 use sheaf_ui::theme;
 
 use crate::markup_tools::{Drag, Tool, arrow_head, rotate_pt, stroke_canvas};
+pub(crate) use crate::pane::Zoom;
+use crate::pane::{Layout, LayoutSpec, MARGIN, PageMode, Pane, Spread};
 use sheaf_doc::{
     Document, Edit, EditOutcome, FlatOutlineItem, OutlineId, PageId, PageRef, SourceId, SourceInfo,
 };
@@ -41,17 +43,15 @@ use sheaf_render::{
 use crate::{
     CancelOcr, CloseSearch, DeletePage, DuplicatePages, ExportCleanCopy, ExportFlattened,
     ExtractPages, Find, FirstPage, InsertPdf, LastPage, LineDown, LineUp, NewBookmark, NextPage,
-    PrevPage, Redo, RotatePageCcw, RotatePageCw, Save, SaveAs, ScreenDown, ScreenUp, SearchNext,
-    SearchPrev, SelectAllPages, ToolArrow, ToolConnector, ToolEllipse, ToolFreeText, ToolHighlight,
-    ToolInk, ToolLine, ToolNote, ToolSelect, ToolSquare, ToolTick, Undo, ZoomActual, ZoomFitPage,
-    ZoomFitWidth, ZoomIn, ZoomOut,
+    PrevPage, Redo, RotatePageCcw, RotatePageCw, RotateViewCcw, RotateViewCw, Save, SaveAs,
+    ScreenDown, ScreenUp, SearchNext, SearchPrev, SelectAllPages, SinglePage, SinglePageContinuous,
+    ToggleCoverPage, ToolArrow, ToolConnector, ToolEllipse, ToolFreeText, ToolHighlight, ToolInk,
+    ToolLine, ToolNote, ToolSelect, ToolSquare, ToolTick, TwoUp, TwoUpContinuous, Undo, ZoomActual,
+    ZoomFitPage, ZoomFitWidth, ZoomIn, ZoomOut,
 };
 
 pub const KEY_CONTEXT: &str = "DocView";
 
-/// Space around the page column and between pages, in logical px.
-const MARGIN: f32 = 16.0;
-const GAP: f32 = 12.0;
 const STATUS_H: f32 = 24.0;
 /// Pages beyond the visible range to prefetch previews for.
 const PREFETCH: usize = 1;
@@ -64,8 +64,6 @@ const TILE: u32 = 1024;
 const PREVIEW_W: u32 = 320;
 /// Vertical overdraw for tile prefetch, as a fraction of the viewport.
 const TILE_OVERDRAW: f32 = 0.5;
-/// 100% zoom = 96 logical px per inch = 96/72 px per PDF point (Acrobat's convention).
-const PX_PER_PT_AT_100: f32 = 96.0 / 72.0;
 const ZOOM_STEP: f32 = 1.25;
 const ZOOM_MIN: f32 = 0.1;
 const ZOOM_MAX: f32 = 16.0;
@@ -74,14 +72,6 @@ const ZOOM_MAX: f32 = 16.0;
 const THUMB_W: f32 = 150.0;
 const THUMB_PAD: f32 = 10.0;
 const THUMB_LABEL_H: f32 = 18.0;
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Zoom {
-    FitWidth,
-    FitPage,
-    /// 1.0 = 100%.
-    Custom(f32),
-}
 
 pub(crate) enum State {
     Loading,
@@ -99,100 +89,6 @@ pub(crate) struct Locked {
     focus_pending: bool,
 }
 
-/// Page geometry in logical px at the current zoom, for one snapshot of the
-/// page sequence.
-pub(crate) struct Layout {
-    pub(crate) zoom: Zoom,
-    pub(crate) view_w: f32,
-    pub(crate) view_h: f32,
-    pub(crate) version: u64,
-    /// Logical px per PDF point.
-    pub(crate) k: f32,
-    pub(crate) refs: Vec<PageRef>,
-    pub(crate) widths: Vec<f32>,
-    pub(crate) heights: Vec<f32>,
-    pub(crate) tops: Vec<f32>,
-    pub(crate) lefts: Vec<f32>,
-    /// Scrollable content size.
-    pub(crate) total_w: f32,
-    pub(crate) total_h: f32,
-}
-
-impl Layout {
-    fn build(
-        zoom: Zoom,
-        view_w: f32,
-        view_h: f32,
-        version: u64,
-        refs: Vec<PageRef>,
-        model: &Document,
-    ) -> Self {
-        let avail_w = (view_w - 2.0 * MARGIN).max(1.0);
-        let avail_h = (view_h - 2.0 * MARGIN).max(1.0);
-        let sizes: Vec<PageSize> = refs.iter().map(|r| model.page_size(r)).collect();
-        let (mut max_w, mut max_h) = (1.0f32, 1.0f32);
-        for s in &sizes {
-            max_w = max_w.max(s.width);
-            max_h = max_h.max(s.height);
-        }
-        let k = match zoom {
-            Zoom::FitWidth => avail_w / max_w,
-            Zoom::FitPage => (avail_w / max_w).min(avail_h / max_h),
-            Zoom::Custom(z) => z * PX_PER_PT_AT_100,
-        };
-        let total_w = (max_w * k + 2.0 * MARGIN).max(view_w);
-        let n = refs.len();
-        let (mut widths, mut heights, mut tops, mut lefts) = (
-            Vec::with_capacity(n),
-            Vec::with_capacity(n),
-            Vec::with_capacity(n),
-            Vec::with_capacity(n),
-        );
-        let mut y = MARGIN;
-        for s in &sizes {
-            let (w, h) = (s.width * k, s.height * k);
-            widths.push(w);
-            heights.push(h);
-            tops.push(y);
-            lefts.push((total_w - w) / 2.0);
-            y += h + GAP;
-        }
-        let total_h = (if n > 0 { y - GAP } else { y } + MARGIN).max(view_h);
-        Self {
-            zoom,
-            view_w,
-            view_h,
-            version,
-            k,
-            refs,
-            widths,
-            heights,
-            tops,
-            lefts,
-            total_w,
-            total_h,
-        }
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        self.refs.len()
-    }
-
-    /// Page whose vertical span contains `y` (or the last one that starts above it).
-    pub(crate) fn page_at(&self, y: f32) -> usize {
-        self.tops.partition_point(|&top| top <= y).saturating_sub(1)
-    }
-
-    fn visible(&self, top: f32, bottom: f32) -> std::ops::RangeInclusive<usize> {
-        let last = self.len().saturating_sub(1);
-        self.page_at(top).min(last)..=self.page_at(bottom).min(last)
-    }
-
-    fn zoom_percent(&self) -> f32 {
-        self.k / PX_PER_PT_AT_100 * 100.0
-    }
-}
-
 type TileKey = (PageId, Job);
 
 pub(crate) struct Doc {
@@ -200,10 +96,13 @@ pub(crate) struct Doc {
     pub(crate) handles: HashMap<SourceId, RenderHandle>,
     /// Bumped on every model change so layouts and lookups can tell.
     pub(crate) version: u64,
-    pub(crate) zoom: Zoom,
-    pub(crate) scroll: ScrollHandle,
-    pub(crate) layout: Option<Layout>,
-    pub(crate) previews: HashMap<PageId, (Rotation, Arc<RenderImage>)>,
+    /// One view of the document, or two when the window is split.
+    pub(crate) panes: Vec<Pane>,
+    /// The pane keys, menus and the status bar act on.
+    pub(crate) active: usize,
+    /// Low-res whole-page renders, by page and the rotation drawn: the
+    /// thumbnails and a rotated view of the same page need both.
+    pub(crate) previews: HashMap<(PageId, Rotation), Arc<RenderImage>>,
     pub(crate) tiles: HashMap<TileKey, Arc<RenderImage>>,
     /// Dropping the task drops the oneshot receiver, which tells the worker
     /// to skip the render if it hasn't started.
@@ -211,15 +110,13 @@ pub(crate) struct Doc {
     /// Images we've stopped showing; GPU textures are released in `render`,
     /// the only place we have a `Window`.
     pub(crate) retired: Vec<Arc<RenderImage>>,
-    pub(crate) current_page: usize,
-    pub(crate) pending_scroll: Option<ScrollTo>,
     pub(crate) first_paint: Option<Instant>,
     /// Last edit notice, shown in the status bar.
     pub(crate) notice: Option<String>,
     // Sidebar state.
     pub(crate) thumb_scroll: ScrollHandle,
     /// Pages whose previews the thumbnail panel is showing; kept cached.
-    pub(crate) thumb_keep: HashSet<PageId>,
+    pub(crate) thumb_keep: HashSet<(PageId, Rotation)>,
     /// Last page the thumbnail panel auto-scrolled to follow.
     pub(crate) thumb_followed: Option<PageId>,
     pub(crate) outline_loaded: bool,
@@ -258,6 +155,30 @@ impl Doc {
 
     pub(crate) fn page_ref(&self, index: usize) -> Option<PageRef> {
         self.model.page(index).copied()
+    }
+
+    pub(crate) fn pane(&self) -> &Pane {
+        &self.panes[self.active]
+    }
+
+    pub(crate) fn pane_mut(&mut self) -> &mut Pane {
+        &mut self.panes[self.active]
+    }
+
+    /// The active pane's current page.
+    pub(crate) fn current_page(&self) -> usize {
+        self.pane().current_page
+    }
+
+    /// Page `index` as the active pane shows it (with rotate view): for
+    /// mapping between page and screen, never for edits.
+    pub(crate) fn shown_ref(&self, index: usize) -> Option<PageRef> {
+        self.page_ref(index).map(|p| self.pane().shown(p))
+    }
+
+    /// Scroll the active pane.
+    pub(crate) fn scroll_to(&mut self, to: ScrollTo) {
+        self.pane_mut().pending_scroll = Some(to);
     }
 
     /// Display index of the primary source's page `index`, if it's still in
@@ -333,7 +254,9 @@ impl Doc {
 
     pub(crate) fn touched(&mut self) {
         self.version += 1;
-        self.layout = None;
+        for p in &mut self.panes {
+            p.layout = None;
+        }
     }
 
     /// Drop every rendered image so pages re-rasterize (after the engine's
@@ -342,7 +265,7 @@ impl Doc {
         for (_, im) in self.tiles.drain() {
             self.retired.push(im);
         }
-        for (_, (_, im)) in self.previews.drain() {
+        for (_, im) in self.previews.drain() {
             self.retired.push(im);
         }
         self.inflight.clear();
@@ -352,9 +275,19 @@ impl Doc {
 
 #[derive(Clone, Copy)]
 pub(crate) enum ScrollTo {
+    /// The top of the row (page or spread) page `n` is in.
     Page(usize),
     By(f32),
+    /// The end of the document.
     End,
+    /// The top or bottom of what's laid out (in a non-continuous mode, the
+    /// shown spread).
+    Top,
+    Bottom,
+    /// In a non-continuous mode: the next spread's top, or the previous
+    /// spread's bottom (scrolling on past an end).
+    NextRow,
+    PrevRowEnd,
     /// Bring a page-relative point (fractions) into view if it isn't already,
     /// landing it a third of the way down the viewport.
     Reveal {
@@ -661,15 +594,12 @@ impl DocView {
             model,
             handles,
             version: 0,
-            zoom: Zoom::FitWidth,
-            scroll: ScrollHandle::new(),
-            layout: None,
+            panes: vec![Pane::new(Zoom::FitWidth, PageMode::default())],
+            active: 0,
             previews: HashMap::new(),
             tiles: HashMap::new(),
             inflight: HashMap::new(),
             retired: Vec::new(),
-            current_page: 0,
-            pending_scroll: None,
             first_paint: None,
             notice: None,
             thumb_scroll: ScrollHandle::new(),
@@ -1092,7 +1022,7 @@ impl DocView {
             path: self.path.clone(),
             snapshot: doc.model.snapshot(),
             selection,
-            current_page: doc.page_ref(doc.current_page).map(|p| p.id),
+            current_page: doc.page_ref(doc.current_page()).map(|p| p.id),
             text: crate::plugins::text_source(&doc.handles),
             ocr: Some(crate::plugins::ocr_source(&doc.handles)),
             render: Some(crate::plugins::render_source(&doc.handles)),
@@ -1106,7 +1036,7 @@ impl DocView {
         };
         if doc.selection.is_empty() {
             return doc
-                .page_ref(doc.current_page)
+                .page_ref(doc.current_page())
                 .map(|p| vec![p.id])
                 .unwrap_or_default();
         }
@@ -1204,7 +1134,7 @@ impl DocView {
         if modifiers.shift {
             let anchor = doc
                 .sel_anchor
-                .unwrap_or(doc.current_page)
+                .unwrap_or(doc.current_page())
                 .min(refs.len() - 1);
             let (a, b) = if anchor <= index {
                 (anchor, index)
@@ -2413,7 +2343,7 @@ impl DocView {
         let Some(index) = doc.model.index_of(hit.page) else {
             return;
         };
-        let Some(pref) = doc.page_ref(index) else {
+        let Some(pref) = doc.shown_ref(index) else {
             return;
         };
         let src = doc
@@ -2427,7 +2357,7 @@ impl DocView {
         if let Some(r) = hit.rects.first() {
             let r = rotate_rect(*r, src, pref.rotation);
             let ps = src.rotated(pref.rotation);
-            doc.pending_scroll = Some(ScrollTo::Reveal {
+            doc.scroll_to(ScrollTo::Reveal {
                 page: index,
                 fx: (r.x + r.w / 2.0) / ps.width.max(1.0),
                 fy: (r.y + r.h / 2.0) / ps.height.max(1.0),
@@ -2517,8 +2447,50 @@ impl DocView {
 
     pub(crate) fn scroll(&mut self, to: ScrollTo, cx: &mut Context<Self>) {
         if let State::Ready(doc) = &mut self.state {
-            doc.pending_scroll = Some(to);
+            doc.scroll_to(to);
             cx.notify();
+        }
+    }
+
+    /// Next/previous page, or spread in a two-up mode.
+    fn turn_page(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let State::Ready(doc) = &mut self.state else {
+            return;
+        };
+        let n = doc.model.page_count();
+        let mode = doc.pane().mode;
+        let rows = mode.row_count(n);
+        if rows == 0 {
+            return;
+        }
+        let row = mode.row_of(doc.current_page()) as isize + delta;
+        let row = row.clamp(0, rows as isize - 1) as usize;
+        doc.scroll_to(ScrollTo::Page(mode.row_pages(row, n).start));
+        cx.notify();
+    }
+
+    /// Two-Up or Two-Up Continuous, keeping the cover page setting.
+    fn set_two_up(&mut self, continuous: bool, cx: &mut Context<Self>) {
+        let State::Ready(doc) = &self.state else {
+            return;
+        };
+        let spread = match doc.pane().mode.spread {
+            Spread::TwoUpCover => Spread::TwoUpCover,
+            _ => Spread::TwoUp,
+        };
+        self.set_page_mode(PageMode { spread, continuous }, cx);
+    }
+
+    /// Height of the active pane's viewport, for page-at-a-time scrolling.
+    fn pane_view_h(&self) -> f32 {
+        match &self.state {
+            State::Ready(doc) => doc
+                .pane()
+                .layout
+                .as_ref()
+                .map(|l| l.view_h)
+                .unwrap_or(600.0),
+            _ => 600.0,
         }
     }
 
@@ -2528,28 +2500,26 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        if doc.zoom == zoom {
+        let pane = doc.pane_mut();
+        if pane.zoom == zoom {
             return;
         }
-        if let Some(layout) = &doc.layout
-            && layout.len() > 0
-        {
+        pane.pending_scroll = pane.layout.as_ref().and_then(|layout| {
             let (vx, vy) = anchor.unwrap_or((layout.view_w / 2.0, layout.view_h / 2.0));
-            let sx = -f32::from(doc.scroll.offset().x);
-            let sy = -f32::from(doc.scroll.offset().y);
+            let sx = -f32::from(pane.scroll.offset().x);
+            let sy = -f32::from(pane.scroll.offset().y);
             let (dx, dy) = (sx + vx, sy + vy);
-            let page = layout.page_at(dy);
-            let fx = (dx - layout.lefts[page]) / layout.widths[page];
-            let fy = (dy - layout.tops[page]) / layout.heights[page];
-            doc.pending_scroll = Some(ScrollTo::Anchor {
+            let page = layout.page_at(dx, dy)?;
+            let r = layout.rect(page)?;
+            Some(ScrollTo::Anchor {
                 page,
-                fx,
-                fy,
+                fx: (dx - r.left) / r.w,
+                fy: (dy - r.top) / r.h,
                 vx,
                 vy,
-            });
-        }
-        doc.zoom = zoom;
+            })
+        });
+        pane.zoom = zoom;
         cx.notify();
     }
 
@@ -2558,6 +2528,7 @@ impl DocView {
             return;
         };
         let current = doc
+            .pane()
             .layout
             .as_ref()
             .map(|l| l.zoom_percent() / 100.0)
@@ -2566,19 +2537,109 @@ impl DocView {
         self.set_zoom(Zoom::Custom(z), anchor, cx);
     }
 
-    fn on_wheel(&mut self, ev: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if !ev.modifiers.control {
+    /// View > Page Display: the active pane's page mode. The page in view
+    /// stays in view.
+    pub(crate) fn set_page_mode(&mut self, mode: PageMode, cx: &mut Context<Self>) {
+        let State::Ready(doc) = &mut self.state else {
+            return;
+        };
+        let page = doc.current_page();
+        let pane = doc.pane_mut();
+        if pane.mode == mode {
             return;
         }
+        pane.mode = mode;
+        pane.row = mode.row_of(page);
+        pane.pending_scroll = Some(ScrollTo::Page(page));
+        doc.notice = Some(format!("Page display: {}", mode.label()));
+        cx.notify();
+    }
+
+    /// Show Cover Page in Two-Up: toggles between the two two-up spreads
+    /// (switching to two-up from single page).
+    fn toggle_cover_page(&mut self, cx: &mut Context<Self>) {
         let State::Ready(doc) = &self.state else {
             return;
         };
+        let mut mode = doc.pane().mode;
+        mode.spread = match mode.spread {
+            Spread::TwoUpCover => Spread::TwoUp,
+            Spread::TwoUp | Spread::Single => Spread::TwoUpCover,
+        };
+        self.set_page_mode(mode, cx);
+    }
+
+    /// Rotate View: turn the active pane's display, not the pages.
+    fn rotate_view(&mut self, by: Rotation, cx: &mut Context<Self>) {
+        let State::Ready(doc) = &mut self.state else {
+            return;
+        };
+        let page = doc.current_page();
+        let pane = doc.pane_mut();
+        pane.rotation = pane.rotation.plus(by);
+        pane.pending_scroll = Some(ScrollTo::Page(page));
+        let deg = pane.rotation.degrees();
+        doc.notice = Some(if deg == 0 {
+            "Rotate view: off".into()
+        } else {
+            format!("Rotate view: {deg}° (display only; Document > Rotate turns pages)")
+        });
+        cx.notify();
+    }
+
+    fn on_wheel(
+        &mut self,
+        ix: usize,
+        ev: &ScrollWheelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let State::Ready(doc) = &mut self.state else {
+            return;
+        };
+        if ix >= doc.panes.len() {
+            return;
+        }
         let dy = f32::from(ev.delta.pixel_delta(window.line_height()).y);
         if dy == 0.0 {
             return;
         }
-        // Anchor on the mouse: position relative to the scroll container.
-        let b = doc.scroll.bounds();
+        if !ev.modifiers.control {
+            // One spread at a time: scrolling on past either end turns the page.
+            let pane = &mut doc.panes[ix];
+            if pane.mode.continuous {
+                return;
+            }
+            let Some(layout) = &pane.layout else { return };
+            let max_y = (layout.total_h - layout.view_h).max(0.0);
+            let sy = -f32::from(pane.scroll.offset().y);
+            let turn = if dy < 0.0 && sy >= max_y - 0.5 {
+                1
+            } else if dy > 0.0 && sy <= 0.5 {
+                -1
+            } else {
+                return;
+            };
+            if pane
+                .last_turn
+                .is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(350))
+            {
+                return;
+            }
+            pane.last_turn = Some(Instant::now());
+            let to = if turn > 0 {
+                ScrollTo::NextRow
+            } else {
+                ScrollTo::PrevRowEnd
+            };
+            pane.pending_scroll = Some(to);
+            cx.notify();
+            return;
+        }
+        // Zoom the pane under the mouse, anchored on the mouse: position
+        // relative to its scroll container.
+        doc.active = ix;
+        let b = doc.pane().scroll.bounds();
         let anchor = (
             f32::from(ev.position.x - b.origin.x),
             f32::from(ev.position.y - b.origin.y),
@@ -2599,10 +2660,7 @@ impl DocView {
             return;
         }
         if let Job::Page { rotation, .. } = want.job
-            && doc
-                .previews
-                .get(&pref.id)
-                .is_some_and(|(r, _)| *r == rotation)
+            && doc.previews.contains_key(&(pref.id, rotation))
         {
             return;
         }
@@ -2663,9 +2721,7 @@ impl DocView {
                 doc.first_paint.get_or_insert_with(Instant::now);
                 let image = Arc::new(to_render_image(rendered.raster));
                 let old = match want.job {
-                    Job::Page { rotation, .. } => {
-                        doc.previews.insert(id, (rotation, image)).map(|(_, im)| im)
-                    }
+                    Job::Page { rotation, .. } => doc.previews.insert((id, rotation), image),
                     Job::Tile { .. } => doc.tiles.insert(key, image),
                 };
                 if let Some(old) = old {
@@ -2678,7 +2734,7 @@ impl DocView {
 
     pub fn current_page(&self) -> usize {
         match &self.state {
-            State::Ready(doc) => doc.current_page,
+            State::Ready(doc) => doc.current_page(),
             _ => 0,
         }
     }
@@ -2738,6 +2794,7 @@ impl Focusable for DocView {
 /// cover the visible part of it.
 struct PagePlan {
     index: usize,
+    /// As the pane shows it (rotate view included).
     pref: PageRef,
     left: f32,
     top: f32,
@@ -2748,6 +2805,670 @@ struct PagePlan {
     tiles: Vec<(Job, u8)>,
 }
 
+/// One pane's frame: its pages and the renders they want.
+struct PaneFrame {
+    plans: Vec<PagePlan>,
+    /// Pages near the viewport whose images stay cached, with the rotation
+    /// this pane draws them at.
+    keep: Vec<(PageId, Rotation)>,
+    wants: Vec<(PageRef, RenderRequest)>,
+}
+
+/// In a non-continuous mode, pick the row a queued scroll lands on before
+/// the pane is laid out, and turn scrolling past either end into a page
+/// turn.
+fn resolve_row(pane: &mut Pane, pages: usize) {
+    let mode = pane.mode;
+    let rows = mode.row_count(pages);
+    if mode.continuous || rows == 0 {
+        return;
+    }
+    let last = rows - 1;
+    let at = |pane: &Pane| {
+        pane.layout.as_ref().map(|l| {
+            let max_y = (l.total_h - l.view_h).max(0.0);
+            (-f32::from(pane.scroll.offset().y), max_y)
+        })
+    };
+    match pane.pending_scroll {
+        Some(
+            ScrollTo::Page(p)
+            | ScrollTo::Reveal { page: p, .. }
+            | ScrollTo::Point { page: p, .. }
+            | ScrollTo::Anchor { page: p, .. },
+        ) => pane.row = mode.row_of(p.min(pages - 1)),
+        Some(ScrollTo::End) => pane.row = last,
+        Some(ScrollTo::NextRow) => {
+            pane.pending_scroll = (pane.row < last).then(|| {
+                pane.row += 1;
+                ScrollTo::Top
+            });
+        }
+        Some(ScrollTo::PrevRowEnd) => {
+            pane.pending_scroll = (pane.row > 0).then(|| {
+                pane.row -= 1;
+                ScrollTo::Bottom
+            });
+        }
+        Some(ScrollTo::By(dy)) => {
+            if let Some((y, max_y)) = at(pane) {
+                if dy > 0.0 && y >= max_y - 0.5 && pane.row < last {
+                    pane.row += 1;
+                    pane.pending_scroll = Some(ScrollTo::Top);
+                } else if dy < 0.0 && y <= 0.5 && pane.row > 0 {
+                    pane.row -= 1;
+                    pane.pending_scroll = Some(ScrollTo::Bottom);
+                }
+            }
+        }
+        Some(ScrollTo::Top | ScrollTo::Bottom) | None => {}
+    }
+}
+
+/// Lay out pane `ix`, apply its queued scroll, and plan the renders its
+/// visible pages need.
+fn plan_pane(
+    doc: &mut Doc,
+    ix: usize,
+    view: (f32, f32),
+    bounds_known: bool,
+    scale: f32,
+) -> PaneFrame {
+    let (view_w, view_h) = view;
+    let pages = doc.model.page_count();
+    let version = doc.version;
+    let pane = &mut doc.panes[ix];
+    resolve_row(pane, pages);
+    let stale = pane.layout.as_ref().is_none_or(|l| {
+        l.zoom != pane.zoom
+            || l.mode != pane.mode
+            || l.rotation != pane.rotation
+            || (!pane.mode.continuous && l.row != pane.row)
+            || l.version != version
+            || (l.view_w - view_w).abs() > 0.5
+            || (l.view_h - view_h).abs() > 0.5
+    });
+    if stale {
+        let layout = Layout::build(
+            LayoutSpec {
+                zoom: pane.zoom,
+                mode: pane.mode,
+                rotation: pane.rotation,
+                row: pane.row,
+                view_w,
+                view_h,
+                version,
+            },
+            &doc.model,
+        );
+        pane.row = layout.row;
+        pane.layout = Some(layout);
+    }
+    let layout = pane.layout.as_ref().expect("built above");
+    let count = layout.len();
+
+    // Apply any queued scroll now that we know geometry.
+    let max_x = (layout.total_w - view_w).max(0.0);
+    let max_y = (layout.total_h - view_h).max(0.0);
+    let mut scroll_x = (-f32::from(pane.scroll.offset().x)).clamp(0.0, max_x);
+    let mut scroll_y = (-f32::from(pane.scroll.offset().y)).clamp(0.0, max_y);
+    if let Some(to) = pane.pending_scroll.take()
+        && count > 0
+    {
+        let last = count - 1;
+        let rect = |p: usize| layout.rect(p.min(last));
+        match to {
+            ScrollTo::Page(p) => {
+                if let Some(top) = layout.row_top_of(p.min(last)) {
+                    scroll_y = top - MARGIN;
+                }
+            }
+            ScrollTo::By(dy) => scroll_y += dy,
+            ScrollTo::End | ScrollTo::Bottom => scroll_y = max_y,
+            ScrollTo::Top => scroll_y = 0.0,
+            ScrollTo::NextRow | ScrollTo::PrevRowEnd => {}
+            ScrollTo::Reveal { page, fx, fy } => {
+                if let Some(r) = rect(page) {
+                    let (x, y) = (r.left + fx * r.w, r.top + fy * r.h);
+                    if y < scroll_y + 8.0 || y > scroll_y + view_h - 8.0 {
+                        scroll_y = y - view_h / 3.0;
+                    }
+                    if x < scroll_x || x > scroll_x + view_w {
+                        scroll_x = x - view_w / 2.0;
+                    }
+                }
+            }
+            ScrollTo::Point { page, fx, fy } => {
+                if let Some(r) = rect(page) {
+                    scroll_y = r.top + fy * r.h;
+                    let x = r.left + fx * r.w;
+                    if x < scroll_x || x > scroll_x + view_w {
+                        scroll_x = x;
+                    }
+                }
+            }
+            ScrollTo::Anchor {
+                page,
+                fx,
+                fy,
+                vx,
+                vy,
+            } => {
+                if let Some(r) = rect(page) {
+                    scroll_x = r.left + fx * r.w - vx;
+                    scroll_y = r.top + fy * r.h - vy;
+                }
+            }
+        }
+        scroll_x = scroll_x.clamp(0.0, max_x);
+        scroll_y = scroll_y.clamp(0.0, max_y);
+        pane.scroll.set_offset(point(px(-scroll_x), px(-scroll_y)));
+    }
+
+    let mut frame = PaneFrame {
+        plans: Vec::new(),
+        keep: Vec::new(),
+        wants: Vec::new(),
+    };
+    if count == 0 {
+        pane.current_page = 0;
+        return frame;
+    }
+    let visible = layout.visible(scroll_y, scroll_y + view_h);
+    pane.current_page = layout
+        .page_at(scroll_x + view_w / 2.0, scroll_y + view_h * 0.5)
+        .unwrap_or(0)
+        .min(count - 1);
+
+    // Plan tiles for pages near the viewport.
+    let overdraw = view_h * TILE_OVERDRAW;
+    let fetch = visible.start.saturating_sub(PREFETCH)..(visible.end + PREFETCH).min(count);
+    for i in visible.start.saturating_sub(KEEP)..(visible.end + KEEP).min(count) {
+        frame
+            .keep
+            .push((layout.refs[i].id, layout.refs[i].rotation));
+    }
+    for i in fetch {
+        let Some(r) = layout.rect(i) else { continue };
+        let pref = layout.refs[i];
+        let (left, top, w, h) = (r.left, r.top, r.w, r.h);
+        let dev_w = (w * scale).round().max(1.0) as u32;
+        let dev_h = (h * scale).round().max(1.0) as u32;
+        // Priorities: visible previews, visible tiles, then the
+        // same for prefetch pages — so an expensive off-screen
+        // preview never delays on-screen tiles.
+        let on_screen_page = visible.contains(&i);
+        frame.wants.push((
+            pref,
+            RenderRequest {
+                page: PageIndex(pref.index),
+                job: Job::Page {
+                    width: PREVIEW_W,
+                    rotation: pref.rotation,
+                },
+                format: PixelFormat::Bgra,
+                priority: if on_screen_page { 0 } else { 2 },
+            },
+        ));
+        // Visible part of this page, in page-local device px.
+        let vis_x0 = ((scroll_x - left) * scale).max(0.0);
+        let vis_x1 = ((scroll_x + view_w - left) * scale).min(dev_w as f32);
+        let vis_y0 = ((scroll_y - overdraw - top) * scale).max(0.0);
+        let vis_y1 = ((scroll_y + view_h + overdraw - top) * scale).min(dev_h as f32);
+        let strict_y0 = ((scroll_y - top) * scale).max(0.0);
+        let strict_y1 = ((scroll_y + view_h - top) * scale).min(dev_h as f32);
+        let mut tiles = Vec::new();
+        // Until the container has been laid out once, the width
+        // is a guess; don't rasterize tiles at the wrong zoom.
+        if bounds_known && vis_x1 > vis_x0 && vis_y1 > vis_y0 {
+            let (c0, c1) = (
+                (vis_x0 / TILE as f32) as u32,
+                ((vis_x1 / TILE as f32).ceil() as u32).max(1),
+            );
+            let (r0, r1) = (
+                (vis_y0 / TILE as f32) as u32,
+                ((vis_y1 / TILE as f32).ceil() as u32).max(1),
+            );
+            for row in r0..r1 {
+                for col in c0..c1 {
+                    let (x, y) = (col * TILE, row * TILE);
+                    let (tw, th) = (TILE.min(dev_w - x), TILE.min(dev_h - y));
+                    let on_screen = (y as f32) < strict_y1 && ((y + th) as f32) > strict_y0;
+                    tiles.push((
+                        Job::Tile {
+                            page_width: dev_w,
+                            page_height: dev_h,
+                            x,
+                            y,
+                            w: tw,
+                            h: th,
+                            rotation: pref.rotation,
+                        },
+                        if on_screen { 1 } else { 3 },
+                    ));
+                }
+            }
+        }
+        for (job, priority) in &tiles {
+            frame.wants.push((
+                pref,
+                RenderRequest {
+                    page: PageIndex(pref.index),
+                    job: *job,
+                    format: PixelFormat::Bgra,
+                    priority: *priority,
+                },
+            ));
+        }
+        frame.plans.push(PagePlan {
+            index: i,
+            pref,
+            left,
+            top,
+            w,
+            h,
+            dev_w,
+            tiles,
+        });
+    }
+    frame
+}
+
+/// Drop cached images no pane needs: anything outside every pane's keep
+/// set; tiles at a rotation no pane draws the page at; and, per page,
+/// tiles at a stale zoom once every pane showing the page has all its
+/// tiles at the current one.
+fn evict(doc: &mut Doc, frames: &[PaneFrame]) {
+    let wanted: HashSet<TileKey> = frames
+        .iter()
+        .flat_map(|f| &f.plans)
+        .flat_map(|pl| pl.tiles.iter().map(move |(j, _)| (pl.pref.id, *j)))
+        .collect();
+    let mut kept: HashMap<PageId, smallvec::SmallVec<[Rotation; 2]>> = HashMap::new();
+    for &(id, rot) in frames.iter().flat_map(|f| &f.keep) {
+        let rots = kept.entry(id).or_default();
+        if !rots.contains(&rot) {
+            rots.push(rot);
+        }
+    }
+    let mut complete: HashMap<PageId, bool> = HashMap::new();
+    for pl in frames.iter().flat_map(|f| &f.plans) {
+        let done = pl
+            .tiles
+            .iter()
+            .all(|(j, _)| doc.tiles.contains_key(&(pl.pref.id, *j)));
+        *complete.entry(pl.pref.id).or_insert(true) &= done;
+    }
+    let evict: Vec<TileKey> = doc
+        .tiles
+        .keys()
+        .copied()
+        .filter(|k @ (p, j)| {
+            let Some(rots) = kept.get(p) else {
+                return true;
+            };
+            !rots.contains(&j.rotation())
+                || (!wanted.contains(k) && complete.get(p).copied().unwrap_or(true))
+        })
+        .collect();
+    for k in evict {
+        if let Some(im) = doc.tiles.remove(&k) {
+            doc.retired.push(im);
+        }
+    }
+    let keep_preview = |doc: &Doc, &(p, r): &(PageId, Rotation)| {
+        kept.get(&p).is_some_and(|rots| rots.contains(&r)) || doc.thumb_keep.contains(&(p, r))
+    };
+    let evict: Vec<(PageId, Rotation)> = doc
+        .previews
+        .keys()
+        .filter(|k| !keep_preview(doc, k))
+        .copied()
+        .collect();
+    for k in evict {
+        if let Some(im) = doc.previews.remove(&k) {
+            doc.retired.push(im);
+        }
+    }
+    let keep_inflight: Vec<TileKey> = doc
+        .inflight
+        .keys()
+        .filter(|k| {
+            wanted.contains(k)
+                || matches!(k.1, Job::Page { rotation, .. } if keep_preview(doc, &(k.0, rotation)))
+        })
+        .copied()
+        .collect();
+    let keep_inflight: HashSet<TileKey> = keep_inflight.into_iter().collect();
+    doc.inflight.retain(|k, _| keep_inflight.contains(k));
+}
+
+/// What's drawn over pages besides the document's own marks.
+struct Overlays<'a> {
+    search: Option<&'a Search>,
+    pattern: Option<&'a crate::pattern_panel::PatternSearch>,
+    region: Option<&'a crate::region::Region>,
+    tool: Tool,
+    tool_color: [u8; 3],
+}
+
+/// One page as drawn in a pane: the preview underneath, any tiles we have
+/// for it (stale-zoom ones scaled to fit, current on top), then search and
+/// pattern hits, markup, and the editing overlays.
+fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
+    let mut page_div = div()
+        .absolute()
+        .top(px(pl.top))
+        .left(px(pl.left))
+        .w(px(pl.w))
+        .h(px(pl.h))
+        .bg(theme::PAGE)
+        .shadow_md();
+    if let Some(prev) = doc.previews.get(&(pl.pref.id, pl.pref.rotation)) {
+        page_div = page_div.child(
+            div()
+                .absolute()
+                .inset_0()
+                .child(img(prev.clone()).size_full().object_fit(ObjectFit::Fill)),
+        );
+    }
+    let mut page_tiles: Vec<(&TileKey, &Arc<RenderImage>)> = doc
+        .tiles
+        .iter()
+        .filter(|((p, j), _)| *p == pl.pref.id && j.rotation() == pl.pref.rotation)
+        .collect();
+    // Stale zoom levels first so current ones paint over them.
+    page_tiles.sort_by_key(|((_, j), _)| match j {
+        Job::Tile { page_width, .. } => *page_width == pl.dev_w,
+        _ => false,
+    });
+    for ((_, job), im) in page_tiles {
+        let Job::Tile {
+            page_width,
+            page_height,
+            x,
+            y,
+            w,
+            h,
+            ..
+        } = job
+        else {
+            continue;
+        };
+        // Logical px per device px of the zoom this tile was rendered at.
+        let sx = pl.w / *page_width as f32;
+        let sy = pl.h / *page_height as f32;
+        page_div = page_div.child(
+            div()
+                .absolute()
+                .left(px(*x as f32 * sx))
+                .top(px(*y as f32 * sy))
+                .w(px(*w as f32 * sx))
+                .h(px(*h as f32 * sy))
+                .child(img(im.clone()).size_full().object_fit(ObjectFit::Fill)),
+        );
+    }
+    // Hit rects and marks are in the source page's displayed space.
+    let src = doc
+        .model
+        .source(pl.pref.source)
+        .map(|s| s.page_size(pl.pref.index))
+        .unwrap_or(PageSize {
+            width: 612.0,
+            height: 792.0,
+        });
+    let rot = pl.pref.rotation;
+    let k = pl.w / src.rotated(rot).width.max(1.0);
+    let hit_rects = |hits: &[Hit], current: Option<usize>, color, current_color| {
+        let mut out = Vec::new();
+        for (ix, hit) in hits.iter().enumerate() {
+            if hit.page != pl.pref.id {
+                continue;
+            }
+            for r in &hit.rects {
+                let r = rotate_rect(*r, src, rot);
+                out.push(
+                    div()
+                        .absolute()
+                        .left(px(r.x * k))
+                        .top(px(r.y * k))
+                        .w(px(r.w * k))
+                        .h(px(r.h * k))
+                        .bg(if current == Some(ix) {
+                            current_color
+                        } else {
+                            color
+                        }),
+                );
+            }
+        }
+        out
+    };
+    // Search highlights on top of everything; pattern hits in their own color.
+    if let Some(search) = ov.search {
+        page_div = page_div.children(hit_rects(
+            &search.hits,
+            search.current,
+            theme::SEARCH_HIT,
+            theme::SEARCH_HIT_CURRENT,
+        ));
+    }
+    if let Some(ps) = ov.pattern {
+        page_div = page_div.children(hit_rects(
+            &ps.hits,
+            ps.current,
+            theme::PATTERN_HIT,
+            theme::PATTERN_HIT_CURRENT,
+        ));
+    }
+    // Our markup, drawn over the page in the displayed orientation.
+    if let Some(list) = doc.model.state().annots_on(pl.pref.id) {
+        for a in list.iter() {
+            page_div = page_div.children(annot_elements(a, src, rot, k));
+        }
+    }
+    // Selection outline, inline editor, drag preview.
+    if let Some((pid, aid)) = doc.selected_annot
+        && pid == pl.pref.id
+        && let Some(a) = doc
+            .model
+            .state()
+            .annots_on(pid)
+            .and_then(|l| l.iter().find(|a| a.id == aid))
+    {
+        let b = a.bounds();
+        let r = rotate_rect(
+            Rect {
+                x: b.x - 2.0,
+                y: b.y - 2.0,
+                w: b.w + 4.0,
+                h: b.h + 4.0,
+            },
+            src,
+            rot,
+        );
+        page_div = page_div.child(
+            div()
+                .absolute()
+                .left(px(r.x * k))
+                .top(px(r.y * k))
+                .w(px(r.w * k))
+                .h(px(r.h * k))
+                .border_1()
+                .border_dashed()
+                .border_color(theme::ACCENT),
+        );
+    }
+    if let Some(ed) = &doc.annot_editor
+        && ed.page == pl.pref.id
+        && let Some(a) = doc
+            .model
+            .state()
+            .annots_on(ed.page)
+            .and_then(|l| l.iter().find(|a| a.id == ed.id))
+    {
+        let b = a.bounds();
+        let r = rotate_rect(
+            Rect {
+                x: b.x,
+                y: b.y + b.h + 2.0,
+                w: b.w,
+                h: 24.0,
+            },
+            src,
+            rot,
+        );
+        page_div = page_div.child(
+            div()
+                .absolute()
+                .left(px(r.x * k))
+                .top(px(r.y * k))
+                .w(px(300.0))
+                .child(ed.input.clone()),
+        );
+    }
+    if let Some(f) = doc.selected_foreign.and_then(|i| doc.foreign_annots.get(i))
+        && pl.pref.source == doc.model.primary()
+        && f.page == pl.pref.index
+    {
+        page_div = page_div.child(crate::comments_panel::foreign_outline(f, src, rot, k));
+    }
+    if let Some(overlay) = crate::region::overlay(ov.region, pl.pref.id, src, rot, k) {
+        page_div = page_div.child(overlay);
+    }
+    if let Some(preview) = DocView::drag_preview(doc, ov.tool, ov.tool_color, pl.index, src, rot, k)
+    {
+        page_div = page_div.child(preview);
+    }
+    if let Some(preview) =
+        DocView::pending_connector_preview(doc, ov.tool_color, pl.pref.id, src, rot, k)
+    {
+        page_div = page_div.child(preview);
+    }
+    page_div
+}
+
+impl DocView {
+    /// The document's panes, laid out and drawn, with the status line for
+    /// the active one.
+    fn render_ready(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (AnyElement, SharedString, Option<SharedString>) {
+        let viewport = window.viewport_size();
+        let scale = window.scale_factor();
+        let page_cursor = self.page_cursor();
+        let State::Ready(doc) = &mut self.state else {
+            unreachable!("render_ready on a document that isn't ready");
+        };
+        let panes = doc.panes.len();
+        let mut frames = Vec::with_capacity(panes);
+        for ix in 0..panes {
+            // The scroll container's bounds lag a frame behind on first
+            // layout; fall back to the window size until we have them.
+            let bounds = doc.panes[ix].scroll.bounds();
+            let bounds_known = f32::from(bounds.size.width) > 0.0;
+            let view = if bounds_known {
+                (f32::from(bounds.size.width), f32::from(bounds.size.height))
+            } else {
+                (
+                    f32::from(viewport.width),
+                    (f32::from(viewport.height) - STATUS_H) / panes as f32,
+                )
+            };
+            frames.push(plan_pane(doc, ix, view, bounds_known, scale));
+        }
+        evict(doc, &frames);
+
+        let ov = Overlays {
+            search: self.search.as_ref().filter(|s| !s.hits.is_empty()),
+            pattern: self.pattern.as_ref().filter(|p| !p.hits.is_empty()),
+            region: self.region.as_ref(),
+            tool: self.tool,
+            tool_color: self.tool_color,
+        };
+        let mut pane_els = Vec::with_capacity(panes);
+        for (ix, frame) in frames.iter().enumerate() {
+            let pane = &doc.panes[ix];
+            let layout = pane.layout.as_ref().expect("planned");
+            let pages: Vec<_> = frame
+                .plans
+                .iter()
+                .map(|pl| page_element(doc, pl, &ov))
+                .collect();
+            pane_els.push(
+                div()
+                    .id(("pages", ix))
+                    .track_scroll(&pane.scroll)
+                    .overflow_scroll()
+                    .size_full()
+                    .on_scroll_wheel(
+                        cx.listener(move |v, ev, window, cx| v.on_wheel(ix, ev, window, cx)),
+                    )
+                    .cursor(page_cursor)
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|v, ev, window, cx| v.on_page_mouse_down(ev, window, cx)),
+                    )
+                    .on_mouse_move(
+                        cx.listener(|v, ev, window, cx| v.on_page_mouse_move(ev, window, cx)),
+                    )
+                    .on_mouse_up(
+                        gpui::MouseButton::Left,
+                        cx.listener(|v, ev, window, cx| v.on_page_mouse_up(ev, window, cx)),
+                    )
+                    .on_mouse_up_out(
+                        gpui::MouseButton::Left,
+                        cx.listener(|v, ev, window, cx| v.on_page_mouse_up(ev, window, cx)),
+                    )
+                    .child(
+                        div()
+                            .relative()
+                            .w(px(layout.total_w))
+                            .h(px(layout.total_h))
+                            .children(pages),
+                    )
+                    .into_any_element(),
+            );
+        }
+        let body = pane_els.pop().expect("at least one pane");
+
+        let pane = doc.pane();
+        let layout = pane.layout.as_ref().expect("planned");
+        let count = layout.len();
+        let zoom_mode = match pane.zoom {
+            Zoom::FitWidth => "fit width",
+            Zoom::FitPage => "fit page",
+            Zoom::Custom(_) => "custom",
+        };
+        let size = doc
+            .shown_ref(doc.current_page())
+            .map(|p| doc.model.page_size(&p))
+            .map(|s| format!("{:.0}×{:.0} pt", s.width, s.height))
+            .unwrap_or_default();
+        let mut view_mode = String::new();
+        if pane.mode != PageMode::default() {
+            view_mode = format!("  —  {}", pane.mode.label());
+        }
+        if pane.rotation != Rotation::R0 {
+            view_mode.push_str(&format!("  —  view rotated {}°", pane.rotation.degrees()));
+        }
+        let status = format!(
+            "page {} / {}  —  {size}  —  {:.0}% ({zoom_mode}){view_mode}",
+            (doc.current_page() + 1).min(count),
+            count,
+            layout.zoom_percent(),
+        );
+        let notice = doc.notice.clone().map(Into::into);
+        let wants: Vec<_> = frames.into_iter().flat_map(|f| f.wants).collect();
+        for (pref, want) in wants {
+            self.ensure_rendered(pref, want, cx);
+        }
+        (body, status.into(), notice)
+    }
+}
+
 impl Render for DocView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(rec) = self.pending_recovery.take() {
@@ -2756,11 +3477,9 @@ impl Render for DocView {
         if let Some(page) = self.pending_edit_last.take() {
             self.start_annot_editor(page, window, cx);
         }
-        let viewport = window.viewport_size();
         if std::mem::take(&mut self.pending_focus) {
             window.focus(&self.focus_handle, cx);
         }
-        let scale = window.scale_factor();
 
         // Release textures for images we've replaced or evicted since last frame.
         if let State::Ready(doc) = &mut self.state {
@@ -2773,616 +3492,52 @@ impl Render for DocView {
 
         let search_bar = self.render_search_bar(cx);
         let toolbar = self.render_toolbar(cx);
-        let page_cursor = self.page_cursor();
-        let (tool, tool_color) = (self.tool, self.tool_color);
-        let mut body = None;
-        let mut wants: Vec<(PageRef, RenderRequest)> = Vec::new();
-        let region = self.region.clone();
+        let mut body: Option<AnyElement> = None;
         // The status bar: where you are, then the latest notice, which
         // gives way (ellipsis, full text on hover) when space is short.
         let mut status_notice: Option<SharedString> = None;
-        let status: SharedString = match &mut self.state {
-            State::Loading => "Opening…".into(),
-            State::Failed(e) => format!("Failed: {e}").into(),
-            State::Locked(l) => {
-                if std::mem::take(&mut l.focus_pending) {
-                    window.focus(&l.input.read(cx).focus_handle(cx), cx);
-                }
-                body = Some(
-                    div()
-                        .id("locked")
-                        .size_full()
-                        .child(locked_card(&self.path, l, cx)),
-                );
-                "Password required".into()
-            }
-            State::Ready(doc) => {
-                // The scroll container's bounds lag a frame behind on first
-                // layout; fall back to the window size until we have them.
-                let bounds = doc.scroll.bounds();
-                let bounds_known = f32::from(bounds.size.width) > 0.0;
-                let (view_w, view_h) = if bounds_known {
-                    (f32::from(bounds.size.width), f32::from(bounds.size.height))
-                } else {
-                    (
-                        f32::from(viewport.width),
-                        f32::from(viewport.height) - STATUS_H,
-                    )
-                };
-                let zoom = doc.zoom;
-
-                let stale = doc.layout.as_ref().is_none_or(|l| {
-                    l.zoom != zoom
-                        || l.version != doc.version
-                        || (l.view_w - view_w).abs() > 0.5
-                        || (l.view_h - view_h).abs() > 0.5
-                });
-                if stale {
-                    let refs: Vec<PageRef> = doc.model.state().pages.iter().copied().collect();
-                    doc.layout = Some(Layout::build(
-                        zoom,
-                        view_w,
-                        view_h,
-                        doc.version,
-                        refs,
-                        &doc.model,
-                    ));
-                }
-                let layout = doc.layout.as_ref().expect("built above");
-                let count = layout.len();
-
-                // Apply any queued scroll now that we know geometry.
-                let max_x = (layout.total_w - view_w).max(0.0);
-                let max_y = (layout.total_h - view_h).max(0.0);
-                let mut scroll_x = (-f32::from(doc.scroll.offset().x)).clamp(0.0, max_x);
-                let mut scroll_y = (-f32::from(doc.scroll.offset().y)).clamp(0.0, max_y);
-                if let Some(to) = doc.pending_scroll.take()
-                    && count > 0
-                {
-                    let last = count - 1;
-                    match to {
-                        ScrollTo::Page(p) => scroll_y = layout.tops[p.min(last)] - MARGIN,
-                        ScrollTo::By(dy) => scroll_y += dy,
-                        ScrollTo::End => scroll_y = max_y,
-                        ScrollTo::Reveal { page, fx, fy } => {
-                            let p = page.min(last);
-                            let (x, y) = (
-                                layout.lefts[p] + fx * layout.widths[p],
-                                layout.tops[p] + fy * layout.heights[p],
-                            );
-                            if y < scroll_y + 8.0 || y > scroll_y + view_h - 8.0 {
-                                scroll_y = y - view_h / 3.0;
-                            }
-                            if x < scroll_x || x > scroll_x + view_w {
-                                scroll_x = x - view_w / 2.0;
-                            }
-                        }
-                        ScrollTo::Point { page, fx, fy } => {
-                            let p = page.min(last);
-                            scroll_y = layout.tops[p] + fy * layout.heights[p];
-                            let x = layout.lefts[p] + fx * layout.widths[p];
-                            if x < scroll_x || x > scroll_x + view_w {
-                                scroll_x = x;
-                            }
-                        }
-                        ScrollTo::Anchor {
-                            page,
-                            fx,
-                            fy,
-                            vx,
-                            vy,
-                        } => {
-                            let p = page.min(last);
-                            scroll_x = layout.lefts[p] + fx * layout.widths[p] - vx;
-                            scroll_y = layout.tops[p] + fy * layout.heights[p] - vy;
-                        }
+        let status: SharedString = if matches!(self.state, State::Ready(_)) {
+            let (el, status, notice) = self.render_ready(window, cx);
+            body = Some(el);
+            status_notice = notice;
+            status
+        } else {
+            match &mut self.state {
+                State::Loading => "Opening…".into(),
+                State::Failed(e) => format!("Failed: {e}").into(),
+                State::Locked(l) => {
+                    if std::mem::take(&mut l.focus_pending) {
+                        window.focus(&l.input.read(cx).focus_handle(cx), cx);
                     }
-                    scroll_x = scroll_x.clamp(0.0, max_x);
-                    scroll_y = scroll_y.clamp(0.0, max_y);
-                    doc.scroll.set_offset(point(px(-scroll_x), px(-scroll_y)));
-                }
-
-                let mut plans: Vec<PagePlan> = Vec::new();
-                let mut keep: HashSet<PageId> = HashSet::new();
-                if count > 0 {
-                    let last = count - 1;
-                    let visible = layout.visible(scroll_y, scroll_y + view_h);
-                    doc.current_page = layout.page_at(scroll_y + view_h * 0.5).min(last);
-
-                    // Plan tiles for pages near the viewport.
-                    let overdraw = view_h * TILE_OVERDRAW;
-                    let fetch = visible.start().saturating_sub(PREFETCH)
-                        ..=(visible.end() + PREFETCH).min(last);
-                    for i in visible.start().saturating_sub(KEEP)..=(visible.end() + KEEP).min(last)
-                    {
-                        keep.insert(layout.refs[i].id);
-                    }
-                    for i in fetch {
-                        let pref = layout.refs[i];
-                        let (left, top, w, h) = (
-                            layout.lefts[i],
-                            layout.tops[i],
-                            layout.widths[i],
-                            layout.heights[i],
-                        );
-                        let dev_w = (w * scale).round().max(1.0) as u32;
-                        let dev_h = (h * scale).round().max(1.0) as u32;
-                        // Priorities: visible previews, visible tiles, then the
-                        // same for prefetch pages — so an expensive off-screen
-                        // preview never delays on-screen tiles.
-                        let on_screen_page = visible.contains(&i);
-                        wants.push((
-                            pref,
-                            RenderRequest {
-                                page: PageIndex(pref.index),
-                                job: Job::Page {
-                                    width: PREVIEW_W,
-                                    rotation: pref.rotation,
-                                },
-                                format: PixelFormat::Bgra,
-                                priority: if on_screen_page { 0 } else { 2 },
-                            },
-                        ));
-                        // Visible part of this page, in page-local device px.
-                        let vis_x0 = ((scroll_x - left) * scale).max(0.0);
-                        let vis_x1 = ((scroll_x + view_w - left) * scale).min(dev_w as f32);
-                        let vis_y0 = ((scroll_y - overdraw - top) * scale).max(0.0);
-                        let vis_y1 =
-                            ((scroll_y + view_h + overdraw - top) * scale).min(dev_h as f32);
-                        let strict_y0 = ((scroll_y - top) * scale).max(0.0);
-                        let strict_y1 = ((scroll_y + view_h - top) * scale).min(dev_h as f32);
-                        let mut tiles = Vec::new();
-                        // Until the container has been laid out once, the width
-                        // is a guess; don't rasterize tiles at the wrong zoom.
-                        if bounds_known && vis_x1 > vis_x0 && vis_y1 > vis_y0 {
-                            let (c0, c1) = (
-                                (vis_x0 / TILE as f32) as u32,
-                                ((vis_x1 / TILE as f32).ceil() as u32).max(1),
-                            );
-                            let (r0, r1) = (
-                                (vis_y0 / TILE as f32) as u32,
-                                ((vis_y1 / TILE as f32).ceil() as u32).max(1),
-                            );
-                            for row in r0..r1 {
-                                for col in c0..c1 {
-                                    let (x, y) = (col * TILE, row * TILE);
-                                    let (tw, th) = (TILE.min(dev_w - x), TILE.min(dev_h - y));
-                                    let on_screen =
-                                        (y as f32) < strict_y1 && ((y + th) as f32) > strict_y0;
-                                    tiles.push((
-                                        Job::Tile {
-                                            page_width: dev_w,
-                                            page_height: dev_h,
-                                            x,
-                                            y,
-                                            w: tw,
-                                            h: th,
-                                            rotation: pref.rotation,
-                                        },
-                                        if on_screen { 1 } else { 3 },
-                                    ));
-                                }
-                            }
-                        }
-                        for (job, priority) in &tiles {
-                            wants.push((
-                                pref,
-                                RenderRequest {
-                                    page: PageIndex(pref.index),
-                                    job: *job,
-                                    format: PixelFormat::Bgra,
-                                    priority: *priority,
-                                },
-                            ));
-                        }
-                        plans.push(PagePlan {
-                            index: i,
-                            pref,
-                            left,
-                            top,
-                            w,
-                            h,
-                            dev_w,
-                            tiles,
-                        });
-                    }
-                } else {
-                    doc.current_page = 0;
-                }
-
-                // Evict: anything outside the keep set; and, per page, tiles at
-                // a stale zoom or rotation once every needed tile at the current
-                // zoom is in (stale rotation goes immediately).
-                let wanted: HashSet<TileKey> = plans
-                    .iter()
-                    .flat_map(|pl| pl.tiles.iter().map(move |(j, _)| (pl.pref.id, *j)))
-                    .collect();
-                let mut complete: HashMap<PageId, bool> = HashMap::new();
-                let mut rotation_of: HashMap<PageId, Rotation> = HashMap::new();
-                for pl in &plans {
-                    complete.insert(
-                        pl.pref.id,
-                        pl.tiles
-                            .iter()
-                            .all(|(j, _)| doc.tiles.contains_key(&(pl.pref.id, *j))),
+                    body = Some(
+                        div()
+                            .id("locked")
+                            .size_full()
+                            .child(locked_card(&self.path, l, cx))
+                            .into_any_element(),
                     );
-                    rotation_of.insert(pl.pref.id, pl.pref.rotation);
+                    "Password required".into()
                 }
-                let evict: Vec<TileKey> = doc
-                    .tiles
-                    .keys()
-                    .copied()
-                    .filter(|k @ (p, j)| {
-                        !keep.contains(p)
-                            || rotation_of.get(p).is_some_and(|r| *r != j.rotation())
-                            || (!wanted.contains(k) && complete.get(p).copied().unwrap_or(true))
-                    })
-                    .collect();
-                for k in evict {
-                    if let Some(im) = doc.tiles.remove(&k) {
-                        doc.retired.push(im);
-                    }
-                }
-                let thumb_keep = doc.thumb_keep.clone();
-                let evict: Vec<PageId> = doc
-                    .previews
-                    .keys()
-                    .copied()
-                    .filter(|p| !keep.contains(p) && !thumb_keep.contains(p))
-                    .collect();
-                for p in evict {
-                    if let Some((_, im)) = doc.previews.remove(&p) {
-                        doc.retired.push(im);
-                    }
-                }
-                doc.inflight.retain(|k, _| {
-                    wanted.contains(k)
-                        || matches!(k.1, Job::Page { .. })
-                            && (keep.contains(&k.0) || thumb_keep.contains(&k.0))
-                });
-
-                // Build elements: preview underneath, then any tiles we have
-                // for the page (stale-zoom ones scaled to fit, current on top).
-                let pages: Vec<_> = plans
-                    .iter()
-                    .map(|pl| {
-                        let mut page_div = div()
-                            .absolute()
-                            .top(px(pl.top))
-                            .left(px(pl.left))
-                            .w(px(pl.w))
-                            .h(px(pl.h))
-                            .bg(theme::PAGE)
-                            .shadow_md();
-                        if let Some((rot, prev)) = doc.previews.get(&pl.pref.id)
-                            && *rot == pl.pref.rotation
-                        {
-                            page_div =
-                                page_div.child(div().absolute().inset_0().child(
-                                    img(prev.clone()).size_full().object_fit(ObjectFit::Fill),
-                                ));
-                        }
-                        let mut page_tiles: Vec<(&TileKey, &Arc<RenderImage>)> = doc
-                            .tiles
-                            .iter()
-                            .filter(|((p, _), _)| *p == pl.pref.id)
-                            .collect();
-                        // Stale zoom levels first so current ones paint over them.
-                        page_tiles.sort_by_key(|((_, j), _)| match j {
-                            Job::Tile { page_width, .. } => *page_width == pl.dev_w,
-                            _ => false,
-                        });
-                        for ((_, job), im) in page_tiles {
-                            let Job::Tile {
-                                page_width,
-                                page_height,
-                                x,
-                                y,
-                                w,
-                                h,
-                                ..
-                            } = job
-                            else {
-                                continue;
-                            };
-                            // Logical px per device px of the zoom this tile was rendered at.
-                            let sx = pl.w / *page_width as f32;
-                            let sy = pl.h / *page_height as f32;
-                            page_div = page_div.child(
-                                div()
-                                    .absolute()
-                                    .left(px(*x as f32 * sx))
-                                    .top(px(*y as f32 * sy))
-                                    .w(px(*w as f32 * sx))
-                                    .h(px(*h as f32 * sy))
-                                    .child(img(im.clone()).size_full().object_fit(ObjectFit::Fill)),
-                            );
-                        }
-                        // Search highlights on top of everything. Hit rects
-                        // are in the source page's displayed space.
-                        if let Some(search) = &self.search
-                            && !search.hits.is_empty()
-                        {
-                            let src = doc
-                                .model
-                                .source(pl.pref.source)
-                                .map(|s| s.page_size(pl.pref.index))
-                                .unwrap_or(PageSize {
-                                    width: 612.0,
-                                    height: 792.0,
-                                });
-                            let k = pl.w / src.rotated(pl.pref.rotation).width.max(1.0);
-                            for (ix, hit) in search.hits.iter().enumerate() {
-                                if hit.page != pl.pref.id {
-                                    continue;
-                                }
-                                let current = search.current == Some(ix);
-                                for r in &hit.rects {
-                                    let r = rotate_rect(*r, src, pl.pref.rotation);
-                                    page_div = page_div.child(
-                                        div()
-                                            .absolute()
-                                            .left(px(r.x * k))
-                                            .top(px(r.y * k))
-                                            .w(px(r.w * k))
-                                            .h(px(r.h * k))
-                                            .bg(if current {
-                                                theme::SEARCH_HIT_CURRENT
-                                            } else {
-                                                theme::SEARCH_HIT
-                                            }),
-                                    );
-                                }
-                            }
-                        }
-                        // Pattern hits, in their own color.
-                        if let Some(ps) = &self.pattern
-                            && !ps.hits.is_empty()
-                        {
-                            let src = doc
-                                .model
-                                .source(pl.pref.source)
-                                .map(|s| s.page_size(pl.pref.index))
-                                .unwrap_or(PageSize {
-                                    width: 612.0,
-                                    height: 792.0,
-                                });
-                            let k = pl.w / src.rotated(pl.pref.rotation).width.max(1.0);
-                            for (ix, hit) in ps.hits.iter().enumerate() {
-                                if hit.page != pl.pref.id {
-                                    continue;
-                                }
-                                let current = ps.current == Some(ix);
-                                for r in &hit.rects {
-                                    let r = rotate_rect(*r, src, pl.pref.rotation);
-                                    page_div = page_div.child(
-                                        div()
-                                            .absolute()
-                                            .left(px(r.x * k))
-                                            .top(px(r.y * k))
-                                            .w(px(r.w * k))
-                                            .h(px(r.h * k))
-                                            .bg(if current {
-                                                theme::PATTERN_HIT_CURRENT
-                                            } else {
-                                                theme::PATTERN_HIT
-                                            }),
-                                    );
-                                }
-                            }
-                        }
-                        // Our markup, drawn over the page in the displayed orientation.
-                        if let Some(list) = doc.model.state().annots_on(pl.pref.id) {
-                            let src = doc
-                                .model
-                                .source(pl.pref.source)
-                                .map(|s| s.page_size(pl.pref.index))
-                                .unwrap_or(PageSize {
-                                    width: 612.0,
-                                    height: 792.0,
-                                });
-                            let k = pl.w / src.rotated(pl.pref.rotation).width.max(1.0);
-                            for a in list.iter() {
-                                page_div =
-                                    page_div.children(annot_elements(a, src, pl.pref.rotation, k));
-                            }
-                        }
-                        // Selection outline, inline editor, drag preview.
-                        {
-                            let src = doc
-                                .model
-                                .source(pl.pref.source)
-                                .map(|s| s.page_size(pl.pref.index))
-                                .unwrap_or(PageSize {
-                                    width: 612.0,
-                                    height: 792.0,
-                                });
-                            let k = pl.w / src.rotated(pl.pref.rotation).width.max(1.0);
-                            if let Some((pid, aid)) = doc.selected_annot
-                                && pid == pl.pref.id
-                                && let Some(a) = doc
-                                    .model
-                                    .state()
-                                    .annots_on(pid)
-                                    .and_then(|l| l.iter().find(|a| a.id == aid))
-                            {
-                                let b = a.bounds();
-                                let r = rotate_rect(
-                                    Rect {
-                                        x: b.x - 2.0,
-                                        y: b.y - 2.0,
-                                        w: b.w + 4.0,
-                                        h: b.h + 4.0,
-                                    },
-                                    src,
-                                    pl.pref.rotation,
-                                );
-                                page_div = page_div.child(
-                                    div()
-                                        .absolute()
-                                        .left(px(r.x * k))
-                                        .top(px(r.y * k))
-                                        .w(px(r.w * k))
-                                        .h(px(r.h * k))
-                                        .border_1()
-                                        .border_dashed()
-                                        .border_color(theme::ACCENT),
-                                );
-                            }
-                            if let Some(ed) = &doc.annot_editor
-                                && ed.page == pl.pref.id
-                                && let Some(a) = doc
-                                    .model
-                                    .state()
-                                    .annots_on(ed.page)
-                                    .and_then(|l| l.iter().find(|a| a.id == ed.id))
-                            {
-                                let b = a.bounds();
-                                let r = rotate_rect(
-                                    Rect {
-                                        x: b.x,
-                                        y: b.y + b.h + 2.0,
-                                        w: b.w,
-                                        h: 24.0,
-                                    },
-                                    src,
-                                    pl.pref.rotation,
-                                );
-                                page_div = page_div.child(
-                                    div()
-                                        .absolute()
-                                        .left(px(r.x * k))
-                                        .top(px(r.y * k))
-                                        .w(px(300.0))
-                                        .child(ed.input.clone()),
-                                );
-                            }
-                            if let Some(f) =
-                                doc.selected_foreign.and_then(|i| doc.foreign_annots.get(i))
-                                && pl.pref.source == doc.model.primary()
-                                && f.page == pl.pref.index
-                            {
-                                page_div = page_div.child(crate::comments_panel::foreign_outline(
-                                    f,
-                                    src,
-                                    pl.pref.rotation,
-                                    k,
-                                ));
-                            }
-                            if let Some(overlay) = crate::region::overlay(
-                                region.as_ref(),
-                                pl.pref.id,
-                                src,
-                                pl.pref.rotation,
-                                k,
-                            ) {
-                                page_div = page_div.child(overlay);
-                            }
-                            if let Some(preview) = DocView::drag_preview(
-                                doc,
-                                tool,
-                                tool_color,
-                                pl.index,
-                                src,
-                                pl.pref.rotation,
-                                k,
-                            ) {
-                                page_div = page_div.child(preview);
-                            }
-                            if let Some(preview) = DocView::pending_connector_preview(
-                                doc,
-                                tool_color,
-                                pl.pref.id,
-                                src,
-                                pl.pref.rotation,
-                                k,
-                            ) {
-                                page_div = page_div.child(preview);
-                            }
-                        }
-                        page_div
-                    })
-                    .collect();
-
-                body = Some(
-                    div()
-                        .id("pages")
-                        .track_scroll(&doc.scroll)
-                        .overflow_scroll()
-                        .size_full()
-                        .on_scroll_wheel(
-                            cx.listener(|v, ev, window, cx| v.on_wheel(ev, window, cx)),
-                        )
-                        .cursor(page_cursor)
-                        .on_mouse_down(
-                            gpui::MouseButton::Left,
-                            cx.listener(|v, ev, window, cx| v.on_page_mouse_down(ev, window, cx)),
-                        )
-                        .on_mouse_move(
-                            cx.listener(|v, ev, window, cx| v.on_page_mouse_move(ev, window, cx)),
-                        )
-                        .on_mouse_up(
-                            gpui::MouseButton::Left,
-                            cx.listener(|v, ev, window, cx| v.on_page_mouse_up(ev, window, cx)),
-                        )
-                        .on_mouse_up_out(
-                            gpui::MouseButton::Left,
-                            cx.listener(|v, ev, window, cx| v.on_page_mouse_up(ev, window, cx)),
-                        )
-                        .child(
-                            div()
-                                .relative()
-                                .w(px(layout.total_w))
-                                .h(px(layout.total_h))
-                                .children(pages),
-                        ),
-                );
-
-                let mode = match zoom {
-                    Zoom::FitWidth => "fit width",
-                    Zoom::FitPage => "fit page",
-                    Zoom::Custom(_) => "custom",
-                };
-                let ps = doc
-                    .page_ref(doc.current_page)
-                    .map(|p| doc.model.page_size(&p));
-                let size = ps
-                    .map(|s| format!("{:.0}×{:.0} pt", s.width, s.height))
-                    .unwrap_or_default();
-                status_notice = doc.notice.clone().map(Into::into);
-                format!(
-                    "page {} / {}  —  {size}  —  {:.0}% ({mode})",
-                    (doc.current_page + 1).min(count),
-                    count,
-                    layout.zoom_percent(),
-                )
-                .into()
+                State::Ready(_) => unreachable!(),
             }
         };
-        for (pref, want) in wants {
-            self.ensure_rendered(pref, want, cx);
-        }
         let ocr_progress = self.ocr_progress();
 
         div()
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
-            .on_action(cx.listener(|v, _: &NextPage, _, cx| {
-                v.scroll(ScrollTo::Page(v.current_page() + 1), cx)
-            }))
-            .on_action(cx.listener(|v, _: &PrevPage, _, cx| {
-                v.scroll(ScrollTo::Page(v.current_page().saturating_sub(1)), cx)
-            }))
+            .on_action(cx.listener(|v, _: &NextPage, _, cx| v.turn_page(1, cx)))
+            .on_action(cx.listener(|v, _: &PrevPage, _, cx| v.turn_page(-1, cx)))
             .on_action(cx.listener(|v, _: &FirstPage, _, cx| v.scroll(ScrollTo::Page(0), cx)))
             .on_action(cx.listener(|v, _: &LastPage, _, cx| v.scroll(ScrollTo::End, cx)))
             .on_action(cx.listener(|v, _: &LineDown, _, cx| v.scroll(ScrollTo::By(LINE_STEP), cx)))
             .on_action(cx.listener(|v, _: &LineUp, _, cx| v.scroll(ScrollTo::By(-LINE_STEP), cx)))
-            .on_action(cx.listener(|v, _: &ScreenDown, window, cx| {
-                let h = f32::from(window.viewport_size().height) - STATUS_H;
+            .on_action(cx.listener(|v, _: &ScreenDown, _, cx| {
+                let h = v.pane_view_h();
                 v.scroll(ScrollTo::By(h * 0.9), cx)
             }))
-            .on_action(cx.listener(|v, _: &ScreenUp, window, cx| {
-                let h = f32::from(window.viewport_size().height) - STATUS_H;
+            .on_action(cx.listener(|v, _: &ScreenUp, _, cx| {
+                let h = v.pane_view_h();
                 v.scroll(ScrollTo::By(-h * 0.9), cx)
             }))
             .on_action(cx.listener(|v, _: &ZoomIn, _, cx| v.zoom_by(ZOOM_STEP, None, cx)))
@@ -3394,6 +3549,23 @@ impl Render for DocView {
                 cx.listener(|v, _: &ZoomFitWidth, _, cx| v.set_zoom(Zoom::FitWidth, None, cx)),
             )
             .on_action(cx.listener(|v, _: &ZoomFitPage, _, cx| v.set_zoom(Zoom::FitPage, None, cx)))
+            .on_action(cx.listener(|v, _: &SinglePage, _, cx| {
+                v.set_page_mode(
+                    PageMode {
+                        spread: Spread::Single,
+                        continuous: false,
+                    },
+                    cx,
+                )
+            }))
+            .on_action(cx.listener(|v, _: &SinglePageContinuous, _, cx| {
+                v.set_page_mode(PageMode::default(), cx)
+            }))
+            .on_action(cx.listener(|v, _: &TwoUp, _, cx| v.set_two_up(false, cx)))
+            .on_action(cx.listener(|v, _: &TwoUpContinuous, _, cx| v.set_two_up(true, cx)))
+            .on_action(cx.listener(|v, _: &ToggleCoverPage, _, cx| v.toggle_cover_page(cx)))
+            .on_action(cx.listener(|v, _: &RotateViewCw, _, cx| v.rotate_view(Rotation::R90, cx)))
+            .on_action(cx.listener(|v, _: &RotateViewCcw, _, cx| v.rotate_view(Rotation::R270, cx)))
             .on_action(cx.listener(|v, _: &Find, window, cx| v.open_search(window, cx)))
             .on_action(cx.listener(|v, _: &CloseSearch, window, cx| {
                 if v.clear_region(cx) {
@@ -3554,7 +3726,7 @@ impl DocView {
 
         // Follow the main view: when the current page changes, make sure its
         // thumbnail is visible.
-        let cur = doc.current_page.min(last);
+        let cur = doc.current_page().min(last);
         let cur_id = refs[cur].id;
         if doc.thumb_followed != Some(cur_id) {
             if let Some(y) = layout.reveal_in(cur, THUMB_PAD, scroll_y, view_h) {
@@ -3566,7 +3738,7 @@ impl DocView {
 
         let visible = layout.visible_in(scroll_y, view_h);
         doc.thumb_keep = (visible.start.saturating_sub(2)..(visible.end + 2).min(count))
-            .map(|i| refs[i].id)
+            .map(|i| (refs[i].id, refs[i].rotation))
             .collect();
 
         // Pages that are bookmark targets get a marker (a delete would cascade).
@@ -3596,11 +3768,7 @@ impl DocView {
                 },
             ));
             let h = thumb_w * sizes[i].height / sizes[i].width.max(1.0);
-            let image = doc
-                .previews
-                .get(&pref.id)
-                .filter(|(r, _)| *r == pref.rotation)
-                .map(|(_, im)| im.clone());
+            let image = doc.previews.get(&(pref.id, pref.rotation)).cloned();
             let current = i == cur;
             let selected = selection.contains(&pref.id);
             let bookmarked = targets.contains(&pref.id);

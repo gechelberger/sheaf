@@ -53,7 +53,7 @@ impl DocView {
         };
         Some((
             doc.model.page_count(),
-            doc.current_page,
+            doc.current_page(),
             doc.selection.len(),
         ))
     }
@@ -87,7 +87,7 @@ impl DocView {
         }
         let refs: Vec<sheaf_doc::PageRef> = match spec.scope {
             Scope::All => doc.model.state().pages.iter().copied().collect(),
-            Scope::Current => doc.page_ref(doc.current_page).into_iter().collect(),
+            Scope::Current => doc.page_ref(doc.current_page()).into_iter().collect(),
             Scope::Selected => doc
                 .model
                 .state()
