@@ -94,7 +94,7 @@ impl Default for DockLayout {
                 size: 220.0,
             },
             right: DockState {
-                panels: vec!["comments".into()],
+                panels: vec!["comments".into(), "history".into()],
                 active: 0,
                 open: false,
                 size: 300.0,

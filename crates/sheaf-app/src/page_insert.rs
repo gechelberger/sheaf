@@ -186,6 +186,7 @@ impl DocView {
                     page_sizes: None,
                     bytes,
                     password: None,
+                    data: Some(sheaf_doc::SourceData(handle.data())),
                 });
                 let sizes_rx = handle.page_sizes();
                 doc.handles.insert(sid, handle);

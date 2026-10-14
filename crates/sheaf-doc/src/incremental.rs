@@ -35,8 +35,7 @@ pub fn incremental_section(snap: &Snapshot) -> Result<(usize, Vec<u8>)> {
 fn build(snap: &Snapshot) -> Result<(usize, Vec<u8>)> {
     let primary_id = snap.primary;
     let info = snap.source(primary_id).context("primary source missing")?;
-    let original =
-        std::fs::read(&info.path).with_context(|| format!("reading {}", info.path.display()))?;
+    let original = crate::file::source_bytes(info)?;
     let original_len = original.len();
     let mut pdf =
         Pdf::load_mem(&original).with_context(|| format!("parsing {}", info.path.display()))?;
@@ -55,7 +54,7 @@ fn build(snap: &Snapshot) -> Result<(usize, Vec<u8>)> {
     let mut others: std::collections::HashMap<_, LoadedSource> = std::collections::HashMap::new();
     for (&sid, sinfo) in &snap.sources {
         if sid != primary_id && snap.state.pages.iter().any(|p| p.source == sid) {
-            let other = crate::file::load_pdf(&sinfo.path, sinfo.password.as_deref())?;
+            let other = crate::file::load_source(sinfo)?;
             others.insert(sid, LoadedSource::from_pdf_owned(other)?);
         }
     }
@@ -238,7 +237,7 @@ fn build(snap: &Snapshot) -> Result<(usize, Vec<u8>)> {
         changed.entry(id).or_insert_with(|| obj.clone());
     }
     if changed.is_empty() {
-        return Ok((original_len, original));
+        return Ok((original_len, std::sync::Arc::unwrap_or_clone(original)));
     }
 
     // ----- serialize the update section ---------------------------------------
@@ -248,7 +247,7 @@ fn build(snap: &Snapshot) -> Result<(usize, Vec<u8>)> {
             _ => id.1,
         }
     };
-    let mut out = original;
+    let mut out = std::sync::Arc::unwrap_or_clone(original);
     if !out.ends_with(b"\n") {
         out.push(b'\n');
     }

@@ -490,6 +490,8 @@ pub struct DocView {
     pub(crate) initial_pattern: Option<String>,
     pub(crate) calc: Option<crate::calc_panel::CalcTape>,
     pub(crate) comments: Option<crate::comments_panel::Comments>,
+    pub(crate) history: Option<crate::history_panel::History>,
+    pub(crate) pending_history_focus: bool,
     /// A Recognize Text run in progress (see ocr_run.rs).
     pub(crate) ocr: Option<crate::ocr_run::OcrRun>,
     /// A background job in progress: Export Pages, Split (see jobs.rs).
@@ -602,6 +604,8 @@ impl DocView {
             blank_review: None,
             plugin_run: None,
             pending_comments_focus: false,
+            history: None,
+            pending_history_focus: false,
             initial_query: None,
             search_started: None,
             selftest_save: None,
@@ -742,8 +746,10 @@ impl DocView {
             page_sizes: None,
             bytes,
             password: self.password.clone(),
+            data: Some(sheaf_doc::SourceData(handle.data())),
         };
-        let model = Document::new(source, &[], sheaf_doc::history::default_policy());
+        let mut model = Document::new(source, &[], sheaf_doc::history::default_policy());
+        model.set_author(crate::prefs::get(cx).identity.name());
         let opened = self.path.clone();
         cx.defer(move |cx| crate::recent::add(&opened, cx));
         let mut handles = HashMap::new();
@@ -1366,6 +1372,13 @@ impl DocView {
         }
     }
 
+    /// Sign the versions made from now on with the name in `settings.toml`.
+    pub(crate) fn sync_author(&mut self, cx: &mut Context<Self>) {
+        if let State::Ready(doc) = &mut self.state {
+            doc.model.set_author(crate::prefs::get(cx).identity.name());
+        }
+    }
+
     pub(crate) fn undo(&mut self, cx: &mut Context<Self>) {
         let State::Ready(doc) = &mut self.state else {
             return;
@@ -1479,6 +1492,7 @@ impl DocView {
                             page_sizes: None,
                             bytes,
                             password: None,
+                            data: Some(sheaf_doc::SourceData(handle.data())),
                         };
                         let sid = doc.model.rebase_to_saved(saved);
                         // Our marks are now in the file; keep PDFium from drawing them.
@@ -2403,6 +2417,7 @@ impl DocView {
                     page_sizes: None,
                     bytes,
                     password: None,
+                    data: Some(sheaf_doc::SourceData(handle.data())),
                 });
                 doc.handles.insert(sid, handle);
                 let mut flat: Vec<FlatOutlineItem> = if bookmarks {

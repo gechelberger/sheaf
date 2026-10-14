@@ -95,12 +95,10 @@ pub fn plan(
     let mut done = 0;
     for (sid, pages) in by_source {
         let info = snap.source(sid).context("unknown source")?;
-        let file = sheaf_doc::file::load_pdf(&info.path, info.password.as_deref())?;
+        let file = sheaf_doc::file::load_source(info)?;
         let objs: Vec<_> = file.get_pages().into_values().collect();
         let engine = match spec {
-            CropSpec::TrimWhite { .. } => {
-                Some(PdfiumEngine::open(&info.path, info.password.as_deref())?)
-            }
+            CropSpec::TrimWhite { .. } => Some(crate::open::engine_for(info)?),
             CropSpec::Margins(_) => None,
         };
         let mut boxes = Vec::new();
@@ -158,6 +156,7 @@ pub fn plan(
                 page_sizes: Some(sizes),
                 bytes: bytes.len(),
                 password: None,
+                data: None,
             },
             pages: planned,
         });

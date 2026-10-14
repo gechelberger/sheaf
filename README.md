@@ -147,7 +147,7 @@ Tier 1 platforms gate every release and run the perf budgets in CI.
 | Rendering strategy | **Tiled, async, cached** | Viewport requests tiles at the current zoom; a worker pool renders them off the UI thread; LRU cache keyed by `(page, zoom, tile)`. Low-res preview tile first, then full-res. This is the single biggest "feels fast" lever. |
 | Text / OCR | PDFium text extraction. OCR is a **core feature** behind an `OcrEngine` trait with two engines compiled in by default: **Tesseract 5** (built from source, linked statically) and **PaddleOCR PP-OCRv5** on ONNX Runtime (`oar-ocr`, with Microsoft's runtime library loaded on demand from `ocr/lib`). | Both engines are native C/C++, so OCR can't live in a WASM plugin; the trait keeps engines swappable, and plugins get OCR as a host capability. Judged on scanned tax forms, not purity. |
 | Save model | Incremental update by default; "Save As (rewrite)" optional | Preserves originals, fast saves on large files. Clean rewrite available for size reduction / "Export Clean Copy". |
-| Undo | Command pattern over the document model | Every edit is a reversible `Edit` enum; undo stack is per-document. |
+| Undo | A tree of versions, each with the edits that made it | Every edit is an `Edit` command. A version keeps a snapshot (cheap, structure-shared) and the commands from its parent; undo, redo and jumps move between versions, an edit after undo starts a branch instead of discarding, and a trimmed snapshot is rebuilt by replaying commands. Per-document. |
 
 ### Efficiency principles
 
@@ -182,6 +182,7 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 | Recent files | ✅ File > Open Recent (last 10, shared by every window) |
 | Document Properties | ✅ File > Properties (Alt+Enter): description, security, fonts |
 | Layers (OCG) panel | ✅ View > Panels > Layers (Ctrl+Alt+7): show or hide for viewing; never saved |
+| History panel | ✅ View > Panels > History (Ctrl+Alt+8): every version since the file opened, who made it and when, and its edits in words; click (or Up/Down) to go back to any version; edits undone and then replaced stay as a branch you can go into |
 | Configurable toolbar: any command or plugin command, docked to any edge or floating | ✅ View > Customize Toolbar…, or right-click a menu item, palette row or toolbar button; `toolbar.json` |
 
 ### Page organization

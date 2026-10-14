@@ -276,6 +276,7 @@ pub fn builtin(id: &str) -> Builtin {
         "workspace::ShowComments" => (&[], None, Some(|f| f.panel(Panel::Comments))),
         "workspace::ShowAttachments" => (&[], None, Some(|f| f.panel(Panel::Attachments))),
         "workspace::ShowLayers" => (&[], None, Some(|f| f.panel(Panel::Layers))),
+        "workspace::ShowHistory" => (&[], None, Some(|f| f.panel(Panel::History))),
         "workspace::ToggleSidebar" => (&[], None, Some(|f| !f.all_hidden)),
         "workspace::ToggleLeftDock" => (&[], None, Some(|f| f.dock(Side::Left))),
         "workspace::ToggleRightDock" => (&[], None, Some(|f| f.dock(Side::Right))),

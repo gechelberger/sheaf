@@ -236,6 +236,11 @@ pub fn info(id: &str) -> Option<Info> {
             "Show the document's layers and turn them on or off.",
             &["ocg", "optional content"],
         ),
+        "workspace::ShowHistory" => (
+            "history",
+            "Every version of the document since it opened, with the edits that made it. Click one to go back to it; edits that were undone and replaced are kept too.",
+            &["undo", "redo", "versions", "changes", "log", "audit"],
+        ),
         "workspace::CommandPalette" => (
             "command-palette",
             "Find and run any command by name.",

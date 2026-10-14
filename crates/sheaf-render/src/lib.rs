@@ -218,7 +218,10 @@ pub mod pdfium {
     }
 
     pub struct PdfiumEngine {
+        // Declared before `bytes`, so it's dropped first: PDFium reads the
+        // buffer for as long as the document is open.
         doc: PdfDocument<'static>,
+        bytes: Arc<Vec<u8>>,
     }
 
     impl PdfiumEngine {
@@ -232,19 +235,33 @@ pub mod pdfium {
             // viewer wants anyway. Truly huge files can revisit this.
             let bytes =
                 std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-            let doc = match pdfium()?.load_pdf_from_byte_vec(bytes, password) {
+            Self::open_bytes(Arc::new(bytes), password)
+                .with_context(|| format!("opening {}", path.display()))
+        }
+
+        /// Open a file already in memory, sharing the buffer: the document
+        /// model keeps the same bytes, so saves read what PDFium shows.
+        pub fn open_bytes(bytes: Arc<Vec<u8>>, password: Option<&str>) -> Result<Self> {
+            // SAFETY: the slice points into `bytes`, which the engine owns
+            // and never changes, and `doc` (which borrows it) is dropped
+            // before it (field order).
+            let slice: &'static [u8] =
+                unsafe { std::slice::from_raw_parts(bytes.as_ptr(), bytes.len()) };
+            let doc = match pdfium()?.load_pdf_from_byte_slice(slice, password) {
                 Ok(d) => d,
                 Err(PdfiumError::PdfiumLibraryInternalError(
                     PdfiumInternalError::PasswordError,
                 )) => {
-                    return Err(crate::OpenError::Password)
-                        .with_context(|| format!("opening {}", path.display()));
+                    return Err(crate::OpenError::Password.into());
                 }
-                Err(e) => {
-                    return Err(e).with_context(|| format!("pdfium loading {}", path.display()));
-                }
+                Err(e) => return Err(e).context("pdfium loading"),
             };
-            Ok(Self { doc })
+            Ok(Self { doc, bytes })
+        }
+
+        /// The file's bytes, shared.
+        pub fn bytes(&self) -> Arc<Vec<u8>> {
+            self.bytes.clone()
         }
     }
 
@@ -813,6 +830,9 @@ enum Msg {
 pub struct RenderHandle {
     tx: mpsc::Sender<Msg>,
     info: Arc<DocInfo>,
+    /// The file's bytes, which the worker's PDFium reads: the document
+    /// model keeps the same buffer (`SourceInfo::data`).
+    data: Arc<Vec<u8>>,
 }
 
 impl RenderHandle {
@@ -820,7 +840,7 @@ impl RenderHandle {
     /// Call from a background task if you don't want to block the UI.
     pub fn open(path: PathBuf, password: Option<String>) -> Result<Self> {
         let (tx, rx) = mpsc::channel::<Msg>();
-        let (ready_tx, ready_rx) = mpsc::channel::<Result<DocInfo>>();
+        let (ready_tx, ready_rx) = mpsc::channel::<Result<(DocInfo, Arc<Vec<u8>>)>>();
 
         std::thread::Builder::new()
             .name("sheaf-render".into())
@@ -833,10 +853,13 @@ impl RenderHandle {
                         return;
                     }
                 };
-                let info = engine.page_size(PageIndex(0)).map(|first_page| DocInfo {
-                    page_count: engine.page_count(),
-                    first_page,
-                    open_time: t.elapsed(),
+                let info = engine.page_size(PageIndex(0)).map(|first_page| {
+                    let info = DocInfo {
+                        page_count: engine.page_count(),
+                        first_page,
+                        open_time: t.elapsed(),
+                    };
+                    (info, engine.bytes())
                 });
                 let failed = info.is_err();
                 let _ = ready_tx.send(info);
@@ -847,13 +870,19 @@ impl RenderHandle {
             })
             .context("spawning render thread")?;
 
-        let info = ready_rx
+        let (info, data) = ready_rx
             .recv()
             .context("render thread died before opening")??;
         Ok(Self {
             tx,
             info: Arc::new(info),
+            data,
         })
+    }
+
+    /// The file's bytes as opened, shared with the renderer.
+    pub fn data(&self) -> Arc<Vec<u8>> {
+        self.data.clone()
     }
 
     pub fn info(&self) -> &DocInfo {

@@ -6449,6 +6449,7 @@ name = "sheaf-app"
 version = "0.1.0-alpha.1"
 dependencies = [
  "anyhow",
+ "chrono",
  "embed-resource",
  "env_logger",
  "futures",

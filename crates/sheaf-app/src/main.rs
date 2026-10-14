@@ -24,6 +24,7 @@ mod export_dialog;
 mod file_dialog;
 mod goto;
 mod header_footer_dialog;
+mod history_panel;
 mod insert_dialog;
 mod instance;
 mod jobs;
@@ -143,6 +144,7 @@ actions!(
     ]
 );
 actions!(comments, [EditComment, DeleteComment]);
+actions!(history, [HistoryPrev, HistoryNext]);
 actions!(
     outline,
     [
@@ -168,6 +170,7 @@ actions!(
         ShowComments,
         ShowAttachments,
         ShowLayers,
+        ShowHistory,
         CloseDocument,
         OpenFile,
         NewWindow,
@@ -479,6 +482,10 @@ fn main() {
             KeyBinding::new("ctrl-alt-5", ShowComments, ws),
             KeyBinding::new("ctrl-alt-6", ShowAttachments, ws),
             KeyBinding::new("ctrl-alt-7", ShowLayers, ws),
+            KeyBinding::new("ctrl-alt-8", ShowHistory, ws),
+            // History panel (when it has focus): step through versions.
+            KeyBinding::new("up", HistoryPrev, Some(history_panel::KEY_CONTEXT)),
+            KeyBinding::new("down", HistoryNext, Some(history_panel::KEY_CONTEXT)),
             KeyBinding::new("ctrl-alt-l", ToggleLeftDock, ws),
             KeyBinding::new("ctrl-alt-r", ToggleRightDock, ws),
             KeyBinding::new("ctrl-alt-j", ToggleBottomDock, ws),

@@ -136,6 +136,38 @@ pub struct AnnotsInFile {
     pub foreign: Vec<ForeignAnnot>,
 }
 
+/// A source's bytes: the ones kept from when it was opened, else the file's
+/// now (see `SourceInfo::data`).
+pub fn source_bytes(info: &crate::SourceInfo) -> Result<std::sync::Arc<Vec<u8>>> {
+    match &info.data {
+        Some(d) => Ok(d.0.clone()),
+        None => Ok(std::sync::Arc::new(
+            std::fs::read(&info.path)
+                .with_context(|| format!("reading {}", info.path.display()))?,
+        )),
+    }
+}
+
+/// A source as lopdf sees it, decrypted as [`load_pdf`] does: from the
+/// bytes kept from when it was opened when there are any, so a file
+/// replaced since (by a save in place) doesn't matter.
+pub fn load_source(info: &crate::SourceInfo) -> Result<lopdf::Document> {
+    let Some(data) = &info.data else {
+        return load_pdf(&info.path, info.password.as_deref());
+    };
+    let path = info.path.display();
+    let mut pdf = lopdf::Document::load_mem(&data.0).with_context(|| format!("loading {path}"))?;
+    if pdf.is_encrypted() {
+        let options = lopdf::LoadOptions::with_password(info.password.as_deref().unwrap_or(""));
+        pdf = lopdf::Document::load_mem_with_options(&data.0, options)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+            .with_context(|| format!("decrypting {path}"))?;
+        pdf.trailer.remove(b"Encrypt");
+        pdf.encryption_state = None;
+    }
+    Ok(pdf)
+}
+
 /// Load a file with lopdf and, if it's encrypted, decrypt it in memory with
 /// `password` (or the empty user password many files use). The result is
 /// plain: strings and streams readable, `/Encrypt` gone, so writing it

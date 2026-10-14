@@ -87,6 +87,7 @@ pub enum Panel {
     Comments,
     Attachments,
     Layers,
+    History,
     /// A panel a plugin contributes, by its id without the `plugin:` prefix.
     /// Kept in the layout even while its plugin isn't loaded, so disabling
     /// a plugin doesn't forget where its panel was.
@@ -97,7 +98,7 @@ pub enum Panel {
 const PLUGIN_PANEL_PREFIX: &str = "plugin:";
 
 impl Panel {
-    const ALL: [Panel; 7] = [
+    const ALL: [Panel; 8] = [
         Panel::Thumbnails,
         Panel::Outline,
         Panel::Patterns,
@@ -105,6 +106,7 @@ impl Panel {
         Panel::Comments,
         Panel::Attachments,
         Panel::Layers,
+        Panel::History,
     ];
 
     /// Stable id for settings and the `--panel` flag.
@@ -117,6 +119,7 @@ impl Panel {
             Panel::Comments => "comments".into(),
             Panel::Attachments => "attachments".into(),
             Panel::Layers => "layers".into(),
+            Panel::History => "history".into(),
             Panel::Plugin(id) => format!("{PLUGIN_PANEL_PREFIX}{id}").into(),
         }
     }
@@ -137,6 +140,7 @@ impl Panel {
             Panel::Comments => "Comments".into(),
             Panel::Attachments => "Attachments".into(),
             Panel::Layers => "Layers".into(),
+            Panel::History => "History".into(),
             // Plugins name their panels once they can contribute them
             // (M6 slice 3); until then, the id.
             Panel::Plugin(id) => id.clone(),
@@ -435,11 +439,15 @@ impl Workspace {
                 .unwrap_or(&DockLayout::default()),
             &plugin_panels,
         );
-        let activation = cx.observe_window_activation(window, |_, window, cx| {
+        let activation = cx.observe_window_activation(window, |ws, window, cx| {
             if window.is_window_active() {
                 crate::prefs::reload_if_changed(cx);
                 crate::patterns::reload_if_changed(cx);
                 crate::toolbar::reload_if_changed(cx);
+                // A new name in settings.toml signs the edits from now on.
+                if let Some(doc) = ws.doc().cloned() {
+                    doc.update(cx, |d, cx| d.sync_author(cx));
+                }
             }
         });
         let toolbar = cx.new(|_| sheaf_ui::toolbar::Toolbar::new(Default::default()));
@@ -522,6 +530,7 @@ impl Workspace {
             Some("comments") => this.show_panel(Panel::Comments),
             Some("attachments") => this.show_panel(Panel::Attachments),
             Some("layers") => this.show_panel(Panel::Layers),
+            Some("history") => this.show_panel(Panel::History),
             _ => {}
         }
         if let Some(p) = path {
@@ -2000,6 +2009,7 @@ impl Workspace {
                 Panel::Patterns => d.render_patterns(wide, window, cx),
                 Panel::Calc => d.render_calc(wide, window, cx),
                 Panel::Comments => d.render_comments(window, cx),
+                Panel::History => d.render_history(window, cx),
                 Panel::Attachments => d.render_attachments(window, cx),
                 Panel::Layers => d.render_layers(window, cx),
                 Panel::Plugin(id) => plugin_panel_body(d, &id, window, cx),
@@ -2643,6 +2653,13 @@ impl Render for Workspace {
                 ws.show_panel(Panel::Layers);
                 cx.notify();
             }))
+            .on_action(cx.listener(|ws, _: &crate::ShowHistory, _, cx| {
+                ws.show_panel(Panel::History);
+                if let Some(doc) = ws.doc().cloned() {
+                    doc.update(cx, |d, cx| d.focus_history(cx));
+                }
+                cx.notify();
+            }))
             .on_action(cx.listener(|ws, _: &crate::ShowAttachments, _, cx| {
                 ws.show_panel(Panel::Attachments);
                 cx.notify();
@@ -3114,6 +3131,8 @@ mod tests {
             [
                 Panel::Comments,
                 Panel::Plugin("amount-crossref.pairs".into()),
+                // A built-in panel the layout predates joins its dock.
+                Panel::History,
                 Panel::Plugin("wp.ticks".into()),
             ]
         );

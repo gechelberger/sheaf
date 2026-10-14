@@ -357,7 +357,7 @@ fn normal_appearance(pdf: &Pdf, annot: &Dictionary) -> Option<ObjectId> {
 fn build_rewrite(model: &Snapshot, clean: bool) -> Result<Pdf> {
     let primary_id = model.primary;
     let primary_info = model.source(primary_id).context("primary source missing")?;
-    let mut pdf = crate::file::load_pdf(&primary_info.path, primary_info.password.as_deref())?;
+    let mut pdf = crate::file::load_source(primary_info)?;
 
     // Source page object ids and their inherited attributes, resolved against
     // the *original* trees before anything is re-parented.
@@ -365,7 +365,7 @@ fn build_rewrite(model: &Snapshot, clean: bool) -> Result<Pdf> {
     sources.insert(primary_id, LoadedSource::from_pdf(&pdf)?);
     for (&sid, info) in &model.sources {
         if sid != primary_id && model.state.pages.iter().any(|p| p.source == sid) {
-            let other = crate::file::load_pdf(&info.path, info.password.as_deref())?;
+            let other = crate::file::load_source(info)?;
             sources.insert(sid, LoadedSource::from_pdf_owned(other)?);
         }
     }
@@ -582,7 +582,7 @@ pub fn derived_copy(
     pages: &[(u32, Option<[f32; 4]>)],
     fix: &mut dyn FnMut(&mut Pdf, &mut Dictionary, &PageGeom, usize) -> Result<()>,
 ) -> Result<Vec<u8>> {
-    let from = crate::file::load_pdf(&src.path, src.password.as_deref())?;
+    let from = crate::file::load_source(src)?;
     let loaded = LoadedSource::from_pdf(&from)?;
     let mut pdf = Pdf::with_version("1.7");
     let pages_id = pdf.new_object_id();
@@ -1200,6 +1200,7 @@ mod tests {
             page_sizes: None,
             bytes: 0,
             password: None,
+            data: None,
         }
     }
 
@@ -1866,6 +1867,52 @@ mod tests {
             assert_eq!(back[0].color, Some([255, 0, 0]), "{incremental}");
             assert_eq!(back[1].title, "Renamed");
             assert!(back[2].style.bold && back[2].style.italic, "{incremental}");
+        }
+    }
+
+    /// A source as the app makes one: its bytes kept from when it opened.
+    fn kept(path: &Path, n: u32) -> SourceInfo {
+        let bytes = std::fs::read(path).unwrap();
+        SourceInfo {
+            bytes: bytes.len(),
+            data: Some(crate::model::SourceData(std::sync::Arc::new(bytes))),
+            ..info(path, n)
+        }
+    }
+
+    /// Bug 13 (todos/m9.md): after a save in place, a version from before
+    /// it still means the old file, whatever the path holds now.
+    #[test]
+    fn undo_past_a_save_then_save_writes_the_right_pages() {
+        for incremental_first in [true, false] {
+            let dir = tempdir();
+            let a = make_pdf(&dir, "a.pdf", "A", 3, &[]);
+            let mut model = Document::new(kept(&a, 3), &[], Box::new(FixedCount(10)));
+            let ids: Vec<PageId> = model.state().pages.iter().map(|p| p.id).collect();
+            model
+                .apply(
+                    Edit::MovePages {
+                        ids: vec![ids[2]],
+                        before: Some(ids[0]),
+                    },
+                    "move",
+                )
+                .unwrap();
+            if incremental_first {
+                save_to_path(&model.snapshot(), &a).unwrap();
+            } else {
+                rewrite_to_path(&model.snapshot(), &a).unwrap();
+            }
+            let saved = read_pages(&std::fs::read(&a).unwrap());
+            assert_eq!(saved[0].0, "A 2");
+            model.rebase_to_saved(kept(&a, 3));
+            model.undo();
+            save_to_path(&model.snapshot(), &a).unwrap();
+            let pages: Vec<String> = read_pages(&std::fs::read(&a).unwrap())
+                .into_iter()
+                .map(|(t, _)| t)
+                .collect();
+            assert_eq!(pages, vec!["A 0", "A 1", "A 2"], "{incremental_first}");
         }
     }
 

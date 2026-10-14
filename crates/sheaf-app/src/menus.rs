@@ -206,6 +206,7 @@ fn builtin_menus() -> Vec<(&'static str, Vec<Item>)> {
                         item("Co&mments", ShowComments),
                         item("Attac&hments", ShowAttachments),
                         item("La&yers", ShowLayers),
+                        item("Hist&ory", ShowHistory),
                         sep(),
                         item("Navigation Pan&es", ToggleSidebar),
                         item("&Left Dock", ToggleLeftDock),

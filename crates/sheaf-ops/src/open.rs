@@ -26,6 +26,15 @@ pub fn open(path: &Path, password: Option<&str>) -> Result<Document> {
     Ok(doc)
 }
 
+/// A renderer for a source: on the bytes the document kept from when it
+/// opened, when it kept them (see `SourceInfo::data`), else on the file.
+pub fn engine_for(info: &SourceInfo) -> Result<PdfiumEngine> {
+    match &info.data {
+        Some(data) => PdfiumEngine::open_bytes(data.0.clone(), info.password.as_deref()),
+        None => PdfiumEngine::open(&info.path, info.password.as_deref()),
+    }
+}
+
 /// What the model needs to know about a file to use its pages, and its
 /// bookmarks (page numbers are 0-based indexes into the file).
 pub fn describe(path: &Path, password: Option<&str>) -> Result<(SourceInfo, Vec<FlatOutlineItem>)> {
@@ -43,6 +52,7 @@ pub fn describe(path: &Path, password: Option<&str>) -> Result<(SourceInfo, Vec<
             .map(|m| m.len() as usize)
             .unwrap_or(0),
         password: password.map(str::to_string),
+        data: None,
     };
     let mut outline: Vec<FlatOutlineItem> = engine
         .outline()

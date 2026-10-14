@@ -62,6 +62,7 @@ const FILES: &[(&str, &[u8])] = icons![
     "header-footer",
     "grid",
     "highlight",
+    "history",
     "insert-blank",
     "insert-image",
     "insert-pdf",

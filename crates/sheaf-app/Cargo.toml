@@ -46,6 +46,8 @@ serde.workspace = true
 serde_json.workspace = true
 # state.json is replaced through a uniquely named temp file.
 tempfile = "3"
+# Local times in the History panel (already in the tree through GPUI).
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 schemars.workspace = true
 unicode-segmentation.workspace = true
 

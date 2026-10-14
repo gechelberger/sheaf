@@ -97,6 +97,7 @@ fn check(rotate: i64, upright: Rotation) {
             page_sizes: None,
             bytes: 0,
             password: None,
+            data: None,
         },
         &[],
         Box::new(FixedCount(10)),

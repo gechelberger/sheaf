@@ -313,6 +313,7 @@ fn add_text(
             .map(|m| m.len() as usize)
             .unwrap_or(0),
         password: None,
+        data: None,
     };
     let mut doc = Document::new(info, &[], sheaf_doc::history::default_policy());
     let ids: Vec<_> = doc.state().pages.iter().map(|p| p.id).collect();
