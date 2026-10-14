@@ -319,3 +319,19 @@ handwritten notes (an MIT algorithm, about 150 lines), and blank-page removal.
      upright and straight with clean edges, and OCR read it back. Real
      photos should still be added to `crates/sheaf-scan/tests/fixtures`
      for tuning.
+5. Done. File > Create > From Scans/Photos… (`workspace::CreateFromScans`,
+   with its own icon) picks images, then opens `scan_dialog.rs`:
+   - **Options.** Output, page size, resolution, the four cleanup steps,
+     and OCR (greyed out with the reason when no engine can run).
+   - **Preview.** One image at a time, at 1200 px, and per step: Photo
+     (the page found, outlined), Page, Lighting, Upright, Straight, Result.
+     `sheaf_scan::clean_with` hands each step's image to a callback.
+   - **Running it.** Create asks where to save, runs `sheaf_ops::scan` with
+     a progress bar (Esc stops it), then opens the PDF. The choices persist
+     as `settings.scan`.
+
+   It also works in an empty window. Found while testing: colour pages
+   were stored as Flate, 6.9 MB for one Letter page. Colour and gray scan
+   pages are now JPEG (quality 80, 0.8 MB); black and white stays G4
+   (50 KB). New `SHEAF_SCRIPT_SAVE` answers save pickers in scripts, so
+   a scripted scan doesn't write its PDF over the photo it picked.

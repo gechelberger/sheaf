@@ -68,6 +68,7 @@ an image element does not inherit the parent element's color.
 | [recognize-text](recognize-text/icon.svg) | Recognize text (OCR) | `RecognizeText` |
 | [cancel-ocr](cancel-ocr/icon.svg) | Cancel OCR | `CancelOcr` |
 | [manage-plugins](manage-plugins/icon.svg) | Manage plugins | `ManagePlugins` |
+| [create-from-scans](create-from-scans/icon.svg) | Create from scans/photos | `CreateFromScans` |
 | [export-pages](export-pages/icon.svg) | Export pages | `ExportPages` |
 | [print](print/icon.svg) | Print | `Print` |
 | [properties](properties/icon.svg) | Document properties | `DocumentProperties` |

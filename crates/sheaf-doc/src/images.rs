@@ -65,6 +65,28 @@ impl PageImage {
         }
     }
 
+    /// Pixels encoded as JPEG at `quality` (1–100): far smaller than Flate
+    /// for photos of paper. Gray stays one component.
+    pub fn jpeg(image: &DynamicImage, dpi: f32, quality: u8) -> Result<PageImage> {
+        use image::codecs::jpeg::JpegEncoder;
+        let mut bytes = Vec::new();
+        let mut enc = JpegEncoder::new_with_quality(&mut bytes, quality.clamp(1, 100));
+        let components = if image.color().has_color() {
+            enc.encode_image(&flatten_alpha(image.clone()).into_rgb8())?;
+            3
+        } else {
+            enc.encode_image(&flatten_alpha(image.clone()).into_luma8())?;
+            1
+        };
+        Ok(PageImage {
+            width: image.width(),
+            height: image.height(),
+            dpi: (dpi, dpi),
+            rotate: 0,
+            pixels: Pixels::Jpeg { bytes, components },
+        })
+    }
+
     /// Size in points as shown, after `rotate`.
     pub fn size_pt(&self) -> (f32, f32) {
         let w = self.width as f32 * 72.0 / self.dpi.0;
@@ -621,6 +643,18 @@ mod tests {
         assert_eq!(
             page_facts(&to_pdf(&rgb, PageFit::Original).unwrap())[0].2,
             "FlateDecode"
+        );
+    }
+
+    #[test]
+    fn encodes_jpeg_by_color() {
+        let rgb = PageImage::jpeg(&gradient(40, 30), 150.0, 80).unwrap();
+        assert!(matches!(rgb.pixels, Pixels::Jpeg { components: 3, .. }));
+        let gray = PageImage::jpeg(&gradient(40, 30).grayscale(), 150.0, 80).unwrap();
+        assert!(matches!(gray.pixels, Pixels::Jpeg { components: 1, .. }));
+        assert_eq!(
+            page_facts(&to_pdf(&[gray], PageFit::Original).unwrap())[0].2,
+            "DCTDecode"
         );
     }
 

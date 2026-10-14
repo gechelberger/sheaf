@@ -17,6 +17,9 @@ use sheaf_scan::ScanParams;
 
 use crate::images::Paper;
 
+/// Color and gray pages are stored as JPEG at this quality.
+const JPEG_QUALITY: u8 = 80;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct ScanOptions {
@@ -71,18 +74,29 @@ pub struct ScanReport {
     pub words: usize,
 }
 
-/// Clean up one photo: what the GUI previews.
+/// Clean up one photo.
 pub fn clean_one(
     path: &Path,
     params: &ScanParams,
     progress: &dyn Progress,
 ) -> Result<sheaf_scan::Cleaned> {
     let image = sheaf_scan::load(path)?;
+    clean_image(image, params, progress, &mut |_, _| {})
+        .with_context(|| format!("cleaning up {}", path.display()))
+}
+
+/// Clean up an image, with the orientation model when it's there,
+/// showing `stage` each step.
+pub fn clean_image(
+    image: image::RgbImage,
+    params: &ScanParams,
+    progress: &dyn Progress,
+    stage: &mut dyn FnMut(sheaf_scan::Stage, &image::RgbImage),
+) -> Result<sheaf_scan::Cleaned> {
     let orienter = |img: &image::RgbImage| sheaf_ocr::orient::scores(img);
     let model = (params.orient && sheaf_ocr::orient::available())
         .then_some(&orienter as sheaf_scan::Orienter);
-    sheaf_scan::clean(image, params, model, progress)
-        .with_context(|| format!("cleaning up {}", path.display()))
+    sheaf_scan::clean_with(image, params, model, progress, stage)
 }
 
 /// Clean up `inputs` and write them to `out` as a PDF, a page each.
@@ -127,7 +141,11 @@ pub fn scan(
                 &format!("{}: turned {}°", path.display(), cleaned.turns * 90),
             );
         }
-        let page = PageImage::from_image(cleaned.image.clone(), opts.dpi as f32);
+        let page = match opts.clean.mode {
+            // Black and white goes in as CCITT G4.
+            sheaf_scan::Mode::Bw => PageImage::from_image(cleaned.image.clone(), opts.dpi as f32),
+            _ => PageImage::jpeg(&cleaned.image, opts.dpi as f32, JPEG_QUALITY)?,
+        };
         if let Some(engine) = engine.as_mut() {
             step.check()?;
             let img = match engine.input() {

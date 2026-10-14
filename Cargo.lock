@@ -6471,6 +6471,7 @@ dependencies = [
  "sheaf-plugin",
  "sheaf-print",
  "sheaf-render",
+ "sheaf-scan",
  "sheaf-ui",
  "smallvec",
  "unicode-segmentation",

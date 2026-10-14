@@ -108,12 +108,36 @@ pub fn load(path: &std::path::Path) -> Result<RgbImage> {
     Ok(image.into_rgb8())
 }
 
+/// A point in the pipeline, for previews.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Stage {
+    /// The page cut out of the photo, edges cleared.
+    Cropped,
+    /// Lighting evened out.
+    Flattened,
+    /// Turned upright.
+    Upright,
+    /// Text made level.
+    Straightened,
+}
+
 /// The whole pipeline, as `params` says.
 pub fn clean(
     image: RgbImage,
     params: &ScanParams,
     orienter: Option<Orienter>,
     progress: &dyn Progress,
+) -> Result<Cleaned> {
+    clean_with(image, params, orienter, progress, &mut |_, _| {})
+}
+
+/// [`clean`], showing `stage` the image after each step that ran.
+pub fn clean_with(
+    image: RgbImage,
+    params: &ScanParams,
+    orienter: Option<Orienter>,
+    progress: &dyn Progress,
+    stage: &mut dyn FnMut(Stage, &RgbImage),
 ) -> Result<Cleaned> {
     progress.set_total(Some(6), Unit::Items);
     let mut image = image;
@@ -128,11 +152,13 @@ pub fn clean(
     progress.check()?;
     if quad.is_some() {
         clear_edges(&mut image, params.threshold_k);
+        stage(Stage::Cropped, &image);
     }
     progress.set(2);
     progress.check()?;
     if params.flatten {
         image = flatten_light(&image);
+        stage(Stage::Flattened, &image);
     }
     let mut turns = 0;
     if params.orient {
@@ -144,6 +170,7 @@ pub fn clean(
             _ => axis,
         };
         image = turn(image, turns);
+        stage(Stage::Upright, &image);
     }
     progress.set(3);
     progress.check()?;
@@ -153,6 +180,7 @@ pub fn clean(
         if skew.abs() >= 0.05 {
             image = rotate(&image, -skew);
         }
+        stage(Stage::Straightened, &image);
     }
     progress.set(4);
     progress.check()?;

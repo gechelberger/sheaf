@@ -42,6 +42,7 @@ mod properties_dialog;
 mod recent;
 mod region;
 mod rulers;
+mod scan_dialog;
 mod script;
 mod settings;
 mod toolbar;
@@ -167,6 +168,7 @@ actions!(
         ClearRecent,
         Print,
         ExportPages,
+        CreateFromScans,
         ToggleToolbar,
         CustomizeToolbar
     ]
@@ -309,6 +311,7 @@ fn main() {
             let tbc_keys = Some("CustomizeToolbar && !TextInput");
             let pd = Some(print_dialog::KEY_CONTEXT);
             let ed = Some(export_dialog::KEY_CONTEXT);
+            let sd = Some(scan_dialog::KEY_CONTEXT);
             let ed_keys = Some("ExportDialog && !TextInput");
             let pd_keys = Some("PrintDialog && !TextInput");
             let pf_keys = Some("PluginForm && !TextInput");
@@ -408,6 +411,13 @@ fn main() {
                 KeyBinding::new("space", DialogRight, ed_keys),
                 KeyBinding::new("enter", DialogRun, ed_keys),
                 KeyBinding::new("escape", DialogCancel, ed_keys),
+                KeyBinding::new("tab", DialogNext, sd),
+                KeyBinding::new("shift-tab", DialogPrev, sd),
+                KeyBinding::new("left", DialogLeft, sd),
+                KeyBinding::new("right", DialogRight, sd),
+                KeyBinding::new("space", DialogRight, sd),
+                KeyBinding::new("enter", DialogRun, sd),
+                KeyBinding::new("escape", DialogCancel, sd),
                 KeyBinding::new("tab", DialogNext, pd),
                 KeyBinding::new("shift-tab", DialogPrev, pd),
                 KeyBinding::new("left", DialogLeft, pd_keys),

@@ -234,7 +234,7 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 |---|---|
 | Export pages to PNG / JPEG | ✅ File > Export Pages (Ctrl+Shift+E): resolution, JPEG quality, page range, marks included or not; Esc stops a running export. Also `sheaf export` on the command line |
 | Export to multi-page TIFF (PDFlyer) | ✅ File > Export Pages > TIFF: one file, black-and-white (CCITT G4), grayscale or color |
-| Create PDF from images | 🚧 `sheaf images-to-pdf` (JPEG kept as is, black-and-white as CCITT G4, multi-page TIFF, original size or fitted to Letter/A4); GUI in M8 |
+| Create PDF from images | ✅ File > Create > From Scans/Photos…: phone photos or scans cleaned up (page found and straightened, upright, deskewed, shadows and color casts evened out), color/gray/black-and-white, Letter/A4/as photographed, optional OCR, with a preview of each step. `sheaf scan` and `sheaf images-to-pdf` on the command line |
 | OCR (searchable text layer) | ✅ Document > Recognize Text (OCR)… (Ctrl+Shift+T): Tesseract or PaddleOCR, whole binder / current / selected / range, skips pages that already have text, progress + Esc to stop, one undo step; Find and Patterns see the text before the first save |
 | Export text | ✅ File > Export Pages > Text: one UTF-8 file, a form feed between pages (unsaved OCR text included) |
 | Print | ✅ File > Print (Ctrl+P): own dialog with sheet preview; printer, copies, pages (all/current/selected/bookmark/range), Fit/Actual/Shrink, orientation, paper, two-sided, comments on/off; CUPS on Linux/macOS, GDI on Windows; Save as PDF |

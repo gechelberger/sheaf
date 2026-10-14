@@ -19,6 +19,8 @@ pub struct Settings {
     pub ocr: sheaf_ocr::OcrConfig,
     /// File > Print's last choices.
     pub print: crate::print_dialog::PrintPrefs,
+    /// File > Create > From Scans/Photos' last choices.
+    pub scan: sheaf_ops::scan::ScanOptions,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -178,6 +180,10 @@ mod tests {
             print: crate::print_dialog::PrintPrefs {
                 printer: Some("Office".into()),
                 markup: false,
+                ..Default::default()
+            },
+            scan: sheaf_ops::scan::ScanOptions {
+                dpi: 200,
                 ..Default::default()
             },
         };
