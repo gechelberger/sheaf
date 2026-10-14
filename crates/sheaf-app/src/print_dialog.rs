@@ -16,8 +16,9 @@ use gpui::{
 use serde::{Deserialize, Serialize};
 use sheaf_core::{PageIndex, PageSize};
 use sheaf_doc::{PageId, Snapshot, SourceId};
+use sheaf_image::raster::PixelFormat;
 use sheaf_print::{Duplex, JobSettings, Orientation, Paper, Printer, Sizing};
-use sheaf_render::{Job, PixelFormat, RenderHandle, RenderRequest};
+use sheaf_render::{Job, RenderHandle, RenderRequest};
 use sheaf_ui::button::{Button, Chip};
 use sheaf_ui::text_input::{TextInput, TextInputEvent};
 use sheaf_ui::{dialog, theme};

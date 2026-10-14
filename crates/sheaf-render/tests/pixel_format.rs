@@ -5,8 +5,9 @@
 
 use lopdf::{Document as Pdf, Stream, dictionary};
 use sheaf_core::{PageIndex, Rotation};
+use sheaf_image::raster::PixelFormat;
 use sheaf_render::pdfium::PdfiumEngine;
-use sheaf_render::{Job, PixelFormat, Renderer};
+use sheaf_render::{Job, Renderer};
 
 fn red_page() -> std::path::PathBuf {
     let mut pdf = Pdf::with_version("1.5");

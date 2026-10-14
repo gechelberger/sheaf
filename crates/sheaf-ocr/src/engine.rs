@@ -2,7 +2,7 @@
 
 use image::{GrayImage, RgbImage};
 use serde::{Deserialize, Serialize};
-use sheaf_render::{PixelFormat, Raster};
+use sheaf_image::raster::Raster;
 
 use crate::config::OcrConfig;
 
@@ -36,33 +36,9 @@ impl OcrImage {
     /// right after, so a 300 dpi Letter page costs 8 MB (gray) instead of
     /// 34 MB while it waits for an engine.
     pub fn from_raster(r: &Raster, kind: InputKind) -> Option<Self> {
-        let n = (r.width as usize) * (r.height as usize);
-        if r.data.len() < n * 4 {
-            return None;
-        }
-        let (ri, gi, bi) = match r.format {
-            PixelFormat::Rgba => (0, 1, 2),
-            PixelFormat::Bgra => (2, 1, 0),
-        };
-        let (px, _) = r.data.as_chunks::<4>();
         match kind {
-            InputKind::Gray => {
-                let data: Vec<u8> = px
-                    .iter()
-                    .map(|p| {
-                        let (r, g, b) = (p[ri] as u32, p[gi] as u32, p[bi] as u32);
-                        ((77 * r + 150 * g + 29 * b) >> 8) as u8
-                    })
-                    .collect();
-                GrayImage::from_raw(r.width, r.height, data).map(Self::Gray)
-            }
-            InputKind::Rgb => {
-                let mut data = Vec::with_capacity(n * 3);
-                for p in px.iter() {
-                    data.extend_from_slice(&[p[ri], p[gi], p[bi]]);
-                }
-                RgbImage::from_raw(r.width, r.height, data).map(Self::Rgb)
-            }
+            InputKind::Gray => r.to_gray().map(Self::Gray),
+            InputKind::Rgb => r.to_rgb().map(Self::Rgb),
         }
     }
 
@@ -255,6 +231,7 @@ pub fn set_language(kind: EngineKind, cfg: &mut OcrConfig, id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sheaf_image::raster::PixelFormat;
 
     #[test]
     fn raster_converts_to_gray_and_rgb() {

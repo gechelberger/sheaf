@@ -60,8 +60,8 @@ Dependency order after the move:
   signatures: every caller that builds one already uses `sheaf_image`. If an old path
   creeps back, a clippy `disallowed-*` entry can forbid it.
 - **Pixel types move from `sheaf-render`; the trait stays.**
-  - `PixelFormat` and `Raster` move to `sheaf_image::raster`, and `sheaf-render`
-    re-exports them so its users keep compiling unchanged.
+  - `PixelFormat` and `Raster` move to `sheaf_image::raster`. Their users import them
+    from there; `sheaf-render` doesn't re-export them.
   - The `Renderer` trait stays in `sheaf-render`. It's about documents (page count,
     sizes, outline, search, text, `hide_sheaf_annots`). Only its output type is an image.
     So do `Job`, `RenderRequest`, `Rendered` and `RenderHandle`: they name pages.
@@ -111,9 +111,9 @@ sheaf-image/src/
 - Check: all workspace tests, and clippy.
 
 ### 2. `Raster` and the shared conversions
-- Move `PixelFormat` and `Raster` into `sheaf_image::raster`.
-  `sheaf-render` gains a `sheaf-image` dependency and does
-  `pub use sheaf_image::raster::{PixelFormat, Raster};`.
+- Move `PixelFormat` and `Raster` into `sheaf_image::raster`. `sheaf-render`,
+  `sheaf-ocr` and `sheaf-print` gain a `sheaf-image` dependency, and every import
+  switches (about 15 files).
 - Add, on `Raster`:
   - `to_gray(&self) -> GrayImage`, with BT.601 weights, honoring `format`;
   - `to_rgb(&self) -> RgbImage`;
@@ -195,3 +195,16 @@ sheaf-image/src/
    from `sheaf_ops::blank`). Nothing is re-exported. Callers name
    `sheaf_image::clean::…` and `sheaf_image::blank::Sensitivity`. The older plans
    (`cleanup-cli.md`, `blanks.md`) gain a pointer here instead of being rewritten.
+2. Done. `sheaf_image::raster` has `PixelFormat`, `Raster` (`to_gray`, `to_rgb`,
+   `into_rgba`, each `None` when the data is short), `luma` (BT.601 in integers) and
+   `content_bounds`. Every hand-written copy goes through them:
+   - OCR's `OcrImage::from_raster`;
+   - the blank detector's render;
+   - auto-crop's `content_margins`;
+   - export's PNG, JPEG and TIFF paths (gray TIFF moves from Rec.709 to BT.601);
+   - two lumas inside `clean`;
+   - the `scanify` example and an OCR test.
+
+   Not changed: the app's `to_render_image` (BGRA passthrough to gpui) and the print
+   paths. Checked with workspace tests, clippy, and the ten eval photos (same result,
+   none dropped).

@@ -7,12 +7,13 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use image::{ImageEncoder, RgbaImage};
+use image::ImageEncoder;
 use sheaf_core::{PageIndex, Rotation};
 use sheaf_doc::{PageId, Snapshot};
+use sheaf_image::raster::{PixelFormat, Raster};
 use sheaf_progress::{Progress, Unit};
 use sheaf_render::pdfium::PdfiumEngine;
-use sheaf_render::{Job, PixelFormat, Raster, Renderer};
+use sheaf_render::{Job, Renderer};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
@@ -208,25 +209,24 @@ fn write_tiff_to(
         progress.check()?;
         let raster = render_at(engine, i as u32, dpi)?;
         let (w, h) = (raster.width, raster.height);
-        let rgba = RgbaImage::from_raw(w, h, raster.data).context("raster size")?;
         let page = [i as u16, n.min(u16::MAX as usize) as u16];
         match mode {
             TiffMode::Color => {
-                let rgb = image::DynamicImage::ImageRgba8(rgba).into_rgb8();
+                let rgb = raster.to_rgb().context("raster size")?;
                 let mut im = enc.new_image::<colortype::RGB8>(w, h)?;
                 im.resolution(ResolutionUnit::Inch, res());
                 im.encoder().write_tag(Tag::Unknown(297), &page[..])?;
                 im.write_data(rgb.as_raw())?;
             }
             TiffMode::Gray => {
-                let gray = image::DynamicImage::ImageRgba8(rgba).into_luma8();
+                let gray = raster.to_gray().context("raster size")?;
                 let mut im = enc.new_image::<colortype::Gray8>(w, h)?;
                 im.resolution(ResolutionUnit::Inch, res());
                 im.encoder().write_tag(Tag::Unknown(297), &page[..])?;
                 im.write_data(gray.as_raw())?;
             }
             TiffMode::BlackWhite => {
-                let gray = image::DynamicImage::ImageRgba8(rgba).into_luma8();
+                let gray = raster.to_gray().context("raster size")?;
                 let data = sheaf_doc::images::g4(gray.as_raw(), w, h);
                 let mut dir = enc.image_directory()?;
                 let offset = dir.write_data(&data[..])?;
@@ -257,16 +257,15 @@ fn write_tiff_to(
     Ok(())
 }
 
-/// Encode an RGBA raster, recording its resolution where the format can.
+/// Encode a raster, recording its resolution where the format can.
 pub fn encode(raster: Raster, format: Format, dpi: u32) -> Result<Vec<u8>> {
-    debug_assert_eq!(raster.format, PixelFormat::Rgba);
     let (w, h) = (raster.width, raster.height);
-    let rgba = RgbaImage::from_raw(w, h, raster.data).context("raster size")?;
+    // Pages are opaque: RGB is a quarter smaller.
+    let rgb = || raster.to_rgb().context("raster size");
     let mut out = Vec::new();
     match format {
         Format::Png => {
-            // Pages are opaque: RGB is a quarter smaller.
-            let rgb = image::DynamicImage::ImageRgba8(rgba).into_rgb8();
+            let rgb = rgb()?;
             let mut enc = png_with_dpi(&mut out, w, h, dpi);
             enc.set_color(png::ColorType::Rgb);
             enc.set_depth(png::BitDepth::Eight);
@@ -275,7 +274,7 @@ pub fn encode(raster: Raster, format: Format, dpi: u32) -> Result<Vec<u8>> {
         }
         Format::Tiff(_) | Format::Text => bail!("this format goes into one file"),
         Format::Jpeg(q) => {
-            let rgb = image::DynamicImage::ImageRgba8(rgba).into_rgb8();
+            let rgb = rgb()?;
             let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(
                 Cursor::new(&mut out),
                 q.clamp(1, 100),

@@ -10,8 +10,9 @@ use std::collections::HashSet;
 use gpui::{AnyElement, Context, ObjectFit, ScrollHandle, div, img, prelude::*, px};
 use sheaf_core::PageIndex;
 use sheaf_doc::{Edit, PageId};
+use sheaf_image::raster::PixelFormat;
 use sheaf_ops::blank::{BlankParams, Candidate, Reason};
-use sheaf_render::{Job, PixelFormat, RenderRequest};
+use sheaf_render::{Job, RenderRequest};
 use sheaf_ui::button::{Button, Chip};
 use sheaf_ui::{dialog, theme};
 

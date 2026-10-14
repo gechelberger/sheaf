@@ -7,6 +7,8 @@
 //!
 //! - [`clean`]: scans and phone photos of paper made into clean pages.
 //! - [`blank`]: whether a page image is blank.
+//! - [`raster`]: rendered pages as pixels, and their conversions.
 
 pub mod blank;
 pub mod clean;
+pub mod raster;

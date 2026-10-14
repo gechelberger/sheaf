@@ -17,6 +17,7 @@ tesseract = ["dep:tesseract-rs"]
 oar = ["dep:oar-ocr", "dep:ort"]
 
 [dependencies]
+sheaf-image.workspace = true
 sheaf-core.workspace = true
 sheaf-doc.workspace = true
 sheaf-render.workspace = true

@@ -21,9 +21,10 @@ use serde::{Deserialize, Serialize};
 use sheaf_core::{PageIndex, Rotation};
 use sheaf_doc::{Document, Edit, NewOutlineItem, PageId, Snapshot, SourceId};
 use sheaf_image::blank::{Sensitivity, Verdict, is_blank};
+use sheaf_image::raster::PixelFormat;
 use sheaf_progress::{Progress, Unit};
 use sheaf_render::pdfium::PdfiumEngine;
-use sheaf_render::{Job, PixelFormat, Renderer};
+use sheaf_render::{Job, Renderer};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -174,13 +175,7 @@ pub fn find(
                 },
                 PixelFormat::Rgba,
             )?;
-            let gray = image::GrayImage::from_fn(raster.width, raster.height, |x, y| {
-                let o = ((y * raster.width + x) * 4) as usize;
-                let d = &raster.data[o..o + 3];
-                image::Luma([
-                    ((77 * d[0] as u32 + 150 * d[1] as u32 + 29 * d[2] as u32) >> 8) as u8,
-                ])
-            });
+            let gray = raster.to_gray().context("short render")?;
             let (reason, ink) = match is_blank(&gray, params.sensitivity) {
                 Verdict::Blank { ink } => (Reason::Blank, ink),
                 Verdict::NearlyBlank { ink } => (Reason::NearlyBlank, ink),

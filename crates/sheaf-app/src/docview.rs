@@ -36,9 +36,9 @@ use crate::{ClearGuides, FullScreen, GoToPage, ReadMode, ToggleGrid, ToggleRuler
 use sheaf_doc::{
     Document, Edit, EditOutcome, FlatOutlineItem, OutlineId, PageId, PageRef, SourceId, SourceInfo,
 };
+use sheaf_image::raster::PixelFormat;
 use sheaf_render::{
-    Job, OutlineItem, PixelFormat, Rect, RenderHandle, RenderRequest, Rendered, SearchEvent,
-    SearchHit,
+    Job, OutlineItem, Rect, RenderHandle, RenderRequest, Rendered, SearchEvent, SearchHit,
 };
 
 use crate::{
@@ -3154,7 +3154,7 @@ fn flat_item(i: &OutlineItem) -> FlatOutlineItem {
 
 /// Wrap a BGRA raster as a GPUI image without copying the pixel data.
 /// `RenderImage` is documented as BGRA; `RgbaImage` here is just the container.
-pub(crate) fn to_render_image(raster: sheaf_render::Raster) -> RenderImage {
+pub(crate) fn to_render_image(raster: sheaf_image::raster::Raster) -> RenderImage {
     debug_assert_eq!(raster.format, PixelFormat::Bgra);
     let buf = image::RgbaImage::from_raw(raster.width, raster.height, raster.data)
         .expect("raster size matches buffer");

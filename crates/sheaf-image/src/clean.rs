@@ -637,7 +637,7 @@ fn max_filter(img: &GrayImage, r: u32) -> GrayImage {
 fn stretch(img: &mut RgbImage) {
     let mut hist = [0u64; 256];
     for p in img.pixels() {
-        let l = (77 * p[0] as u32 + 150 * p[1] as u32 + 29 * p[2] as u32) >> 8;
+        let l = crate::raster::luma(p[0], p[1], p[2]);
         hist[l as usize] += 1;
     }
     let total: u64 = hist.iter().sum();
@@ -770,7 +770,7 @@ pub fn clear_edges(img: &mut RgbImage, k: f32) {
     let paper = |x: u32, y: u32| Rgb([0, 1, 2].map(|c| channels[c].get_pixel(x, y)[0]));
     for (x, y, p) in bw.enumerate_pixels_mut() {
         let pp = paper(x, y);
-        let lum = (77 * pp[0] as u32 + 150 * pp[1] as u32 + 29 * pp[2] as u32) >> 8;
+        let lum = crate::raster::luma(pp[0], pp[1], pp[2]) as u32;
         if (gray.get_pixel(x, y)[0] as u32) * 10 < lum * 6 {
             p[0] = 0;
         }

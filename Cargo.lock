@@ -6553,6 +6553,7 @@ dependencies = [
  "serde_json",
  "sheaf-core",
  "sheaf-doc",
+ "sheaf-image",
  "sheaf-render",
  "tesseract-rs",
  "thiserror 2.0.21",
@@ -6618,6 +6619,7 @@ dependencies = [
  "anyhow",
  "log",
  "sheaf-core",
+ "sheaf-image",
  "sheaf-render",
  "windows 0.61.3",
 ]
@@ -6640,6 +6642,7 @@ dependencies = [
  "regex",
  "sheaf-core",
  "sheaf-doc",
+ "sheaf-image",
  "thiserror 2.0.21",
 ]
 

@@ -12,9 +12,10 @@ use serde::{Deserialize, Serialize};
 use sheaf_core::{PageIndex, PageSize, Rotation};
 use sheaf_doc::annot::Pt;
 use sheaf_doc::{PageId, Snapshot, SourceId, SourceInfo};
+use sheaf_image::raster::{PixelFormat, content_bounds};
 use sheaf_progress::{Progress, Unit};
 use sheaf_render::pdfium::PdfiumEngine;
-use sheaf_render::{Job, PixelFormat, Renderer};
+use sheaf_render::{Job, Renderer};
 
 /// Points to take off each side, as the page is shown (after sheaf's
 /// rotation).
@@ -176,23 +177,11 @@ fn content_margins(e: &PdfiumEngine, index: u32, w: f32, h: f32, pad: f32) -> Re
         },
         PixelFormat::Rgba,
     )?;
-    let (rw, rh) = (raster.width as usize, raster.height as usize);
-    let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0, 0);
-    for y in 0..rh {
-        for x in 0..rw {
-            let p = &raster.data[(y * rw + x) * 4..][..4];
-            let lum = (77 * p[0] as u32 + 150 * p[1] as u32 + 29 * p[2] as u32) >> 8;
-            if lum < 235 {
-                x0 = x0.min(x);
-                y0 = y0.min(y);
-                x1 = x1.max(x + 1);
-                y1 = y1.max(y + 1);
-            }
-        }
-    }
-    if x0 == usize::MAX {
+    let (rw, rh) = (raster.width, raster.height);
+    let gray = raster.to_gray().context("short render")?;
+    let Some((x0, y0, x1, y1)) = content_bounds(&gray, 235) else {
         return Ok(Margins::default());
-    }
+    };
     let (sx, sy) = (w / rw as f32, h / rh as f32);
     Ok(Margins {
         left: (x0 as f32 * sx - pad).max(0.0),

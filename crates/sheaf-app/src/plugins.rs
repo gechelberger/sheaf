@@ -960,7 +960,8 @@ impl sheaf_plugin::render::RenderSource for EngineRender {
         page_h: u32,
         (x, y, w, h): (u32, u32, u32, u32),
     ) -> Result<Vec<u8>> {
-        use sheaf_render::{Job, PixelFormat, RenderRequest};
+        use sheaf_image::raster::PixelFormat;
+        use sheaf_render::{Job, RenderRequest};
         let handle = self.0.get(&source).context("source not open")?;
         let rx = handle.render(RenderRequest {
             page: sheaf_core::PageIndex(index),
