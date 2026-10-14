@@ -47,6 +47,11 @@ pub struct Command {
 
 pub enum PaletteEvent {
     Run(Box<dyn Action>),
+    /// A row was right-clicked: its command id, where. The palette closes.
+    Context {
+        id: String,
+        position: gpui::Point<gpui::Pixels>,
+    },
     Dismiss,
 }
 
@@ -69,7 +74,7 @@ const KEYWORD_PENALTY: i32 = 1000;
 /// Subsequence match of `query` against `hay` (both lowercase). Higher is
 /// better; None when it doesn't match. Contiguous runs and matches at word
 /// starts score well, so "fw" finds "Fit Width" before "File > Save".
-fn score(query: &str, hay: &str) -> Option<i32> {
+pub fn score(query: &str, hay: &str) -> Option<i32> {
     if query.is_empty() {
         return Some(0);
     }
@@ -197,6 +202,16 @@ impl Render for Palette {
                         this.selected = row;
                         this.run_selected(cx);
                     }))
+                    .on_mouse_down(MouseButton::Right, {
+                        let id = c.id.clone();
+                        cx.listener(move |_, e: &gpui::MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            cx.emit(PaletteEvent::Context {
+                                id: id.clone(),
+                                position: e.position,
+                            });
+                        })
+                    })
                     .child(
                         svg()
                             .path(c.icon.clone())

@@ -45,6 +45,7 @@ mod rulers;
 mod script;
 mod settings;
 mod toolbar;
+mod toolbar_dialog;
 mod workspace;
 
 use std::path::PathBuf;
@@ -165,7 +166,9 @@ actions!(
         DocumentProperties,
         ClearRecent,
         Print,
-        ExportPages
+        ExportPages,
+        ToggleToolbar,
+        CustomizeToolbar
     ]
 );
 actions!(
@@ -295,6 +298,8 @@ fn main() {
             let pf = Some("PluginForm");
             let pm = Some("PluginManager");
             let props = Some(properties_dialog::KEY_CONTEXT);
+            let tbc = Some(toolbar_dialog::KEY_CONTEXT);
+            let tbc_keys = Some("CustomizeToolbar && !TextInput");
             let pd = Some(print_dialog::KEY_CONTEXT);
             let ed = Some(export_dialog::KEY_CONTEXT);
             let ed_keys = Some("ExportDialog && !TextInput");
@@ -410,6 +415,15 @@ fn main() {
                 KeyBinding::new("left", DialogLeft, props),
                 KeyBinding::new("right", DialogRight, props),
                 KeyBinding::new("escape", DialogCancel, props),
+                KeyBinding::new("up", toolbar_dialog::ListUp, tbc),
+                KeyBinding::new("down", toolbar_dialog::ListDown, tbc),
+                KeyBinding::new("tab", toolbar_dialog::SwitchList, tbc),
+                KeyBinding::new("shift-tab", toolbar_dialog::SwitchList, tbc),
+                KeyBinding::new("alt-up", toolbar_dialog::MoveUp, tbc),
+                KeyBinding::new("alt-down", toolbar_dialog::MoveDown, tbc),
+                KeyBinding::new("escape", toolbar_dialog::Cancel, tbc),
+                KeyBinding::new("enter", toolbar_dialog::AddOrRemove, tbc_keys),
+                KeyBinding::new("delete", toolbar_dialog::RemoveItem, tbc_keys),
                 KeyBinding::new("tab", DialogNext, od),
                 KeyBinding::new("shift-tab", DialogPrev, od),
                 KeyBinding::new("down", DialogNext, od_keys),

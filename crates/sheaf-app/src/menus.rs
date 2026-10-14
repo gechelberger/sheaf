@@ -188,6 +188,9 @@ fn builtin_menus() -> Vec<(&'static str, Vec<Item>)> {
                 item("Left &Dock", ToggleLeftDock),
                 item("Ri&ght Dock", ToggleRightDock),
                 item("Botto&m Dock", ToggleBottomDock),
+                sep(),
+                item("T&oolbar", ToggleToolbar),
+                item("Customi&ze Toolbar…", CustomizeToolbar),
             ],
         ),
         menu(

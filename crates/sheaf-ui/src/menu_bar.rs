@@ -46,6 +46,10 @@ impl Default for ItemState {
 /// Asked about each item as it's drawn or stepped over.
 pub type StateFn = std::rc::Rc<dyn Fn(&dyn Action, &Window, &App) -> ItemState>;
 
+/// Called when an item is right-clicked (after the menu closes), with its
+/// action and the pointer's window position.
+pub type SecondaryFn = std::rc::Rc<dyn Fn(&dyn Action, gpui::Point<Pixels>, &mut Window, &mut App)>;
+
 actions!(
     menu_bar,
     [
@@ -80,6 +84,7 @@ pub struct MenuBar {
     /// view that asked for it to open.
     pick_first: bool,
     state: Option<StateFn>,
+    secondary: Option<SecondaryFn>,
     /// Bounds of the bar from the last frame, so a click on a title isn't
     /// also treated as a click outside the open dropdown.
     bounds: Bounds<Pixels>,
@@ -108,6 +113,7 @@ impl MenuBar {
             keyboard: false,
             pick_first: false,
             state: None,
+            secondary: None,
             bounds: Bounds::default(),
             sub_bounds: Bounds::default(),
             _blur: blur,
@@ -117,6 +123,11 @@ impl MenuBar {
     /// Ask `state` about items from now on.
     pub fn set_state(&mut self, state: StateFn) {
         self.state = Some(state);
+    }
+
+    /// Call `f` when an item is right-clicked.
+    pub fn set_on_secondary(&mut self, f: SecondaryFn) {
+        self.secondary = Some(f);
     }
 
     fn app_state(&self, action: &dyn Action, window: &Window, cx: &App) -> ItemState {
@@ -493,6 +504,21 @@ impl MenuBar {
                 };
                 match item {
                     OwnedMenuItem::Action { name, action, .. } => row
+                        .on_mouse_down(MouseButton::Right, {
+                            let action = action.boxed_clone();
+                            cx.listener(move |bar, e: &gpui::MouseDownEvent, window, cx| {
+                                cx.stop_propagation();
+                                let Some(f) = bar.secondary.clone() else {
+                                    return;
+                                };
+                                bar.close(window, cx);
+                                let action = action.boxed_clone();
+                                let at = e.position;
+                                window.defer(cx, move |window, cx| {
+                                    f(action.as_ref(), at, window, cx)
+                                });
+                            })
+                        })
                         .on_mouse_move(cx.listener(move |bar, _, _, cx| {
                             if sub {
                                 if bar.sub_item != Some(ix) {

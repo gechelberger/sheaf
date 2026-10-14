@@ -347,6 +347,27 @@ This is the part that makes it worth doing.
      context menu.
 6. Customize dialog, plus Add/Remove from the context menus of the bar,
    the menu bar and the palette.
+   *Done 2026-10-14.* Notes and deviations:
+   - New commands View > Toolbar (`workspace::ToggleToolbar`, checked
+     while shown) and View > Customize Toolbar… (`workspace::
+     CustomizeToolbar`), with icons.
+   - `toolbar_dialog.rs`: left, a separator, the two widgets and every
+     command (Open Recent entries left out), ranked like the palette
+     (`sheaf_ui::palette::score` is public now); right, the layout, with
+     unregistered ids shown greyed "(not loaded)". Add / Remove / Move
+     Up / Move Down / Separator, double-click to add or remove, drag rows
+     to reorder, Reset to Default. Each change is written to the global
+     layout at once (so the bar updates live); Cancel restores the layout
+     from when the dialog opened, OK saves `toolbar.json`.
+   - Right-click menus: on the bar, Remove from Toolbar (when on an
+     item), Customize Toolbar…, dock to another edge or float, lay a
+     floating bar out across/down, Hide Toolbar. On a title-bar menu item
+     (`MenuBar::set_on_secondary`) or a palette row
+     (`PaletteEvent::Context`): Add to / Remove from Toolbar.
+   - Found on the way: the dock tab strip overflowed under the document,
+     so a hidden tab (Layers) caught clicks meant for the toolbar. Tabs
+     that don't fit now scroll instead.
+   - Script: `{"click": [x, y], "right": true}`.
 7. Replace the fixed markup toolbar with the default layout; remove the
    setting from slice 3.
 

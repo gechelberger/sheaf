@@ -222,6 +222,12 @@ pub fn info(id: &str) -> Option<Info> {
         "workspace::ToggleBottomDock" => {
             ("bottom-dock", "Show or hide the bottom dock.", &["panel"])
         }
+        "workspace::ToggleToolbar" => ("toolbar", "Show or hide the toolbar.", &["buttons"]),
+        "workspace::CustomizeToolbar" => (
+            "customize-toolbar",
+            "Choose the toolbar's buttons and their order.",
+            &["buttons", "quick tools", "edit toolbar"],
+        ),
         // Document
         "docview::RotatePageCw" => (
             "rotate-right",

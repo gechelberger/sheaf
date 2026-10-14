@@ -294,6 +294,15 @@ impl ToolbarPlace {
     }
 }
 
+/// What a toolbar right-click menu is about.
+#[derive(Debug, Clone, PartialEq)]
+enum ToolbarMenu {
+    /// The bar, and the layout index of the item clicked, if any.
+    Bar(Option<usize>),
+    /// A command right-clicked in a menu or the palette.
+    Command(String),
+}
+
 /// The toolbar being dragged by its grip.
 #[derive(Debug, Clone, Copy)]
 struct ToolbarDrag {
@@ -353,6 +362,17 @@ pub struct Workspace {
     toolbar_drag: Option<ToolbarDrag>,
     /// Bounds of the document area (toolbar included) last frame.
     doc_area: gpui::Bounds<Pixels>,
+    /// Per toolbar item drawn last frame, its index in the layout.
+    toolbar_from: Vec<usize>,
+    /// A right-click menu about the toolbar or a command.
+    toolbar_menu: Option<(ToolbarMenu, Point<Pixels>)>,
+    /// View > Customize Toolbar…, while open, with the layout to restore
+    /// on Cancel.
+    customize: Option<(
+        Entity<crate::toolbar_dialog::CustomizeToolbar>,
+        Subscription,
+        Vec<crate::toolbar::Entry>,
+    )>,
     _toolbar_sub: Subscription,
     /// Bounds of the dock area from the last frame, for splitter math.
     area: gpui::Bounds<Pixels>,
@@ -420,6 +440,18 @@ impl Workspace {
                 cx.new(|cx| {
                     let mut bar = MenuBar::new(window, cx);
                     bar.set_state(std::rc::Rc::new(crate::availability::menu_item_state));
+                    bar.set_on_secondary(std::rc::Rc::new(|action, at, window, cx| {
+                        let Some(id) = cx
+                            .global::<crate::commands::CommandRegistry>()
+                            .for_action(action)
+                            .map(|c| c.id.clone())
+                        else {
+                            return;
+                        };
+                        if let Some(ws) = window.root::<Workspace>().flatten() {
+                            ws.update(cx, |ws, cx| ws.open_command_menu(id, at, cx));
+                        }
+                    }));
                     bar
                 })
             }),
@@ -431,6 +463,9 @@ impl Workspace {
             ),
             toolbar_drag: None,
             doc_area: gpui::Bounds::default(),
+            toolbar_from: Vec::new(),
+            toolbar_menu: None,
+            customize: None,
             _toolbar_sub: toolbar_sub,
             area: gpui::Bounds::default(),
             timing,
@@ -908,6 +943,9 @@ impl Workspace {
         let sub = cx.subscribe_in(&palette, window, |ws, _, ev: &PaletteEvent, window, cx| {
             ws.palette = None;
             ws.focus_active(window, cx);
+            if let PaletteEvent::Context { id, position } = ev {
+                ws.open_command_menu(id.clone(), *position, cx);
+            }
             if let PaletteEvent::Run(action) = ev {
                 window.dispatch_action(action.boxed_clone(), cx);
             }
@@ -1286,7 +1324,11 @@ impl Workspace {
                 )
                 .child(panel_label(panel, cx))
         });
+        // Tabs that don't fit scroll (Shift+wheel) rather than spill
+        // under the document, where they'd catch its clicks.
         let header = div()
+            .id(("dock-tabs", side as usize))
+            .overflow_x_scroll()
             .h(px(DOCK_TAB_H))
             .flex_shrink_0()
             .flex()
@@ -1386,7 +1428,7 @@ impl Workspace {
 
         let spec = self.toolbar_spec(cx);
         let normal = doc.read(cx).presentation() == crate::presentation::Presentation::Normal;
-        if !self.settings.new_toolbar || !normal || !spec.visible {
+        if !self.toolbar_visible(cx) || !normal {
             return area.child(doc_el).into_any_element();
         }
         let place = self.toolbar_place;
@@ -1397,7 +1439,8 @@ impl Workspace {
             place.dock.orientation(place.orientation)
         };
         let facts = crate::availability::Facts::from_workspace(self, cx);
-        let (items, _) = crate::toolbar::resolve(&spec.items, &facts, Some(&doc), cx);
+        let (items, from) = crate::toolbar::resolve(&spec.items, &facts, Some(&doc), cx);
+        self.toolbar_from = from;
         let natural = self.toolbar.update(cx, |t, _| {
             t.set_orientation(orientation);
             t.set_items(items);
@@ -1531,6 +1574,203 @@ impl Workspace {
         crate::toolbar::describe(&items)
     }
 
+    /// Whether the toolbar is turned on (View > Toolbar).
+    pub(crate) fn toolbar_visible(&self, cx: &App) -> bool {
+        self.settings.new_toolbar && self.toolbar_spec(cx).visible
+    }
+
+    /// Change the toolbar's layout or visibility (every window's), and save.
+    fn edit_toolbar(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut crate::toolbar::Spec)) {
+        if !cx.has_global::<crate::toolbar::Toolbars>() {
+            cx.set_global(crate::toolbar::Toolbars::default());
+        }
+        f(cx.global_mut::<crate::toolbar::Toolbars>().main_mut());
+        crate::toolbar::save(cx);
+        cx.notify();
+    }
+
+    fn toggle_toolbar(&mut self, cx: &mut Context<Self>) {
+        self.edit_toolbar(cx, |s| s.visible = !s.visible);
+    }
+
+    /// Put a command at the end of the toolbar.
+    fn add_to_toolbar(&mut self, id: String, cx: &mut Context<Self>) {
+        self.edit_toolbar(cx, |s| {
+            s.visible = true;
+            s.items.push(crate::toolbar::Entry::item(&id));
+        });
+    }
+
+    /// Take every copy of a command off the toolbar.
+    fn remove_from_toolbar(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.edit_toolbar(cx, |s| {
+            s.items
+                .retain(|e| !matches!(e, crate::toolbar::Entry::Item { id: i, .. } if i == id))
+        });
+    }
+
+    fn on_toolbar_bar(&self, id: &str, cx: &App) -> bool {
+        self.toolbar_spec(cx)
+            .items
+            .iter()
+            .any(|e| matches!(e, crate::toolbar::Entry::Item { id: i, .. } if i == id))
+    }
+
+    /// Right-click on a command in a menu or the palette.
+    pub(crate) fn open_command_menu(
+        &mut self,
+        id: String,
+        pos: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.toolbar_menu = Some((ToolbarMenu::Command(id), pos));
+        cx.notify();
+    }
+
+    fn toggle_customize(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((_, _, original)) = self.customize.take() {
+            self.edit_toolbar(cx, |s| s.items = original);
+            self.focus_active(window, cx);
+            return;
+        }
+        let original = self.toolbar_spec(cx).items;
+        let dialog =
+            cx.new(|cx| crate::toolbar_dialog::CustomizeToolbar::new(original.clone(), window, cx));
+        let sub = cx.subscribe_in(
+            &dialog,
+            window,
+            |ws, _, ev: &crate::toolbar_dialog::CustomizeEvent, window, cx| match ev {
+                crate::toolbar_dialog::CustomizeEvent::Changed(items) => {
+                    let items = items.clone();
+                    if cx.has_global::<crate::toolbar::Toolbars>() {
+                        let spec = cx.global_mut::<crate::toolbar::Toolbars>().main_mut();
+                        spec.items = items;
+                        spec.visible = true;
+                    }
+                    cx.notify();
+                }
+                crate::toolbar_dialog::CustomizeEvent::Done(keep) => {
+                    if let Some((_, _, original)) = ws.customize.take() {
+                        if *keep {
+                            crate::toolbar::save(cx);
+                            cx.notify();
+                        } else {
+                            ws.edit_toolbar(cx, |s| s.items = original);
+                        }
+                    }
+                    ws.focus_active(window, cx);
+                }
+            },
+        );
+        self.customize = Some((dialog, sub, original));
+        cx.notify();
+    }
+
+    fn render_toolbar_menu(
+        &self,
+        menu: ToolbarMenu,
+        pos: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        use crate::toolbar::Dock;
+        let sep = || {
+            div()
+                .my_1()
+                .h(px(1.0))
+                .bg(theme::SEPARATOR)
+                .into_any_element()
+        };
+        let mut items: Vec<AnyElement> = Vec::new();
+        match menu {
+            ToolbarMenu::Command(id) => {
+                if self.on_toolbar_bar(&id, cx) {
+                    items.push(menu_item(
+                        "tbm-remove",
+                        "Remove from Toolbar",
+                        cx,
+                        move |ws, _, cx| ws.remove_from_toolbar(&id, cx),
+                    ));
+                } else {
+                    items.push(menu_item(
+                        "tbm-add",
+                        "Add to Toolbar",
+                        cx,
+                        move |ws, _, cx| ws.add_to_toolbar(id.clone(), cx),
+                    ));
+                }
+            }
+            ToolbarMenu::Bar(ix) => {
+                if let Some(ix) = ix {
+                    items.push(menu_item(
+                        "tbm-remove",
+                        "Remove from Toolbar",
+                        cx,
+                        move |ws, _, cx| {
+                            ws.edit_toolbar(cx, |s| {
+                                if ix < s.items.len() {
+                                    s.items.remove(ix);
+                                }
+                            })
+                        },
+                    ));
+                    items.push(sep());
+                }
+                items.push(menu_item(
+                    "tbm-customize",
+                    "Customize Toolbar…",
+                    cx,
+                    |ws, window, cx| ws.toggle_customize(window, cx),
+                ));
+                items.push(sep());
+                let place = self.toolbar_place;
+                for (dock, label) in [
+                    (Dock::Top, "Dock at Top"),
+                    (Dock::Bottom, "Dock at Bottom"),
+                    (Dock::Left, "Dock at Left"),
+                    (Dock::Right, "Dock at Right"),
+                    (Dock::Floating, "Float over Document"),
+                ] {
+                    if dock != place.dock {
+                        items.push(menu_item(
+                            ("tbm-dock", dock as usize),
+                            label,
+                            cx,
+                            move |ws, _, cx| {
+                                ws.toolbar_place.dock = dock;
+                                ws.store_toolbar_place(cx);
+                            },
+                        ));
+                    }
+                }
+                if place.dock == Dock::Floating {
+                    let vertical = place.orientation == sheaf_ui::toolbar::Orientation::Vertical;
+                    items.push(menu_item(
+                        "tbm-orient",
+                        if vertical {
+                            "Lay Out Across"
+                        } else {
+                            "Lay Out Down"
+                        },
+                        cx,
+                        move |ws, _, cx| {
+                            ws.toolbar_place.orientation = if vertical {
+                                sheaf_ui::toolbar::Orientation::Horizontal
+                            } else {
+                                sheaf_ui::toolbar::Orientation::Vertical
+                            };
+                            ws.store_toolbar_place(cx);
+                        },
+                    ));
+                }
+                items.push(sep());
+                items.push(menu_item("tbm-hide", "Hide Toolbar", cx, |ws, _, cx| {
+                    ws.toggle_toolbar(cx)
+                }));
+            }
+        }
+        self.popup_menu("toolbar-menu", pos, items, cx)
+    }
+
     /// The toolbar's layout (`toolbar.json`, shared by every window).
     fn toolbar_spec(&self, cx: &App) -> crate::toolbar::Spec {
         cx.try_global::<crate::toolbar::Toolbars>()
@@ -1550,7 +1790,10 @@ impl Workspace {
                 self.focus_active(window, cx);
                 window.dispatch_action(action.boxed_clone(), cx);
             }
-            sheaf_ui::toolbar::ToolbarEvent::Context { .. } => {}
+            sheaf_ui::toolbar::ToolbarEvent::Context { item, position } => {
+                let ix = item.and_then(|i| self.toolbar_from.get(i).copied());
+                self.toolbar_menu = Some((ToolbarMenu::Bar(ix), *position));
+            }
             sheaf_ui::toolbar::ToolbarEvent::Grab { position, offset } => {
                 self.toolbar_drag = Some(ToolbarDrag {
                     offset: *offset,
@@ -1579,6 +1822,7 @@ impl Workspace {
                         .occlude()
                         .on_mouse_down_out(cx.listener(|ws, _, _, cx| {
                             ws.dock_menu = None;
+                            ws.toolbar_menu = None;
                             cx.notify();
                         }))
                         .min_w(px(160.0))
@@ -1638,7 +1882,12 @@ impl Render for Workspace {
         let menu = self
             .dock_menu
             .clone()
-            .map(|(panel, pos)| self.render_dock_menu(panel, pos, cx));
+            .map(|(panel, pos)| self.render_dock_menu(panel, pos, cx))
+            .or_else(|| {
+                self.toolbar_menu
+                    .clone()
+                    .map(|(m, pos)| self.render_toolbar_menu(m, pos, cx))
+            });
 
         // Remember where the dock area is so splitter drags can be resolved
         // against it next frame.
@@ -1761,6 +2010,10 @@ impl Render for Workspace {
                 cx.listener(|ws, _: &RecognizeText, window, cx| ws.toggle_ocr_dialog(window, cx)),
             )
             .on_action(cx.listener(|ws, _: &crate::Print, window, cx| ws.toggle_print(window, cx)))
+            .on_action(cx.listener(|ws, _: &crate::ToggleToolbar, _, cx| ws.toggle_toolbar(cx)))
+            .on_action(cx.listener(|ws, _: &crate::CustomizeToolbar, window, cx| {
+                ws.toggle_customize(window, cx)
+            }))
             .on_action(
                 cx.listener(|ws, _: &crate::ExportPages, window, cx| ws.toggle_export(window, cx)),
             )
@@ -1872,6 +2125,11 @@ impl Render for Workspace {
                 self.export
                     .as_ref()
                     .map(|(d, _)| deferred(d.clone()).with_priority(2)),
+            )
+            .children(
+                self.customize
+                    .as_ref()
+                    .map(|(d, _, _)| deferred(d.clone()).with_priority(2)),
             );
         #[cfg(feature = "plugins")]
         let content = content
@@ -1931,6 +2189,7 @@ fn menu_item(
         .hover(|s| s.bg(theme::HOVER))
         .on_click(cx.listener(move |ws, _, window, cx| {
             ws.dock_menu = None;
+            ws.toolbar_menu = None;
             on_click(ws, window, cx);
             cx.notify();
         }))

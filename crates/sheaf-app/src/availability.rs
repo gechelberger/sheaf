@@ -76,6 +76,7 @@ pub struct Facts {
     pub docks: [bool; 3],
     /// Every dock is hidden (F4).
     pub all_hidden: bool,
+    pub toolbar: bool,
 }
 
 impl Facts {
@@ -96,6 +97,7 @@ impl Facts {
             panels: ws.visible_panels(cx),
             docks: Side::ALL.map(|s| ws.dock_shown(s)),
             all_hidden: ws.all_hidden(),
+            toolbar: ws.toolbar_visible(cx),
             ..Facts::default()
         };
         let Some(view) = ws.doc() else {
@@ -265,6 +267,7 @@ pub fn builtin(id: &str) -> Builtin {
         "workspace::ToggleLeftDock" => (&[], None, Some(|f| f.dock(Side::Left))),
         "workspace::ToggleRightDock" => (&[], None, Some(|f| f.dock(Side::Right))),
         "workspace::ToggleBottomDock" => (&[], None, Some(|f| f.dock(Side::Bottom))),
+        "workspace::ToggleToolbar" => (&[], None, Some(|f| f.toolbar)),
         "workspace::RecognizeText" => (DOC, Some(|f| !f.ocr_running), None),
         "docview::CancelOcr" => (DOC, Some(|f| f.ocr_running), None),
         "tools::ToolSelect" => (DOC, None, Some(|f| f.tool == Some(Tool::Select))),

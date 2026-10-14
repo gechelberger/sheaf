@@ -89,6 +89,8 @@ an image element does not inherit the parent element's color.
 | [go-to-page](go-to-page/icon.svg) | Go to page | `GoToPage` |
 | [attachments](attachments/icon.svg) | Attachments | `ShowAttachments` |
 | [layers](layers/icon.svg) | Layers | `ShowLayers` |
+| [toolbar](toolbar/icon.svg) | Toolbar | `ToggleToolbar` |
+| [customize-toolbar](customize-toolbar/icon.svg) | Customize toolbar | `CustomizeToolbar` |
 
 ## Pattern-search alternatives
 
