@@ -8,14 +8,17 @@ use sheaf_doc::{Document, FlatOutlineItem, SourceInfo};
 use sheaf_render::Renderer;
 use sheaf_render::pdfium::PdfiumEngine;
 
-/// `path` as a document: its pages, bookmarks and sheaf's own marks, as
-/// the app shows them on open.
+/// `path` as a document: its pages, bookmarks, page labels and sheaf's
+/// own marks, as the app shows them on open.
 pub fn open(path: &Path, password: Option<&str>) -> Result<Document> {
     let (source, outline) = describe(path, password)?;
     let mut doc = Document::new(source, &outline, sheaf_doc::history::default_policy());
-    let (annots, _) = sheaf_doc::file::read_open(path, password)?;
+    let (annots, facts) = sheaf_doc::file::read_open(path, password)?;
     if !annots.sheaf.is_empty() {
         doc.set_initial_annots(annots.sheaf)?;
+    }
+    if let Some(ranges) = &facts.label_ranges {
+        doc.set_initial_labels(ranges)?;
     }
     Ok(doc)
 }

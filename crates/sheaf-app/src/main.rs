@@ -23,6 +23,7 @@ mod goto;
 mod insert_dialog;
 mod jobs;
 mod keymap;
+mod labels_dialog;
 mod layers_panel;
 mod markup_tools;
 mod menus;
@@ -181,6 +182,7 @@ actions!(
         InsertFromImages,
         ReplacePages,
         CropPages,
+        PageLabels,
         ToggleToolbar,
         CustomizeToolbar
     ]
@@ -328,6 +330,8 @@ fn main() {
             let spd = Some(split_dialog::KEY_CONTEXT);
             let ind = Some(insert_dialog::KEY_CONTEXT);
             let crd = Some(crop_dialog::KEY_CONTEXT);
+            let lbd = Some(labels_dialog::KEY_CONTEXT);
+            let lbd_keys = Some("LabelsDialog && !TextInput");
             let crd_keys = Some("CropDialog && !TextInput");
             let ind_keys = Some("InsertDialog && !TextInput");
             let spd_keys = Some("SplitDialog && !TextInput");
@@ -457,6 +461,12 @@ fn main() {
                 KeyBinding::new("right", DialogRight, crd_keys),
                 KeyBinding::new("enter", DialogRun, crd_keys),
                 KeyBinding::new("escape", DialogCancel, crd_keys),
+                KeyBinding::new("tab", DialogNext, lbd),
+                KeyBinding::new("shift-tab", DialogPrev, lbd),
+                KeyBinding::new("left", DialogLeft, lbd_keys),
+                KeyBinding::new("right", DialogRight, lbd_keys),
+                KeyBinding::new("enter", DialogRun, lbd_keys),
+                KeyBinding::new("escape", DialogCancel, lbd_keys),
                 KeyBinding::new("tab", DialogNext, pd),
                 KeyBinding::new("shift-tab", DialogPrev, pd),
                 KeyBinding::new("left", DialogLeft, pd_keys),

@@ -281,6 +281,11 @@ pub fn info(id: &str) -> Option<Info> {
                 "add pages",
             ],
         ),
+        "workspace::PageLabels" => (
+            "page-labels",
+            "Number pages your way: roman numerals for the front matter, a prefix like A- for exhibits, or a new start.",
+            &["numbering", "roman", "prefix", "exhibit", "page numbers"],
+        ),
         "workspace::CropPages" => (
             "crop-pages",
             "Crop pages by margins, or trim them to their content. What's cropped is hidden, not deleted.",

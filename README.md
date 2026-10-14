@@ -188,7 +188,7 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 | Replace pages | ✅ Document > Replace Pages…: pages of this document with a run of another PDF's; bookmarks and comments on them stay |
 | Insert from scanner | 📋 M5 |
 | Crop pages | ✅ Document > Crop Pages…: margins (in, mm or pt, as the page is shown) or trim white margins, on the current, selected, all or a range of pages; marks and OCR text stay on their content; saved as `/CropBox` |
-| Page labels (roman numerals, prefixes) | 📋 |
+| Page labels (roman numerals, prefixes) | ✅ Document > Page Labels…: style, prefix and start for a run of pages; the pages after keep their labels; labels follow their pages through reorders and are written as `/PageLabels`; shown in the status bar and thumbnails, and Go to Page takes them |
 | Headers / footers / Bates numbering | 📋 |
 | Watermarks / backgrounds | 📋 |
 

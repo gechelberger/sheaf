@@ -105,9 +105,33 @@ pub struct DocState {
     /// page content and `rebase_to_saved` drops them, so presence here
     /// means unsaved (see `text_layer`).
     pub text_layers: im::HashMap<PageId, Arc<TextLayer>>,
+    /// Page labels, anchored to the pages ranges start at. None: the file
+    /// has none, or they haven't been read.
+    pub labels: Option<Vector<crate::labels::LabelSpec>>,
 }
 
 impl DocState {
+    /// Every page's label, when the document has page labels.
+    pub fn page_labels(&self) -> Option<Vec<String>> {
+        let specs = self.labels.as_ref()?;
+        let ids: Vec<PageId> = self.pages.iter().map(|p| p.id).collect();
+        let ranges = crate::labels::resolve_specs(&specs.iter().cloned().collect::<Vec<_>>(), &ids);
+        if ranges.is_empty() {
+            return None;
+        }
+        Some(crate::labels::labels_for(&ranges, ids.len() as u32))
+    }
+
+    /// The label ranges by page position, when there are labels.
+    pub fn label_ranges(&self) -> Option<Vec<crate::labels::LabelRange>> {
+        let specs = self.labels.as_ref()?;
+        let ids: Vec<PageId> = self.pages.iter().map(|p| p.id).collect();
+        Some(crate::labels::resolve_specs(
+            &specs.iter().cloned().collect::<Vec<_>>(),
+            &ids,
+        ))
+    }
+
     pub fn annots_on(&self, page: PageId) -> Option<&Vector<Annot>> {
         self.annots.get(&page)
     }
@@ -319,6 +343,10 @@ pub enum Edit {
     RebasePages {
         pages: Vec<Rebase>,
     },
+    /// Replace the page labels. Empty removes them.
+    SetPageLabels {
+        ranges: Vec<crate::labels::LabelSpec>,
+    },
 }
 
 /// One page of [`Edit::RebasePages`].
@@ -383,6 +411,8 @@ pub struct Snapshot {
     pub sources: HashMap<SourceId, Arc<SourceInfo>>,
     /// The outline differs from what's in the primary file.
     pub outline_dirty: bool,
+    /// The page labels differ from what's in the primary file.
+    pub labels_dirty: bool,
     /// Pages whose markup differs from what's in the primary file.
     pub annots_dirty: HashSet<PageId>,
 }
@@ -407,6 +437,7 @@ pub struct Document {
     next_job: u64,
     /// Outline as it exists in the primary file on disk.
     saved_outline: Vector<OutlineNode>,
+    saved_labels: Option<Vector<crate::labels::LabelSpec>>,
     /// Markup as it exists in the primary file on disk.
     saved_annots: im::HashMap<PageId, Vector<Annot>>,
 }
@@ -432,6 +463,7 @@ impl Document {
             next_annot: 1,
             next_job: 1,
             saved_outline: Vector::new(),
+            saved_labels: None,
             saved_annots: im::HashMap::new(),
         };
         let pages: Vector<PageRef> = (0..primary.page_count)
@@ -453,6 +485,7 @@ impl Document {
                 outline,
                 annots: im::HashMap::new(),
                 text_layers: im::HashMap::new(),
+                labels: None,
             },
             marginal_bytes: 0,
             job: None,
@@ -502,6 +535,19 @@ impl Document {
 
     /// Markup read back from the primary file (annotations sheaf wrote
     /// earlier), keyed by source page index. Only valid before any edit.
+    /// The file's page labels, read after open: ranges by page index.
+    pub fn set_initial_labels(&mut self, ranges: &[crate::labels::LabelRange]) -> Result<()> {
+        if self.history.len() != 1 {
+            bail!("page labels can only be set before editing");
+        }
+        let ids: Vec<PageId> = self.history[0].state.pages.iter().map(|p| p.id).collect();
+        let specs: Vector<_> = crate::labels::to_specs(ranges, &ids).into_iter().collect();
+        let specs = (!specs.is_empty()).then_some(specs);
+        self.history[0].state.labels = specs.clone();
+        self.saved_labels = specs;
+        Ok(())
+    }
+
     pub fn set_initial_annots(&mut self, by_index: HashMap<u32, Vec<Annot>>) -> Result<()> {
         if self.history.len() != 1 {
             bail!("annotations can only be loaded before editing");
@@ -553,6 +599,7 @@ impl Document {
             primary: self.primary,
             sources: self.sources.clone(),
             outline_dirty: self.state().outline != self.saved_outline,
+            labels_dirty: self.state().labels != self.saved_labels,
             annots_dirty: self.annots_dirty_pages(),
         }
     }
@@ -582,6 +629,7 @@ impl Document {
             .collect();
         self.saved_outline = self.history[self.cursor].state.outline.clone();
         self.saved_annots = self.history[self.cursor].state.annots.clone();
+        self.saved_labels = self.history[self.cursor].state.labels.clone();
         self.saved = Some(self.cursor);
         id
     }
@@ -1185,6 +1233,7 @@ impl Document {
                                 outline: st.outline.clone(),
                                 annots: st.annots.clone(),
                                 text_layers: st.text_layers.clone(),
+                                labels: st.labels.clone(),
                             };
                             let prev_node = flat[..my_pos]
                                 .iter()
@@ -1332,6 +1381,9 @@ impl Document {
                 for id in ids {
                     st.text_layers.remove(&id);
                 }
+            }
+            Edit::SetPageLabels { ranges } => {
+                st.labels = (!ranges.is_empty()).then(|| ranges.into_iter().collect());
             }
             Edit::RebasePages { pages } => {
                 let pos = st.page_positions();

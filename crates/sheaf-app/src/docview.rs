@@ -166,8 +166,8 @@ pub(crate) struct Doc {
     /// Pages of the primary file whose sheaf-written marks PDFium is told
     /// not to draw; repeated when its renderer is reopened.
     pub(crate) sheaf_pages: Vec<u32>,
-    /// The primary file's page labels, by its page index.
-    pub(crate) labels: Option<(SourceId, Vec<String>)>,
+    /// Every page's label (from the model), and the version it's for.
+    pub(crate) labels: std::cell::RefCell<(u64, Option<std::sync::Arc<Vec<String>>>)>,
     /// With two panes: the top pane's share of the height.
     pub(crate) split: f32,
     /// The split divider is being dragged.
@@ -722,7 +722,7 @@ impl DocView {
             pending_connector: None,
             foreign_annots: Vec::new(),
             selected_foreign: None,
-            labels: None,
+            labels: std::cell::RefCell::new((u64::MAX, None)),
             attachments: Vec::new(),
             collection: None,
             attachment_selected: None,
@@ -1543,8 +1543,13 @@ impl DocView {
                     );
                 }
                 doc.foreign_annots = foreign;
-                let primary = doc.model.primary();
-                doc.set_labels(primary, facts.labels);
+                if let Some(ranges) = &facts.label_ranges
+                    && let Err(e) = doc.model.set_initial_labels(ranges)
+                {
+                    log::warn!("page labels arrived after edits; ignored: {e:#}");
+                }
+                // The labels changed under the same version.
+                doc.labels.borrow_mut().0 = u64::MAX;
                 doc.attachments = facts.attachments;
                 doc.collection = facts.collection;
                 doc.set_layers(facts.layers);

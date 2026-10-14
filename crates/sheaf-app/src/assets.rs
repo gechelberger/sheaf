@@ -70,6 +70,7 @@ const FILES: &[(&str, &[u8])] = icons![
     "note",
     "open",
     "outline",
+    "page-labels",
     "pattern-search",
     "pencil",
     "prev-page",

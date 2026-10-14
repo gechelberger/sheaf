@@ -340,6 +340,7 @@ pub struct Workspace {
     insert_dialog: Option<(Entity<crate::insert_dialog::InsertDialog>, Subscription)>,
     replace_dialog: Option<(Entity<crate::insert_dialog::ReplaceDialog>, Subscription)>,
     crop: Option<(Entity<crate::crop_dialog::CropDialog>, Subscription)>,
+    labels: Option<(Entity<crate::labels_dialog::LabelsDialog>, Subscription)>,
     /// File > Print, while open.
     print: Option<(Entity<crate::print_dialog::PrintDialog>, Subscription)>,
     /// File > Properties, while open.
@@ -439,6 +440,7 @@ impl Workspace {
             insert_dialog: None,
             replace_dialog: None,
             crop: None,
+            labels: None,
             print: None,
             properties: None,
             ocr_dialog: None,
@@ -1252,6 +1254,56 @@ impl Workspace {
             .ok();
         })
         .detach();
+    }
+
+    fn toggle_labels(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.labels.take().is_some() {
+            self.focus_active(window, cx);
+            cx.notify();
+            return;
+        }
+        let Some(doc) = self.doc().cloned() else {
+            return;
+        };
+        let (count, targets, has) = doc.read_with(cx, |d, _| {
+            let (count, targets) = d.target_indexes();
+            (count, targets, d.has_page_labels())
+        });
+        if count == 0 {
+            return;
+        }
+        let dialog =
+            cx.new(|cx| crate::labels_dialog::LabelsDialog::new(count, &targets, has, window, cx));
+        let sub = cx.subscribe_in(
+            &dialog,
+            window,
+            |ws, _, ev: &crate::labels_dialog::LabelsEvent, window, cx| {
+                use crate::labels_dialog::LabelsEvent;
+                ws.labels = None;
+                ws.focus_active(window, cx);
+                if let Some(doc) = ws.doc().cloned() {
+                    match ev {
+                        LabelsEvent::Apply {
+                            from,
+                            to,
+                            style,
+                            prefix,
+                            first,
+                        } => {
+                            let change = (*from, *to, *style, prefix.clone(), *first);
+                            doc.update(cx, |d, cx| d.set_page_labels(Some(change), cx));
+                        }
+                        LabelsEvent::RemoveAll => {
+                            doc.update(cx, |d, cx| d.set_page_labels(None, cx));
+                        }
+                        LabelsEvent::Dismiss => {}
+                    }
+                }
+                cx.notify();
+            },
+        );
+        self.labels = Some((dialog, sub));
+        cx.notify();
     }
 
     fn toggle_crop(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2383,6 +2435,9 @@ impl Render for Workspace {
                 cx.listener(|ws, _: &crate::CropPages, window, cx| ws.toggle_crop(window, cx)),
             )
             .on_action(
+                cx.listener(|ws, _: &crate::PageLabels, window, cx| ws.toggle_labels(window, cx)),
+            )
+            .on_action(
                 cx.listener(|ws, a: &crate::recent::OpenRecent, window, cx| {
                     ws.open_recent(a.path.clone(), window, cx)
                 }),
@@ -2518,6 +2573,11 @@ impl Render for Workspace {
             )
             .children(
                 self.crop
+                    .as_ref()
+                    .map(|(d, _)| deferred(d.clone()).with_priority(2)),
+            )
+            .children(
+                self.labels
                     .as_ref()
                     .map(|(d, _)| deferred(d.clone()).with_priority(2)),
             )

@@ -101,10 +101,16 @@ fn subset(model: &Snapshot, ids: &[PageId], outline: bool) -> Option<Snapshot> {
             },
             annots,
             text_layers,
+            labels: if outline {
+                model.state.labels.clone()
+            } else {
+                None
+            },
         },
         primary: model.primary,
         sources: model.sources.clone(),
         outline_dirty: true,
+        labels_dirty: true,
         annots_dirty: HashSet::new(),
     })
 }
@@ -467,11 +473,27 @@ fn build_rewrite(model: &Snapshot, clean: bool) -> Result<Pdf> {
     // (serialization happens in `finish`)
 
     let catalog_id = pdf.trailer.get(b"Root")?.as_reference()?;
+    // Labels the model keeps follow their pages.
+    let labels_tree = state
+        .label_ranges()
+        .filter(|r| !r.is_empty())
+        .map(|r| pdf.add_object(crate::labels::number_tree(&r)));
+    let identity = is_identity(model, &sources[&primary_id]);
     let catalog = pdf.get_dictionary_mut(catalog_id)?;
     catalog.set("Pages", pages_id);
-    // Page labels index by position; they'd be wrong after any reorder.
-    if !is_identity(model, &sources[&primary_id]) {
-        catalog.remove(b"PageLabels");
+    match labels_tree {
+        Some(id) => catalog.set("PageLabels", id),
+        // Removed.
+        None if model.labels_dirty => {
+            catalog.remove(b"PageLabels");
+        }
+        // Never read into the model: the file's index by position, so
+        // they'd be wrong after any reorder.
+        None => {
+            if !identity {
+                catalog.remove(b"PageLabels");
+            }
+        }
     }
     catalog.remove(b"Outlines");
     if !state.outline.is_empty() {
@@ -728,7 +750,7 @@ fn remap(
 }
 
 /// PDF text string: PDFDocEncoding when ASCII, otherwise UTF-16BE with BOM.
-fn text_string(s: &str) -> Object {
+pub(crate) fn text_string(s: &str) -> Object {
     if s.is_ascii() {
         Object::String(s.as_bytes().to_vec(), StringFormat::Literal)
     } else {
@@ -2175,6 +2197,72 @@ mod tests {
 
     /// The print file has just the chosen pages, no bookmarks, and its marks
     /// drawn in or left out.
+    /// Labels set in the model follow their pages through a reorder, by
+    /// rewrite and by incremental save, and removing them removes them.
+    #[test]
+    fn page_labels_are_written_and_follow_pages() {
+        use crate::labels::{LabelSpec, Style, label_ranges, labels_for};
+        let dir = tempdir();
+        let a = make_pdf(&dir, "labels.pdf", "L", 4, &[]);
+        let bytes = std::fs::metadata(&a).unwrap().len() as usize;
+        let mut model = Document::new(
+            SourceInfo {
+                bytes,
+                ..info(&a, 4)
+            },
+            &[],
+            crate::history::default_policy(),
+        );
+        let ids: Vec<PageId> = model.state().pages.iter().map(|p| p.id).collect();
+        let spec = |id, style, first| LabelSpec {
+            start: id,
+            style,
+            prefix: String::new(),
+            first,
+        };
+        model
+            .apply(
+                Edit::SetPageLabels {
+                    ranges: vec![
+                        spec(ids[0], Style::LowerRoman, 1),
+                        spec(ids[2], Style::Decimal, 1),
+                    ],
+                },
+                "labels",
+            )
+            .unwrap();
+        let read = |p: &Path| {
+            let pdf = Pdf::load(p).unwrap();
+            label_ranges(&pdf).map(|r| labels_for(&r, 4))
+        };
+        // Incremental, in place.
+        assert_eq!(
+            save_to_path(&model.snapshot(), &a).unwrap(),
+            Strategy::Incremental
+        );
+        assert_eq!(read(&a).unwrap(), vec!["i", "ii", "1", "2"]);
+        // Move the decimal range's first page to the front; rewrite.
+        model
+            .apply(
+                Edit::MovePages {
+                    ids: vec![ids[2]],
+                    before: Some(ids[0]),
+                },
+                "move",
+            )
+            .unwrap();
+        let out = dir.join("moved.pdf");
+        rewrite_to_path(&model.snapshot(), &out).unwrap();
+        assert_eq!(read(&out).unwrap(), vec!["1", "i", "ii", "iii"]);
+        // Removed.
+        model
+            .apply(Edit::SetPageLabels { ranges: vec![] }, "none")
+            .unwrap();
+        let out = dir.join("none.pdf");
+        rewrite_to_path(&model.snapshot(), &out).unwrap();
+        assert_eq!(read(&out), None);
+    }
+
     /// Displayed positions start at the CropBox's corner, as viewers draw.
     #[test]
     fn geometry_follows_the_crop_box() {

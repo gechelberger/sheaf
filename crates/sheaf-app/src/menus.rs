@@ -233,6 +233,7 @@ fn builtin_menus() -> Vec<(&'static str, Vec<Item>)> {
                 ),
                 item("Re&place Pages…", ReplacePages),
                 item("Cr&op Pages…", CropPages),
+                item("Page &Labels…", PageLabels),
                 item("Du&plicate Pages", DuplicatePages),
                 item("E&xtract Pages…", ExtractPages),
                 item("&Split Document…", SplitDocument),

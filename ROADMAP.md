@@ -141,7 +141,7 @@ portal. Reasons in [`todos/m7.md`](todos/m7.md).
 - Insert blank page; insert pages from images (shares M5 image import).
 - Replace pages (Acrobat's Replace Pages).
 - Crop pages (CropBox), with the option to apply to a range.
-- Page labels: edit numbering style, prefix, start.
+- ✅ Page labels: edit numbering style, prefix, start.
 - Headers / footers: add, update, remove (with date, page number, file name).
 - Bates numbering.
 - Watermarks and backgrounds (text or image, opacity, behind/in front).

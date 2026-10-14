@@ -343,3 +343,52 @@ impl DocView {
         }
     }
 }
+
+impl DocView {
+    /// Document > Page Labels: number pages `from..=to` with `style`,
+    /// keeping the numbering after them; or remove every label.
+    pub(crate) fn set_page_labels(
+        &mut self,
+        change: Option<(usize, usize, sheaf_doc::labels::Style, String, u32)>,
+        cx: &mut Context<Self>,
+    ) {
+        use sheaf_doc::labels;
+        let State::Ready(doc) = &mut self.state else {
+            return;
+        };
+        let st = doc.model.state();
+        let ids: Vec<PageId> = st.pages.iter().map(|p| p.id).collect();
+        let (specs, label) = match change {
+            None => (Vec::new(), "Remove page labels".to_string()),
+            Some((from, to, style, prefix, first)) => {
+                let current = st.label_ranges().unwrap_or_default();
+                let ranges = labels::apply(
+                    &current,
+                    ids.len() as u32,
+                    from as u32,
+                    to as u32,
+                    style,
+                    &prefix,
+                    first,
+                );
+                (labels::to_specs(&ranges, &ids), "Page labels".to_string())
+            }
+        };
+        match doc
+            .model
+            .apply(Edit::SetPageLabels { ranges: specs }, &label)
+        {
+            Ok(out) => {
+                doc.touched();
+                self.after_model_change(label, out, cx);
+            }
+            Err(e) => self.set_notice(format!("Page labels: {e:#}"), cx),
+        }
+    }
+}
+
+impl DocView {
+    pub(crate) fn has_page_labels(&self) -> bool {
+        matches!(&self.state, State::Ready(doc) if doc.model.state().labels.is_some())
+    }
+}
