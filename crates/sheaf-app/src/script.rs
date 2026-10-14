@@ -7,7 +7,7 @@
 //! - `{"keys": "ctrl-shift-k escape"}`: keystrokes, space-separated.
 //! - `{"type": "text"}`: type text into whatever has focus.
 //! - `{"click": [x, y]}`, `{"drag": [x1, y1, x2, y2], "shift": true}`: in
-//!   window coordinates (logical px).
+//!   window coordinates (logical px). `{"hover": [x, y]}` only moves.
 //! - `{"drag_page": [x1, y1, x2, y2], "page": 0, "shift": true}`: in page
 //!   points (the page as the file draws it), on page index `page`.
 //! - `{"form": {"field-id": value, ...}}`: fill the open plugin form and
@@ -17,7 +17,7 @@
 //!   two minutes) until `<script>.go` contains that name, so a harness can
 //!   take a screenshot first.
 //! - `{"dump": "outline" | "notice" | "annots" | "pages" | "panels" |
-//!   "plugins" | "region"}`: print state as `SCRIPT <what>: …` lines.
+//!   "plugins" | "region" | "view" | "focus"}`: print state as `SCRIPT <what>: …` lines.
 //! - `{"quit": true}`
 //!
 //! Output goes to stderr. Never part of normal use.
@@ -79,6 +79,11 @@ async fn run_step(
         return Ok(());
     }
     if let Some(name) = step.get("checkpoint").and_then(Value::as_str) {
+        // Synthetic input doesn't always schedule a frame; make sure the
+        // screenshot sees the current state.
+        cx.update_window(handle.into(), |_, window, _| window.refresh())
+            .map_err(|e| e.to_string())?;
+        pause(cx, 300).await;
         eprintln!("SCRIPT checkpoint {name}");
         let started = Instant::now();
         while started.elapsed() < Duration::from_secs(120) {
@@ -176,7 +181,21 @@ async fn run_step(
             .map(|v| v.as_f64().map(|f| f as f32))
             .collect()
     };
-    if let Some(c) = coords("click") {
+    if let Some(c) = coords("hover") {
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.dispatch_event(
+                PlatformInput::MouseMove(MouseMoveEvent {
+                    position: point(px(c[0]), px(c[1])),
+                    pressed_button: None,
+                    modifiers: Modifiers::default(),
+                }),
+                cx,
+            );
+        })
+        .map_err(|e| e.to_string())?;
+        pause(cx, 100).await;
+        Ok(())
+    } else if let Some(c) = coords("click") {
         mouse(handle, cx, (c[0], c[1]), (c[0], c[1]), shift).await
     } else if let Some(c) = coords("drag") {
         mouse(handle, cx, (c[0], c[1]), (c[2], c[3]), shift).await
@@ -226,7 +245,8 @@ async fn mouse(
         }),
         cx,
     )?;
-    pause(cx, 30).await;
+    // Let a frame paint, so hover and hitboxes are up to date.
+    pause(cx, 100).await;
     send(
         PlatformInput::MouseDown(MouseDownEvent {
             button: MouseButton::Left,
@@ -237,7 +257,9 @@ async fn mouse(
         }),
         cx,
     )?;
-    let steps = 12;
+    // A click is a press and release in place: moving with the button
+    // down, even by nothing, can start a drag on draggable rows.
+    let steps = if from == to { 0 } else { 12 };
     for i in 1..=steps {
         let t = i as f32 / steps as f32;
         let p = (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t);
@@ -251,6 +273,9 @@ async fn mouse(
         )?;
         pause(cx, 25).await;
     }
+    // GPUI listens for a click's release only from the frame after the
+    // press, so let one paint.
+    pause(cx, 100).await;
     send(
         PlatformInput::MouseUp(MouseUpEvent {
             button: MouseButton::Left,
@@ -335,6 +360,14 @@ impl Workspace {
         match what {
             "notice" => eprintln!("SCRIPT notice: {:?}", d.notice),
             "pages" => eprintln!("SCRIPT pages: {}", st.pages.len()),
+            "view" => eprintln!(
+                "SCRIPT view: page {} {:?} selected {:?}",
+                view.current_page() + 1,
+                view.current_view().map(|(_, v)| v),
+                d.outline_selected
+                    .and_then(|id| st.outline_flat().into_iter().find(|(_, n)| n.id == id))
+                    .map(|(_, n)| n.title.clone())
+            ),
             "region" => eprintln!(
                 "SCRIPT region: {:?}",
                 view.region.as_ref().map(|r| (r.page, r.rect()))
