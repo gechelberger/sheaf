@@ -174,6 +174,7 @@ fn ctx(d: &Document) -> CallContext {
         }),
         ui: None,
         presets: Vec::new(),
+        progress: None,
     }
 }
 
@@ -464,6 +465,7 @@ fn tax_form_bookmarks_example() {
         }),
         ui: None,
         presets: Vec::new(),
+        progress: None,
     };
     let out = run(&p, "scan", None, ctx(&d)).unwrap();
     let b = &out.batches[0];
@@ -663,6 +665,7 @@ fn amount_crossref_bundled_plugin() {
         }),
         ui: Some(ui.clone()),
         presets: Vec::new(),
+        progress: None,
     };
     let all: Vec<_> = (0..3).map(|i| d.page(i).unwrap().id).collect();
     *ui.answer.lock().unwrap() = Some(vec![
@@ -920,6 +923,7 @@ fn bookmark_from_pattern_bundled_plugin() {
             name: "Invoice".into(),
             regex: r"Invoice (\d+)".into(),
         }],
+        progress: None,
     };
     let all: Vec<_> = (0..3).map(|i| d.page(i).unwrap().id).collect();
     let answer = |source: usize, template: &str, placement: usize| {
@@ -1051,6 +1055,7 @@ fn subtotal_bundled_plugin() {
         }),
         ui: Some(ui.clone()),
         presets: Vec::new(),
+        progress: None,
     };
     let region = |x: f32, y: f32, w: f32, h: f32| {
         Call::Event(DocEvent::Region {
@@ -1159,6 +1164,7 @@ fn currency_convert_bundled_plugin() {
         }),
         ui: Some(ui.clone()),
         presets: Vec::new(),
+        progress: None,
     };
     let answer = |date: &str| {
         Some(vec![
@@ -1340,6 +1346,7 @@ fn duplicate_pages_bundled_plugin() {
         }),
         ui: Some(ui.clone()),
         presets: Vec::new(),
+        progress: None,
     };
     let tolerant = || {
         Some(vec![FieldAnswer {
@@ -1394,4 +1401,44 @@ fn duplicate_pages_bundled_plugin() {
         ui.notices.lock().unwrap().last().unwrap(),
         "No duplicate pages found"
     );
+}
+
+/// A command's progress tasks report under the call's tracker, and
+/// cancelling it stops the command at its next check.
+#[test]
+fn progress_reports_and_cancels() {
+    let p = load("progress", Limits::default());
+    let d = doc(1);
+    // Runs to the end without a tracker.
+    run(&p, "count", None, ctx(&d)).unwrap();
+
+    let tracker = sheaf_progress::Tracker::new();
+    let mut c = ctx(&d);
+    c.progress = Some(tracker.clone());
+    let rx = p.run_command("count", None, c);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    // Wait until it's under way, then stop it.
+    loop {
+        let s = tracker.snapshot();
+        if s.done >= 20 {
+            assert_eq!(
+                s.message,
+                Some((sheaf_progress::Level::Info, "ten done".into()))
+            );
+            assert!(s.fraction.unwrap() > 0.0);
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "no progress: {s:?}");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    tracker.cancel();
+    let out = block_on(rx).expect("reply");
+    match out {
+        Err(PluginError::Failed(m)) => {
+            let n: u64 = m.trim_start_matches("Stopped at ").parse().unwrap();
+            assert!((20..400).contains(&n), "{m}");
+        }
+        other => panic!("expected a stop, got {other:?}"),
+    }
+    assert_eq!(p.status(), Status::Ready);
 }

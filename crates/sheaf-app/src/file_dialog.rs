@@ -8,9 +8,28 @@ use gpui::{App, PathPromptOptions};
 type Dialog<T> = oneshot::Receiver<Result<Option<T>>>;
 
 /// Dev: `SHEAF_SCRIPT_PICK` answers every picker with that path, so UI
-/// scripts (see script.rs) can get past them.
+/// scripts (see script.rs) can get past them. `SHEAF_SCRIPT_SAVE`, when
+/// set, answers save pickers instead, so a script that picks an input
+/// doesn't also write over it.
 fn scripted() -> Option<PathBuf> {
     std::env::var_os("SHEAF_SCRIPT_PICK").map(PathBuf::from)
+}
+
+fn scripted_save() -> Option<PathBuf> {
+    std::env::var_os("SHEAF_SCRIPT_SAVE")
+        .map(PathBuf::from)
+        .or_else(scripted)
+}
+
+/// What a file picker offers to open.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Filter {
+    Pdf,
+    Images,
+}
+
+pub fn open(cx: &App, options: PathPromptOptions) -> Dialog<Vec<PathBuf>> {
+    open_filtered(cx, options, Filter::Pdf)
 }
 
 fn answer<T>(value: T) -> Dialog<T> {
@@ -19,20 +38,26 @@ fn answer<T>(value: T) -> Dialog<T> {
     rx
 }
 
-pub fn open(cx: &App, options: PathPromptOptions) -> Dialog<Vec<PathBuf>> {
+pub fn open_filtered(cx: &App, options: PathPromptOptions, filter: Filter) -> Dialog<Vec<PathBuf>> {
     if let Some(p) = scripted() {
         return answer(vec![p]);
     }
+    #[cfg(not(target_os = "linux"))]
+    let _ = filter;
     #[cfg(target_os = "linux")]
     let command = {
         let mut command = linux::command();
         if options.directories && !options.files {
             command.arg("--directory");
         } else {
-            command.args([
-                "--file-filter=PDF files | *.pdf *.PDF",
-                "--file-filter=All files | *",
-            ]);
+            command.arg(match filter {
+                Filter::Pdf => "--file-filter=PDF files | *.pdf *.PDF",
+                Filter::Images => {
+                    "--file-filter=Images | *.jpg *.jpeg *.png *.tif *.tiff *.bmp *.gif *.webp \
+                     *.JPG *.JPEG *.PNG *.TIF *.TIFF *.BMP *.GIF *.WEBP"
+                }
+            });
+            command.arg("--file-filter=All files | *");
         }
         if options.multiple {
             command.args(["--multiple", "--separator=\n"]);
@@ -50,7 +75,7 @@ pub fn open(cx: &App, options: PathPromptOptions) -> Dialog<Vec<PathBuf>> {
 }
 
 pub fn save(cx: &App, directory: &Path, suggested_name: Option<&str>) -> Dialog<PathBuf> {
-    if let Some(p) = scripted() {
+    if let Some(p) = scripted_save() {
         return answer(p);
     }
     let rx = cx.prompt_for_new_path(directory, suggested_name);

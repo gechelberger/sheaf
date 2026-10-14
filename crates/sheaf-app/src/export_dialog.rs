@@ -10,8 +10,8 @@ use sheaf_ui::button::{Button, Chip};
 use sheaf_ui::text_input::{TextInput, TextInputEvent};
 use sheaf_ui::{dialog, theme};
 
-use crate::export::{Format, TiffMode};
 use crate::{DialogCancel, DialogLeft, DialogNext, DialogPrev, DialogRight, DialogRun};
+use sheaf_ops::export::{Format, TiffMode};
 
 pub const KEY_CONTEXT: &str = "ExportDialog";
 
@@ -214,7 +214,7 @@ impl ExportDialog {
             Pages::All => Ok((0..n).collect()),
             Pages::Current => Ok(vec![self.ctx.current.min(n.saturating_sub(1))]),
             Pages::Selected => Ok(self.ctx.selected.clone()),
-            Pages::Range => sheaf_ocr::page_range::parse(self.range.read(cx).text(), n),
+            Pages::Range => sheaf_ops::pages::parse(self.range.read(cx).text(), n),
         }
     }
 

@@ -1124,10 +1124,15 @@ pub fn run(
         return;
     }
     let (ui_tx, mut ui_rx) = mpsc::unbounded();
+    // Commands the user ran report progress to the document's status bar,
+    // and Escape there stops them.
+    let tracker = matches!(call, Call::Command { .. } | Call::PanelAction { .. })
+        .then(sheaf_ops::Tracker::new);
     let ctx = CallContext {
         doc: doc.as_ref().and_then(|d| d.read(cx).plugin_context()),
         ui: Some(Arc::new(AppUi(ui_tx))),
         presets: presets(cx),
+        progress: tracker.clone(),
     };
     let what = call.to_string();
     let region_call = matches!(
@@ -1142,6 +1147,10 @@ pub fn run(
     let quiet = matches!(call_kind, CallKind::Event);
     if !quiet && matches!(plugin.status(), Status::Loading | Status::Ready) {
         notice(&doc, format!("{label}…"), cx);
+    }
+    if let (Some(d), Some(t)) = (&doc, &tracker) {
+        let (label, t) = (label.clone(), t.clone());
+        d.update(cx, |d, _| d.plugin_run = Some((label, t)));
     }
 
     // UI requests arrive while the call runs; the channel closes with it.
@@ -1160,11 +1169,38 @@ pub fn run(
     let weak = doc.as_ref().map(|d| d.downgrade());
     let plugin_id = plugin_id.to_string();
     cx.spawn_in(window, async move |ws, cx| {
-        let result = rx
-            .await
-            .unwrap_or_else(|_| Err(PluginError::Unavailable("its thread stopped".into())));
+        use futures::FutureExt;
+        let mut rx = rx.fuse();
+        let result = loop {
+            let mut tick = cx
+                .background_executor()
+                .timer(std::time::Duration::from_millis(150))
+                .fuse();
+            futures::select_biased! {
+                r = rx => break r,
+                _ = tick => {}
+            }
+            if let (Some(t), Some(d)) = (&tracker, weak.as_ref().and_then(|w| w.upgrade())) {
+                let line = progress_line(&label, &t.snapshot());
+                if let Some(line) = line {
+                    d.update(cx, |d, cx| d.set_notice(line, cx));
+                }
+            }
+        }
+        .unwrap_or_else(|_| Err(PluginError::Unavailable("its thread stopped".into())));
         ws.update_in(cx, |_, window, cx| {
             let doc = weak.and_then(|w| w.upgrade());
+            if let Some(d) = &doc {
+                d.update(cx, |d, cx| {
+                    d.plugin_run = None;
+                    // The last progress line goes with the run.
+                    if let Some(t) = &tracker
+                        && let Some(line) = progress_line(&label, &t.snapshot())
+                    {
+                        d.clear_notice_if(&line, cx);
+                    }
+                });
+            }
             match result {
                 Ok(out) if out.batches.is_empty() && quiet => {}
                 Ok(out) if out.batches.is_empty() => {
@@ -1206,6 +1242,23 @@ pub fn run(
         .ok();
     })
     .detach();
+}
+
+/// The status line for a running command's progress, once it has any.
+fn progress_line(label: &str, s: &sheaf_ops::Snapshot) -> Option<String> {
+    if s.cancelled {
+        return Some(format!("{label}: stopping…"));
+    }
+    if let Some((_, msg)) = &s.message {
+        return Some(format!("{label}: {msg}"));
+    }
+    let total = s.total?;
+    let step = if s.step.is_empty() { label } else { &s.step };
+    Some(format!(
+        "{step}: {} of {total} {}…",
+        s.done.min(total),
+        s.unit.noun()
+    ))
 }
 
 /// A plugin finished a region call: send it the newest region event that

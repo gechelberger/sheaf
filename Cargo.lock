@@ -6451,31 +6451,50 @@ dependencies = [
  "anyhow",
  "embed-resource",
  "env_logger",
- "fax",
  "futures",
  "gpui",
  "gpui_platform",
  "im",
  "image",
  "log",
- "png 0.18.1",
  "regex",
  "resvg",
  "schemars",
  "semver",
  "serde",
  "serde_json",
+ "sheaf-cli",
  "sheaf-core",
  "sheaf-doc",
  "sheaf-ocr",
+ "sheaf-ops",
  "sheaf-plugin",
  "sheaf-print",
  "sheaf-render",
+ "sheaf-scan",
  "sheaf-ui",
  "smallvec",
- "tiff",
  "unicode-segmentation",
  "zip 9.0.2",
+]
+
+[[package]]
+name = "sheaf-cli"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "ctrlc",
+ "env_logger",
+ "image",
+ "indicatif",
+ "log",
+ "lopdf",
+ "sheaf-doc",
+ "sheaf-ocr",
+ "sheaf-ops",
+ "sheaf-progress",
+ "sheaf-scan",
 ]
 
 [[package]]
@@ -6491,7 +6510,10 @@ version = "0.1.0-alpha.1"
 dependencies = [
  "anyhow",
  "env_logger",
+ "fax",
+ "flate2",
  "im",
+ "image",
  "log",
  "lopdf",
  "regex",
@@ -6499,6 +6521,7 @@ dependencies = [
  "serde_json",
  "sheaf-core",
  "thiserror 2.0.21",
+ "tiff",
 ]
 
 [[package]]
@@ -6523,6 +6546,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "sheaf-ops"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "anyhow",
+ "image",
+ "log",
+ "png 0.18.1",
+ "serde",
+ "serde_json",
+ "sheaf-core",
+ "sheaf-doc",
+ "sheaf-ocr",
+ "sheaf-progress",
+ "sheaf-render",
+ "sheaf-scan",
+ "tiff",
+]
+
+[[package]]
 name = "sheaf-plugin"
 version = "0.1.0-alpha.1"
 dependencies = [
@@ -6538,6 +6580,7 @@ dependencies = [
  "serde_json",
  "sheaf-core",
  "sheaf-doc",
+ "sheaf-progress",
  "toml 0.9.12+spec-1.1.0",
  "usvg",
  "wasmtime",
@@ -6547,7 +6590,7 @@ dependencies = [
 
 [[package]]
 name = "sheaf-plugin-api"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "wasi 0.14.7+wasi-0.2.4",
  "wit-bindgen 0.62.0",
@@ -6565,6 +6608,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "sheaf-progress"
+version = "0.1.0-alpha.1"
+
+[[package]]
 name = "sheaf-render"
 version = "0.1.0-alpha.1"
 dependencies = [
@@ -6579,6 +6626,19 @@ dependencies = [
  "sheaf-core",
  "sheaf-doc",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "sheaf-scan"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "anyhow",
+ "image",
+ "imageproc",
+ "log",
+ "serde",
+ "serde_json",
+ "sheaf-progress",
 ]
 
 [[package]]

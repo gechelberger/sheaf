@@ -24,7 +24,8 @@
 //! The raw interfaces generated from `wit/sheaf.wit` are re-exported as
 //! modules ([`document`], [`text`], [`edits`], [`ui`], [`storage`],
 //! [`patterns`], [`ocr`], [`log`], [`types`]); [`FormBuilder`] and [`Batch`] cover the
-//! common cases with less ceremony. See `docs/plugins.md` in the sheaf
+//! common cases with less ceremony, and [`progress`] adds helpers to its
+//! interface. See `docs/plugins.md` in the sheaf
 //! repository for the whole guide.
 //!
 //! The version of this crate is the version of the WIT package it binds.
@@ -44,6 +45,7 @@ pub mod bindings {
 mod batch;
 mod form;
 pub mod http;
+pub mod progress;
 
 pub use batch::{Batch, annot, at};
 pub use bindings::sheaf::plugin::{

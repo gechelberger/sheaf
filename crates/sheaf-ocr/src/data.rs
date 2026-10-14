@@ -111,6 +111,8 @@ pub const OAR_MODEL_SETS: [OarModelSet; 2] = [
 pub const OAR_DET: &str = "pp-ocrv5_mobile_det.onnx";
 pub const OAR_TEXTLINE_ORI: &str = "pp-lcnet_x0_25_textline_ori.onnx";
 pub const OAR_DOC_ORI: &str = "pp-lcnet_x1_0_doc_ori.onnx";
+/// UVDoc page unwarping, for scans (`scripts/fetch-ocr-data.sh --uvdoc`).
+pub const OAR_UVDOC: &str = "uvdoc.onnx";
 
 /// The ONNX Runtime shared library's file name on this platform.
 pub const ORT_LIB: &str = if cfg!(windows) {

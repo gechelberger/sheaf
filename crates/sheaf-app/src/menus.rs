@@ -114,6 +114,10 @@ fn builtin_menus() -> Vec<(&'static str, Vec<Item>)> {
                 item("&New Window", NewWindow),
                 item("&Open…", OpenFile),
                 Item::Sub(
+                    "Crea&te",
+                    vec![item("From &Scans/Photos…", CreateFromScans)],
+                ),
+                Item::Sub(
                     "Open &Recent",
                     vec![item("&Clear Recent Files", ClearRecent)],
                 ),

@@ -13,7 +13,7 @@ pub fn check(cfg: &OcrConfig) -> Result<(), EngineError> {
 
 /// Load Microsoft's ONNX Runtime from `path` once per process. ort keeps
 /// one global environment; a second call is a no-op.
-fn load_runtime(path: &std::path::Path) -> Result<(), EngineError> {
+pub(crate) fn load_runtime(path: &std::path::Path) -> Result<(), EngineError> {
     use std::sync::OnceLock;
     static LOADED: OnceLock<Result<(), String>> = OnceLock::new();
     LOADED

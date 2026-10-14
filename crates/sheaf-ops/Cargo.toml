@@ -1,0 +1,26 @@
+[package]
+name = "sheaf-ops"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "sheaf's document operations without a GUI: what both the app and the command line run"
+
+[dependencies]
+sheaf-core.workspace = true
+sheaf-doc.workspace = true
+sheaf-render.workspace = true
+sheaf-progress.workspace = true
+sheaf-scan.workspace = true
+# OCR for scans. Engines are cargo features of sheaf-ocr, picked by the
+# binary (sheaf-app, sheaf-cli); without one it builds and says so.
+sheaf-ocr.workspace = true
+anyhow.workspace = true
+log.workspace = true
+serde.workspace = true
+image = { workspace = true, features = ["jpeg"] }
+# PNG resolution (pHYs) and multi-page TIFF for export.
+png = "0.18"
+tiff = "0.11"
+
+[dev-dependencies]
+serde_json.workspace = true

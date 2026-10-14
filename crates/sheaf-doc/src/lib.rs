@@ -9,6 +9,7 @@ pub mod annot;
 pub mod attachments;
 pub mod file;
 pub mod history;
+pub mod images;
 pub mod incremental;
 pub mod labels;
 pub mod layers;

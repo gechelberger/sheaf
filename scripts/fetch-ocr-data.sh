@@ -4,7 +4,9 @@
 #   vendor/ocr/models/*.onnx, *.txt       PaddleOCR PP-OCRv5 models for oar-ocr
 #   vendor/ocr/lib/libonnxruntime.so      Microsoft's ONNX Runtime (onnxruntime.dll
 #                                         on Windows), loaded at run time
-# Usage: scripts/fetch-ocr-data.sh [--multilingual]
+# Usage: scripts/fetch-ocr-data.sh [--multilingual] [--uvdoc]
+#   --uvdoc also fetches the UVDoc page-unwarping model (about 31 MB) that
+#   scan cleanup's "flatten curled pages" uses.
 # The app looks in $SHEAF_OCR_DATA_DIR, ocr/ beside the binary, then vendor/ocr.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -14,9 +16,11 @@ OAR_MODELS_TAG="${OAR_MODELS_TAG:-v0.3.0}"
 # Same ONNX Runtime version as the `ort` crate's own prebuilt binaries.
 ORT_VERSION="${ORT_VERSION:-1.28.0}"
 multilingual=0
+uvdoc=0
 for arg in "$@"; do
   case "$arg" in
     --multilingual) multilingual=1 ;;
+    --uvdoc) uvdoc=1 ;;
     *) echo "unknown option $arg" >&2; exit 1 ;;
   esac
 done
@@ -47,6 +51,9 @@ models=(
 )
 if [[ $multilingual == 1 ]]; then
   models+=(pp-ocrv5_mobile_rec.onnx ppocrv5_dict.txt)
+fi
+if [[ $uvdoc == 1 ]]; then
+  models+=(uvdoc.onnx)
 fi
 for m in "${models[@]}"; do
   fetch "$oar/$m" "$dest/models/$m"

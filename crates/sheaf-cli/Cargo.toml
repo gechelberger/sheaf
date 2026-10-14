@@ -1,0 +1,33 @@
+[package]
+name = "sheaf-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "sheaf on the command line: the same operations as the app, with no GUI"
+
+[[bin]]
+name = "sheaf-cli"
+path = "src/bin/sheaf-cli.rs"
+
+[features]
+# The OCR engines for `scan --ocr`, as in the app.
+default = ["ocr-tesseract", "ocr-oar"]
+ocr-tesseract = ["sheaf-ocr/tesseract"]
+ocr-oar = ["sheaf-ocr/oar"]
+
+[dependencies]
+sheaf-ocr.workspace = true
+sheaf-scan.workspace = true
+sheaf-ops.workspace = true
+sheaf-progress.workspace = true
+sheaf-doc.workspace = true
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true
+clap = { version = "4", features = ["derive"] }
+indicatif = "0.18"
+ctrlc = "3"
+
+[dev-dependencies]
+lopdf.workspace = true
+image = { workspace = true, features = ["jpeg"] }

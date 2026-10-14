@@ -38,6 +38,7 @@ const FILES: &[(&str, &[u8])] = icons![
     "comments",
     "connector",
     "cover-page",
+    "create-from-scans",
     "delete-pages",
     "duplicate-pages",
     "ellipse",

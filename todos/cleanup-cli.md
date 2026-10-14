@@ -1,6 +1,6 @@
 # Plan: ops layer, CLI, shared progress, scan cleanup
 
-Status: **planned** (2026-10-14). Not started.
+Status: **done** (2026-10-14), branch `cleanup-cli`. See "Slice notes" at the end.
 
 ## Why
 
@@ -246,3 +246,154 @@ handwritten notes (an MIT algorithm, about 150 lines), and blank-page removal.
   [`plugin-image-writes.md`](plugin-image-writes.md)). It's a separate later
   slice, and it probably reruns OCR and refuses to run on pages that have
   annotations.
+
+## Slice notes
+
+1. Done. `sheaf_progress::Tracker` places a child after its previous
+   sibling's share as well as after the parent's own count, so steps
+   ("render, then OCR") line up without the parent counting them. Export
+   now stops with `Cancelled` instead of returning the partial list: per-page
+   files already written stay, and a TIFF's `.part` file is removed. The GUI
+   gained what it lacked before: Esc stops a running Export Pages, and the
+   OCR progress strip shows export progress too.
+2. Done. `sheaf_ops::open` loads a file headlessly: pages, bookmarks and
+   sheaf's own marks, as the app does on open. The page-range parser moved
+   from `sheaf_ocr::page_range` to `sheaf_ops::pages`, which also accepts an
+   open start (`-3`). `sheaf_plugin::ui::parse_page_range` stays separate:
+   its empty input means every page, and the plugin crate shouldn't pull in
+   the renderer. `sheaf_cli::run` returns the exit status (0, 1, 2 for bad
+   arguments, 130 when cancelled), so the app's hand-off keeps it.
+   `scripts/package.sh` ships `sheaf-cli` beside `sheaf`. A file named like
+   a subcommand opens in the app as `./export`. None of the `--selftest-*`
+   flags moved: each drives `DocView` (adding marks through the view, then
+   saving), so each needs a window. They can move when their ops (clean,
+   flatten, extract) do.
+3. Done. `sheaf_doc::images` reads an image file into `PageImage`s, one
+   per page (`read`; TIFF through the `tiff` crate, since `image` reads
+   only a TIFF's first page), and `to_pdf` builds the PDF bytes.
+   `PageImage::from_image` takes pixels the caller already has; the scan
+   pipeline uses it. The details:
+   - A JPEG's EXIF rotation becomes the page's `/Rotate`. Mirrored or CMYK
+     JPEGs are decoded instead.
+   - All-0/255 gray is stored as G4. `g4` moved here from export.
+   - With no recorded resolution, 96 dpi is assumed, as img2pdf does.
+
+   Deviation: there's no "add as a source" helper yet. Sources are
+   path-based (save, incremental save and the renderer all reopen the
+   path), so an image source needs its PDF bytes written to a file. M8's
+   Insert from Image adds that helper (a content-addressed file in the
+   cache directory) when the GUI needs it. HEIC isn't readable: there's no
+   permissive pure-Rust decoder.
+4. Done: `sheaf-scan`, `sheaf_ops::scan`, and `sheaf scan … [--mode bw]
+   [--page letter] [--ocr]`. Deviations, found by running it:
+   - **Order.** Crop → clear edges → flatten → orient → deskew → fit →
+     mode. Flatten comes before deskew because deskew fills the rotated
+     corners with white: before flattening, that white beside the still-tan
+     paper made dark strips. The orientation model reads flattened pages
+     far better (0.8 against 0.5 confidence), so orientation waits for it.
+   - **Background slivers.** The crop is insetted 0.75%, and `clear_edges`
+     whitens dark shapes touching a cropped page's border, as unpaper's
+     border filter does. It runs before flattening: afterwards Sauvola
+     can't see a uniform dark strip.
+   - **White point.** The contrast stretch also maps the median (paper) to
+     white, clamped at 200 so mostly-picture pages aren't blown out.
+   - **Despeckle size.** "0.02% of the page area" would erase punctuation
+     (1,700 px at 300 dpi Letter). It drops shapes under 1/200,000 of the
+     page instead, about 42 px (half a millimeter across) at 300 dpi.
+   - **Orientation.** Projection profiles got a real page wrong (row/column
+     energy 0.65 when upright). `quarter_turns` uses word shape instead:
+     with letters smeared into words, words lie wide. That gives the axis.
+     When the oar model is present (`sheaf_ocr::orient::scores`), it picks
+     between the two turns on that axis; on its own the model was wrong
+     about a sideways shaded page. The model's label is how far the
+     content is turned clockwise (checked by an ignored test in
+     `sheaf-ocr/tests/engines.rs`).
+   - `sheaf-ops` depends on `sheaf-ocr` outright: without engine features
+     it's light, and the binaries choose the engines (`sheaf-cli` has the
+     same `ocr-tesseract`/`ocr-oar` defaults as the app).
+   - **Fixtures.** There are no real phone shots in the repo yet (none were
+     on this machine). The unit tests build synthetic photos in code
+     instead: an angled shot on a dark background, a skewed page, a
+     sideways page, and a shadow with a warm cast. An end-to-end run on a
+     synthetic photo of rendered text, in all four orientations, came out
+     upright and straight with clean edges, and OCR read it back. Real
+     photos should still be added to `crates/sheaf-scan/tests/fixtures`
+     for tuning.
+5. Done. File > Create > From Scans/Photos… (`workspace::CreateFromScans`,
+   with its own icon) picks images, then opens `scan_dialog.rs`:
+   - **Options.** Output, page size, resolution, the four cleanup steps,
+     and OCR (greyed out with the reason when no engine can run).
+   - **Preview.** One image at a time, at 1200 px, and per step: Photo
+     (the page found, outlined), Page, Lighting, Upright, Straight, Result.
+     `sheaf_scan::clean_with` hands each step's image to a callback.
+   - **Running it.** Create asks where to save, runs `sheaf_ops::scan` with
+     a progress bar (Esc stops it), then opens the PDF. The choices persist
+     as `settings.scan`.
+
+   It also works in an empty window. Found while testing: colour pages
+   were stored as Flate, 6.9 MB for one Letter page. Colour and gray scan
+   pages are now JPEG (quality 80, 0.8 MB); black and white stays G4
+   (50 KB). New `SHEAF_SCRIPT_SAVE` answers save pickers in scripts, so
+   a scripted scan doesn't write its PDF over the photo it picked.
+6. Done. `sheaf_ocr::rectify` wraps oar-ocr's `DocumentRectificationPredictor`.
+   `ScanParams::flatten_curl` (off by default; `--flatten-curl`, and a
+   dialog toggle greyed out with the reason) runs it right after the
+   crop, through `sheaf_scan::Models` (the orientation model moved in there
+   too). The model is `uvdoc.onnx` from the oar-ocr v0.3.0 release, the
+   same tag as the other models. `fetch-ocr-data.sh --uvdoc` gets it, and
+   `package.sh` bundles it only with `SHEAF_PACKAGE_UVDOC=1`. Asking for
+   it without the model is an error, not a silent no-op.
+
+   On a synthetic curled page it straightened arcing text lines well
+   (about 1 s extra). Found along the way, both in the classic path:
+   - A curled page's bowed edges aren't a 4-gon, so nothing was cropped.
+     Now it falls back to `min_area_rect`, as planned.
+   - `clear_edges` missed the wide wedges that leaves. It now also counts
+     as dark anything under 60% of the paper brightness nearby (a 4%-radius
+     max filter, so gradual shadows don't count).
+
+   Covered by a test of the curled-page crop, and an ignored UVDoc smoke
+   test next to the orientation one.
+7. Done. The WIT has a `progress` interface with a `task` resource; each
+   task is a `Tracker` under the call's own (`CallContext::progress`, a
+   new field). The app creates one for every command and panel action,
+   shows it in the document's status bar and progress strip, and Esc
+   cancels it once it has reported something.
+   - **Version.** Deviation: 0.2.1, not a minor bump. Adding an interface
+     is backward compatible, and the package version is part of every
+     import name. A 0.3.0 bump would have stopped every 0.2 plugin from
+     linking; with 0.2.1, the six bundled plugins still built against
+     0.2.0 all load Ready.
+   - **Pieces.** `sheaf_progress::Tracker::child_tracker` gives an owned
+     child for the resource table; tasks are freed when the call returns,
+     and at most 256 per call are tracked. The SDK adds
+     `sheaf_plugin_api::progress` (`pages`, `items`, `check`).
+   - **Tests.** The fixture's `count` command reports, posts a message,
+     and stops when cancelled (`progress_reports_and_cancels`).
+   - **A bundled user.** `tax-form-bookmarks` 0.2.2 (`api = "^0.2.1"`)
+     reports as it reads pages. On the 3,837-page Title 26 PDF the status
+     bar read "Reading pages: 646 of 3837 pages…", and Esc stopped it.
+8. Done. In `ROADMAP.md`:
+   - M5 gains camera capture and marks image import and cleanup done
+     (blank-page removal is still open).
+   - M15's CLI line describes the ops/CLI split.
+   - The parity rows for scanner intake, separator sheets, images and OCR
+     say M5. Two stray "M5 plugin host" references now say M6.
+
+Verification:
+- **Automated.** `cargo test --workspace`, clippy, the
+  `--no-default-features` app build, and `cargo tree -p sheaf-cli | grep
+  gpui` (empty) all pass.
+- **CLI.**
+  - `sheaf export` through the main binary matches File > Export Pages,
+    since both run the same op.
+  - Ctrl-C on a 400-page `sheaf-cli export` exits with status 130 through
+    `check()`.
+  - `sheaf-cli scan --mode bw --ocr` on a synthetic phone photo gives a
+    straight, white page whose text reads back.
+- **GUI.** Esc stops a running export, a plugin command, and a scan in the
+  dialog.
+
+Still open: real phone-photo fixtures; blank-page removal; and the two
+"Open" questions above (keeping the raw photos as attachments, and cleaning
+pages already in a PDF).

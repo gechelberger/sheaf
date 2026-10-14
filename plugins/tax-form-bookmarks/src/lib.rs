@@ -4,7 +4,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 use sheaf_plugin_api::types::{Edit, OutlineInsert};
-use sheaf_plugin_api::{Batch, Plugin, document, text};
+use sheaf_plugin_api::{Batch, Plugin, document, progress, text};
 
 /// Form headers, most specific first. Group 1 is the form's name.
 static FORMS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
@@ -120,16 +120,19 @@ impl Plugin for TaxFormBookmarks {
         if pages.is_empty() {
             return Err("open a document first".into());
         }
-        let titles: Vec<Option<String>> = pages
-            .iter()
-            .map(|p| match text::page_text(p.id) {
+        let task = progress::pages("Reading pages", pages.len() as u64);
+        let mut titles: Vec<Option<String>> = Vec::with_capacity(pages.len());
+        for p in &pages {
+            progress::check(&task)?;
+            titles.push(match text::page_text(p.id) {
                 Ok(t) => detect(&t),
                 Err(e) => {
                     sheaf_plugin_api::warn(&format!("page {}: {e}", p.id));
                     None
                 }
-            })
-            .collect();
+            });
+            task.inc(1);
+        }
         let outline = document::outline();
         let exists = |title: &str, page: u64| {
             outline

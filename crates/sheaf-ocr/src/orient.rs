@@ -1,0 +1,90 @@
+//! Which way up a page image is, from PaddleOCR's document orientation
+//! model (`pp-lcnet_x1_0_doc_ori`), for straightening photos before OCR.
+
+use image::RgbImage;
+
+/// Clockwise quarter turns that make `img` upright, or `None` when the
+/// model isn't available (no `oar` feature, or its files are missing) or
+/// isn't sure.
+pub fn quarter_turns(img: &RgbImage) -> Option<u16> {
+    let s = scores(img)?;
+    let (best, score) = (0..4u16)
+        .map(|k| (k, s[k as usize]))
+        .max_by(|a, b| a.1.total_cmp(&b.1))?;
+    // Four classes: chance is 0.25. Below this it's a guess.
+    (score >= 0.45).then_some(best)
+}
+
+/// The model's confidence, for k = 0..4, that `img` needs k clockwise
+/// quarter turns to be upright; `None` without the model.
+pub fn scores(img: &RgbImage) -> Option<[f32; 4]> {
+    #[cfg(feature = "oar")]
+    {
+        model::scores(img)
+    }
+    #[cfg(not(feature = "oar"))]
+    {
+        let _ = img;
+        None
+    }
+}
+
+/// Whether [`quarter_turns`] can answer.
+pub fn available() -> bool {
+    #[cfg(feature = "oar")]
+    {
+        model::predictor().is_some()
+    }
+    #[cfg(not(feature = "oar"))]
+    {
+        false
+    }
+}
+
+#[cfg(feature = "oar")]
+mod model {
+    use std::sync::{Mutex, OnceLock};
+
+    use image::RgbImage;
+    use oar_ocr::predictors::DocumentOrientationPredictor;
+
+    pub fn predictor() -> Option<&'static Mutex<DocumentOrientationPredictor>> {
+        static CELL: OnceLock<Option<Mutex<DocumentOrientationPredictor>>> = OnceLock::new();
+        CELL.get_or_init(|| {
+            let model = crate::data::models_dir()?.join(crate::data::OAR_DOC_ORI);
+            let runtime = crate::data::onnxruntime_lib()?;
+            if !model.is_file() || !runtime.is_file() {
+                return None;
+            }
+            if let Err(e) = crate::oar::load_runtime(&runtime) {
+                log::warn!("orientation model: {e}");
+                return None;
+            }
+            match DocumentOrientationPredictor::builder()
+                .topk(4)
+                .build(&model)
+            {
+                Ok(p) => Some(Mutex::new(p)),
+                Err(e) => {
+                    log::warn!("orientation model {}: {e}", model.display());
+                    None
+                }
+            }
+        })
+        .as_ref()
+    }
+
+    pub fn scores(img: &RgbImage) -> Option<[f32; 4]> {
+        let p = predictor()?.lock().ok()?;
+        let out = p.predict(vec![img.clone()]).ok()?;
+        let mut s = [0f32; 4];
+        for c in out.orientations.first()? {
+            // The label is how far the content is turned clockwise;
+            // undoing it takes the rest of a full turn.
+            let deg: u16 = c.label.parse().ok()?;
+            s[((4 - (deg / 90) % 4) % 4) as usize] = c.score;
+        }
+        log::debug!("page orientation scores (turns 0–3): {s:?}");
+        Some(s)
+    }
+}

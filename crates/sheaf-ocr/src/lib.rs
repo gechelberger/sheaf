@@ -15,13 +15,15 @@ pub mod data;
 pub mod engine;
 pub mod geom;
 pub mod job;
+pub mod orient;
+pub mod rectify;
 
 #[cfg(feature = "oar")]
 mod oar;
 #[cfg(feature = "tesseract")]
 mod tesseract;
 
-pub use config::{OarConfig, OcrConfig, Scope, TesseractConfig, page_range};
+pub use config::{OarConfig, OcrConfig, Scope, TesseractConfig};
 pub use engine::{
     EngineError, EngineInfo, EngineKind, InputKind, OcrEngine, OcrImage, OcrWord, build_engine,
     check_engine, configured_language, engines, language_options, languages, set_language,

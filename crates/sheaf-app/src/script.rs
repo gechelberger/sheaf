@@ -22,7 +22,9 @@
 //! - `{"quit": true}`
 //!
 //! File pickers can't be driven; set `SHEAF_SCRIPT_PICK=<path>` and every
-//! open, folder and save picker answers with that path.
+//! open, folder and save picker answers with that path. `SHEAF_SCRIPT_SAVE`
+//! answers save pickers instead, when a script opens one file and saves
+//! another.
 //!
 //! Output goes to stderr. Never part of normal use.
 

@@ -4,7 +4,7 @@
 /// Versioning: semver on this package. The host keeps serving the previous
 /// minor/major world when it moves on (N-1), so a plugin built against an
 /// older API keeps loading.
-package sheaf:plugin@0.2.0;
+package sheaf:plugin@0.2.1;
 
 /// Shared data types. Ids are opaque and stable for the life of an open
 /// document; they are not page numbers.
@@ -417,6 +417,34 @@ interface ui {
     show-panel: func(panel: string);
 }
 
+/// Progress for long commands, shown in the status bar while the call
+/// runs, with a way for the user to stop it. (Since 0.2.1.)
+interface progress {
+    /// What a count counts.
+    enum unit { items, pages, bytes }
+    enum level { info, warn, error }
+
+    /// Make one per call and use `child` for its steps. A second one made
+    /// in the same call starts where the first left off.
+    resource task {
+        /// `total` none while it isn't known yet.
+        constructor(label: string, total: option<u64>, unit: unit);
+        set-total: func(total: option<u64>, unit: unit);
+        /// How many are done.
+        set: func(done: u64);
+        inc: func(n: u64);
+        /// Shown in the status bar.
+        message: func(level: level, message: string);
+        /// The user asked to stop: tidy up and return (an error saying so
+        /// is fine). Check once per page or chunk; the call's time limit
+        /// still applies.
+        is-cancelled: func() -> bool;
+        /// A step covering `weight` (0 to 1) of this task, starting where
+        /// this one is now.
+        child: func(label: string, weight: f32) -> task;
+    }
+}
+
 interface log {
     enum level { trace, debug, info, warn, error }
 
@@ -434,6 +462,7 @@ world plugin {
     import patterns;
     import render;
     import ocr;
+    import progress;
     import log;
 
     /// Called once after loading.

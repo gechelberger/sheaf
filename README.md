@@ -28,6 +28,27 @@ spends its effort on PDF features instead.
 
 From the command line, `sheaf one.pdf two.pdf three.pdf` opens three windows.
 
+### Command line
+
+Some work runs without a window. `sheaf <subcommand> …` runs it headless,
+and so does `sheaf-cli <subcommand> …`, a separate binary with no GUI at
+all, for servers and CI. `--help` on either lists the options. A progress
+bar shows on stderr (`-q` hides it), and Ctrl-C stops the work cleanly
+(exit status 130).
+
+```sh
+sheaf export binder.pdf -o pngs/ --pages "1-3, 10-" --dpi 200
+sheaf export binder.pdf -f tiff --tiff bw -o binder.tif
+sheaf-cli export binder.pdf -f text -o binder.txt
+sheaf scan photos/*.jpg -o receipts.pdf --mode bw --ocr
+```
+
+| Subcommand | Does |
+|---|---|
+| `export` | Pages to PNG, JPEG, TIFF or text, as File > Export Pages. Prints the files written; refuses to overwrite without `--force` |
+| `scan` | Photos or scans of paper to a clean PDF: finds the page in the photo and straightens it, turns it upright, levels the text, evens out shadows and color casts. `--mode color\|gray\|bw`, `--page letter\|a4\|original`, `--dpi`, `--ocr` (searchable text that lines up with the page), `--no-crop`/`--no-deskew`/… to skip a step, `--flatten-curl` for curled or bent pages (UVDoc model; `scripts/fetch-ocr-data.sh --uvdoc`) |
+| `images-to-pdf` | JPEG, PNG, TIFF (every page), BMP, GIF and WebP files to one PDF, a page each: `--page original\|letter\|a4`, `--margin`, `--dpi` |
+
 ## Why
 
 Acrobat has become slow enough that routine work — opening a 400-page scanned
@@ -82,7 +103,12 @@ Tier 1 platforms gate every release and run the perf budgets in CI.
 ```
 ┌─────────────────────────────────────────────────────────┐
 │  sheaf-app          GPUI application, views, commands    │
-├─────────────────────────────────────────────────────────┤
+├────────────────────────────┬────────────────────────────┤
+│  sheaf-cli (no GUI)        │  sheaf-ops: operations     │
+│  clap subcommands          │  shared by app and CLI;    │
+│                            │  sheaf-progress: progress  │
+│                            │  + cancel trait            │
+├────────────────────────────┴────────────────────────────┤
 │  sheaf-ui           Reusable widgets: page canvas, tile  │
 │                     viewport, sidebars, command palette  │
 ├────────────────────────────┬────────────────────────────┤
@@ -206,9 +232,9 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 ### Conversion & export
 | Feature | Status |
 |---|---|
-| Export pages to PNG / JPEG | ✅ File > Export Pages (Ctrl+Shift+E): resolution, JPEG quality, page range, marks included or not |
+| Export pages to PNG / JPEG | ✅ File > Export Pages (Ctrl+Shift+E): resolution, JPEG quality, page range, marks included or not; Esc stops a running export. Also `sheaf export` on the command line |
 | Export to multi-page TIFF (PDFlyer) | ✅ File > Export Pages > TIFF: one file, black-and-white (CCITT G4), grayscale or color |
-| Create PDF from images | 📋 |
+| Create PDF from images | ✅ File > Create > From Scans/Photos…: phone photos or scans cleaned up (page found and straightened, upright, deskewed, shadows and color casts evened out), color/gray/black-and-white, Letter/A4/as photographed, optional OCR, with a preview of each step. `sheaf scan` and `sheaf images-to-pdf` on the command line |
 | OCR (searchable text layer) | ✅ Document > Recognize Text (OCR)… (Ctrl+Shift+T): Tesseract or PaddleOCR, whole binder / current / selected / range, skips pages that already have text, progress + Esc to stop, one undo step; Find and Patterns see the text before the first save |
 | Export text | ✅ File > Export Pages > Text: one UTF-8 file, a form feed between pages (unsaved OCR text included) |
 | Print | ✅ File > Print (Ctrl+P): own dialog with sheet preview; printer, copies, pages (all/current/selected/bookmark/range), Fit/Actual/Shrink, orientation, paper, two-sided, comments on/off; CUPS on Linux/macOS, GDI on Windows; Save as PDF |
@@ -302,6 +328,7 @@ sudo apt install build-essential clang lld cmake pkg-config libfontconfig-dev \
 
 scripts/fetch-pdfium.sh          # prebuilt libpdfium → vendor/pdfium/<os>-<arch>/
 scripts/fetch-ocr-data.sh        # Tesseract language data + PaddleOCR models → vendor/ocr/
+                                 #   (--uvdoc adds the curled-page model scan cleanup can use)
 scripts/build-plugins.sh         # the bundled plugins (plugins/) → target/plugins/
 cargo run -p sheaf-app           # the GPUI window
 ```
@@ -351,7 +378,8 @@ since GPUI is consumed as a git dependency at a pinned rev in `Cargo.toml`).
 scripts/package.sh               # → dist/sheaf-<version>-<os>-<arch>.tar.gz (zip on Windows)
 ```
 
-The bundle is the release binary next to the PDFium library, the OCR data
+The bundle is the release binaries (`sheaf` and the GUI-less `sheaf-cli`)
+next to the PDFium library, the OCR data
 in `ocr/` (about 25 MB of language files and models, plus the ONNX Runtime
 library in `ocr/lib`), the bundled plugins in `plugins/`, the licenses, and
 (on Linux) a `.desktop` entry; unpack it anywhere and run `sheaf`. The

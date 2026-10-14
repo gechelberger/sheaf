@@ -1,0 +1,17 @@
+[package]
+name = "sheaf-scan"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Scan and phone-photo cleanup for sheaf: find the page, straighten it, even out the light"
+
+[dependencies]
+sheaf-progress.workspace = true
+anyhow.workspace = true
+log.workspace = true
+serde.workspace = true
+image = { workspace = true, features = ["jpeg", "tiff", "bmp", "webp"] }
+imageproc = { version = "0.27", default-features = false, features = ["rayon"] }
+
+[dev-dependencies]
+serde_json.workspace = true

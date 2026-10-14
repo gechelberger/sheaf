@@ -49,6 +49,13 @@ pub fn info(id: &str) -> Option<Info> {
             "Save a copy with annotations burned into the page, so they can't be changed or removed.",
             &["burn", "bake"],
         ),
+        "workspace::CreateFromScans" => (
+            "create-from-scans",
+            "Make a PDF from photos or scans of paper: find each page, straighten it, even out shadows, and optionally recognize the text.",
+            &[
+                "camera", "photo", "image", "scan", "phone", "receipt", "import", "deskew", "ocr",
+            ],
+        ),
         "workspace::ExportPages" => (
             "export-pages",
             "Save pages as PNG, JPEG or TIFF images, or as plain text.",

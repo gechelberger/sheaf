@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Build a release binary and bundle it with libpdfium, licenses and a
-# desktop entry into dist/sheaf-<version>-<os>-<arch>.{tar.gz,zip}.
+# Build the release binaries (sheaf, and sheaf-cli without the GUI) and
+# bundle them with libpdfium, licenses and a desktop entry into
+# dist/sheaf-<version>-<os>-<arch>.{tar.gz,zip}.
 #
 # Usage: scripts/package.sh            # host platform
-#        scripts/package.sh --no-build # reuse target/release/sheaf
+#        scripts/package.sh --no-build # reuse target/release/sheaf{,-cli}
 #
 # Runs on Linux, macOS, and Windows under Git Bash. Expects the PDFium
 # library in vendor/pdfium/<os>-<arch>/ (scripts/fetch-pdfium.sh) and the
@@ -16,11 +17,11 @@ build=1
 
 version="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
 case "$(uname -s)-$(uname -m)" in
-  Linux-x86_64)  os=linux;   arch=x86_64;  lib=libpdfium.so;    exe=sheaf ;;
-  Linux-aarch64) os=linux;   arch=aarch64; lib=libpdfium.so;    exe=sheaf ;;
-  Darwin-arm64)  os=macos;   arch=aarch64; lib=libpdfium.dylib; exe=sheaf ;;
-  Darwin-x86_64) os=macos;   arch=x86_64;  lib=libpdfium.dylib; exe=sheaf ;;
-  MINGW64*|MSYS*|CYGWIN*) os=windows; arch=x86_64; lib=pdfium.dll; exe=sheaf.exe ;;
+  Linux-x86_64)  os=linux;   arch=x86_64;  lib=libpdfium.so;    exe=sheaf; cli=sheaf-cli ;;
+  Linux-aarch64) os=linux;   arch=aarch64; lib=libpdfium.so;    exe=sheaf; cli=sheaf-cli ;;
+  Darwin-arm64)  os=macos;   arch=aarch64; lib=libpdfium.dylib; exe=sheaf; cli=sheaf-cli ;;
+  Darwin-x86_64) os=macos;   arch=x86_64;  lib=libpdfium.dylib; exe=sheaf; cli=sheaf-cli ;;
+  MINGW64*|MSYS*|CYGWIN*) os=windows; arch=x86_64; lib=pdfium.dll; exe=sheaf.exe; cli=sheaf-cli.exe ;;
   *) echo "unsupported host $(uname -s)-$(uname -m)" >&2; exit 1 ;;
 esac
 
@@ -29,18 +30,20 @@ vendor="vendor/pdfium/${os}-${arch}"
 [[ -f vendor/ocr/tessdata/eng.traineddata ]] || { echo "missing vendor/ocr — run scripts/fetch-ocr-data.sh" >&2; exit 1; }
 
 if (( build )); then
-  cargo build --release -p sheaf-app
+  cargo build --release -p sheaf-app -p sheaf-cli
 fi
 # The plugins that ship with sheaf; installed into the user's plugin
 # directory on first run.
 scripts/build-plugins.sh target/plugins
-[[ -f "target/release/$exe" ]] || { echo "missing target/release/$exe" >&2; exit 1; }
+for b in "$exe" "$cli"; do
+  [[ -f "target/release/$b" ]] || { echo "missing target/release/$b" >&2; exit 1; }
+done
 
 name="sheaf-${version}-${os}-${arch}"
 stage="dist/$name"
 rm -rf "$stage"
 mkdir -p "$stage/licenses"
-cp "target/release/$exe" "$stage/"
+cp "target/release/$exe" "target/release/$cli" "$stage/"
 # The binary looks for the library next to itself first (sheaf-render).
 cp "$vendor/$lib" "$stage/"
 [[ -f "$vendor/LICENSE" ]] && cp "$vendor/LICENSE" "$stage/licenses/LICENSE-pdfium"
@@ -49,7 +52,11 @@ cp LICENSE-MIT LICENSE-APACHE "$stage/licenses/"
 # with the engines' and models' licenses.
 mkdir -p "$stage/ocr/tessdata" "$stage/ocr/models" "$stage/ocr/lib"
 cp vendor/ocr/tessdata/*.traineddata "$stage/ocr/tessdata/"
-cp vendor/ocr/models/*.onnx vendor/ocr/models/*.txt "$stage/ocr/models/"
+# UVDoc (31 MB, opt-in curl flattening) only when asked for.
+for m in vendor/ocr/models/*.onnx vendor/ocr/models/*.txt; do
+  [[ "$(basename "$m")" == uvdoc.onnx && "${SHEAF_PACKAGE_UVDOC:-0}" != 1 ]] && continue
+  cp "$m" "$stage/ocr/models/"
+done
 # ONNX Runtime is loaded from here at run time, only when PaddleOCR is used.
 cp vendor/ocr/lib/libonnxruntime.* vendor/ocr/lib/onnxruntime.dll "$stage/ocr/lib/" 2>/dev/null || true
 [[ -n "$(ls "$stage/ocr/lib")" ]] || { echo "missing vendor/ocr/lib — run scripts/fetch-ocr-data.sh" >&2; exit 1; }

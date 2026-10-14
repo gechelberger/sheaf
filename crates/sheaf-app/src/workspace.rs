@@ -334,6 +334,7 @@ pub struct Workspace {
     palette: Option<(Entity<Palette>, Subscription)>,
     /// File > Export Pages, while open.
     export: Option<(Entity<crate::export_dialog::ExportDialog>, Subscription)>,
+    scan: Option<(Entity<crate::scan_dialog::ScanDialog>, Subscription)>,
     /// File > Print, while open.
     print: Option<(Entity<crate::print_dialog::PrintDialog>, Subscription)>,
     /// File > Properties, while open.
@@ -427,6 +428,7 @@ impl Workspace {
             dock_menu: None,
             palette: None,
             export: None,
+            scan: None,
             print: None,
             properties: None,
             ocr_dialog: None,
@@ -982,6 +984,69 @@ impl Workspace {
             &["OK"],
         ));
         crate::recent::forget(&path, cx);
+    }
+
+    /// File > Create > From Scans/Photos: pick the images, then the dialog.
+    fn create_from_scans(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.scan.is_some() {
+            return;
+        }
+        let rx = crate::file_dialog::open_filtered(
+            cx,
+            gpui::PathPromptOptions {
+                files: true,
+                directories: false,
+                multiple: true,
+                prompt: Some("Choose Photos or Scans".into()),
+            },
+            crate::file_dialog::Filter::Images,
+        );
+        cx.spawn_in(window, async move |ws, cx| {
+            let Ok(Ok(Some(mut files))) = rx.await else {
+                return;
+            };
+            files.retain(|p| sheaf_doc::images::is_image_path(p));
+            files.sort();
+            if files.is_empty() {
+                return;
+            }
+            ws.update_in(cx, |ws, window, cx| ws.open_scan_dialog(files, window, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    fn open_scan_dialog(
+        &mut self,
+        files: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let opts = self.settings.scan.clone();
+        let ocr = self.settings.ocr.clone();
+        let dialog = cx.new(|cx| crate::scan_dialog::ScanDialog::new(files, opts, ocr, window, cx));
+        let sub = cx.subscribe_in(
+            &dialog,
+            window,
+            |ws, _, ev: &crate::scan_dialog::ScanEvent, window, cx| {
+                ws.scan = None;
+                ws.focus_active(window, cx);
+                if let crate::scan_dialog::ScanEvent::Created { path, opts } = ev {
+                    ws.settings.scan = opts.clone();
+                    if let Err(e) = ws.settings.save() {
+                        log::warn!("saving settings: {e:#}");
+                    }
+                    let origin = window.window_handle().downcast::<Workspace>();
+                    let path = path.clone();
+                    if let Some(origin) = origin {
+                        cx.defer(move |cx| open_paths(origin, vec![path], cx));
+                    }
+                }
+                cx.notify();
+            },
+        );
+        self.scan = Some((dialog, sub));
+        cx.notify();
     }
 
     fn toggle_export(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2017,6 +2082,9 @@ impl Render for Workspace {
             .on_action(
                 cx.listener(|ws, _: &crate::ExportPages, window, cx| ws.toggle_export(window, cx)),
             )
+            .on_action(cx.listener(|ws, _: &crate::CreateFromScans, window, cx| {
+                ws.create_from_scans(window, cx)
+            }))
             .on_action(
                 cx.listener(|ws, a: &crate::recent::OpenRecent, window, cx| {
                     ws.open_recent(a.path.clone(), window, cx)
@@ -2123,6 +2191,11 @@ impl Render for Workspace {
             )
             .children(
                 self.export
+                    .as_ref()
+                    .map(|(d, _)| deferred(d.clone()).with_priority(2)),
+            )
+            .children(
+                self.scan
                     .as_ref()
                     .map(|(d, _)| deferred(d.clone()).with_priority(2)),
             )

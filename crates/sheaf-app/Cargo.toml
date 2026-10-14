@@ -24,6 +24,9 @@ sheaf-doc.workspace = true
 sheaf-ui.workspace = true
 sheaf-ocr.workspace = true
 sheaf-print.workspace = true
+sheaf-ops.workspace = true
+sheaf-scan.workspace = true
+sheaf-cli.workspace = true
 sheaf-plugin = { workspace = true, optional = true }
 semver = { version = "1", features = ["serde"], optional = true }
 # Reading .sheafplugin archives.
@@ -34,10 +37,6 @@ anyhow.workspace = true
 env_logger.workspace = true
 log.workspace = true
 image = { workspace = true, features = ["jpeg", "tiff"] }
-# PNG resolution (pHYs) and multi-page TIFF (with CCITT G4) for File > Export.
-png = "0.18"
-tiff = "0.11"
-fax = "0.2"
 smallvec.workspace = true
 futures.workspace = true
 im.workspace = true
