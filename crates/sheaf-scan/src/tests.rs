@@ -198,3 +198,37 @@ fn a_curled_page_is_cropped_and_its_edges_cleared() {
     let dark = border.filter(|&(x, y)| bw.get_pixel(x, y)[0] == 0).count();
     assert_eq!(dark, 0);
 }
+
+#[test]
+fn clearing_edges_keeps_content_that_runs_off_the_page() {
+    // A close-up: a table whose rules run off the photo on every side,
+    // and a strip of dark background along the top.
+    let (w, h) = (800u32, 600u32);
+    let mut img = RgbImage::from_pixel(w, h, Rgb([235, 230, 220]));
+    for y in (40..h).step_by(60) {
+        for x in 0..w {
+            for t in 0..3 {
+                img.put_pixel(x, y + t, Rgb([20, 20, 20]));
+            }
+        }
+    }
+    for x in (50..w).step_by(120) {
+        for y in 40..h {
+            for t in 0..3 {
+                img.put_pixel(x + t, y, Rgb([20, 20, 20]));
+            }
+        }
+    }
+    for y in 0..14 {
+        for x in 0..w {
+            img.put_pixel(x, y, Rgb([70, 60, 50]));
+        }
+    }
+    clear_edges(&mut img, 0.25);
+    // The table's rules are still there, the strip is gone, and what
+    // replaced it is the paper's color, not white.
+    assert!(img.get_pixel(400, 101)[0] < 60, "rule erased");
+    assert!(img.get_pixel(171, 300)[0] < 60, "rule erased");
+    let strip = img.get_pixel(400, 5);
+    assert!(strip[0] > 200 && strip[0] < 250, "strip is {strip:?}");
+}

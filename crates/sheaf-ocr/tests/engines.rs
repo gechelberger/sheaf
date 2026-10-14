@@ -217,3 +217,21 @@ fn uvdoc_returns_a_page() {
         flat.height()
     );
 }
+
+#[test]
+#[ignore = "needs libpdfium; skips without osd.traineddata"]
+#[cfg(all(feature = "oar", feature = "tesseract"))]
+fn tesseract_osd_undoes_a_turn() {
+    use image::imageops::{rotate90, rotate270};
+    if !sheaf_ocr::orient::osd_available() {
+        eprintln!("skipped: no osd.traineddata");
+        return;
+    }
+    let gray = |im: image::RgbImage| image::DynamicImage::ImageRgb8(im).into_luma8();
+    let page = text_page();
+    let turns = |im| sheaf_ocr::orient::osd(&im, 100).map(|(k, _)| k);
+    assert_eq!(turns(gray(page.clone())), Some(0));
+    // Turned clockwise once, it takes three more to come back.
+    assert_eq!(turns(gray(rotate90(&page))), Some(3));
+    assert_eq!(turns(gray(rotate270(&page))), Some(1));
+}

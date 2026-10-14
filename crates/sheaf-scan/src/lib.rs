@@ -92,9 +92,14 @@ pub struct Models<'a> {
     pub unwarp: Option<Unwarper<'a>>,
 }
 
-/// Asks a model which way is up: its confidence, for k = 0..4, that the
-/// page needs k clockwise quarter turns; `None` when it can't say.
+/// Asks models which way is up: given the page at full resolution, votes
+/// for k = 0..4 clockwise quarter turns making it upright (higher is
+/// surer); `None` when they can't say.
 pub type Orienter<'a> = &'a (dyn Fn(&RgbImage) -> Option<[f32; 4]> + Sync);
+
+/// How much the text's direction (word shapes) adds to the two turns on
+/// its axis: a tiebreak, since drawings have labels running both ways.
+const AXIS_PRIOR: f32 = 0.15;
 
 /// What [`clean`] did, with the result.
 pub struct Cleaned {
@@ -187,12 +192,18 @@ pub fn clean_with(
     }
     let mut turns = 0;
     if params.orient {
-        // The text's direction says sideways or not; the model, if any,
-        // picks between the two turns that leaves.
+        // Word shapes give the axis; models, when there are any, vote
+        // on all four turns, with the axis as a tiebreak.
         let axis = quarter_turns(&small_gray(&image));
-        turns = match models.orient.and_then(|model| model(&small_rgb(&image))) {
-            Some(s) if s[axis as usize + 2] > s[axis as usize] => axis + 2,
-            _ => axis,
+        turns = match models.orient.and_then(|model| model(&image)) {
+            Some(votes) => (0..4u16)
+                .max_by(|&a, &b| {
+                    let v =
+                        |k: u16| votes[k as usize] + if k % 2 == axis { AXIS_PRIOR } else { 0.0 };
+                    v(a).total_cmp(&v(b))
+                })
+                .unwrap_or(axis),
+            None => axis,
         };
         image = turn(image, turns);
         stage(Stage::Upright, &image);
@@ -272,10 +283,18 @@ pub fn find_page(img: &RgbImage) -> Option<Quad> {
     let gray = small_gray(img);
     let frame = gray.width() as f64 * gray.height() as f64;
     let blurred = imageproc::filter::gaussian_blur_f32(&gray, 2.0);
+    let (w, h) = (gray.width() as f32, gray.height() as f32);
+    // A page that runs well out of the photo (a close-up of part of a
+    // sheet) isn't one we can cut out: its "corners" are guesses.
+    let slack = 0.02 * w.max(h);
+    let inside = |q: &Quad| {
+        q.iter()
+            .all(|&(x, y)| x > -slack && y > -slack && x < w + slack && y < h + slack)
+    };
     let mut best: Option<(f64, Quad)> = None;
     let mut consider = |mask: &GrayImage, shrink: f32| {
         for (area, q) in quads_in(mask, frame, shrink) {
-            if best.as_ref().is_none_or(|(a, _)| area > *a) {
+            if inside(&q) && best.as_ref().is_none_or(|(a, _)| area > *a) {
                 best = Some((area, q));
             }
         }
@@ -294,11 +313,12 @@ pub fn find_page(img: &RgbImage) -> Option<Quad> {
     // smallest rectangle around the largest outline, and clear_edges
     // whitens the background it takes in.
     if best.is_none() {
-        best = rect_fallback(&edges, frame).or_else(|| rect_fallback(&bright, frame));
+        best = rect_fallback(&edges, frame)
+            .or_else(|| rect_fallback(&bright, frame))
+            .filter(|(_, q)| inside(q));
     }
     let (_, q) = best?;
     // A quad hugging the whole frame means the photo is the page already.
-    let (w, h) = (gray.width() as f32, gray.height() as f32);
     let margin = 0.01 * w.max(h);
     let hugs = q
         .iter()
@@ -719,6 +739,10 @@ fn inset(img: RgbImage, frac: f32) -> RgbImage {
     image::imageops::crop_imm(&img, dx, dy, w - 2 * dx, h - 2 * dy).to_image()
 }
 
+/// How far in from the edges leftover background can reach: 6% of the
+/// shorter side.
+const EDGE_BAND: f32 = 0.06;
+
 /// Sauvola's window: 2% of the page's width.
 fn window_for(gray: &GrayImage) -> u32 {
     (gray.width() / 50).max(15) | 1
@@ -731,21 +755,31 @@ fn window_for(gray: &GrayImage) -> u32 {
 pub fn clear_edges(img: &mut RgbImage, k: f32) {
     let gray = DynamicImage::ImageRgb8(img.clone()).into_luma8();
     let mut bw = sauvola(&gray, window_for(&gray), k);
-    let small = small_gray(img);
+    // The paper's own color nearby (a wide max filter, so gradual shadows
+    // count as paper and thin strips of background don't).
+    let small = small_rgb(img);
     let r = (small.width().max(small.height()) / 25).max(3);
-    let paper = image::imageops::resize(
-        &imageproc::filter::median_filter(&max_filter(&small, r), r, r),
-        gray.width(),
-        gray.height(),
-        FilterType::Triangle,
-    );
+    let channels: Vec<GrayImage> = (0..3)
+        .map(|c| {
+            let ch = GrayImage::from_fn(small.width(), small.height(), |x, y| {
+                Luma([small.get_pixel(x, y)[c]])
+            });
+            let bg = imageproc::filter::median_filter(&max_filter(&ch, r), r, r);
+            image::imageops::resize(&bg, gray.width(), gray.height(), FilterType::Triangle)
+        })
+        .collect();
+    let paper = |x: u32, y: u32| Rgb([0, 1, 2].map(|c| channels[c].get_pixel(x, y)[0]));
     for (x, y, p) in bw.enumerate_pixels_mut() {
-        if (gray.get_pixel(x, y)[0] as u32) * 10 < paper.get_pixel(x, y)[0] as u32 * 6 {
+        let pp = paper(x, y);
+        let lum = (77 * pp[0] as u32 + 150 * pp[1] as u32 + 29 * pp[2] as u32) >> 8;
+        if (gray.get_pixel(x, y)[0] as u32) * 10 < lum * 6 {
             p[0] = 0;
         }
     }
+    // Paint it the paper's color, not white: flattening then whitens it
+    // with the paper around it instead of leaving a halo.
     for (x, y) in edge_ink(&bw) {
-        img.put_pixel(x, y, Rgb([255, 255, 255]));
+        img.put_pixel(x, y, paper(x, y));
     }
 }
 
@@ -768,9 +802,29 @@ pub fn edge_ink(bw: &GrayImage) -> Vec<(u32, u32)> {
     if touching.is_empty() {
         return Vec::new();
     }
+    // Background left by a crop hugs the edges; a table or a drawing's
+    // frame that runs off the photo reaches well inside. Keep only shapes
+    // that are nearly all within a band along the edges.
+    let band = (w.min(h) as f32 * EDGE_BAND) as u32;
+    let near = |x: u32, y: u32| x < band || y < band || x >= w - band || y >= h - band;
+    let mut counts: std::collections::HashMap<u32, (u64, u64)> = Default::default();
+    for (x, y, l) in labels.enumerate_pixels() {
+        if touching.contains(&l[0]) {
+            let c = counts.entry(l[0]).or_default();
+            c.0 += 1;
+            if near(x, y) {
+                c.1 += 1;
+            }
+        }
+    }
+    let background: std::collections::HashSet<u32> = counts
+        .into_iter()
+        .filter(|(_, (all, inside))| *inside * 10 >= *all * 9)
+        .map(|(l, _)| l)
+        .collect();
     labels
         .enumerate_pixels()
-        .filter(|(_, _, l)| touching.contains(&l[0]))
+        .filter(|(_, _, l)| background.contains(&l[0]))
         .map(|(x, y, _)| (x, y))
         .collect()
 }

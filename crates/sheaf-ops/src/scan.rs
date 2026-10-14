@@ -93,11 +93,12 @@ pub fn clean_image(
     progress: &dyn Progress,
     stage: &mut dyn FnMut(sheaf_scan::Stage, &image::RgbImage),
 ) -> Result<sheaf_scan::Cleaned> {
-    let orienter = |img: &image::RgbImage| sheaf_ocr::orient::scores(img);
+    let orienter = |img: &image::RgbImage| orientation_votes(img);
     let unwarper = |img: &image::RgbImage| sheaf_ocr::rectify::unwarp(img);
     let models = sheaf_scan::Models {
-        orient: (params.orient && sheaf_ocr::orient::available())
-            .then_some(&orienter as sheaf_scan::Orienter),
+        orient: (params.orient
+            && (sheaf_ocr::orient::available() || sheaf_ocr::orient::osd_available()))
+        .then_some(&orienter as sheaf_scan::Orienter),
         unwarp: (params.flatten_curl && sheaf_ocr::rectify::available())
             .then_some(&unwarper as sheaf_scan::Unwarper),
     };
@@ -108,6 +109,45 @@ pub fn clean_image(
         );
     }
     sheaf_scan::clean_with(image, params, models, progress, stage)
+}
+
+/// Votes for which way up a page goes, from the models there are:
+/// PaddleOCR's orientation classifier, averaged over the page turned all
+/// four ways (on its own it has favourite answers), and Tesseract's
+/// orientation detection on the gray page and a black-and-white copy,
+/// each weighted by its confidence. On ten phone photos of engineering
+/// drawings neither was right alone; together they were.
+pub fn orientation_votes(img: &image::RgbImage) -> Option<[f32; 4]> {
+    let mut votes = [0f32; 4];
+    let mut any = false;
+    if sheaf_ocr::orient::available() {
+        let s = (1000.0 / img.width().max(img.height()) as f32).min(1.0);
+        let small = image::imageops::resize(
+            img,
+            ((img.width() as f32 * s) as u32).max(1),
+            ((img.height() as f32 * s) as u32).max(1),
+            image::imageops::FilterType::Triangle,
+        );
+        for r in 0..4u16 {
+            if let Some(sc) = sheaf_ocr::orient::scores(&sheaf_scan::turn(small.clone(), r)) {
+                for (j, v) in sc.iter().enumerate() {
+                    votes[(j + r as usize) % 4] += v / 4.0;
+                }
+                any = true;
+            }
+        }
+    }
+    if sheaf_ocr::orient::osd_available() {
+        let gray = image::DynamicImage::ImageRgb8(img.clone()).into_luma8();
+        let bw = sheaf_scan::sauvola(&gray, (gray.width() / 50).max(15) | 1, 0.25);
+        for im in [&gray, &bw] {
+            if let Some((k, conf)) = sheaf_ocr::orient::osd(im, 300) {
+                votes[k as usize] += (conf / 8.0).clamp(0.0, 1.0);
+                any = true;
+            }
+        }
+    }
+    any.then_some(votes)
 }
 
 /// Clean up `inputs` and write them to `out` as a PDF, a page each.
