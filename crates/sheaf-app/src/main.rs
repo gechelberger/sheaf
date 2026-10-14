@@ -31,6 +31,7 @@ mod plugin_panel;
 mod plugins;
 mod presentation;
 mod region;
+mod rulers;
 mod script;
 mod settings;
 mod workspace;
@@ -91,7 +92,10 @@ actions!(
         SplitView,
         NextPane,
         FullScreen,
-        ReadMode
+        ReadMode,
+        ToggleRulers,
+        ToggleGrid,
+        ClearGuides
     ]
 );
 actions!(
@@ -297,6 +301,8 @@ fn main() {
                 KeyBinding::new("f6", NextPane, doc),
                 KeyBinding::new("ctrl-l", FullScreen, doc),
                 KeyBinding::new("ctrl-h", ReadMode, doc),
+                KeyBinding::new("ctrl-r", ToggleRulers, doc),
+                KeyBinding::new("ctrl-u", ToggleGrid, doc),
                 KeyBinding::new("r", RotatePageCw, doc_keys),
                 KeyBinding::new("shift-r", RotatePageCcw, doc_keys),
                 KeyBinding::new("delete", DeletePage, doc_keys),

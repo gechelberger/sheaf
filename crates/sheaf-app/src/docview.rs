@@ -32,7 +32,7 @@ use sheaf_ui::theme;
 use crate::markup_tools::{Drag, Tool, arrow_head, rotate_pt, stroke_canvas};
 pub(crate) use crate::pane::Zoom;
 use crate::pane::{Layout, LayoutSpec, MARGIN, PageMode, Pane, Spread};
-use crate::{FullScreen, ReadMode};
+use crate::{ClearGuides, FullScreen, ReadMode, ToggleGrid, ToggleRulers};
 use sheaf_doc::{
     Document, Edit, EditOutcome, FlatOutlineItem, OutlineId, PageId, PageRef, SourceId, SourceInfo,
 };
@@ -410,6 +410,11 @@ pub struct DocView {
     /// Full Screen / Read Mode (see presentation.rs).
     pub(crate) presentation: crate::presentation::Presentation,
     pub(crate) saved_view: Option<crate::presentation::SavedView>,
+    /// View > Rulers / Grid, and the guides dragged out of the rulers.
+    pub(crate) rulers: bool,
+    pub(crate) grid: bool,
+    pub(crate) guides: Vec<crate::rulers::Guide>,
+    pub(crate) guide_drag: Option<crate::rulers::GuideDrag>,
     /// Rows of plugin panels for this document, by `<plugin>.<panel>`.
     #[cfg(feature = "plugins")]
     pub(crate) plugin_panels: HashMap<String, crate::plugin_panel::PluginPanelState>,
@@ -486,6 +491,10 @@ impl DocView {
             region: None,
             presentation: Default::default(),
             saved_view: None,
+            rulers: false,
+            grid: false,
+            guides: Vec::new(),
+            guide_drag: None,
             #[cfg(feature = "plugins")]
             plugin_panels: HashMap::new(),
         };
@@ -3251,6 +3260,8 @@ struct Overlays<'a> {
     region: Option<&'a crate::region::Region>,
     tool: Tool,
     tool_color: [u8; 3],
+    grid: bool,
+    guides: &'a [crate::rulers::Guide],
 }
 
 /// One page as drawn in a pane: the preview underneath, any tiles we have
@@ -3345,6 +3356,10 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
         }
         out
     };
+    if ov.grid {
+        page_div = page_div.child(crate::rulers::grid(pl.w, pl.h, k));
+    }
+    page_div = page_div.children(crate::rulers::guide_lines(ov.guides, pl.w, pl.h, k));
     // Search highlights on top of everything; pattern hits in their own color.
     if let Some(search) = ov.search {
         page_div = page_div.children(hit_rects(
@@ -3495,6 +3510,8 @@ impl DocView {
             region: self.region.as_ref(),
             tool: self.tool,
             tool_color: self.tool_color,
+            grid: self.grid && !full,
+            guides: if full { &[] } else { &self.guides },
         };
         let mut pane_els = Vec::with_capacity(panes);
         for (&ix, frame) in shown.iter().zip(&frames) {
@@ -3505,58 +3522,76 @@ impl DocView {
                 .iter()
                 .map(|pl| page_element(doc, pl, &ov))
                 .collect();
-            pane_els.push(
-                div()
-                    .id(("pages", ix))
-                    .track_scroll(&pane.scroll)
-                    .overflow_scroll()
-                    .size_full()
-                    .on_scroll_wheel(
-                        cx.listener(move |v, ev, window, cx| v.on_wheel(ix, ev, window, cx)),
-                    )
-                    .cursor(page_cursor)
-                    .on_mouse_down(
-                        gpui::MouseButton::Left,
-                        cx.listener(move |v, ev: &gpui::MouseDownEvent, window, cx| {
-                            if v.presentation == crate::presentation::Presentation::FullScreen {
-                                // Acrobat: click for the next page, Shift+click back.
-                                v.turn_page(if ev.modifiers.shift { -1 } else { 1 }, cx);
-                                return;
-                            }
-                            v.activate_pane(ix, cx);
-                            v.on_page_mouse_down(ev, window, cx)
-                        }),
-                    )
-                    .on_mouse_down(
-                        gpui::MouseButton::Right,
-                        cx.listener(move |v, _, _, cx| {
-                            if v.presentation == crate::presentation::Presentation::FullScreen {
-                                v.turn_page(-1, cx);
-                                return;
-                            }
-                            v.activate_pane(ix, cx)
-                        }),
-                    )
-                    .on_mouse_move(
-                        cx.listener(|v, ev, window, cx| v.on_page_mouse_move(ev, window, cx)),
-                    )
-                    .on_mouse_up(
-                        gpui::MouseButton::Left,
-                        cx.listener(|v, ev, window, cx| v.on_page_mouse_up(ev, window, cx)),
-                    )
-                    .on_mouse_up_out(
-                        gpui::MouseButton::Left,
-                        cx.listener(|v, ev, window, cx| v.on_page_mouse_up(ev, window, cx)),
-                    )
-                    .child(
-                        div()
-                            .relative()
-                            .w(px(layout.total_w))
-                            .h(px(layout.total_h))
-                            .children(pages),
-                    )
-                    .into_any_element(),
-            );
+            let preview = self.guide_drag.filter(|d| d.pane == ix).and_then(|d| {
+                let pos = d.pos?;
+                let b = pane.scroll.bounds();
+                Some((
+                    d.horizontal,
+                    if d.horizontal {
+                        pos.y - b.origin.y
+                    } else {
+                        pos.x - b.origin.x
+                    },
+                ))
+            });
+            let scroll_el = div()
+                .id(("pages", ix))
+                .track_scroll(&pane.scroll)
+                .overflow_scroll()
+                .size_full()
+                .on_scroll_wheel(
+                    cx.listener(move |v, ev, window, cx| v.on_wheel(ix, ev, window, cx)),
+                )
+                .cursor(page_cursor)
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(move |v, ev: &gpui::MouseDownEvent, window, cx| {
+                        if v.presentation == crate::presentation::Presentation::FullScreen {
+                            // Acrobat: click for the next page, Shift+click back.
+                            v.turn_page(if ev.modifiers.shift { -1 } else { 1 }, cx);
+                            return;
+                        }
+                        v.activate_pane(ix, cx);
+                        v.on_page_mouse_down(ev, window, cx)
+                    }),
+                )
+                .on_mouse_down(
+                    gpui::MouseButton::Right,
+                    cx.listener(move |v, _, _, cx| {
+                        if v.presentation == crate::presentation::Presentation::FullScreen {
+                            v.turn_page(-1, cx);
+                            return;
+                        }
+                        v.activate_pane(ix, cx)
+                    }),
+                )
+                .on_mouse_move(
+                    cx.listener(|v, ev, window, cx| v.on_page_mouse_move(ev, window, cx)),
+                )
+                .on_mouse_up(
+                    gpui::MouseButton::Left,
+                    cx.listener(|v, ev, window, cx| v.on_page_mouse_up(ev, window, cx)),
+                )
+                .on_mouse_up_out(
+                    gpui::MouseButton::Left,
+                    cx.listener(|v, ev, window, cx| v.on_page_mouse_up(ev, window, cx)),
+                )
+                .child(
+                    div()
+                        .relative()
+                        .w(px(layout.total_w))
+                        .h(px(layout.total_h))
+                        .children(pages),
+                )
+                .into_any_element();
+            pane_els.push(crate::rulers::with_rulers(
+                ix,
+                self.rulers && !full,
+                preview,
+                pane,
+                scroll_el,
+                cx,
+            ));
         }
         let body = if pane_els.len() == 1 {
             pane_els.pop().expect("one pane")
@@ -3770,6 +3805,24 @@ impl Render for DocView {
                 cx.listener(|v, _: &FullScreen, window, cx| v.toggle_full_screen(window, cx)),
             )
             .on_action(cx.listener(|v, _: &ReadMode, window, cx| v.toggle_read_mode(window, cx)))
+            .on_action(cx.listener(|v, _: &ToggleRulers, _, cx| v.toggle_rulers(cx)))
+            .on_action(cx.listener(|v, _: &ToggleGrid, _, cx| v.toggle_grid(cx)))
+            .on_action(cx.listener(|v, _: &ClearGuides, _, cx| v.clear_guides(cx)))
+            .when(self.guide_drag.is_some(), |d| {
+                d.on_mouse_move(
+                    cx.listener(|v, ev: &gpui::MouseMoveEvent, _, cx| {
+                        v.move_guide(ev.position, cx)
+                    }),
+                )
+                .on_mouse_up(
+                    gpui::MouseButton::Left,
+                    cx.listener(|v, _, _, cx| v.finish_guide(cx)),
+                )
+                .on_mouse_up_out(
+                    gpui::MouseButton::Left,
+                    cx.listener(|v, _, _, cx| v.finish_guide(cx)),
+                )
+            })
             .on_action(cx.listener(|v, _: &CloseSearch, window, cx| {
                 if v.presentation == crate::presentation::Presentation::FullScreen
                     && v.leave_presentation(window, cx)
