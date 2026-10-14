@@ -443,6 +443,7 @@ fn main() {
                 log::warn!("keymap.json: {e}");
                 eprintln!("keymap.json: {e}");
             }
+            toolbar::init(cx);
             cx.set_menus(menus::app_menus(cx));
             sheaf_ui::prompts::install(cx);
 

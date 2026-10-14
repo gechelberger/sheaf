@@ -312,7 +312,6 @@ pub struct Workspace {
     menu_bar: Option<Entity<MenuBar>>,
     /// The configurable toolbar, and what's on it.
     toolbar: Entity<sheaf_ui::toolbar::Toolbar>,
-    toolbar_layout: Vec<crate::toolbar::Entry>,
     _toolbar_sub: Subscription,
     /// Bounds of the dock area from the last frame, for splitter math.
     area: gpui::Bounds<Pixels>,
@@ -384,7 +383,6 @@ impl Workspace {
                 })
             }),
             toolbar,
-            toolbar_layout: crate::toolbar::default_layout(),
             _toolbar_sub: toolbar_sub,
             area: gpui::Bounds::default(),
             timing,
@@ -1312,11 +1310,12 @@ impl Workspace {
     fn render_toolbar(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let doc = self.doc().cloned()?;
         let normal = doc.read(cx).presentation() == crate::presentation::Presentation::Normal;
-        if !self.settings.new_toolbar || !normal {
+        let spec = self.toolbar_spec(cx);
+        if !self.settings.new_toolbar || !normal || !spec.visible {
             return None;
         }
         let facts = crate::availability::Facts::from_workspace(self, cx);
-        let items = crate::toolbar::resolve(&self.toolbar_layout, &facts, Some(&doc), cx);
+        let (items, _) = crate::toolbar::resolve(&spec.items, &facts, Some(&doc), cx);
         self.toolbar.update(cx, |t, _| t.set_items(items));
         Some(
             div()
@@ -1332,8 +1331,16 @@ impl Workspace {
     pub(crate) fn toolbar_dump(&mut self, cx: &mut Context<Self>) -> Vec<String> {
         let facts = crate::availability::Facts::from_workspace(self, cx);
         let doc = self.doc().cloned();
-        let items = crate::toolbar::resolve(&self.toolbar_layout, &facts, doc.as_ref(), cx);
+        let spec = self.toolbar_spec(cx);
+        let (items, _) = crate::toolbar::resolve(&spec.items, &facts, doc.as_ref(), cx);
         crate::toolbar::describe(&items)
+    }
+
+    /// The toolbar's layout (`toolbar.json`, shared by every window).
+    fn toolbar_spec(&self, cx: &App) -> crate::toolbar::Spec {
+        cx.try_global::<crate::toolbar::Toolbars>()
+            .map(|t| t.main().clone())
+            .unwrap_or_default()
     }
 
     /// What the toolbar asked for.

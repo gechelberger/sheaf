@@ -315,6 +315,18 @@ This is the part that makes it worth doing.
      `{"dump": "toolbar"}`.
 4. `toolbar.json`: load, resolve, report bad entries like `keymap.json`,
    keep unknown ids. Widget items for colors and tickmarks.
+   *Done 2026-10-14.* Notes and deviations:
+   - `toolbar.rs`: `Toolbars` global from `toolbar.json` (a list; the app
+     shows the first). Each `Spec` has name, dock, position, orientation,
+     visible and items. No file means the default layout; nothing is
+     written until the user changes something.
+   - Items: command id, widget id, `"separator"`, or
+     `["plugin::Run", { plugin, command, args }]` (stored as the command
+     id plus args). Unreadable items are reported on stderr and kept
+     verbatim (`Entry::Invalid`), so a save doesn't lose them;
+     unregistered ids are logged at info level and skipped when drawing.
+   - Overflow keeps layout order: the first item that doesn't fit and
+     everything after it go into `»`.
 5. Docking to all four edges and floating with drag, dock targets and
    on-screen clamping. Position saved per window.
 6. Customize dialog, plus Add/Remove from the context menus of the bar,
