@@ -525,12 +525,14 @@ impl Render for PluginForm {
                                     .text_color(rgb(0xe8e8e8))
                                     .child(self.form.title.clone()),
                             )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(0x7a7a7a))
-                                    .child(format!("from {}", self.source)),
-                            ),
+                            .when(!same_name(&self.form.title, &self.source), |d| {
+                                d.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(0x7a7a7a))
+                                        .child(format!("from {}", self.source)),
+                                )
+                            }),
                     )
                     .children(rows)
                     .when_some(self.error.clone(), |d, e| {
@@ -558,5 +560,42 @@ impl Render for PluginForm {
                             .child(buttons),
                     ),
             )
+    }
+}
+
+/// Whether a form's title already names its plugin ("Bookmarks from
+/// Pattern" from "Bookmark from Pattern"), so "from <plugin>" would only
+/// repeat it: the same words in any order, ignoring case, punctuation and
+/// plurals.
+fn same_name(title: &str, plugin: &str) -> bool {
+    let words = |s: &str| {
+        s.split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .map(|w| {
+                let w = w.to_lowercase();
+                w.strip_suffix('s').map(str::to_string).unwrap_or(w)
+            })
+            .collect::<Vec<_>>()
+    };
+    let (mut a, mut b) = (words(title), words(plugin));
+    a.sort();
+    b.sort();
+    a == b
+}
+
+#[cfg(test)]
+mod name_tests {
+    use super::same_name;
+
+    #[test]
+    fn titles_naming_their_plugin() {
+        assert!(same_name("Bookmarks from Pattern", "Bookmark from Pattern"));
+        assert!(same_name("Find Duplicate Pages…", "Find Duplicate Pages"));
+        assert!(same_name("Convert Currency", "Currency Convert"));
+        assert!(!same_name("Pick a Date", "Currency Convert"));
+        assert!(!same_name(
+            "Find Matching Amounts",
+            "Amount Cross-Reference"
+        ));
     }
 }
