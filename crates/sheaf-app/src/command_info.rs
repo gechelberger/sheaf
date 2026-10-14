@@ -281,6 +281,22 @@ pub fn info(id: &str) -> Option<Info> {
                 "add pages",
             ],
         ),
+        "workspace::HeaderFooter" => (
+            "header-footer",
+            "Add, update or remove a header and footer: text with the page number, page count, date and file name.",
+            &["page numbers", "running head", "footer", "stamp"],
+        ),
+        "workspace::BatesNumbering" => (
+            "bates",
+            "Number every page with a Bates number, like ABC000123, in the header or footer.",
+            &[
+                "legal",
+                "discovery",
+                "production",
+                "endorse",
+                "control number",
+            ],
+        ),
         "workspace::PageLabels" => (
             "page-labels",
             "Number pages your way: roman numerals for the front matter, a prefix like A- for exhibits, or a new start.",

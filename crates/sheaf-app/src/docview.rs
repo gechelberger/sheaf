@@ -1548,6 +1548,11 @@ impl DocView {
                 {
                     log::warn!("page labels arrived after edits; ignored: {e:#}");
                 }
+                if let Some((hf, scope)) = facts.header_footer.clone()
+                    && let Err(e) = doc.model.set_initial_header_footer(hf, scope)
+                {
+                    log::warn!("header/footer settings arrived after edits; ignored: {e:#}");
+                }
                 // The labels changed under the same version.
                 doc.labels.borrow_mut().0 = u64::MAX;
                 doc.attachments = facts.attachments;
@@ -3675,6 +3680,8 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
             theme::PATTERN_HIT_CURRENT,
         ));
     }
+    // A header/footer not yet saved into the file, drawn as it will be.
+    page_div = page_div.children(header_footer_elements(doc, pl, k));
     // Our markup, drawn over the page in the displayed orientation.
     if let Some(list) = doc.model.state().annots_on(pl.pref.id) {
         for a in list.iter() {
@@ -4500,6 +4507,54 @@ impl Render for DragPreview {
                 format!("{} pages", self.count)
             })
     }
+}
+
+/// The unsaved header/footer on one page, in page-local logical px. Only
+/// without a view rotation: GPUI can't turn text, and the header/footer
+/// reads upright on the page as the document has it.
+fn header_footer_elements(doc: &Doc, pl: &PagePlan, k: f32) -> Vec<AnyElement> {
+    let st = doc.model.state();
+    let Some(hf) = &st.header_footer else {
+        return Vec::new();
+    };
+    let own = st.pages.get(pl.index);
+    if !doc.model.header_footer_dirty()
+        || !hf.covers(pl.pref.id)
+        || own.is_none_or(|p| p.rotation != pl.pref.rotation)
+    {
+        return Vec::new();
+    }
+    let size = doc.model.page_size(&pl.pref);
+    let bates = if hf.bates.is_some() {
+        let ids: Vec<PageId> = st.pages.iter().map(|p| p.id).collect();
+        hf.bates_numbers(&ids).get(pl.index).copied().flatten()
+    } else {
+        None
+    };
+    let facts = sheaf_doc::stamps::PageFacts {
+        index: pl.index,
+        count: st.pages.len(),
+        bates,
+    };
+    let [r, g, b] = hf.color;
+    let color = rgb(((r as u32) << 16) | ((g as u32) << 8) | b as u32);
+    hf.layout(size, &facts)
+        .into_iter()
+        .map(|p| {
+            div()
+                .absolute()
+                .left(px(p.x * k))
+                .top(px((p.baseline - p.size * 0.9) * k))
+                .h(px(p.size * 1.1 * k))
+                .whitespace_nowrap()
+                .font_family("Liberation Sans")
+                .text_size(px(p.size * k))
+                .line_height(px(p.size * 1.1 * k))
+                .text_color(color)
+                .child(p.text)
+                .into_any_element()
+        })
+        .collect()
 }
 
 /// GPUI elements for one annotation, positioned in page-local logical px.

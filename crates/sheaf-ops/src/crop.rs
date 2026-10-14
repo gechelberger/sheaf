@@ -11,7 +11,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sheaf_core::{PageIndex, PageSize, Rotation};
 use sheaf_doc::annot::Pt;
-use sheaf_doc::{PageId, Rebase, Snapshot, SourceId, SourceInfo};
+use sheaf_doc::{PageId, Snapshot, SourceId, SourceInfo};
 use sheaf_progress::{Progress, Unit};
 use sheaf_render::pdfium::PdfiumEngine;
 use sheaf_render::{Job, PixelFormat, Renderer};
@@ -36,28 +36,7 @@ pub enum CropSpec {
     },
 }
 
-/// A generated PDF holding cropped copies of some pages, and the rebases
-/// that move the document's pages onto it once it's a source.
-pub struct CroppedSource {
-    pub info: SourceInfo,
-    /// (page, its index in `info`'s file, shift).
-    pub pages: Vec<(PageId, u32, (f32, f32))>,
-}
-
-impl CroppedSource {
-    /// The edit, once `info` is added to the document as `source`.
-    pub fn rebases(&self, source: SourceId) -> Vec<Rebase> {
-        self.pages
-            .iter()
-            .map(|&(id, index, shift)| Rebase {
-                id,
-                source,
-                index,
-                shift,
-            })
-            .collect()
-    }
-}
+pub use crate::derive::DerivedSource as CroppedSource;
 
 /// Smallest page a crop may leave, in points (a quarter inch).
 const MIN_SIDE: f32 = 18.0;

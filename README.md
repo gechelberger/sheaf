@@ -189,7 +189,7 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 | Insert from scanner | 📋 M5 |
 | Crop pages | ✅ Document > Crop Pages…: margins (in, mm or pt, as the page is shown) or trim white margins, on the current, selected, all or a range of pages; marks and OCR text stay on their content; saved as `/CropBox` |
 | Page labels (roman numerals, prefixes) | ✅ Document > Page Labels…: style, prefix and start for a run of pages; the pages after keep their labels; labels follow their pages through reorders and are written as `/PageLabels`; shown in the status bar and thumbnails, and Go to Page takes them |
-| Headers / footers / Bates numbering | 📋 |
+| Headers / footers / Bates numbering | ✅ Document > Header & Footer… and Bates Numbering…: six places with page number, page count, date, file name and Bates tokens; size, color, margins, page range; shown on the pages at once, written as tagged artifacts like Acrobat's on save; Update and Remove work on ours and Acrobat's |
 | Watermarks / backgrounds | 📋 |
 
 ### Bookmarks (PDFlyer-heavy)

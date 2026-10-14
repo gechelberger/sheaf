@@ -40,6 +40,10 @@ fn build(snap: &Snapshot) -> Result<(usize, Vec<u8>)> {
     let original_len = original.len();
     let mut pdf =
         Pdf::load_mem(&original).with_context(|| format!("parsing {}", info.path.display()))?;
+    if snap.header_footer_dirty {
+        // Drawing it touches every page's content: a rewrite does that.
+        bail!("a new header/footer is written by a full save");
+    }
     if pdf.encryption_state.is_some() || pdf.trailer.has(b"Encrypt") {
         bail!("incremental save of encrypted files is not supported yet");
     }

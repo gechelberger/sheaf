@@ -108,6 +108,8 @@ pub struct DocState {
     /// Page labels, anchored to the pages ranges start at. None: the file
     /// has none, or they haven't been read.
     pub labels: Option<Vector<crate::labels::LabelSpec>>,
+    /// The header/footer (with Bates numbers) sheaf draws on pages.
+    pub header_footer: Option<Arc<crate::stamps::HeaderFooter>>,
 }
 
 impl DocState {
@@ -347,6 +349,10 @@ pub enum Edit {
     SetPageLabels {
         ranges: Vec<crate::labels::LabelSpec>,
     },
+    /// Set or remove the header/footer.
+    SetHeaderFooter {
+        header_footer: Option<crate::stamps::HeaderFooter>,
+    },
 }
 
 /// One page of [`Edit::RebasePages`].
@@ -413,6 +419,9 @@ pub struct Snapshot {
     pub outline_dirty: bool,
     /// The page labels differ from what's in the primary file.
     pub labels_dirty: bool,
+    /// The header/footer differs from what's drawn in the primary file:
+    /// it's drawn over the pages on screen, and a save writes it.
+    pub header_footer_dirty: bool,
     /// Pages whose markup differs from what's in the primary file.
     pub annots_dirty: HashSet<PageId>,
 }
@@ -438,6 +447,8 @@ pub struct Document {
     /// Outline as it exists in the primary file on disk.
     saved_outline: Vector<OutlineNode>,
     saved_labels: Option<Vector<crate::labels::LabelSpec>>,
+    /// The header/footer already drawn into the primary file's pages.
+    baked_header_footer: Option<Arc<crate::stamps::HeaderFooter>>,
     /// Markup as it exists in the primary file on disk.
     saved_annots: im::HashMap<PageId, Vector<Annot>>,
 }
@@ -464,6 +475,7 @@ impl Document {
             next_job: 1,
             saved_outline: Vector::new(),
             saved_labels: None,
+            baked_header_footer: None,
             saved_annots: im::HashMap::new(),
         };
         let pages: Vector<PageRef> = (0..primary.page_count)
@@ -486,6 +498,7 @@ impl Document {
                 annots: im::HashMap::new(),
                 text_layers: im::HashMap::new(),
                 labels: None,
+                header_footer: None,
             },
             marginal_bytes: 0,
             job: None,
@@ -535,6 +548,29 @@ impl Document {
 
     /// Markup read back from the primary file (annotations sheaf wrote
     /// earlier), keyed by source page index. Only valid before any edit.
+    /// The header/footer differs from what the primary file has drawn.
+    pub fn header_footer_dirty(&self) -> bool {
+        self.state().header_footer != self.baked_header_footer
+    }
+
+    /// The header/footer sheaf drew into the file, read after open (page
+    /// scope by index).
+    pub fn set_initial_header_footer(
+        &mut self,
+        mut hf: crate::stamps::HeaderFooter,
+        indexes: Option<Vec<usize>>,
+    ) -> Result<()> {
+        if self.history.len() != 1 {
+            bail!("the header/footer can only be set before editing");
+        }
+        let ids: Vec<PageId> = self.history[0].state.pages.iter().map(|p| p.id).collect();
+        hf.pages = indexes.map(|ix| ix.iter().filter_map(|&i| ids.get(i).copied()).collect());
+        let hf = Some(Arc::new(hf));
+        self.history[0].state.header_footer = hf.clone();
+        self.baked_header_footer = hf;
+        Ok(())
+    }
+
     /// The file's page labels, read after open: ranges by page index.
     pub fn set_initial_labels(&mut self, ranges: &[crate::labels::LabelRange]) -> Result<()> {
         if self.history.len() != 1 {
@@ -600,6 +636,7 @@ impl Document {
             sources: self.sources.clone(),
             outline_dirty: self.state().outline != self.saved_outline,
             labels_dirty: self.state().labels != self.saved_labels,
+            header_footer_dirty: self.header_footer_dirty(),
             annots_dirty: self.annots_dirty_pages(),
         }
     }
@@ -630,6 +667,7 @@ impl Document {
         self.saved_outline = self.history[self.cursor].state.outline.clone();
         self.saved_annots = self.history[self.cursor].state.annots.clone();
         self.saved_labels = self.history[self.cursor].state.labels.clone();
+        self.baked_header_footer = self.history[self.cursor].state.header_footer.clone();
         self.saved = Some(self.cursor);
         id
     }
@@ -1234,6 +1272,7 @@ impl Document {
                                 annots: st.annots.clone(),
                                 text_layers: st.text_layers.clone(),
                                 labels: st.labels.clone(),
+                                header_footer: st.header_footer.clone(),
                             };
                             let prev_node = flat[..my_pos]
                                 .iter()
@@ -1381,6 +1420,9 @@ impl Document {
                 for id in ids {
                     st.text_layers.remove(&id);
                 }
+            }
+            Edit::SetHeaderFooter { header_footer } => {
+                st.header_footer = header_footer.filter(|h| !h.is_empty()).map(Arc::new);
             }
             Edit::SetPageLabels { ranges } => {
                 st.labels = (!ranges.is_empty()).then(|| ranges.into_iter().collect());

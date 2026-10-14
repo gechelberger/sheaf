@@ -20,6 +20,9 @@ pub fn open(path: &Path, password: Option<&str>) -> Result<Document> {
     if let Some(ranges) = &facts.label_ranges {
         doc.set_initial_labels(ranges)?;
     }
+    if let Some((hf, scope)) = facts.header_footer {
+        doc.set_initial_header_footer(hf, scope)?;
+    }
     Ok(doc)
 }
 

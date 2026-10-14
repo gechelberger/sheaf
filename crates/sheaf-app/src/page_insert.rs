@@ -392,3 +392,97 @@ impl DocView {
         matches!(&self.state, State::Ready(doc) if doc.model.state().labels.is_some())
     }
 }
+
+impl DocView {
+    /// Document > Header & Footer: set (or with None, remove) the
+    /// header/footer. Pages whose file already has one drawn are moved onto
+    /// copies without it first, in the same undo step, so the new one
+    /// isn't drawn over the old.
+    pub(crate) fn set_header_footer(
+        &mut self,
+        hf: Option<sheaf_doc::stamps::HeaderFooter>,
+        cx: &mut Context<Self>,
+    ) {
+        let State::Ready(doc) = &self.state else {
+            return;
+        };
+        let snapshot = doc.model.snapshot();
+        let label = if hf.is_some() {
+            "Header & footer"
+        } else {
+            "Remove header & footer"
+        };
+        self.set_notice(format!("{label}…"), cx);
+        cx.spawn(async move |this, cx| {
+            let planned = cx
+                .background_executor()
+                .spawn(async move {
+                    let plan = sheaf_ops::derive::strip_stamps(&snapshot, &sheaf_ops::NoProgress)?;
+                    let mut opened = Vec::new();
+                    for c in plan {
+                        let handle = RenderHandle::open(c.info.path.clone(), None)?;
+                        opened.push((c, handle));
+                    }
+                    anyhow::Ok(opened)
+                })
+                .await;
+            this.update(cx, |v, cx| {
+                let opened = match planned {
+                    Ok(o) => o,
+                    Err(e) => {
+                        v.set_notice(format!("{label} failed: {e:#}"), cx);
+                        return;
+                    }
+                };
+                let State::Ready(doc) = &mut v.state else {
+                    return;
+                };
+                let mut rebases = Vec::new();
+                for (c, handle) in opened {
+                    let sid = doc.model.add_source(c.info.clone());
+                    doc.handles.insert(sid, handle);
+                    rebases.extend(c.rebases(sid));
+                }
+                let mut edits = Vec::new();
+                if !rebases.is_empty() {
+                    edits.push(Edit::RebasePages { pages: rebases });
+                }
+                edits.push(Edit::SetHeaderFooter { header_footer: hf });
+                match doc.model.apply_batch(edits, label) {
+                    Ok(out) => {
+                        doc.touched();
+                        v.after_model_change(label.to_string(), out, cx);
+                    }
+                    Err(e) => v.set_notice(format!("{label} failed: {e:#}"), cx),
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// What the Header & Footer dialog starts from.
+    pub(crate) fn header_footer(&self) -> Option<sheaf_doc::stamps::HeaderFooter> {
+        let State::Ready(doc) = &self.state else {
+            return None;
+        };
+        doc.model.state().header_footer.as_deref().cloned()
+    }
+}
+
+impl DocView {
+    /// 0-based indexes of these pages, in document order.
+    pub(crate) fn indexes_of(&self, ids: &[PageId]) -> Vec<usize> {
+        let State::Ready(doc) = &self.state else {
+            return Vec::new();
+        };
+        doc.model
+            .state()
+            .pages
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| ids.contains(&p.id))
+            .map(|(i, _)| i)
+            .collect()
+    }
+}

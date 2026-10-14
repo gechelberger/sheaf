@@ -142,8 +142,8 @@ portal. Reasons in [`todos/m7.md`](todos/m7.md).
 - Replace pages (Acrobat's Replace Pages).
 - Crop pages (CropBox), with the option to apply to a range.
 - ✅ Page labels: edit numbering style, prefix, start.
-- Headers / footers: add, update, remove (with date, page number, file name).
-- Bates numbering.
+- ✅ Headers / footers: add, update, remove (with date, page number, file name).
+- ✅ Bates numbering.
 - Watermarks and backgrounds (text or image, opacity, behind/in front).
 - Bookmarks: create from a page range; colorize by level; auto-bookmark from
   a text pattern (reuses the Patterns engine).

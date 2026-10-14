@@ -341,6 +341,10 @@ pub struct Workspace {
     replace_dialog: Option<(Entity<crate::insert_dialog::ReplaceDialog>, Subscription)>,
     crop: Option<(Entity<crate::crop_dialog::CropDialog>, Subscription)>,
     labels: Option<(Entity<crate::labels_dialog::LabelsDialog>, Subscription)>,
+    header_footer: Option<(
+        Entity<crate::header_footer_dialog::HeaderFooterDialog>,
+        Subscription,
+    )>,
     /// File > Print, while open.
     print: Option<(Entity<crate::print_dialog::PrintDialog>, Subscription)>,
     /// File > Properties, while open.
@@ -441,6 +445,7 @@ impl Workspace {
             replace_dialog: None,
             crop: None,
             labels: None,
+            header_footer: None,
             print: None,
             properties: None,
             ocr_dialog: None,
@@ -1254,6 +1259,65 @@ impl Workspace {
             .ok();
         })
         .detach();
+    }
+
+    /// Header & Footer… (or Bates Numbering…, which starts with Bates on).
+    fn open_header_footer(&mut self, bates: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.header_footer.is_some() {
+            return;
+        }
+        let Some(doc) = self.doc().cloned() else {
+            return;
+        };
+        let ctx = doc.read_with(cx, |d, _| {
+            let current = d.header_footer();
+            let (page_count, _) = d.target_indexes();
+            let scope = current
+                .as_ref()
+                .and_then(|h| h.pages.as_ref())
+                .map(|ids| crate::insert_dialog::ranges_text(&d.indexes_of(ids)))
+                .unwrap_or_default();
+            crate::header_footer_dialog::HeaderFooterContext {
+                current,
+                page_count,
+                file: d
+                    .path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+                scope,
+                bates,
+            }
+        });
+        let dialog =
+            cx.new(|cx| crate::header_footer_dialog::HeaderFooterDialog::new(ctx, window, cx));
+        let sub = cx.subscribe_in(
+            &dialog,
+            window,
+            |ws, _, ev: &crate::header_footer_dialog::HeaderFooterEvent, window, cx| {
+                use crate::header_footer_dialog::HeaderFooterEvent;
+                ws.header_footer = None;
+                ws.focus_active(window, cx);
+                if let Some(doc) = ws.doc().cloned() {
+                    match ev {
+                        HeaderFooterEvent::Apply(hf, pages) => {
+                            let (mut hf, pages) = ((**hf).clone(), pages.clone());
+                            doc.update(cx, |d, cx| {
+                                hf.pages = pages.map(|ix| d.page_ids_at(&ix));
+                                d.set_header_footer(Some(hf), cx)
+                            });
+                        }
+                        HeaderFooterEvent::Remove => {
+                            doc.update(cx, |d, cx| d.set_header_footer(None, cx));
+                        }
+                        HeaderFooterEvent::Dismiss => {}
+                    }
+                }
+                cx.notify();
+            },
+        );
+        self.header_footer = Some((dialog, sub));
+        cx.notify();
     }
 
     fn toggle_labels(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2437,6 +2501,12 @@ impl Render for Workspace {
             .on_action(
                 cx.listener(|ws, _: &crate::PageLabels, window, cx| ws.toggle_labels(window, cx)),
             )
+            .on_action(cx.listener(|ws, _: &crate::HeaderFooter, window, cx| {
+                ws.open_header_footer(false, window, cx)
+            }))
+            .on_action(cx.listener(|ws, _: &crate::BatesNumbering, window, cx| {
+                ws.open_header_footer(true, window, cx)
+            }))
             .on_action(
                 cx.listener(|ws, a: &crate::recent::OpenRecent, window, cx| {
                     ws.open_recent(a.path.clone(), window, cx)
@@ -2578,6 +2648,11 @@ impl Render for Workspace {
             )
             .children(
                 self.labels
+                    .as_ref()
+                    .map(|(d, _)| deferred(d.clone()).with_priority(2)),
+            )
+            .children(
+                self.header_footer
                     .as_ref()
                     .map(|(d, _)| deferred(d.clone()).with_priority(2)),
             )

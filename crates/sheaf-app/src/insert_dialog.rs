@@ -379,7 +379,7 @@ impl ReplaceDialog {
 }
 
 /// 0-based indexes as a 1-based range string: [2,3,4,7] → "3-5, 8".
-fn ranges_text(idx: &[usize]) -> String {
+pub(crate) fn ranges_text(idx: &[usize]) -> String {
     let mut out: Vec<String> = Vec::new();
     let mut i = 0;
     while i < idx.len() {

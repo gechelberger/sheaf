@@ -7,6 +7,7 @@
 
 pub mod combine;
 pub mod crop;
+pub mod derive;
 pub mod export;
 pub mod images;
 pub mod open;

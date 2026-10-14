@@ -129,6 +129,9 @@ pub fn load_pdf(path: &Path, password: Option<&str>) -> Result<lopdf::Document> 
 pub struct FileFacts {
     /// The file's `/PageLabels` ranges, by page index.
     pub label_ranges: Option<Vec<crate::labels::LabelRange>>,
+    /// The header/footer sheaf drew into the file, and the page indexes
+    /// it's on (none: all).
+    pub header_footer: Option<(crate::stamps::HeaderFooter, Option<Vec<usize>>)>,
     /// Embedded files, document-level and on annotations.
     pub attachments: Vec<crate::attachments::Attachment>,
     /// Set when the file is a PDF Portfolio.
@@ -141,6 +144,7 @@ pub struct FileFacts {
 pub fn facts_in(pdf: &lopdf::Document) -> FileFacts {
     FileFacts {
         label_ranges: crate::labels::label_ranges(pdf),
+        header_footer: crate::stamps::from_catalog(pdf),
         attachments: crate::attachments::attachments_in(pdf),
         collection: crate::portfolio::collection(pdf),
         layers: crate::layers::layers_in(pdf),

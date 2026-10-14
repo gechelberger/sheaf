@@ -20,6 +20,7 @@ mod export;
 mod export_dialog;
 mod file_dialog;
 mod goto;
+mod header_footer_dialog;
 mod insert_dialog;
 mod jobs;
 mod keymap;
@@ -183,6 +184,8 @@ actions!(
         ReplacePages,
         CropPages,
         PageLabels,
+        HeaderFooter,
+        BatesNumbering,
         ToggleToolbar,
         CustomizeToolbar
     ]
@@ -331,6 +334,7 @@ fn main() {
             let ind = Some(insert_dialog::KEY_CONTEXT);
             let crd = Some(crop_dialog::KEY_CONTEXT);
             let lbd = Some(labels_dialog::KEY_CONTEXT);
+            let hfd = Some(header_footer_dialog::KEY_CONTEXT);
             let lbd_keys = Some("LabelsDialog && !TextInput");
             let crd_keys = Some("CropDialog && !TextInput");
             let ind_keys = Some("InsertDialog && !TextInput");
@@ -467,6 +471,9 @@ fn main() {
                 KeyBinding::new("right", DialogRight, lbd_keys),
                 KeyBinding::new("enter", DialogRun, lbd_keys),
                 KeyBinding::new("escape", DialogCancel, lbd_keys),
+                KeyBinding::new("tab", DialogNext, hfd),
+                KeyBinding::new("shift-tab", DialogPrev, hfd),
+                KeyBinding::new("escape", DialogCancel, hfd),
                 KeyBinding::new("tab", DialogNext, pd),
                 KeyBinding::new("shift-tab", DialogPrev, pd),
                 KeyBinding::new("left", DialogLeft, pd_keys),

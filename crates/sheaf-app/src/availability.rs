@@ -217,6 +217,8 @@ pub fn builtin(id: &str) -> Builtin {
         | "workspace::ReplacePages"
         | "workspace::CropPages"
         | "workspace::PageLabels"
+        | "workspace::HeaderFooter"
+        | "workspace::BatesNumbering"
         | "workspace::Print"
         | "workspace::DocumentProperties"
         | "workspace::CloseDocument"
