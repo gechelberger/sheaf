@@ -91,7 +91,7 @@ Viewing:
 - Open PDF Portfolios (read-only). When the catalog has a `/Collection`,
   open in portfolio view: the attachments panel lists the embedded files
   with their folders and metadata columns, the page view shows the cover
-  sheet, embedded PDFs open in new tabs, and any file can be saved out.
+  sheet, embedded PDFs open in new windows, and any file can be saved out.
 - Layers (OCG) panel: toggle visibility.
 - Document Properties dialog (metadata, fonts, PDF version, security summary).
 - Recent files.

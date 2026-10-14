@@ -1,6 +1,6 @@
-//! Top-level window content: document tabs, three docks (left, right,
-//! bottom) that each host a tabbed set of panels, and the active document
-//! view in the middle. F4 hides and shows all docks at once, as Acrobat's
+//! Top-level window content: one document per window, with three docks
+//! (left, right, bottom) that each host a tabbed set of panels around the
+//! document view. F4 hides and shows all docks at once, as Acrobat's
 //! navigation-pane toggle does; individual docks have their own keys.
 
 use std::path::{Path, PathBuf};
@@ -21,32 +21,32 @@ use crate::docview::{DocEvent, DocView};
 use crate::ocr_dialog::{OcrDialog, OcrDialogContext, OcrDialogEvent, OcrSpec};
 use crate::settings::{DockLayout, DockState, Settings, WindowPlacement};
 use crate::{
-    About, ActivateMenuBar, CloseTab, CloseWindow, CommandPalette, MoveTabToNewWindow, NewWindow,
-    NextTab, OpenFile, OpenInWindows, PrevTab, Quit, RecognizeText, ShowCalc, ShowComments,
-    ShowOutline, ShowPatterns, ShowThumbnails, ToggleBottomDock, ToggleLeftDock, ToggleRightDock,
-    ToggleSidebar,
+    About, ActivateMenuBar, CloseDocument, CloseWindow, CommandPalette, NewWindow, OpenFile, Quit,
+    RecognizeText, ShowCalc, ShowComments, ShowOutline, ShowPatterns, ShowThumbnails,
+    ToggleBottomDock, ToggleLeftDock, ToggleRightDock, ToggleSidebar,
 };
 
 pub const KEY_CONTEXT: &str = "Workspace";
 
 /// What the command line asked for at startup.
 pub struct Launch {
-    pub paths: Vec<PathBuf>,
+    /// The window's document; None opens an empty window.
+    pub path: Option<PathBuf>,
     pub timing: bool,
-    /// Open the search bar with this query once the first document loads.
+    /// Open the search bar with this query once the document loads.
     pub find: Option<String>,
-    /// Dev: rotate page 1 of the first document and save it here.
+    /// Dev: rotate page 1 of the document and save it here.
     pub selftest_save: Option<PathBuf>,
-    /// Dev: insert this PDF after page 1 of the first document.
+    /// Dev: insert this PDF after page 1 of the document.
     pub selftest_insert: Option<PathBuf>,
     pub selftest_annot: Option<PathBuf>,
     pub selftest_clean: Option<PathBuf>,
     pub start_panel: Option<String>,
-    /// Run this regex in the Patterns panel of the first document.
+    /// Run this regex in the Patterns panel of the document.
     pub pattern: Option<String>,
     pub launched: Instant,
     pub settings: Settings,
-    /// Dev: open the command-line files with this password.
+    /// Dev: open the command-line file with this password.
     pub password: Option<String>,
     pub selftest_extract: Option<PathBuf>,
     pub selftest_flatten: Option<PathBuf>,
@@ -54,9 +54,9 @@ pub struct Launch {
 }
 
 impl Launch {
-    pub fn files(paths: Vec<PathBuf>) -> Self {
+    pub fn file(path: Option<PathBuf>) -> Self {
         Self {
-            paths,
+            path,
             timing: false,
             find: None,
             selftest_save: None,
@@ -75,7 +75,6 @@ impl Launch {
     }
 }
 
-const TAB_H: f32 = 32.0;
 const DOCK_TAB_H: f32 = 28.0;
 const SPLITTER: f32 = 5.0;
 const MIN_DOCK: f32 = 140.0;
@@ -270,8 +269,7 @@ pub struct Workspace {
     focus: gpui::FocusHandle,
     closing: bool,
     native_title: String,
-    docs: Vec<Entity<DocView>>,
-    active: usize,
+    doc: Option<Entity<DocView>>,
     docks: [Dock; 3],
     /// F4: everything hidden regardless of per-dock state.
     all_hidden: bool,
@@ -279,8 +277,6 @@ pub struct Workspace {
     resizing: Option<Side>,
     /// Right-click menu on a dock tab: (panel, where).
     dock_menu: Option<(Panel, Point<Pixels>)>,
-    /// The tab whose right-click menu is open, and where.
-    tab_menu: Option<(Entity<DocView>, Point<Pixels>)>,
     /// The command palette, while open.
     palette: Option<(Entity<Palette>, Subscription)>,
     /// Document > Recognize Text (OCR)…, while open.
@@ -291,7 +287,8 @@ pub struct Workspace {
     /// Plugins > Manage Plugins…, while open.
     #[cfg(feature = "plugins")]
     plugin_manager: Option<(Entity<crate::plugin_manager::PluginManager>, Subscription)>,
-    /// Each open document's events, forwarded to plugins.
+    /// The document's events, forwarded to plugins. A closed document's
+    /// entry stays until its `Closed` event is delivered.
     #[cfg(feature = "plugins")]
     doc_subs: Vec<(gpui::EntityId, Subscription)>,
     /// File/Edit/View… in the title bar; None where the OS draws menus.
@@ -301,14 +298,14 @@ pub struct Workspace {
     timing: bool,
     launched: Instant,
     settings: Settings,
-    /// Only for files named on the command line.
+    /// Only for the file named on the command line.
     password: Option<String>,
 }
 
 impl Workspace {
     pub fn new(window: &mut Window, launch: Launch, cx: &mut Context<Self>) -> Self {
         let Launch {
-            paths,
+            path,
             timing,
             find,
             selftest_save,
@@ -338,13 +335,11 @@ impl Workspace {
             focus: cx.focus_handle(),
             closing: false,
             native_title: "sheaf".into(),
-            docs: Vec::new(),
-            active: 0,
+            doc: None,
             docks,
             all_hidden,
             resizing: None,
             dock_menu: None,
-            tab_menu: None,
             palette: None,
             ocr_dialog: None,
             #[cfg(feature = "plugins")]
@@ -367,44 +362,44 @@ impl Workspace {
             Some("comments") => this.show_panel(Panel::Comments),
             _ => {}
         }
-        for p in paths {
+        if let Some(p) = path {
             this.open_path(p, window, cx);
         }
         #[cfg(feature = "plugins")]
         crate::plugins::ask_consent(window, cx);
         this.password = None;
-        if let (Some(q), Some(doc)) = (find, this.docs.first().cloned()) {
+        if let (Some(q), Some(doc)) = (find, this.doc.clone()) {
             doc.update(cx, |d, cx| d.set_initial_query(q, cx));
         }
-        if let (Some(p), Some(doc)) = (selftest_save, this.docs.first().cloned()) {
+        if let (Some(p), Some(doc)) = (selftest_save, this.doc.clone()) {
             doc.update(cx, |d, _| d.set_selftest_save(p));
         }
-        if let (Some(p), Some(doc)) = (selftest_insert, this.docs.first().cloned()) {
+        if let (Some(p), Some(doc)) = (selftest_insert, this.doc.clone()) {
             doc.update(cx, |d, _| d.set_selftest_insert(p));
         }
-        if let (Some(p), Some(doc)) = (selftest_annot, this.docs.first().cloned()) {
+        if let (Some(p), Some(doc)) = (selftest_annot, this.doc.clone()) {
             doc.update(cx, |d, _| d.set_selftest_annot(p));
         }
-        if let (Some(p), Some(doc)) = (selftest_clean, this.docs.first().cloned()) {
+        if let (Some(p), Some(doc)) = (selftest_clean, this.doc.clone()) {
             doc.update(cx, |d, _| d.set_selftest_clean(p));
         }
-        if let (Some(p), Some(doc)) = (selftest_extract, this.docs.first().cloned()) {
+        if let (Some(p), Some(doc)) = (selftest_extract, this.doc.clone()) {
             doc.update(cx, |d, _| d.selftest_extract = Some(p));
         }
-        if let (Some(p), Some(doc)) = (selftest_flatten, this.docs.first().cloned()) {
+        if let (Some(p), Some(doc)) = (selftest_flatten, this.doc.clone()) {
             doc.update(cx, |d, _| d.selftest_flatten = Some(p));
         }
-        if let (Some(p), Some(doc)) = (selftest_ocr, this.docs.first().cloned()) {
+        if let (Some(p), Some(doc)) = (selftest_ocr, this.doc.clone()) {
             doc.update(cx, |d, _| d.selftest_ocr = Some(p));
         }
-        if let (Some(p), Some(doc)) = (pattern, this.docs.first().cloned()) {
+        if let (Some(p), Some(doc)) = (pattern, this.doc.clone()) {
             doc.update(cx, |d, _| d.set_initial_pattern(p));
         }
         this
     }
 
-    pub fn active_doc(&self) -> Option<&Entity<DocView>> {
-        self.docs.get(self.active)
+    pub fn doc(&self) -> Option<&Entity<DocView>> {
+        self.doc.as_ref()
     }
 
     fn dock(&self, side: Side) -> &Dock {
@@ -496,39 +491,33 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Show `path` in this window if it's empty; otherwise in a new one.
     pub fn open_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(ix) = self.position_of(&path, cx) {
-            self.active = ix;
-            cx.notify();
+        if self.shows(&path, cx) {
+            return;
+        }
+        if self.doc.is_some() {
+            Self::new_window(Some(path), cx);
             return;
         }
         let (timing, launched) = (self.timing, self.launched);
         let password = self.password.clone();
         let doc = cx.new(|cx| DocView::new(path, password, timing, launched, cx));
         self.watch(&doc, window, cx);
-        self.docs.push(doc);
-        self.active = self.docs.len() - 1;
-        cx.notify();
-    }
-
-    /// The tab showing this file, if any.
-    fn position_of(&self, path: &Path, cx: &App) -> Option<usize> {
-        self.docs
-            .iter()
-            .position(|d| same_file(&d.read(cx).path, path))
-    }
-
-    fn activate(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if self.docs.is_empty() {
-            return;
-        }
-        self.active = ix.min(self.docs.len() - 1);
+        self.doc = Some(doc);
         self.focus_active(window, cx);
         cx.notify();
     }
 
+    /// Whether this window's document is this file.
+    fn shows(&self, path: &Path, cx: &App) -> bool {
+        self.doc
+            .as_ref()
+            .is_some_and(|d| same_file(&d.read(cx).path, path))
+    }
+
     pub fn focus_active(&self, window: &mut Window, cx: &mut App) {
-        if let Some(doc) = self.active_doc() {
+        if let Some(doc) = self.doc() {
             let handle = doc.read(cx).focus_handle(cx);
             window.focus(&handle, cx);
         } else {
@@ -543,21 +532,29 @@ impl Workspace {
         }
     }
 
-    /// Close a tab, asking about unsaved changes first.
-    fn close(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(doc) = self.docs.get(ix).cloned() else {
+    /// File > Close: close the window, asking about unsaved changes first.
+    /// The last window stays open, empty, so another file can be opened.
+    fn close_document(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let here = window.window_handle().window_id();
+        let others = cx
+            .windows()
+            .into_iter()
+            .filter_map(|w| w.downcast::<Workspace>())
+            .any(|w| w.window_id() != here);
+        let Some(doc) = self.doc.clone().filter(|_| !others) else {
+            self.request_close(window, cx);
             return;
         };
         if !doc.read(cx).is_dirty() {
-            self.close_now(ix, window, cx);
+            self.close_now(window, cx);
             return;
         }
         let may_close = self.confirm_close(doc.clone(), window, cx);
         cx.spawn_in(window, async move |this, cx| {
             if may_close.await {
                 this.update_in(cx, |ws, window, cx| {
-                    if let Some(i) = ws.docs.iter().position(|d| *d == doc) {
-                        ws.close_now(i, window, cx);
+                    if ws.doc.as_ref() == Some(&doc) {
+                        ws.close_now(window, cx);
                     }
                 })
                 .ok();
@@ -566,16 +563,17 @@ impl Workspace {
         .detach();
     }
 
-    /// Close a tab without asking.
-    fn close_now(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(doc) = self.docs.get(ix).cloned() else {
+    /// Drop the document without asking.
+    fn close_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(doc) = self.doc.take() else {
             return;
         };
         doc.update(cx, |_, cx| cx.emit(DocEvent::Closed));
         // Subscriptions hold the view weakly; keep it alive until the event
         // has been delivered.
         cx.defer(move |_| drop(doc));
-        self.detach(ix, true, window, cx);
+        self.focus_active(window, cx);
+        cx.notify();
     }
 
     /// Forward a document's events to the plugins that want them.
@@ -593,27 +591,6 @@ impl Workspace {
 
     #[cfg(not(feature = "plugins"))]
     fn watch(&mut self, _: &Entity<DocView>, _: &mut Window, _: &mut Context<Self>) {}
-
-    /// Take a tab out of this window (closed, or moved to another). A
-    /// closing tab's event subscription stays until `Closed` is delivered.
-    fn detach(&mut self, ix: usize, closing: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if ix >= self.docs.len() {
-            return;
-        }
-        let doc = self.docs.remove(ix);
-        #[cfg(feature = "plugins")]
-        if !closing {
-            self.doc_subs.retain(|(d, _)| *d != doc.entity_id());
-        }
-        #[cfg(not(feature = "plugins"))]
-        let _ = (doc, closing);
-        if ix < self.active {
-            self.active -= 1;
-        }
-        self.active = self.active.min(self.docs.len().saturating_sub(1));
-        self.focus_active(window, cx);
-        cx.notify();
-    }
 
     /// Acrobat's "Save changes?" prompt for one document. Resolves to true
     /// once the document may be closed: either it was saved, or the user
@@ -655,7 +632,7 @@ impl Workspace {
             id: run.command.clone(),
             args: run.args.as_ref().map(|a| a.to_string()),
         };
-        crate::plugins::run(&run.plugin, call, self.active_doc().cloned(), window, cx);
+        crate::plugins::run(&run.plugin, call, self.doc().cloned(), window, cx);
     }
 
     /// A row action in a plugin panel.
@@ -669,7 +646,7 @@ impl Workspace {
             row: a.row.clone(),
             action: a.action.clone(),
         };
-        crate::plugins::run(plugin, call, self.active_doc().cloned(), window, cx);
+        crate::plugins::run(plugin, call, self.doc().cloned(), window, cx);
     }
 
     /// Pick up changed menus in the title bar.
@@ -802,7 +779,7 @@ impl Workspace {
             run.plugin, run.command
         );
         log::warn!("{msg}");
-        if let Some(doc) = self.active_doc().cloned() {
+        if let Some(doc) = self.doc().cloned() {
             doc.update(cx, |d, cx| d.set_notice(msg, cx));
         }
     }
@@ -836,7 +813,7 @@ impl Workspace {
             cx.notify();
             return;
         }
-        let Some(doc) = self.active_doc().cloned() else {
+        let Some(doc) = self.doc().cloned() else {
             return;
         };
         let Some((page_count, current_page, selected)) = doc.read(cx).ocr_context() else {
@@ -895,12 +872,12 @@ impl Workspace {
         if let Err(e) = self.settings.save() {
             log::warn!("saving settings: {e:#}");
         }
-        if let Some(doc) = self.active_doc().cloned() {
+        if let Some(doc) = self.doc().cloned() {
             doc.update(cx, |d, cx| d.start_ocr(spec, config, cx));
         }
     }
 
-    /// Close only this window, checking each edited document in turn.
+    /// Close this window, asking first if its document has unsaved changes.
     pub fn request_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.closing {
             return;
@@ -910,7 +887,7 @@ impl Workspace {
     }
 
     fn continue_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(dirty) = self.docs.iter().find(|d| d.read(cx).is_dirty()).cloned() else {
+        let Some(dirty) = self.doc.clone().filter(|d| d.read(cx).is_dirty()) else {
             self.persist_window(window);
             window.remove_window();
             if cx.try_global::<crate::Quitting>().is_some_and(|q| q.0) {
@@ -924,8 +901,8 @@ impl Workspace {
             let may_close = may_close.await;
             this.update_in(cx, |ws, window, cx| {
                 if may_close {
-                    if let Some(i) = ws.docs.iter().position(|d| *d == dirty) {
-                        ws.close_now(i, window, cx);
+                    if ws.doc.as_ref() == Some(&dirty) {
+                        ws.close_now(window, cx);
                     }
                     ws.continue_close(window, cx);
                 } else {
@@ -945,68 +922,13 @@ impl Workspace {
         false
     }
 
-    /// Move a tab into a window of its own.
-    fn move_to_new_window(
-        &mut self,
-        doc: Entity<DocView>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        // A lone tab already has its window.
-        if self.closing || self.docs.len() < 2 {
-            return;
-        }
-        match crate::open_workspace(Launch::files(Vec::new()), None, cx) {
-            Ok(target) => self.move_to(doc, target, window, cx),
-            Err(e) => log::error!("opening window: {e:#}"),
-        }
-    }
-
-    /// Hand a tab, unsaved changes and all, to another window, which comes
-    /// forward. A window left with no tabs closes.
-    fn move_to(
-        &mut self,
-        doc: Entity<DocView>,
-        target: WindowHandle<Workspace>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.closing {
-            return;
-        }
-        let Some(ix) = self.docs.iter().position(|d| *d == doc) else {
-            return;
-        };
-        let moved = target
-            .update(cx, |ws, window, cx| {
-                if ws.closing {
-                    return false;
-                }
-                ws.watch(&doc, window, cx);
-                ws.docs.push(doc);
-                ws.active = ws.docs.len() - 1;
-                ws.focus_active(window, cx);
-                window.activate_window();
-                cx.notify();
-                true
-            })
-            .unwrap_or(false);
-        if !moved {
-            return;
-        }
-        self.detach(ix, false, window, cx);
-        if self.docs.is_empty() {
-            self.request_close(window, cx);
-        }
-    }
-
-    fn new_window(paths: Vec<PathBuf>, cx: &mut App) {
-        if let Err(e) = crate::open_workspace(Launch::files(paths), None, cx) {
+    fn new_window(path: Option<PathBuf>, cx: &mut App) {
+        if let Err(e) = crate::open_workspace(Launch::file(path), None, cx) {
             log::error!("opening window: {e:#}");
         }
     }
 
-    fn prompt_open(&mut self, separate_windows: bool, window: &Window, cx: &mut Context<Self>) {
+    fn prompt_open(&mut self, window: &Window, cx: &mut Context<Self>) {
         let rx = crate::file_dialog::open(
             cx,
             PathPromptOptions {
@@ -1020,7 +942,7 @@ impl Workspace {
             return;
         };
         cx.spawn(async move |_, cx| match rx.await {
-            Ok(Ok(Some(paths))) => cx.update(|cx| open_paths(origin, paths, separate_windows, cx)),
+            Ok(Ok(Some(paths))) => cx.update(|cx| open_paths(origin, paths, cx)),
             Ok(Ok(None)) => {}
             Ok(Err(e)) => log::error!("open dialog: {e:#}"),
             Err(_) => {}
@@ -1157,7 +1079,7 @@ impl Workspace {
                     .child("×"),
             );
 
-        let body: AnyElement = match (self.active_doc().cloned(), active) {
+        let body: AnyElement = match (self.doc().cloned(), active) {
             (Some(doc), Some(panel)) => doc.update(cx, |d, cx| match panel {
                 Panel::Thumbnails => d.render_thumbnails(size, window, cx),
                 Panel::Outline => d.render_outline(window, cx),
@@ -1202,59 +1124,6 @@ impl Workspace {
         self.popup_menu("dock-menu", pos, items, cx)
     }
 
-    /// Right-click on a document tab: move it to a new or another window.
-    fn render_tab_menu(
-        &self,
-        doc: Entity<DocView>,
-        pos: Point<Pixels>,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let here = window.window_handle().window_id();
-        let others: Vec<(WindowHandle<Workspace>, String)> = cx
-            .windows()
-            .into_iter()
-            .filter(|w| w.window_id() != here)
-            .filter_map(|w| w.downcast::<Workspace>())
-            .filter_map(|handle| {
-                let ws = handle.read(cx).ok()?;
-                let label = match ws.active_doc() {
-                    Some(d) if ws.docs.len() > 1 => {
-                        format!("{} (+{})", d.read(cx).file_name(), ws.docs.len() - 1)
-                    }
-                    Some(d) => d.read(cx).file_name(),
-                    None => "empty window".into(),
-                };
-                Some((handle, label))
-            })
-            .collect();
-        let mut items = Vec::new();
-        if self.docs.len() > 1 {
-            let doc = doc.clone();
-            items.push(menu_item(
-                "tab-move-new",
-                "Move to New Window",
-                cx,
-                move |ws, w, cx| ws.move_to_new_window(doc.clone(), w, cx),
-            ));
-        }
-        for (i, (target, label)) in others.into_iter().enumerate() {
-            let doc = doc.clone();
-            items.push(menu_item(
-                ("tab-move", i),
-                format!("Move to Window: {label}"),
-                cx,
-                move |ws, w, cx| ws.move_to(doc.clone(), target, w, cx),
-            ));
-        }
-        items.push(menu_item("tab-close", "Close Tab", cx, move |ws, w, cx| {
-            if let Some(i) = ws.docs.iter().position(|d| *d == doc) {
-                ws.close(i, w, cx);
-            }
-        }));
-        self.popup_menu("tab-menu", pos, items, cx)
-    }
-
     /// A right-click menu at `pos`; clicking outside it dismisses it.
     fn popup_menu(
         &self,
@@ -1273,7 +1142,6 @@ impl Workspace {
                         .occlude()
                         .on_mouse_down_out(cx.listener(|ws, _, _, cx| {
                             ws.dock_menu = None;
-                            ws.tab_menu = None;
                             cx.notify();
                         }))
                         .min_w(px(160.0))
@@ -1290,79 +1158,11 @@ impl Workspace {
         )
         .into_any_element()
     }
-
-    fn render_tabs(&self, cx: &mut Context<Self>) -> AnyElement {
-        let tabs = self.docs.iter().enumerate().map(|(i, doc)| {
-            let active = i == self.active;
-            let title = doc.read(cx).title();
-            div()
-                .id(("tab", i))
-                .flex_shrink_0()
-                .h_full()
-                .px_3()
-                .flex()
-                .items_center()
-                .gap_2()
-                .text_sm()
-                .cursor_pointer()
-                .bg(if active {
-                    theme::RAISED
-                } else {
-                    theme::BACKGROUND
-                })
-                .text_color(if active {
-                    theme::TEXT_BRIGHT
-                } else {
-                    theme::TEXT_MUTED
-                })
-                .hover(|s| s.bg(theme::HOVER_SUBTLE))
-                .on_click(cx.listener(move |ws, _, window, cx| ws.activate(i, window, cx)))
-                .on_mouse_down(
-                    MouseButton::Right,
-                    cx.listener({
-                        let doc = doc.clone();
-                        move |ws, ev: &gpui::MouseDownEvent, _, cx| {
-                            ws.tab_menu = Some((doc.clone(), ev.position));
-                            cx.notify();
-                        }
-                    }),
-                )
-                .child(title)
-                .child(
-                    div()
-                        .id(("tab-close", i))
-                        .px_1()
-                        .rounded_sm()
-                        .text_color(theme::TEXT_DIM)
-                        .hover(|s| {
-                            s.bg(theme::CONTROL_HOVER_STRONG)
-                                .text_color(theme::TEXT_BRIGHT)
-                        })
-                        .on_click(cx.listener(move |ws, _, window, cx| {
-                            ws.close(i, window, cx);
-                            cx.stop_propagation();
-                        }))
-                        .child("×"),
-                )
-        });
-        div()
-            .id("document-tabs")
-            .overflow_x_scroll()
-            .h(px(TAB_H))
-            .flex_shrink_0()
-            .flex()
-            .items_stretch()
-            .bg(theme::BACKGROUND)
-            .border_b_1()
-            .border_color(theme::DIVIDER)
-            .children(tabs)
-            .into_any_element()
-    }
 }
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let main: AnyElement = match self.active_doc().cloned() {
+        let main: AnyElement = match self.doc().cloned() {
             Some(doc) => doc.into_any_element(),
             None => div()
                 .size_full()
@@ -1379,7 +1179,7 @@ impl Render for Workspace {
                 .into_any_element(),
         };
         let show =
-            |ws: &Self, side: Side| !ws.all_hidden && !ws.docs.is_empty() && ws.dock(side).shows();
+            |ws: &Self, side: Side| !ws.all_hidden && ws.doc.is_some() && ws.dock(side).shows();
         let left = show(self, Side::Left).then(|| self.render_dock(Side::Left, window, cx));
         let right = show(self, Side::Right).then(|| self.render_dock(Side::Right, window, cx));
         let bottom = show(self, Side::Bottom).then(|| self.render_dock(Side::Bottom, window, cx));
@@ -1387,10 +1187,6 @@ impl Render for Workspace {
             .dock_menu
             .clone()
             .map(|(panel, pos)| self.render_dock_menu(panel, pos, cx));
-        let tab_menu = self
-            .tab_menu
-            .clone()
-            .map(|(doc, pos)| self.render_tab_menu(doc, pos, window, cx));
 
         // Remember where the dock area is so splitter drags can be resolved
         // against it next frame.
@@ -1415,7 +1211,7 @@ impl Render for Workspace {
                 d.child(self.splitter(Side::Bottom, cx)).child(b)
             });
 
-        let title: SharedString = match self.active_doc() {
+        let title: SharedString = match self.doc() {
             Some(doc) => doc.read(cx).title(),
             None => "".into(),
         };
@@ -1459,51 +1255,31 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|ws, _: &ShowPatterns, window, cx| {
                 ws.show_panel(Panel::Patterns);
-                if let Some(doc) = ws.active_doc().cloned() {
+                if let Some(doc) = ws.doc().cloned() {
                     doc.update(cx, |d, cx| d.focus_pattern_input(window, cx));
                 }
                 cx.notify();
             }))
             .on_action(cx.listener(|ws, _: &ShowComments, _, cx| {
                 ws.show_panel(Panel::Comments);
-                if let Some(doc) = ws.active_doc().cloned() {
+                if let Some(doc) = ws.doc().cloned() {
                     doc.update(cx, |d, cx| d.focus_comments(cx));
                 }
                 cx.notify();
             }))
             .on_action(cx.listener(|ws, _: &ShowCalc, window, cx| {
                 ws.show_panel(Panel::Calc);
-                if let Some(doc) = ws.active_doc().cloned() {
+                if let Some(doc) = ws.doc().cloned() {
                     doc.update(cx, |d, cx| d.focus_calc_input(window, cx));
                 }
                 cx.notify();
             }))
-            .on_action(cx.listener(|ws, _: &NextTab, window, cx| {
-                let n = ws.docs.len();
-                if n > 0 {
-                    ws.activate((ws.active + 1) % n, window, cx);
-                }
-            }))
-            .on_action(cx.listener(|ws, _: &PrevTab, window, cx| {
-                let n = ws.docs.len();
-                if n > 0 {
-                    ws.activate((ws.active + n - 1) % n, window, cx);
-                }
-            }))
-            .on_action(cx.listener(|ws, _: &CloseTab, window, cx| ws.close(ws.active, window, cx)))
             .on_action(
-                cx.listener(|ws, _: &OpenFile, window, cx| ws.prompt_open(false, window, cx)),
+                cx.listener(|ws, _: &CloseDocument, window, cx| ws.close_document(window, cx)),
             )
-            .on_action(
-                cx.listener(|ws, _: &OpenInWindows, window, cx| ws.prompt_open(true, window, cx)),
-            )
-            .on_action(|_: &NewWindow, _, cx| Self::new_window(Vec::new(), cx))
+            .on_action(cx.listener(|ws, _: &OpenFile, window, cx| ws.prompt_open(window, cx)))
+            .on_action(|_: &NewWindow, _, cx| Self::new_window(None, cx))
             .on_action(cx.listener(|ws, _: &CloseWindow, window, cx| ws.request_close(window, cx)))
-            .on_action(cx.listener(|ws, _: &MoveTabToNewWindow, window, cx| {
-                if let Some(doc) = ws.active_doc().cloned() {
-                    ws.move_to_new_window(doc, window, cx);
-                }
-            }))
             .on_action(|_: &Quit, _, cx| cx.defer(crate::request_quit))
             .on_action(
                 cx.listener(|ws, run: &Run, window, cx| ws.run_plugin_command(run, window, cx)),
@@ -1582,7 +1358,6 @@ impl Render for Workspace {
             .bg(theme::RAISED)
             .text_color(theme::TEXT_SOFT)
             .child(title_bar)
-            .child(self.render_tabs(cx))
             .child(
                 div()
                     .relative()
@@ -1597,7 +1372,6 @@ impl Render for Workspace {
                     }),
             )
             .children(menu)
-            .children(tab_menu)
             .children(
                 self.palette
                     .as_ref()
@@ -1624,44 +1398,30 @@ impl Render for Workspace {
     }
 }
 
-/// Open files picked in `origin`'s dialog. A file that is already open just
-/// brings its window and tab forward: two views of one file would share a
+/// Open files picked in `origin`'s dialog: the first fills `origin` if it's
+/// empty, the rest get windows of their own. A file that is already open
+/// just brings its window forward: two views of one file would share a
 /// recovery sidecar and each save would discard the other's edits.
-fn open_paths(
-    origin: WindowHandle<Workspace>,
-    paths: Vec<PathBuf>,
-    separate_windows: bool,
-    cx: &mut App,
-) {
+fn open_paths(origin: WindowHandle<Workspace>, paths: Vec<PathBuf>, cx: &mut App) {
     for p in paths {
-        if let Some((handle, ix)) = find_open(&p, cx) {
+        if let Some(handle) = find_open(&p, cx) {
             handle
-                .update(cx, |ws, window, cx| {
-                    ws.activate(ix, window, cx);
-                    window.activate_window();
-                })
+                .update(cx, |_, window, _| window.activate_window())
                 .ok();
-        } else if separate_windows {
-            Workspace::new_window(vec![p], cx);
         } else {
             origin
                 .update(cx, |ws, window, cx| ws.open_path(p, window, cx))
                 .ok();
         }
     }
-    if !separate_windows {
-        origin
-            .update(cx, |ws, window, cx| ws.focus_active(window, cx))
-            .ok();
-    }
 }
 
-/// The window and tab showing this file, in any window.
-fn find_open(path: &Path, cx: &App) -> Option<(WindowHandle<Workspace>, usize)> {
+/// The window showing this file, if any.
+fn find_open(path: &Path, cx: &App) -> Option<WindowHandle<Workspace>> {
     cx.windows()
         .into_iter()
         .filter_map(|w| w.downcast::<Workspace>())
-        .find_map(|handle| Some((handle, handle.read(cx).ok()?.position_of(path, cx)?)))
+        .find(|handle| handle.read(cx).is_ok_and(|ws| ws.shows(path, cx)))
 }
 
 /// One row of a right-click menu; clicking it closes the menu.
@@ -1679,7 +1439,6 @@ fn menu_item(
         .cursor_pointer()
         .hover(|s| s.bg(theme::HOVER))
         .on_click(cx.listener(move |ws, _, window, cx| {
-            ws.tab_menu = None;
             ws.dock_menu = None;
             on_click(ws, window, cx);
             cx.notify();

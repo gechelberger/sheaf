@@ -416,7 +416,7 @@ pub enum DocEvent {
     },
     /// The region was cleared.
     RegionCleared,
-    /// The tab closed. Emitted by the workspace just before it drops the view.
+    /// The document closed. Emitted by the workspace just before it drops the view.
     Closed,
 }
 

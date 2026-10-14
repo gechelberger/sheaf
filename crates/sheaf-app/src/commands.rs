@@ -265,7 +265,7 @@ impl CommandRegistry {
 
     /// Put a command in the menu at `path`, creating menus as needed. Names
     /// match existing menus ignoring case and `&` markers. A new top-level
-    /// menu goes before Window; a new submenu goes at the end of its parent,
+    /// menu goes before Window (or Help); a new submenu goes at the end of its parent,
     /// after a separator.
     fn place(&mut self, path: &[&str], id: &str, label: &str) {
         let (top, rest) = path.split_first().expect("non-empty path");
@@ -462,12 +462,12 @@ mod tests {
         };
         assert_eq!(names(&wp.entries), ["Tick All", "Foot"]);
 
-        // A new top-level menu lands before Window.
+        // A new top-level menu lands before Help.
         reg.add_plugin_command("tax", "scan", "Scan", "Tax", Some("Tax"))
             .unwrap();
         let order: Vec<String> = reg.menus().iter().map(|m| parse_label(&m.name).0).collect();
         let tax = order.iter().position(|n| n == "Tax").unwrap();
-        assert_eq!(order[tax + 1], "Window");
+        assert_eq!(order[tax + 1], "Help");
 
         assert_eq!(
             reg.add_plugin_command("tax", "x", "X", "Tax", Some("Tax//Y")),
