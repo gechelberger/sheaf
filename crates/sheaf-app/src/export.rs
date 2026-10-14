@@ -18,6 +18,18 @@ pub enum Format {
     Png,
     /// Quality 1–100.
     Jpeg(u8),
+    /// Every page in one multi-page file.
+    Tiff(TiffMode),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TiffMode {
+    /// RGB, LZW.
+    Color,
+    /// 8-bit gray, LZW.
+    Gray,
+    /// 1-bit, CCITT Group 4: what scanned binders and document systems use.
+    BlackWhite,
 }
 
 impl Format {
@@ -25,7 +37,13 @@ impl Format {
         match self {
             Format::Png => "png",
             Format::Jpeg(_) => "jpg",
+            Format::Tiff(_) => "tif",
         }
+    }
+
+    /// One file for the whole job (else one per page).
+    pub fn single_file(self) -> bool {
+        matches!(self, Format::Tiff(_))
     }
 }
 
@@ -36,7 +54,8 @@ pub struct ExportJob {
     pub markup: bool,
     pub dpi: u32,
     pub format: Format,
-    /// One file per page: `<dir>/<stem>_Page_<n>.<ext>`.
+    /// One file per page: `<dir>/<stem>_Page_<n>.<ext>`; for a
+    /// single-file format, `<dir>/<stem>.<ext>`.
     pub dir: PathBuf,
     pub stem: String,
 }
@@ -65,6 +84,11 @@ pub fn run(
     let engine = flattened(snapshot, &job.pages, job.markup)?;
     let n = engine.page_count() as usize;
     std::fs::create_dir_all(&job.dir).with_context(|| format!("creating {}", job.dir.display()))?;
+    if let Format::Tiff(mode) = job.format {
+        let path = job.dir.join(format!("{}.tif", job.stem));
+        write_tiff(&engine, n, job.dpi, mode, &path, &mut progress)?;
+        return Ok(vec![path]);
+    }
     let mut written = Vec::with_capacity(n);
     for i in 0..n {
         let raster = render_at(&engine, i as u32, job.dpi)?;
@@ -117,6 +141,96 @@ pub(crate) fn render_at(engine: &PdfiumEngine, i: u32, dpi: u32) -> Result<Raste
     )
 }
 
+/// All `n` pages of `engine` into one TIFF at `path`.
+fn write_tiff(
+    engine: &PdfiumEngine,
+    n: usize,
+    dpi: u32,
+    mode: TiffMode,
+    path: &Path,
+    progress: &mut impl FnMut(Progress) -> bool,
+) -> Result<()> {
+    use tiff::encoder::{Compression, Rational, TiffEncoder, colortype};
+    use tiff::tags::{ResolutionUnit, Tag};
+    // Write beside the target and rename, so a failure leaves no half file.
+    let tmp = path.with_extension("tif.part");
+    let file =
+        std::fs::File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
+    let mut enc =
+        TiffEncoder::new(std::io::BufWriter::new(file))?.with_compression(Compression::Lzw);
+    let res = || Rational { n: dpi, d: 1 };
+    for i in 0..n {
+        let raster = render_at(engine, i as u32, dpi)?;
+        let (w, h) = (raster.width, raster.height);
+        let rgba = RgbaImage::from_raw(w, h, raster.data).context("raster size")?;
+        let page = [i as u16, n.min(u16::MAX as usize) as u16];
+        match mode {
+            TiffMode::Color => {
+                let rgb = image::DynamicImage::ImageRgba8(rgba).into_rgb8();
+                let mut im = enc.new_image::<colortype::RGB8>(w, h)?;
+                im.resolution(ResolutionUnit::Inch, res());
+                im.encoder().write_tag(Tag::Unknown(297), &page[..])?;
+                im.write_data(rgb.as_raw())?;
+            }
+            TiffMode::Gray => {
+                let gray = image::DynamicImage::ImageRgba8(rgba).into_luma8();
+                let mut im = enc.new_image::<colortype::Gray8>(w, h)?;
+                im.resolution(ResolutionUnit::Inch, res());
+                im.encoder().write_tag(Tag::Unknown(297), &page[..])?;
+                im.write_data(gray.as_raw())?;
+            }
+            TiffMode::BlackWhite => {
+                let gray = image::DynamicImage::ImageRgba8(rgba).into_luma8();
+                let data = g4(gray.as_raw(), w, h);
+                let mut dir = enc.image_directory()?;
+                let offset = dir.write_data(&data[..])?;
+                dir.write_tag(Tag::NewSubfileType, 2u32)?;
+                dir.write_tag(Tag::ImageWidth, w)?;
+                dir.write_tag(Tag::ImageLength, h)?;
+                dir.write_tag(Tag::BitsPerSample, 1u16)?;
+                // CCITT T.6.
+                dir.write_tag(Tag::Compression, 4u16)?;
+                // WhiteIsZero, as fax data is.
+                dir.write_tag(Tag::PhotometricInterpretation, 0u16)?;
+                dir.write_tag(Tag::StripOffsets, u32::try_from(offset)?)?;
+                dir.write_tag(Tag::SamplesPerPixel, 1u16)?;
+                dir.write_tag(Tag::RowsPerStrip, h)?;
+                dir.write_tag(Tag::StripByteCounts, data.len() as u32)?;
+                dir.write_tag(Tag::XResolution, res())?;
+                dir.write_tag(Tag::YResolution, res())?;
+                dir.write_tag(Tag::ResolutionUnit, 2u16)?;
+                // T6Options: no uncompressed mode.
+                dir.write_tag(Tag::Unknown(293), 0u32)?;
+                dir.write_tag(Tag::Unknown(297), &page[..])?;
+                dir.finish()?;
+            }
+        }
+        if !progress(Progress::Page { done: i + 1, of: n }) {
+            break;
+        }
+    }
+    drop(enc);
+    std::fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
+}
+
+/// 8-bit gray rows as CCITT Group 4, thresholded at mid-gray.
+fn g4(gray: &[u8], w: u32, h: u32) -> Vec<u8> {
+    use fax::{Color, VecWriter, encoder::Encoder};
+    let mut enc = Encoder::new(VecWriter::new());
+    for row in gray.chunks_exact(w as usize).take(h as usize) {
+        let pels = row
+            .iter()
+            .map(|&v| if v < 128 { Color::Black } else { Color::White });
+        // VecWriter can't fail.
+        let _ = enc.encode_line(pels, w as u16);
+    }
+    match enc.finish() {
+        Ok(writer) => writer.finish(),
+        Err(never) => match never {},
+    }
+}
+
 /// Encode an RGBA raster, recording its resolution where the format can.
 pub fn encode(raster: Raster, format: Format, dpi: u32) -> Result<Vec<u8>> {
     debug_assert_eq!(raster.format, PixelFormat::Rgba);
@@ -133,6 +247,7 @@ pub fn encode(raster: Raster, format: Format, dpi: u32) -> Result<Vec<u8>> {
             enc.set_compression(png::Compression::Balanced);
             enc.write_header()?.write_image_data(rgb.as_raw())?;
         }
+        Format::Tiff(_) => bail!("TIFF pages go into one file; use write_tiff"),
         Format::Jpeg(q) => {
             let rgb = image::DynamicImage::ImageRgba8(rgba).into_rgb8();
             let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(
@@ -162,6 +277,12 @@ fn png_with_dpi(out: &mut Vec<u8>, w: u32, h: u32, dpi: u32) -> png::Encoder<'_,
 
 /// Where a single-page export would land, to warn before overwriting.
 pub fn existing(job: &ExportJob) -> Vec<PathBuf> {
+    if job.format.single_file() {
+        let p = job
+            .dir
+            .join(format!("{}.{}", job.stem, job.format.extension()));
+        return if p.exists() { vec![p] } else { Vec::new() };
+    }
     let n = job.pages.len();
     (1..=n)
         .map(|i| {
@@ -212,6 +333,30 @@ mod tests {
         assert_eq!((info.width, info.height), (30, 20));
         let dims = info.pixel_dims.unwrap();
         assert_eq!(dims.xppu, 11811);
+    }
+
+    #[test]
+    fn g4_round_trips_through_a_decoder() {
+        // A 40×10 page: white with a black bar in rows 3–5, columns 8–30.
+        let (w, h) = (40u32, 10u32);
+        let mut gray = vec![255u8; (w * h) as usize];
+        for y in 3..6 {
+            for x in 8..31 {
+                gray[(y * w + x) as usize] = 0;
+            }
+        }
+        let data = g4(&gray, w, h);
+        let mut rows = Vec::new();
+        fax::decoder::decode_g4(data.into_iter(), w as u16, Some(h as u16), |t| {
+            rows.push(fax::decoder::pels(t, w as u16).collect::<Vec<_>>());
+        });
+        assert_eq!(rows.len(), h as usize);
+        for (y, row) in rows.iter().enumerate() {
+            for (x, c) in row.iter().enumerate() {
+                let black = (3..6).contains(&y) && (8..31).contains(&x);
+                assert_eq!(*c == fax::Color::Black, black, "pel {x},{y}");
+            }
+        }
     }
 
     #[test]
@@ -268,6 +413,30 @@ impl crate::docview::DocView {
             dir: PathBuf::new(),
             stem: stem_of(&self.path),
         };
+        let window_handle = window.window_handle();
+        if job.format.single_file() {
+            // One file: ask for its name (the picker confirms replacing).
+            let dir = self
+                .path
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_default();
+            let suggested = format!("{}.{}", job.stem, job.format.extension());
+            let rx = crate::file_dialog::save(cx, &dir, Some(&suggested));
+            cx.spawn(async move |this, cx| {
+                let Ok(Ok(Some(path))) = rx.await else {
+                    return;
+                };
+                let job = ExportJob {
+                    dir: path.parent().map(|p| p.to_path_buf()).unwrap_or_default(),
+                    stem: stem_of(&path),
+                    ..job
+                };
+                this.update(cx, |v, cx| v.run_export(job, cx)).ok();
+            })
+            .detach();
+            return;
+        }
         let rx = crate::file_dialog::open(
             cx,
             gpui::PathPromptOptions {
@@ -277,7 +446,6 @@ impl crate::docview::DocView {
                 prompt: Some("Export Here".into()),
             },
         );
-        let window_handle = window.window_handle();
         cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(mut dirs))) = rx.await else {
                 return;

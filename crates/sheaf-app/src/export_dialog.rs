@@ -10,7 +10,7 @@ use sheaf_ui::button::{Button, Chip};
 use sheaf_ui::text_input::{TextInput, TextInputEvent};
 use sheaf_ui::{dialog, theme};
 
-use crate::export::Format;
+use crate::export::{Format, TiffMode};
 use crate::{DialogCancel, DialogLeft, DialogNext, DialogPrev, DialogRight, DialogRun};
 
 pub const KEY_CONTEXT: &str = "ExportDialog";
@@ -23,9 +23,19 @@ const QUALITIES: [(u8, &str); 3] = [(60, "Low"), (80, "Medium"), (92, "High")];
 pub enum Kind {
     Png,
     Jpeg,
+    Tiff,
 }
 
-const KINDS: [(Kind, &str); 2] = [(Kind::Png, "PNG"), (Kind::Jpeg, "JPEG")];
+const KINDS: [(Kind, &str); 3] = [
+    (Kind::Png, "PNG"),
+    (Kind::Jpeg, "JPEG"),
+    (Kind::Tiff, "TIFF (multi-page)"),
+];
+const TIFF_MODES: [(TiffMode, &str); 3] = [
+    (TiffMode::BlackWhite, "Black and white (G4)"),
+    (TiffMode::Gray, "Grayscale"),
+    (TiffMode::Color, "Color"),
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pages {
@@ -58,10 +68,10 @@ pub enum ExportEvent {
 const ROW_FORMAT: usize = 0;
 const ROW_DPI: usize = 1;
 const ROW_QUALITY: usize = 2;
+const ROW_COLOR: usize = 6;
 const ROW_PAGES: usize = 3;
 const ROW_RANGE: usize = 4;
 const ROW_MARKUP: usize = 5;
-const ROWS: usize = 6;
 
 pub struct ExportDialog {
     focus: FocusHandle,
@@ -69,6 +79,7 @@ pub struct ExportDialog {
     kind: Kind,
     dpi: u32,
     quality: u8,
+    tiff: TiffMode,
     pages: Pages,
     range: Entity<TextInput>,
     markup: bool,
@@ -110,6 +121,7 @@ impl ExportDialog {
             kind: Kind::Png,
             dpi: 150,
             quality: 80,
+            tiff: TiffMode::BlackWhite,
             pages,
             range,
             markup: true,
@@ -119,10 +131,22 @@ impl ExportDialog {
         }
     }
 
+    /// Rows in Tab order; quality and colour only for the formats that
+    /// have them.
     fn rows(&self) -> Vec<usize> {
-        (0..ROWS)
-            .filter(|&r| r != ROW_QUALITY || self.kind == Kind::Jpeg)
-            .collect()
+        [
+            ROW_FORMAT,
+            ROW_DPI,
+            ROW_QUALITY,
+            ROW_COLOR,
+            ROW_PAGES,
+            ROW_RANGE,
+            ROW_MARKUP,
+        ]
+        .into_iter()
+        .filter(|&r| r != ROW_QUALITY || self.kind == Kind::Jpeg)
+        .filter(|&r| r != ROW_COLOR || self.kind == Kind::Tiff)
+        .collect()
     }
 
     fn set_row(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -162,6 +186,10 @@ impl ExportDialog {
                 let qs: Vec<u8> = QUALITIES.iter().map(|q| q.0).collect();
                 self.quality = cycle(&qs, self.quality, by);
             }
+            ROW_COLOR => {
+                let ms: Vec<TiffMode> = TIFF_MODES.iter().map(|m| m.0).collect();
+                self.tiff = cycle(&ms, self.tiff, by);
+            }
             ROW_PAGES => {
                 let opts: Vec<Pages> = [Pages::All, Pages::Current, Pages::Selected, Pages::Range]
                     .into_iter()
@@ -190,6 +218,7 @@ impl ExportDialog {
         match self.kind {
             Kind::Png => Format::Png,
             Kind::Jpeg => Format::Jpeg(self.quality),
+            Kind::Tiff => Format::Tiff(self.tiff),
         }
     }
 
@@ -284,6 +313,17 @@ impl Render for ExportDialog {
             |d, v| d.quality = v,
             cx,
         );
+        let color = self.chips(
+            "color",
+            ROW_COLOR,
+            TIFF_MODES
+                .iter()
+                .map(|(m, l)| (*m, l.to_string(), true))
+                .collect(),
+            self.tiff,
+            |d, v| d.tiff = v,
+            cx,
+        );
         let n = self.ctx.page_count;
         let pages = self.chips(
             "pages",
@@ -343,10 +383,13 @@ impl Render for ExportDialog {
             )
             .child(
                 dialog::card("export-dialog", px(600.0))
-                    .child(
-                        dialog::header("Export Pages")
-                            .child(dialog::subtitle("one image file per page")),
-                    )
+                    .child(dialog::header("Export Pages").child(dialog::subtitle(
+                        if self.kind == Kind::Tiff {
+                            "every page in one file"
+                        } else {
+                            "one image file per page"
+                        },
+                    )))
                     .child(self.row_el(ROW_FORMAT, "Format", format))
                     .child(
                         self.row_el(
@@ -363,6 +406,9 @@ impl Render for ExportDialog {
                     )
                     .when(self.kind == Kind::Jpeg, |d| {
                         d.child(self.row_el(ROW_QUALITY, "Quality", quality))
+                    })
+                    .when(self.kind == Kind::Tiff, |d| {
+                        d.child(self.row_el(ROW_COLOR, "Color", color))
                     })
                     .child(self.row_el(ROW_PAGES, "Pages", pages))
                     .child(self.row_el(ROW_RANGE, "", range))
