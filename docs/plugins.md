@@ -180,7 +180,10 @@ checkbox, file (open or save) and page range (answered as page ids).
 shows a line in the status area (an empty message clears it). `set-panel(panel, rows)` replaces the rows
 of one of your panels for the current document. Each row has a label,
 detail, badge, icon, indent, an optional page (clicking the row goes there)
-and buttons that call `panel-action`.
+and buttons that call `panel-action`. `show-panel(panel)` brings a panel
+into view without taking keyboard focus: one of yours, or sheaf's own
+`pages`, `bookmarks`, `patterns`, `calc` or `comments` (say, to show the
+comments a command just added). Setting a panel's rows also shows it.
 
 **`patterns`**: `presets()` returns the user's Patterns presets, then those
 plugins ship.

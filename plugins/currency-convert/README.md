@@ -3,7 +3,8 @@
 Ships with sheaf. **Tools → Convert Currency…** finds every foreign-currency
 amount in the document and highlights it, with a note giving its value in
 the currency you choose: "≈ USD 1,352.10 (EUR 1,234.56 × 1.0956, ECB
-2026-10-09)". All the highlights undo as one step.
+2026-10-09)". All the highlights undo as one step, and the Comments panel opens to
+list them.
 
 - Amounts are recognized by symbol or code, before or after the number:
   `€1.234,56`, `£980`, `GBP 980.00`, `1 200,50 CHF`, `C$75`, `¥12,000`.

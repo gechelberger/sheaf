@@ -11,6 +11,39 @@ pub trait Ui: Send + Sync {
     fn notice(&self, message: String);
     /// `panel` is the manifest's panel id (checked by the host).
     fn set_panel(&self, panel: String, rows: Vec<PanelRow>);
+    /// Bring a panel into view (checked by the host).
+    fn show_panel(&self, panel: ShowPanel);
+}
+
+/// A panel a plugin can bring into view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShowPanel {
+    /// One of the plugin's own, by manifest id.
+    Plugin(String),
+    Builtin(BuiltinPanel),
+}
+
+/// sheaf's own panels, as plugins name them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinPanel {
+    Pages,
+    Bookmarks,
+    Patterns,
+    Calc,
+    Comments,
+}
+
+impl BuiltinPanel {
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "pages" => Self::Pages,
+            "bookmarks" => Self::Bookmarks,
+            "patterns" => Self::Patterns,
+            "calc" => Self::Calc,
+            "comments" => Self::Comments,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

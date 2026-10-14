@@ -128,6 +128,9 @@ impl Guest for TestPlugin {
                 }
                 ui::set_panel("matches", &rows);
                 ui::set_panel("undeclared", &rows);
+                ui::show_panel("matches");
+                ui::show_panel("comments");
+                ui::show_panel("nowhere");
                 ui::notice(&format!("{} matches", rows.len()));
                 Ok(())
             }

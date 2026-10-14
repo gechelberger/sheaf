@@ -11,7 +11,9 @@ use anyhow::Result;
 use futures::executor::block_on;
 use sheaf_core::PageSize;
 use sheaf_doc::{Document, Edit, FixedCount, SourceId, SourceInfo};
-use sheaf_plugin::ui::{FieldAnswer, FieldKind, FieldValue, Form, PanelRow, Ui};
+use sheaf_plugin::ui::{
+    BuiltinPanel, FieldAnswer, FieldKind, FieldValue, Form, PanelRow, ShowPanel, Ui,
+};
 use sheaf_plugin::{
     Call, CallContext, CallOutput, DocContext, DocEvent, Grants, Limits, LoadOptions, Manifest,
     Plugin, PluginError, Runtime, Status, TextMatch, TextSource,
@@ -490,6 +492,7 @@ struct FakeUi {
     forms: std::sync::Mutex<Vec<Form>>,
     notices: std::sync::Mutex<Vec<String>>,
     panels: std::sync::Mutex<Vec<(String, Vec<PanelRow>)>>,
+    shown: std::sync::Mutex<Vec<ShowPanel>>,
 }
 
 impl Ui for FakeUi {
@@ -505,6 +508,10 @@ impl Ui for FakeUi {
 
     fn set_panel(&self, panel: String, rows: Vec<PanelRow>) {
         self.panels.lock().unwrap().push((panel, rows));
+    }
+
+    fn show_panel(&self, panel: ShowPanel) {
+        self.shown.lock().unwrap().push(panel);
     }
 }
 
@@ -583,6 +590,14 @@ fn panels_notices_and_panel_actions() {
     assert_eq!(rows[1].page, Some(d.page(1).unwrap().id));
     assert_eq!(rows[0].detail, "5,10");
     assert_eq!(*ui.notices.lock().unwrap(), ["2 matches"]);
+    assert_eq!(
+        *ui.shown.lock().unwrap(),
+        [
+            ShowPanel::Plugin("matches".into()),
+            ShowPanel::Builtin(BuiltinPanel::Comments)
+        ],
+        "unknown panels are dropped"
+    );
 
     let err = block_on(p.call(
         Call::PanelAction {

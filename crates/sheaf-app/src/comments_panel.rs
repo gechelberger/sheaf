@@ -7,7 +7,7 @@ use gpui::{
     AnyElement, Context, Entity, FocusHandle, Subscription, Window, div, prelude::*, px, rgb,
 };
 use sheaf_core::PageSize;
-use sheaf_doc::{AnnotId, AnnotKind, PageId, file::ForeignAnnot};
+use sheaf_doc::{Annot, AnnotId, AnnotKind, PageId, file::ForeignAnnot};
 use sheaf_render::Rect;
 
 use crate::docview::{DocView, ScrollTo, State, rotate_rect};
@@ -16,8 +16,17 @@ use crate::{DeleteComment, EditComment, Redo, Save, Undo};
 
 pub const KEY_CONTEXT: &str = "Comments";
 
-const ROW_H: f32 = 40.0;
 const HEADER_H: f32 = 22.0;
+/// A comment row: padding, the kind/author line, then the text, wrapped
+/// to at most `MAX_TEXT_LINES` lines.
+const ROW_PAD: f32 = 4.0;
+const TITLE_LH: f32 = 16.0;
+const TEXT_LH: f32 = 20.0;
+const MAX_TEXT_LINES: usize = 4;
+
+fn row_h(lines: usize) -> f32 {
+    ROW_PAD * 2.0 + TITLE_LH + TEXT_LH * lines as f32
+}
 
 pub struct Comments {
     pub filter: Entity<TextInput>,
@@ -221,21 +230,63 @@ impl DocView {
         let focus = cm.focus.clone();
         let st = doc.model.state();
 
-        // Variable-height rows: headers are short.
+        let bounds = cm.scroll.bounds();
+        // Variable-height rows: headers are short, and a comment's text
+        // wraps to the panel's width.
+        let wrap_w = f32::from(bounds.size.width) - 16.0;
+        let font = window.text_style().font();
+        let font_size = window.rem_size() * 0.875;
+        let text_lines = |text: &str| -> usize {
+            if wrap_w <= 0.0 || text.is_empty() {
+                return 1;
+            }
+            let run = gpui::TextRun {
+                len: text.len(),
+                font: font.clone(),
+                color: gpui::black(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            window
+                .text_system()
+                .shape_text(
+                    text.to_string().into(),
+                    font_size,
+                    &[run],
+                    Some(px(wrap_w)),
+                    Some(MAX_TEXT_LINES),
+                )
+                .map(|ls| ls.iter().map(|l| l.wrap_boundaries().len() + 1).sum())
+                .unwrap_or(1)
+                .clamp(1, MAX_TEXT_LINES)
+        };
         let mut tops = Vec::with_capacity(rows.len());
+        let mut heights = Vec::with_capacity(rows.len());
         let mut y = 0.0;
         for r in &rows {
-            tops.push(y);
-            y += match r {
+            let h = match *r {
                 Row::Header { .. } => HEADER_H,
-                _ => ROW_H,
+                Row::Ours { page, id } => row_h(
+                    st.annots_on(page)
+                        .and_then(|l| l.iter().find(|a| a.id == id))
+                        .map_or(1, |a| text_lines(&ours_text(a))),
+                ),
+                Row::Foreign(ix) => row_h(
+                    doc.foreign_annots
+                        .get(ix)
+                        .map_or(1, |f| text_lines(&foreign_text(f))),
+                ),
             };
+            tops.push(y);
+            heights.push(h);
+            y += h;
         }
         let total_h = y + 4.0;
-        let bounds = cm.scroll.bounds();
         let view_h = f32::from(bounds.size.height).max(1.0);
         let scroll_y = (-f32::from(cm.scroll.offset().y)).max(0.0);
-        let r0 = tops.partition_point(|t| *t + ROW_H < scroll_y);
+        let bottoms: Vec<f32> = tops.iter().zip(&heights).map(|(t, h)| t + h).collect();
+        let r0 = bottoms.partition_point(|b| *b < scroll_y);
         let r1 = tops.partition_point(|t| *t < scroll_y + view_h);
 
         let selected = doc.selected_annot;
@@ -274,16 +325,12 @@ impl DocView {
                         continue;
                     };
                     let is_sel = selected == Some((page, id));
-                    let snippet = if a.contents.is_empty() {
-                        kind_label(&a.kind)
-                    } else {
-                        a.contents.replace('\n', " ")
-                    };
+                    let snippet = ours_text(a);
                     let title = format!("{}  ·  {}", kind_label(&a.kind), a.author);
                     els.push(
                         comment_row(
                             ("ours", id.0 as usize),
-                            top,
+                            (top, heights[i]),
                             is_sel,
                             title,
                             snippet,
@@ -326,11 +373,7 @@ impl DocView {
                         continue;
                     };
                     let is_sel = selected_foreign == Some(ix);
-                    let snippet = if f.contents.is_empty() {
-                        subtype_label(&f.subtype).to_string()
-                    } else {
-                        f.contents.replace('\n', " ")
-                    };
+                    let snippet = foreign_text(f);
                     let author = if f.author.is_empty() {
                         "(no author)".to_string()
                     } else {
@@ -338,9 +381,16 @@ impl DocView {
                     };
                     let title = format!("{}  ·  {author}", subtype_label(&f.subtype));
                     els.push(
-                        comment_row(("foreign", ix), top, is_sel, title, snippet, &f.modified)
-                            .on_click(cx.listener(move |v, _, _, cx| v.select_foreign(ix, cx)))
-                            .into_any_element(),
+                        comment_row(
+                            ("foreign", ix),
+                            (top, heights[i]),
+                            is_sel,
+                            title,
+                            snippet,
+                            &f.modified,
+                        )
+                        .on_click(cx.listener(move |v, _, _, cx| v.select_foreign(ix, cx)))
+                        .into_any_element(),
                     );
                 }
             }
@@ -392,10 +442,27 @@ impl DocView {
     }
 }
 
-/// One two-line comment row: kind and author over the text, date at right.
+/// A comment's text as its row shows it.
+fn ours_text(a: &Annot) -> String {
+    if a.contents.is_empty() {
+        kind_label(&a.kind)
+    } else {
+        a.contents.replace('\n', " ")
+    }
+}
+
+fn foreign_text(f: &ForeignAnnot) -> String {
+    if f.contents.is_empty() {
+        subtype_label(&f.subtype).to_string()
+    } else {
+        f.contents.replace('\n', " ")
+    }
+}
+
+/// One comment row: kind and author over the text (wrapped), date at right.
 fn comment_row(
     id: (&'static str, usize),
-    top: f32,
+    (top, height): (f32, f32),
     selected: bool,
     title: String,
     snippet: String,
@@ -407,9 +474,9 @@ fn comment_row(
         .top(px(top))
         .left(px(0.0))
         .w_full()
-        .h(px(ROW_H))
+        .h(px(height))
         .px_2()
-        .py_1()
+        .py(px(ROW_PAD))
         .flex()
         .flex_col()
         .cursor_pointer()
@@ -420,6 +487,7 @@ fn comment_row(
                 .flex()
                 .justify_between()
                 .text_xs()
+                .line_height(px(TITLE_LH))
                 .child(
                     div()
                         .overflow_hidden()
@@ -440,9 +508,10 @@ fn comment_row(
         .child(
             div()
                 .overflow_hidden()
-                .whitespace_nowrap()
-                .text_ellipsis()
                 .text_sm()
+                .line_height(px(TEXT_LH))
+                .line_clamp(MAX_TEXT_LINES)
+                .text_ellipsis()
                 .text_color(rgb(0xe0e0e0))
                 .child(snippet),
         )

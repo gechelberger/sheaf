@@ -747,6 +747,18 @@ impl Workspace {
                 self.show_panel(Panel::Plugin(id.into()));
                 cx.notify();
             }
+            UiRequest::ShowPanel(which) => {
+                use sheaf_plugin::ui::{BuiltinPanel, ShowPanel};
+                self.show_panel(match which {
+                    ShowPanel::Plugin(panel) => Panel::Plugin(format!("{plugin}.{panel}").into()),
+                    ShowPanel::Builtin(BuiltinPanel::Pages) => Panel::Thumbnails,
+                    ShowPanel::Builtin(BuiltinPanel::Bookmarks) => Panel::Outline,
+                    ShowPanel::Builtin(BuiltinPanel::Patterns) => Panel::Patterns,
+                    ShowPanel::Builtin(BuiltinPanel::Calc) => Panel::Calc,
+                    ShowPanel::Builtin(BuiltinPanel::Comments) => Panel::Comments,
+                });
+                cx.notify();
+            }
             UiRequest::Form(form, reply) => {
                 if self.plugin_form.is_some() {
                     log::warn!("{plugin}: a form is already open; cancelling the new one");

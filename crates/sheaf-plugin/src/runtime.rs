@@ -16,7 +16,7 @@ use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 use crate::convert;
 use crate::manifest::{Grants, Manifest, WASM_NAME};
 use crate::storage::Storage;
-use crate::ui::Ui;
+use crate::ui::{BuiltinPanel, ShowPanel, Ui};
 
 pub(crate) mod bindings {
     wasmtime::component::bindgen!({
@@ -956,6 +956,26 @@ impl api::ui::Host for HostState {
         }
         if let Some(ui) = self.ui() {
             ui.set_panel(panel, rows.into_iter().map(convert::row_from_wit).collect());
+        }
+    }
+
+    fn show_panel(&mut self, panel: String) {
+        // The plugin's own panels first, so a panel it calls "comments"
+        // is still its own.
+        let which = if self.panels.contains(&panel) {
+            ShowPanel::Plugin(panel)
+        } else if let Some(b) = BuiltinPanel::from_name(&panel) {
+            ShowPanel::Builtin(b)
+        } else {
+            log::warn!(
+                target: "plugin",
+                "[{}] show-panel: there's no panel {panel:?}",
+                self.plugin
+            );
+            return;
+        };
+        if let Some(ui) = self.ui() {
+            ui.show_panel(which);
         }
     }
 }

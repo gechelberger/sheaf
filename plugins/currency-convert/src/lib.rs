@@ -342,13 +342,15 @@ fn run() -> Result<(), String> {
         }));
     }
     batch.submit();
+    // The converted values are in the highlights' notes.
+    ui::show_panel("comments");
     let dates: Vec<&str> = {
         let mut d: Vec<&str> = rates.values().map(|r| r.date.as_str()).collect();
         d.dedup();
         d
     };
     ui::notice(&format!(
-        "Converted {n} amount{} to {target} at ECB rates for {}",
+        "Converted {n} amount{} to {target} at ECB rates for {} — see Comments",
         if n == 1 { "" } else { "s" },
         dates.join(", ")
     ));

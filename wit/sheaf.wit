@@ -410,6 +410,11 @@ interface ui {
     /// Replace the rows of one of this plugin's panels (declared in its
     /// manifest) for the document the call is running against.
     set-panel: func(panel: string, rows: list<panel-row>);
+
+    /// Bring a panel into view: one of this plugin's panels (by its
+    /// manifest id), or one of sheaf's own: "pages", "bookmarks",
+    /// "patterns", "calc" or "comments". Doesn't take keyboard focus.
+    show-panel: func(panel: string);
 }
 
 interface log {

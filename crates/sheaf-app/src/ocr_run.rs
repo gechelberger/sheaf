@@ -206,6 +206,14 @@ impl DocView {
         }
     }
 
+    #[cfg_attr(not(feature = "plugins"), allow(dead_code))]
+    pub(crate) fn notice(&self) -> Option<&str> {
+        match &self.state {
+            State::Ready(doc) => doc.notice.as_deref(),
+            _ => None,
+        }
+    }
+
     pub(crate) fn set_notice(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
         if let State::Ready(doc) = &mut self.state {
             doc.notice = Some(text.into());

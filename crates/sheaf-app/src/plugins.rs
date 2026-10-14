@@ -27,7 +27,7 @@ use futures::channel::{mpsc, oneshot};
 use gpui::{App, Context, Entity, Global, KeyBinding, KeyBindingContextPredicate, Window};
 use serde::{Deserialize, Serialize};
 use sheaf_doc::SourceId;
-use sheaf_plugin::ui::{FieldAnswer, Form, PanelRow, Ui};
+use sheaf_plugin::ui::{FieldAnswer, Form, PanelRow, ShowPanel, Ui};
 use sheaf_plugin::{
     Call, CallContext, Limits, LoadOptions, Manifest, Permissions, Plugin, PluginError, Runtime,
     Status, TextMatch, TextSource,
@@ -934,6 +934,7 @@ pub enum UiRequest {
     Notice(String),
     /// Panel id within the plugin, and its rows.
     Panel(String, Vec<PanelRow>),
+    ShowPanel(ShowPanel),
 }
 
 /// Forwards `ui` calls to the workspace that started the call.
@@ -952,6 +953,10 @@ impl Ui for AppUi {
 
     fn set_panel(&self, panel: String, rows: Vec<PanelRow>) {
         let _ = self.0.unbounded_send(UiRequest::Panel(panel, rows));
+    }
+
+    fn show_panel(&self, panel: ShowPanel) {
+        let _ = self.0.unbounded_send(UiRequest::ShowPanel(panel));
     }
 }
 
@@ -1089,11 +1094,22 @@ pub fn run(
                 }
                 Ok(out) => match &doc {
                     Some(d) => d.update(cx, |d, cx| {
+                        // A message the plugin left outlasts the undo label
+                        // applying shows, but not a failure or a warning.
+                        let running = format!("{label}…");
+                        let left = d.notice().filter(|n| *n != running).map(str::to_string);
+                        let mut last = None;
                         d.edit_source = Some(plugin_id.clone());
                         for b in out.batches {
                             d.apply_batch(b.edits, &b.label, cx);
+                            last = Some(b.label);
                         }
                         d.edit_source = None;
+                        if let Some(msg) = left
+                            && d.notice() == last.as_deref()
+                        {
+                            d.set_notice(msg, cx);
+                        }
                     }),
                     None => notice(&doc, format!("{label}: no document to edit"), cx),
                 },
