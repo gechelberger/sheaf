@@ -2,9 +2,10 @@
 //! kept per document. Clicking a row shows its page; its action buttons
 //! dispatch `plugin::PanelAction` back to the plugin.
 
-use gpui::{AnyElement, Context, ScrollHandle, Window, div, prelude::*, px, rgb};
+use gpui::{AnyElement, Context, ScrollHandle, Window, div, prelude::*, px};
 use sheaf_doc::PageId;
 use sheaf_plugin::ui::PanelRow;
+use sheaf_ui::theme;
 
 use crate::commands::PanelAction;
 use crate::docview::{DocView, State};
@@ -58,7 +59,7 @@ impl DocView {
             return div()
                 .p_3()
                 .text_sm()
-                .text_color(rgb(0x8a8a8a))
+                .text_color(theme::TEXT_DIM)
                 .child("Nothing here yet. Run one of the plugin's commands.")
                 .into_any_element();
         };
@@ -66,7 +67,7 @@ impl DocView {
             return div()
                 .p_3()
                 .text_sm()
-                .text_color(rgb(0x8a8a8a))
+                .text_color(theme::TEXT_DIM)
                 .child("No items.")
                 .into_any_element();
         }
@@ -89,8 +90,8 @@ impl DocView {
                         .rounded_sm()
                         .text_xs()
                         .cursor_pointer()
-                        .bg(rgb(0x3a3a3a))
-                        .hover(|s| s.bg(rgb(0x4a9eff)).text_color(rgb(0xffffff)))
+                        .bg(theme::CONTROL)
+                        .hover(|s| s.bg(theme::ACCENT).text_color(theme::TEXT_BRIGHT))
                         .on_click(move |_, window, cx| {
                             cx.stop_propagation();
                             window.dispatch_action(Box::new(action.clone()), cx);
@@ -106,9 +107,9 @@ impl DocView {
                     .pr_2()
                     .pl(px(8.0 + 14.0 * r.depth as f32))
                     .border_b_1()
-                    .border_color(rgb(0x2a2a2a))
+                    .border_color(theme::POPOVER)
                     .when(page.is_some(), |d| {
-                        d.cursor_pointer().hover(|s| s.bg(rgb(0x303030)))
+                        d.cursor_pointer().hover(|s| s.bg(theme::HOVER_FAINT))
                     })
                     .on_click(cx.listener(move |v, _, _, cx| {
                         if let Some(p) = page {
@@ -116,13 +117,7 @@ impl DocView {
                         }
                     }))
                     .when_some(r.icon.glyph(), |d, g| {
-                        d.child(
-                            div()
-                                .w(px(14.0))
-                                .text_sm()
-                                .text_color(rgb(0x9ac0ff))
-                                .child(g),
-                        )
+                        d.child(div().w(px(14.0)).text_sm().text_color(theme::LINK).child(g))
                     })
                     .child(
                         div()
@@ -133,7 +128,7 @@ impl DocView {
                             .child(
                                 div()
                                     .text_sm()
-                                    .text_color(rgb(0xe0e0e0))
+                                    .text_color(theme::TEXT)
                                     .overflow_hidden()
                                     .whitespace_nowrap()
                                     .text_ellipsis()
@@ -143,7 +138,7 @@ impl DocView {
                                 d.child(
                                     div()
                                         .text_xs()
-                                        .text_color(rgb(0x8a8a8a))
+                                        .text_color(theme::TEXT_DIM)
                                         .overflow_hidden()
                                         .whitespace_nowrap()
                                         .text_ellipsis()
@@ -156,9 +151,9 @@ impl DocView {
                             div()
                                 .px_1p5()
                                 .rounded_sm()
-                                .bg(rgb(0x3a3a3a))
+                                .bg(theme::CONTROL)
                                 .text_xs()
-                                .text_color(rgb(0xc0c0c0))
+                                .text_color(theme::TEXT_SUBTLE)
                                 .child(b),
                         )
                     })

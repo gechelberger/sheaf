@@ -4,9 +4,10 @@
 //! dragging (Subtotal sums the numbers in it); later, copy-text-from-region
 //! and table extraction start from it too.
 
-use gpui::{AnyElement, Context, div, prelude::*, px, rgba};
+use gpui::{AnyElement, Context, div, prelude::*, px};
 use sheaf_core::{PageSize, Rotation};
 use sheaf_doc::{Box2, PageId, Pt};
+use sheaf_ui::theme;
 
 use crate::docview::{DocEvent, DocView, State};
 use crate::markup_tools::rotate_pt;
@@ -143,8 +144,8 @@ pub(crate) fn overlay(
                 .w(px(shown.w * k))
                 .h(px(shown.h * k))
                 .border_1()
-                .border_color(rgba(0x4a9effff))
-                .bg(rgba(0x4a9eff1f))
+                .border_color(theme::REGION_BORDER)
+                .bg(theme::REGION_FILL)
                 .into_any_element(),
         )
     }

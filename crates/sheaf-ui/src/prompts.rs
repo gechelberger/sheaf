@@ -9,8 +9,11 @@ use futures::channel::oneshot;
 use gpui::{
     App, AppContext as _, Context, EventEmitter, FocusHandle, Focusable, Global, IntoElement,
     KeyDownEvent, PromptButton, PromptLevel, PromptResponse, Render, SharedString, Window,
-    WindowId, div, prelude::*, px, relative, rgb, rgba,
+    WindowId, div, prelude::*, px, relative,
 };
+
+use crate::button::Button;
+use crate::{dialog, theme};
 
 struct Pending {
     level: PromptLevel,
@@ -181,35 +184,14 @@ impl Render for PromptView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let glyph = match self.level {
             PromptLevel::Info => None,
-            PromptLevel::Warning => Some(("⚠", rgb(0xe0a030))),
-            PromptLevel::Critical => Some(("⚠", rgb(0xe05050))),
+            PromptLevel::Warning => Some(("⚠", theme::WARNING)),
+            PromptLevel::Critical => Some(("⚠", theme::CRITICAL)),
         };
+        // The selected answer (Enter's) is the accent one; arrows move it.
         let buttons = self.answers.iter().enumerate().map(|(ix, a)| {
-            let selected = ix == self.selected;
-            div()
-                .id(("prompt-answer", ix))
-                .px_3()
-                .py_1()
-                .rounded_sm()
-                .text_sm()
-                .cursor_pointer()
-                .border_1()
-                .when(selected, |d| {
-                    d.bg(rgb(0x4a9eff))
-                        .text_color(rgb(0xffffff))
-                        .border_color(rgb(0x9ccaff))
-                        .hover(|s| s.bg(rgb(0x5aaeff)))
-                })
-                .when(!selected, |d| {
-                    d.bg(rgb(0x3a3a3a))
-                        .border_color(rgb(0x3a3a3a))
-                        .hover(|s| s.bg(rgb(0x4a4a4a)))
-                })
-                .on_click(cx.listener(move |_, _, _, cx| {
-                    cx.emit(PromptResponse(ix));
-                    cx.stop_propagation();
-                }))
-                .child(a.label().clone())
+            Button::new(("prompt-answer", ix), a.label().clone())
+                .when(ix == self.selected, Button::primary)
+                .on_click(cx.listener(move |_, _, _, cx| cx.emit(PromptResponse(ix))))
         });
         div()
             .id("prompt-backdrop")
@@ -217,24 +199,15 @@ impl Render for PromptView {
             .on_key_down(cx.listener(|this, ev, _, cx| this.on_key(ev, cx)))
             .occlude()
             .size_full()
-            .bg(rgba(0x00000080))
+            .bg(theme::BACKDROP_STRONG)
             .flex()
             .justify_center()
             .items_center()
             .child(
-                div()
-                    .w(px(440.0))
+                dialog::card("prompt", px(440.0))
                     .max_w(relative(0.9))
                     .p_4()
-                    .flex()
-                    .flex_col()
                     .gap_3()
-                    .bg(rgb(0x262626))
-                    .border_1()
-                    .border_color(rgb(0x4a4a4a))
-                    .rounded_md()
-                    .shadow_lg()
-                    .text_color(rgb(0xd0d0d0))
                     .child(
                         div()
                             .flex()
@@ -247,12 +220,12 @@ impl Render for PromptView {
                                 div()
                                     .flex_1()
                                     .min_w(px(0.0))
-                                    .text_color(rgb(0xf0f0f0))
+                                    .text_color(theme::TEXT_TITLE)
                                     .child(self.message.clone()),
                             ),
                     )
                     .when_some(self.detail.clone(), |d, detail| {
-                        d.child(div().text_sm().text_color(rgb(0xb0b0b0)).child(detail))
+                        d.child(div().text_sm().text_color(theme::TEXT_DETAIL).child(detail))
                     })
                     .child(
                         div()

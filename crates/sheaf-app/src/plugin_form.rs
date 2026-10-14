@@ -4,12 +4,14 @@
 
 use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, MouseButton,
-    PathPromptOptions, Subscription, Window, div, prelude::*, px, rgb, rgba,
+    PathPromptOptions, Subscription, Window, div, prelude::*, px,
 };
 use sheaf_doc::PageId;
 use sheaf_plugin::ui::{FieldAnswer, FieldKind, FieldValue, Form, parse_page_range};
+use sheaf_ui::button::{Button, Chip};
+use sheaf_ui::text_input::{TextInput, TextInputEvent};
+use sheaf_ui::{dialog, theme};
 
-use crate::text_input::{TextInput, TextInputEvent};
 use crate::{DialogCancel, DialogLeft, DialogNext, DialogPrev, DialogRight, DialogRun};
 
 pub const KEY_CONTEXT: &str = "PluginForm";
@@ -290,24 +292,9 @@ impl PluginForm {
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        div()
-            .id(id)
-            .px_2()
-            .py_1()
-            .rounded_sm()
-            .text_sm()
-            .border_1()
-            .border_color(if selected {
-                rgb(0x4a9eff)
-            } else {
-                rgb(0x3a3a3a)
-            })
-            .when(selected, |d| d.bg(rgb(0x2f4a6f)))
-            .text_color(rgb(0xe8e8e8))
-            .cursor_pointer()
-            .hover(|s| s.bg(rgb(0x3a3a3a)))
+        Chip::new(id, label)
+            .selected(selected)
             .on_click(cx.listener(move |this, _, window, cx| on_click(this, window, cx)))
-            .child(label)
             .into_any_element()
     }
 
@@ -325,7 +312,7 @@ impl PluginForm {
                     d.child(
                         div()
                             .text_xs()
-                            .text_color(rgb(0x7a7a7a))
+                            .text_color(theme::TEXT_FAINT)
                             .child(bounds_text(*min, *max)),
                     )
                 })
@@ -379,7 +366,7 @@ impl PluginForm {
                     div()
                         .flex_1()
                         .text_xs()
-                        .text_color(rgb(0xb0b0b0))
+                        .text_color(theme::TEXT_DETAIL)
                         .overflow_hidden()
                         .whitespace_nowrap()
                         .text_ellipsis()
@@ -412,68 +399,21 @@ impl Render for PluginForm {
         let rows: Vec<AnyElement> = (0..self.fields.len())
             .map(|i| {
                 let content = self.render_field(i, cx);
-                div()
-                    .flex()
-                    .items_start()
-                    .gap_3()
-                    .py_1()
-                    .px_2()
-                    .rounded_sm()
-                    .when(self.row == i, |d| d.bg(rgb(0x2e2e2e)))
-                    .child(
-                        div()
-                            .w(px(130.0))
-                            .flex_shrink_0()
-                            .pt_1()
-                            .text_sm()
-                            .text_color(rgb(0x9a9a9a))
-                            .child(self.form.fields[i].label.clone()),
-                    )
-                    .child(div().flex_1().min_w(px(0.0)).child(content))
-                    .into_any_element()
+                let label = self.form.fields[i].label.clone();
+                dialog::field_row(label, px(130.0), self.row == i, content).into_any_element()
             })
             .collect();
         let buttons_focused = self.row == self.fields.len();
-        let buttons = div()
-            .flex()
-            .gap_2()
-            .justify_end()
-            .child(
-                div()
-                    .id("form-cancel")
-                    .px_3()
-                    .py_1()
-                    .rounded_sm()
-                    .text_sm()
-                    .cursor_pointer()
-                    .bg(rgb(0x3a3a3a))
-                    .hover(|s| s.bg(rgb(0x4a4a4a)))
-                    .on_click(cx.listener(|_, _, _, cx| cx.emit(PluginFormEvent::Dismiss)))
-                    .child("Cancel"),
-            )
-            .child(
-                div()
-                    .id("form-submit")
-                    .px_3()
-                    .py_1()
-                    .rounded_sm()
-                    .text_sm()
-                    .cursor_pointer()
-                    .bg(rgb(0x4a9eff))
-                    .text_color(rgb(0xffffff))
-                    .border_1()
-                    .border_color(if buttons_focused {
-                        rgb(0xffffff)
-                    } else {
-                        rgb(0x4a9eff)
-                    })
-                    .hover(|s| s.bg(rgb(0x5aaeff)))
-                    .on_click(cx.listener(|this, _, _, cx| this.submit(cx)))
-                    .child(self.form.submit_label.clone()),
-            );
+        let buttons = [
+            Button::new("form-cancel", "Cancel")
+                .on_click(cx.listener(|_, _, _, cx| cx.emit(PluginFormEvent::Dismiss))),
+            Button::new("form-submit", self.form.submit_label.clone())
+                .primary()
+                .focused(buttons_focused)
+                .on_click(cx.listener(|this, _, _, cx| this.submit(cx))),
+        ];
 
-        div()
-            .id("form-backdrop")
+        dialog::backdrop("form-backdrop")
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &DialogNext, window, cx| this.step_row(1, window, cx)))
@@ -484,80 +424,26 @@ impl Render for PluginForm {
             .on_action(cx.listener(|this, _: &DialogRight, _, cx| this.adjust(1, cx)))
             .on_action(cx.listener(|this, _: &DialogRun, _, cx| this.submit(cx)))
             .on_action(cx.listener(|_, _: &DialogCancel, _, cx| cx.emit(PluginFormEvent::Dismiss)))
-            .absolute()
-            .inset_0()
-            .bg(rgba(0x00000060))
-            .flex()
-            .justify_center()
-            .items_start()
-            .pt(px(80.0))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|_, _, _, cx| cx.emit(PluginFormEvent::Dismiss)),
             )
             .child(
-                div()
-                    .id("plugin-form")
-                    .w(px(520.0))
-                    .p_3()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .bg(rgb(0x262626))
-                    .border_1()
-                    .border_color(rgb(0x4a4a4a))
-                    .rounded_md()
-                    .shadow_lg()
-                    .text_color(rgb(0xd0d0d0))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                dialog::card("plugin-form", px(520.0))
                     .child(
-                        div()
-                            .pb_2()
-                            .mb_1()
-                            .border_b_1()
-                            .border_color(rgb(0x111111))
-                            .flex()
-                            .items_baseline()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(rgb(0xe8e8e8))
-                                    .child(self.form.title.clone()),
-                            )
+                        dialog::header(self.form.title.clone())
                             .when(!same_name(&self.form.title, &self.source), |d| {
-                                d.child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(rgb(0x7a7a7a))
-                                        .child(format!("from {}", self.source)),
-                                )
+                                d.child(dialog::subtitle(format!("from {}", self.source)))
                             }),
                     )
                     .children(rows)
-                    .when_some(self.error.clone(), |d, e| {
-                        d.child(
-                            div()
-                                .px_2()
-                                .pt_1()
-                                .text_xs()
-                                .text_color(rgb(0xe08080))
-                                .child(e),
-                        )
-                    })
+                    .when_some(self.error.clone(), |d, e| d.child(dialog::message(e, true)))
                     .child(
-                        div()
-                            .pt_2()
-                            .flex()
-                            .items_center()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .text_xs()
-                                    .text_color(rgb(0x7a7a7a))
-                                    .child("Tab moves, ←/→ change, Enter submits, Esc cancels"),
-                            )
-                            .child(buttons),
+                        dialog::footer()
+                            .child(dialog::hint(
+                                "Tab moves, ←/→ change, Enter submits, Esc cancels",
+                            ))
+                            .children(buttons),
                     ),
             )
     }

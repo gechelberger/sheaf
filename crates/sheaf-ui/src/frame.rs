@@ -7,8 +7,10 @@
 use gpui::{
     AnyElement, App, Bounds, CursorStyle, Decorations, HitboxBehavior, Hsla, MouseButton, Pixels,
     Point, ResizeEdge, SharedString, Size, Stateful, Styled, Tiling, Window, WindowControlArea,
-    canvas, div, point, prelude::*, px, rgb, size, transparent_black,
+    canvas, div, point, prelude::*, px, size, transparent_black,
 };
+
+use crate::theme;
 
 pub const TITLE_H: f32 = 34.0;
 const SHADOW: Pixels = px(10.0);
@@ -37,9 +39,10 @@ fn caption_region() -> gpui::Div {
         })
 }
 
-/// The title bar. `menu_bar` follows the app name; `title` is shown centered; the whole bar moves the
+/// The title bar. `icon` and the app name lead; `menu_bar` follows them; `title` is shown centered; the whole bar moves the
 /// window, double-click toggles maximize, right-click opens the window menu.
 pub fn title_bar(
+    icon: AnyElement,
     title: SharedString,
     menu_bar: Option<AnyElement>,
     on_close: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
@@ -58,13 +61,13 @@ pub fn title_bar(
             .items_center()
             .justify_center()
             .text_sm()
-            .text_color(rgb(0xc0c0c0))
+            .text_color(theme::TEXT_SUBTLE)
             .cursor_pointer()
             .hover(move |s| {
                 if danger {
-                    s.bg(rgb(0xc42b1c)).text_color(rgb(0xffffff))
+                    s.bg(theme::CLOSE_HOVER).text_color(theme::TEXT_BRIGHT)
                 } else {
-                    s.bg(rgb(0x3a3a3a))
+                    s.bg(theme::HOVER)
                 }
             })
             // Linux's parent mouse handler must not move the window when a
@@ -118,9 +121,9 @@ pub fn title_bar(
         .flex_shrink_0()
         .flex()
         .items_center()
-        .bg(rgb(0x181818))
+        .bg(theme::TITLE_BAR)
         .border_b_1()
-        .border_color(rgb(0x0e0e0e))
+        .border_color(theme::FRAME_BORDER)
         .when(!cfg!(target_os = "windows"), |bar| {
             bar.on_mouse_down(MouseButton::Left, |e, window, _| {
                 if e.click_count == 2 {
@@ -139,17 +142,13 @@ pub fn title_bar(
         })
         // Keep native caption regions separate from menus and buttons. Native
         // caption handling supplies dragging, double-click, and window menus.
-        .child(
-            caption_region()
-                .pl_3()
-                .child(crate::brand::mark(px(16.0), window)),
-        )
+        .child(caption_region().pl_3().child(icon))
         .child(
             caption_region()
                 .pl_2()
                 .text_sm()
                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(rgb(0xe0e0e0))
+                .text_color(theme::TEXT)
                 .child("sheaf"),
         )
         .children(menu_bar.map(|m| div().h_full().pl_2().occlude().child(m)))
@@ -158,7 +157,7 @@ pub fn title_bar(
                 .flex_1()
                 .justify_center()
                 .text_sm()
-                .text_color(rgb(0x9a9a9a))
+                .text_color(theme::TEXT_MUTED)
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_ellipsis()
@@ -256,7 +255,7 @@ pub fn client_side_decorations(
                 .map(|d| match decorations {
                     Decorations::Server => d,
                     Decorations::Client { .. } => rounded(d, tiling)
-                        .border_color(rgb(0x3a3a3a))
+                        .border_color(theme::BORDER)
                         .when(!tiling.top, |d| d.border_t(BORDER))
                         .when(!tiling.bottom, |d| d.border_b(BORDER))
                         .when(!tiling.left, |d| d.border_l(BORDER))

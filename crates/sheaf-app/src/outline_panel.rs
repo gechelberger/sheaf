@@ -8,14 +8,16 @@ use std::collections::HashSet;
 
 use gpui::{
     AnchoredPositionMode, AnyElement, Context, DragMoveEvent, Entity, Focusable, MouseButton,
-    Pixels, Point, Subscription, Window, anchored, deferred, div, point, prelude::*, px, rgb, rgba,
+    Pixels, Point, Subscription, Window, anchored, deferred, div, point, prelude::*, px, rgb,
 };
 use sheaf_core::Rotation;
 use sheaf_doc::{DestView, Edit, OutlineId, OutlineNode, PageId, Pt};
+use sheaf_ui::list::ListLayout;
+use sheaf_ui::text_input::{TextInput, TextInputEvent};
+use sheaf_ui::theme;
 
 use crate::docview::{DocView, ScrollTo, State};
 use crate::markup_tools::rotate_pt;
-use crate::text_input::{TextInput, TextInputEvent};
 use crate::{
     CollapseAllBookmarks, DeleteBookmark, DeselectBookmark, ExpandAllBookmarks, NewBookmark, Redo,
     RenameBookmark, Save, SetBookmarkDestination, Undo,
@@ -64,8 +66,8 @@ impl Render for DragPreview {
             .px_2()
             .py_1()
             .rounded_md()
-            .bg(rgb(0x4a9eff))
-            .text_color(rgb(0xffffff))
+            .bg(theme::ACCENT)
+            .text_color(theme::TEXT_BRIGHT)
             .text_sm()
             .child(self.title.clone())
     }
@@ -455,7 +457,7 @@ impl DocView {
             return container
                 .p_2()
                 .text_sm()
-                .text_color(rgb(0x9a9a9a))
+                .text_color(theme::TEXT_MUTED)
                 .child("Loading bookmarks…")
                 .into_any_element();
         }
@@ -464,7 +466,7 @@ impl DocView {
             return container
                 .p_2()
                 .text_sm()
-                .text_color(rgb(0x9a9a9a))
+                .text_color(theme::TEXT_MUTED)
                 .child("No bookmarks — Ctrl+B adds one for the current page")
                 .into_any_element();
         }
@@ -501,19 +503,15 @@ impl DocView {
         let row_depths: std::sync::Arc<Vec<u16>> =
             std::sync::Arc::new(rows.iter().map(|r| r.2).collect());
 
-        let total_h = rows.len() as f32 * ROW_H + PAD;
-        let bounds = doc.outline_scroll.bounds();
-        let view_h = f32::from(bounds.size.height).max(1.0);
-        let scroll_y = (-f32::from(doc.outline_scroll.offset().y)).max(0.0);
-        let r0 = ((scroll_y / ROW_H) as usize).min(rows.len());
-        let r1 = (((scroll_y + view_h) / ROW_H) as usize + 1).min(rows.len());
+        let layout = ListLayout::fixed(rows.len(), ROW_H).padded(0.0, PAD);
 
         let cur_id = doc.page_ref(doc.current_page).map(|p| p.id);
         let selected = doc.outline_selected;
         let drop = doc.outline_drop;
         let rename = doc.outline_rename.as_ref().map(|r| (r.id, r.input.clone()));
         let mut els = Vec::new();
-        for (r, &(ix, id, depth, target)) in rows.iter().enumerate().take(r1).skip(r0) {
+        for r in layout.visible(&doc.outline_scroll) {
+            let (ix, id, depth, target) = rows[r];
             let node = flat[ix].1;
             let view = node.view.clone();
             let orphan = node.target.is_some() && target.is_none();
@@ -530,9 +528,9 @@ impl DocView {
             };
             let title_color = match node.color {
                 Some([cr, cg, cb]) => rgb(((cr as u32) << 16) | ((cg as u32) << 8) | cb as u32),
-                None if target.is_some() => rgb(0xd0d0d0),
-                None if orphan => rgb(0x8a6a6a),
-                None => rgb(0x8a8a8a),
+                None if target.is_some() => theme::TEXT_SOFT,
+                None if orphan => theme::TEXT_ORPHAN,
+                None => theme::TEXT_DIM,
             };
             let title_el: AnyElement = match &rename {
                 Some((rid, input)) if *rid == id => {
@@ -549,13 +547,9 @@ impl DocView {
             };
             let title_for_drag = node.title.clone();
             els.push(
-                div()
+                layout
+                    .place(r)
                     .id(("outline", id.0 as usize))
-                    .absolute()
-                    .top(px(r as f32 * ROW_H))
-                    .left(px(0.0))
-                    .w_full()
-                    .h(px(ROW_H))
                     .pl(px(6.0 + depth as f32 * INDENT))
                     .pr_2()
                     .flex()
@@ -563,10 +557,10 @@ impl DocView {
                     .gap_1()
                     .text_sm()
                     .cursor_pointer()
-                    .when(is_selected, |d| d.bg(rgb(0x2f4f7f)))
-                    .when(!is_selected && active, |d| d.bg(rgb(0x3a4a60)))
-                    .when(into, |d| d.bg(rgba(0x4a9eff60)))
-                    .hover(|s| s.bg(rgb(0x3a3a3a)))
+                    .when(is_selected, |d| d.bg(theme::SELECTED_STRONG))
+                    .when(!is_selected && active, |d| d.bg(theme::ACTIVE_ROW))
+                    .when(into, |d| d.bg(theme::SELECTION))
+                    .hover(|s| s.bg(theme::HOVER))
                     .on_click(cx.listener(move |v, _, window, cx| {
                         if let State::Ready(doc) = &mut v.state {
                             doc.outline_selected = Some(id);
@@ -597,7 +591,7 @@ impl DocView {
                         div()
                             .id(("outline-toggle", id.0 as usize))
                             .w(px(14.0))
-                            .text_color(rgb(0x9a9a9a))
+                            .text_color(theme::TEXT_MUTED)
                             .cursor_pointer()
                             .on_click(cx.listener(move |v, _, _, cx| {
                                 if let State::Ready(doc) = &mut v.state {
@@ -618,8 +612,8 @@ impl DocView {
         let indicator = drop.and_then(|d| {
             let depth = *row_depths.get(d.row)? as f32;
             let y = match d.pos {
-                DropPos::Before => d.row as f32 * ROW_H,
-                DropPos::After => (d.row + 1) as f32 * ROW_H,
+                DropPos::Before => layout.top(d.row),
+                DropPos::After => layout.top(d.row) + layout.height(d.row),
                 DropPos::Into => return None,
             };
             Some(
@@ -629,15 +623,15 @@ impl DocView {
                     .right(px(4.0))
                     .top(px(y - 1.0))
                     .h(px(2.0))
-                    .bg(rgb(0x4a9eff)),
+                    .bg(theme::ACCENT),
             )
         });
 
         // Context menu, anchored at the click position in window coordinates.
         let menu = doc.outline_menu.map(|(_, pos)| self_menu(pos, cx));
 
-        let rows_len = rows.len();
         let depths = row_depths.clone();
+        let drag_layout = layout.clone();
         container
             .track_scroll(&doc.outline_scroll)
             .overflow_y_scroll()
@@ -649,11 +643,10 @@ impl DocView {
                     let local_y = f32::from(ev.event.position.y - ev.bounds.origin.y)
                         - f32::from(doc.outline_scroll.offset().y);
                     let local_x = f32::from(ev.event.position.x - ev.bounds.origin.x);
-                    if rows_len == 0 {
+                    let Some(row) = drag_layout.row_at(local_y) else {
                         return;
-                    }
-                    let row = ((local_y / ROW_H).floor().max(0.0) as usize).min(rows_len - 1);
-                    let frac = (local_y - row as f32 * ROW_H) / ROW_H;
+                    };
+                    let frac = (local_y - drag_layout.top(row)) / drag_layout.height(row);
                     let indent = 6.0 + depths[row] as f32 * INDENT;
                     let pos = if frac < 0.25 {
                         DropPos::Before
@@ -678,14 +671,7 @@ impl DocView {
                 let with_pages = window.modifiers().shift;
                 v.drop_bookmark(d.id, with_pages, cx)
             }))
-            .child(
-                div()
-                    .relative()
-                    .w_full()
-                    .h(px(total_h))
-                    .children(els)
-                    .children(indicator),
-            )
+            .child(layout.body().children(els).children(indicator))
             .children(menu)
             .into_any_element()
     }
@@ -703,7 +689,7 @@ fn self_menu(pos: Point<Pixels>, cx: &mut Context<DocView>) -> AnyElement {
             .py_1()
             .text_sm()
             .cursor_pointer()
-            .hover(|s| s.bg(rgb(0x3a3a3a)))
+            .hover(|s| s.bg(theme::HOVER))
             .on_click(cx.listener(move |v, _, window, cx| {
                 f(v, window, cx);
                 if let State::Ready(doc) = &mut v.state {
@@ -716,7 +702,7 @@ fn self_menu(pos: Point<Pixels>, cx: &mut Context<DocView>) -> AnyElement {
     let swatch = |color: Option<[u8; 3]>, cx: &mut Context<DocView>| {
         let fill = color
             .map(|[r, g, b]| rgb(((r as u32) << 16) | ((g as u32) << 8) | b as u32))
-            .unwrap_or(rgb(0xd0d0d0));
+            .unwrap_or(theme::TEXT_SOFT);
         div()
             .id((
                 "swatch",
@@ -729,7 +715,7 @@ fn self_menu(pos: Point<Pixels>, cx: &mut Context<DocView>) -> AnyElement {
             .rounded_sm()
             .bg(fill)
             .border_1()
-            .border_color(rgb(0x111111))
+            .border_color(theme::DIVIDER)
             .cursor_pointer()
             .on_click(cx.listener(move |v, _, _, cx| v.set_selected_color(color, cx)))
     };
@@ -759,9 +745,9 @@ fn self_menu(pos: Point<Pixels>, cx: &mut Context<DocView>) -> AnyElement {
                     .min_w(px(220.0))
                     .py_1()
                     .rounded_md()
-                    .bg(rgb(0x2a2a2a))
+                    .bg(theme::POPOVER)
                     .border_1()
-                    .border_color(rgb(0x111111))
+                    .border_color(theme::DIVIDER)
                     .shadow_lg()
                     .flex()
                     .flex_col()
@@ -784,10 +770,10 @@ fn self_menu(pos: Point<Pixels>, cx: &mut Context<DocView>) -> AnyElement {
                             .flex()
                             .items_center()
                             .gap_2()
-                            .child(div().text_sm().text_color(rgb(0x9a9a9a)).child("Color"))
+                            .child(div().text_sm().text_color(theme::TEXT_MUTED).child("Color"))
                             .children(colors.iter().map(|c| swatch(*c, cx))),
                     )
-                    .child(div().h(px(1.0)).my_1().bg(rgb(0x111111)))
+                    .child(div().h(px(1.0)).my_1().bg(theme::DIVIDER))
                     .child(item("menu-expand", "Expand All", cx, |v, _, cx| {
                         v.set_all_expanded(true, cx)
                     }))

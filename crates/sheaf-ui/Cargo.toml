@@ -7,3 +7,5 @@ license.workspace = true
 [dependencies]
 sheaf-core.workspace = true
 gpui.workspace = true
+futures.workspace = true
+unicode-segmentation.workspace = true

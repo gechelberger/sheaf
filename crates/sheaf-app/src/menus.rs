@@ -1,10 +1,11 @@
 //! The built-in menus, defined once. They register their commands in the
 //! [`CommandRegistry`], which plugins extend; the menus shown come from
 //! there. macOS shows them in the system menu bar; everywhere else
-//! `menu_bar.rs` draws them in the title bar. A `&` before a letter marks
+//! `sheaf_ui::menu_bar` draws them in the title bar. A `&` before a letter marks
 //! its Alt-key mnemonic, as in Win32 menus.
 
 use gpui::{Action, App, Menu};
+use sheaf_ui::menu_bar::parse_label;
 
 use crate::commands::{Command, CommandRegistry, MenuEntry, MenuSpec, Target};
 use crate::*;
@@ -201,35 +202,6 @@ fn builtin_menus() -> Vec<(&'static str, Vec<Item>)> {
         menu("&Help", vec![item("&About sheaf", About)]),
     ]);
     menus
-}
-
-/// Split a `&`-marked label into display text and the byte offset of its
-/// mnemonic character, if any.
-pub fn parse_label(label: &str) -> (String, Option<usize>) {
-    match label.find('&') {
-        Some(i) if i + 1 < label.len() => {
-            let mut text = String::with_capacity(label.len() - 1);
-            text.push_str(&label[..i]);
-            text.push_str(&label[i + 1..]);
-            (text, Some(i))
-        }
-        _ => (label.to_string(), None),
-    }
-}
-
-/// The mnemonic letter of a `&`-marked label, lowercased.
-pub fn mnemonic(label: &str) -> Option<char> {
-    let (text, at) = parse_label(label);
-    text[at?..].chars().next().map(|c| c.to_ascii_lowercase())
-}
-
-/// macOS menus don't use mnemonics; strip the markers there.
-pub fn label(s: &str) -> String {
-    if cfg!(target_os = "macos") {
-        parse_label(s).0
-    } else {
-        s.to_string()
-    }
 }
 
 fn menu(name: &'static str, items: Vec<Item>) -> (&'static str, Vec<Item>) {

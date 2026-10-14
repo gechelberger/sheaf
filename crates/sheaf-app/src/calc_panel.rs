@@ -5,16 +5,15 @@
 //! or Enter on an empty entry prints the running total and starts a new
 //! subtotal. "Place on page" then drops the tape where you next click.
 
-use gpui::{
-    AnyElement, Context, Entity, Focusable, Subscription, Window, div, prelude::*, px, rgb,
-};
+use gpui::{AnyElement, Context, Entity, Focusable, Subscription, Window, div, prelude::*, px};
 use sheaf_doc::{
     AnnotKind, Box2, PageId, Pt,
     annot::{TAPE_LINE, TAPE_OP_W, TAPE_PAD, helv_width, tape_lines},
 };
+use sheaf_ui::text_input::{TextInput, TextInputEvent};
+use sheaf_ui::theme;
 
 use crate::docview::{DocView, State};
-use crate::text_input::{TextInput, TextInputEvent};
 
 const ROW_H: f32 = 22.0;
 /// Point size of a placed tape.
@@ -337,8 +336,8 @@ impl DocView {
                 .justify_center()
                 .text_sm()
                 .cursor_pointer()
-                .bg(rgb(0x3a3a3a))
-                .hover(|s| s.bg(rgb(0x4a4a4a)))
+                .bg(theme::CONTROL)
+                .hover(|s| s.bg(theme::CONTROL_HOVER))
                 .child(label)
         };
         let mut keys: Vec<AnyElement> = Op::KEYS
@@ -374,7 +373,7 @@ impl DocView {
             },
             true,
         )
-        .when(placing, |d| d.bg(rgb(0x4a9eff)))
+        .when(placing, |d| d.bg(theme::ACCENT))
         .on_click(cx.listener(|v, _, _, cx| v.calc_place_requested(cx)));
 
         // Tape rows.
@@ -395,10 +394,10 @@ impl DocView {
                     .justify_end()
                     .px_2()
                     .text_sm()
-                    .text_color(rgb(0xe0e0e0))
+                    .text_color(theme::TEXT)
                     .when(total, |d| {
                         d.border_t_1()
-                            .border_color(rgb(0x777777))
+                            .border_color(theme::TOTAL_RULE)
                             .font_weight(gpui::FontWeight::BOLD)
                     })
                     .child(div().child(fmt_amount(l.value)))
@@ -406,7 +405,7 @@ impl DocView {
                         div()
                             .w(px(18.0))
                             .pl_1()
-                            .text_color(rgb(0x9a9a9a))
+                            .text_color(theme::TEXT_MUTED)
                             .child(l.op.symbol()),
                     )
                     .into_any_element()
@@ -425,7 +424,7 @@ impl DocView {
                     .justify_end()
                     .px_2()
                     .text_sm()
-                    .text_color(rgb(0x8a8a8a))
+                    .text_color(theme::TEXT_DIM)
                     .child(div().child(fmt_amount(calc.running)))
                     .child(div().w(px(18.0)).pl_1().child("="))
                     .into_any_element(),
@@ -442,7 +441,7 @@ impl DocView {
             .child(input)
             .child(div().flex().flex_wrap().gap_1().children(keys))
             .child(div().flex().child(place))
-            .child(div().text_xs().text_color(rgb(0x9a9a9a)).child(status));
+            .child(div().text_xs().text_color(theme::TEXT_MUTED).child(status));
         let tape = div()
             .id("calc-tape")
             .track_scroll(&calc.scroll)
@@ -459,7 +458,7 @@ impl DocView {
                     controls
                         .w(px(280.0))
                         .border_r_1()
-                        .border_color(rgb(0x111111)),
+                        .border_color(theme::DIVIDER),
                 )
                 .child(tape)
                 .into_any_element()
@@ -468,7 +467,7 @@ impl DocView {
                 .size_full()
                 .flex()
                 .flex_col()
-                .child(controls.border_b_1().border_color(rgb(0x111111)))
+                .child(controls.border_b_1().border_color(theme::DIVIDER))
                 .child(tape)
                 .into_any_element()
         }

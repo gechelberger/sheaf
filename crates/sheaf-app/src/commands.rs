@@ -14,11 +14,11 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use gpui::{Action, Global, Menu, MenuItem};
+use gpui::{Action, App, Global, Menu, MenuItem};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::menus::{label as menu_label, parse_label};
+use sheaf_ui::menu_bar::{parse_label, platform_label as menu_label};
 
 /// Run a plugin command. Bindable in `keymap.json`:
 /// `["plugin::Run", { "plugin": "tax-form-bookmarks", "command": "scan" }]`.
@@ -351,6 +351,25 @@ fn same_name(menu: &str, name: &str) -> bool {
     parse_label(menu)
         .0
         .eq_ignore_ascii_case(&parse_label(name).0)
+}
+
+/// Every registered command, in registration (built-ins: menu) order, as
+/// the command palette lists them.
+pub fn palette_commands(cx: &App) -> Vec<sheaf_ui::palette::Command> {
+    cx.global::<CommandRegistry>()
+        .commands()
+        .iter()
+        .map(|c| {
+            let action = c.target.action();
+            sheaf_ui::palette::Command {
+                id: c.id.clone(),
+                category: c.category.clone(),
+                label: parse_label(&c.label).0.trim_end_matches('…').to_string(),
+                shortcut: sheaf_ui::menu_bar::shortcut(action.as_ref(), cx).map(|s| s.to_string()),
+                action,
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
