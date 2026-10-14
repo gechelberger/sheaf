@@ -128,7 +128,9 @@ pub struct Permissions {
     pub read: Vec<String>,
     /// Directories it may read and write.
     pub write: Vec<String>,
-    pub network: bool,
+    /// Hosts it may make HTTP requests to: `"api.example.com"` (any port),
+    /// `"*.example.com"` (subdomains too) or `"127.0.0.1:8080"` (that port).
+    pub network: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
@@ -148,12 +150,32 @@ pub enum EventKind {
 pub struct Grants {
     pub read: Vec<PathBuf>,
     pub write: Vec<PathBuf>,
-    pub network: bool,
+    /// Hosts for HTTP (see [`Permissions::network`]).
+    pub network: Vec<String>,
 }
 
 impl Grants {
     pub fn is_empty(&self) -> bool {
-        self.read.is_empty() && self.write.is_empty() && !self.network
+        self.read.is_empty() && self.write.is_empty() && self.network.is_empty()
+    }
+
+    /// Whether an HTTP request to `host` (and `port`, if the URL gave one)
+    /// is allowed.
+    pub fn allows_host(&self, host: &str, port: Option<u16>) -> bool {
+        let host = host.trim_end_matches('.').to_ascii_lowercase();
+        self.network.iter().any(|pattern| {
+            let pattern = pattern.trim().to_ascii_lowercase();
+            let (name, want_port) = match pattern.rsplit_once(':') {
+                Some((n, p)) if p.parse::<u16>().is_ok() => (n.to_string(), p.parse().ok()),
+                _ => (pattern.clone(), None),
+            };
+            let port_ok = want_port.is_none() || want_port == port;
+            let name_ok = match name.strip_prefix("*.") {
+                Some(base) => host == base || host.ends_with(&format!(".{base}")),
+                None => host == name,
+            };
+            port_ok && name_ok
+        })
     }
 
     /// One line per permission, for asking the user.
@@ -169,9 +191,7 @@ impl Grants {
                 .iter()
                 .map(|d| format!("Read and change files in {}", d.display())),
         );
-        if self.network {
-            out.push("Use the network".into());
-        }
+        out.extend(self.network.iter().map(|h| format!("Connect to {h}")));
         out
     }
 }
@@ -182,7 +202,7 @@ impl Permissions {
         Grants {
             read: self.read.iter().map(|d| expand_home(d)).collect(),
             write: self.write.iter().map(|d| expand_home(d)).collect(),
-            network: self.network,
+            network: self.network.clone(),
         }
     }
 }
@@ -333,11 +353,32 @@ mod tests {
         assert_eq!(m.category(&m.commands[0]), "Tax Form Bookmarks");
         assert_eq!(m.marks.stamps, ["Agreed"]);
         assert_eq!(m.permissions, Permissions::default());
-        assert!(!m.permissions.network);
+        assert!(m.permissions.network.is_empty());
     }
 
     fn bad(edit: impl Fn(&str) -> String) -> String {
         format!("{:#}", Manifest::parse(&edit(GOOD)).unwrap_err())
+    }
+
+    #[test]
+    fn network_hosts_match_as_written() {
+        let g = Grants {
+            network: vec![
+                "api.frankfurter.app".into(),
+                "*.example.com".into(),
+                "127.0.0.1:8080".into(),
+            ],
+            ..Grants::default()
+        };
+        assert!(g.allows_host("api.frankfurter.app", None));
+        assert!(g.allows_host("API.Frankfurter.app.", Some(443)));
+        assert!(!g.allows_host("evil.frankfurter.app", None));
+        assert!(g.allows_host("a.b.example.com", None));
+        assert!(g.allows_host("example.com", None));
+        assert!(!g.allows_host("notexample.com", None));
+        assert!(g.allows_host("127.0.0.1", Some(8080)));
+        assert!(!g.allows_host("127.0.0.1", Some(9090)));
+        assert!(!Grants::default().allows_host("api.frankfurter.app", None));
     }
 
     #[test]

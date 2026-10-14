@@ -8,7 +8,8 @@
 //! interruption) and a memory limit. A plugin that traps is unloaded.
 //!
 //! Plugins see nothing outside the document unless their manifest's
-//! permissions say so: no files, no network.
+//! permissions say so and the user allows it: no files, and HTTP only to
+//! the hosts named (no raw sockets).
 
 mod convert;
 pub mod manifest;

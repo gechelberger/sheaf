@@ -54,7 +54,15 @@ additions).
   - Number parsing as in `amount-crossref`: `$`, commas, `(1,234)`
     negative, a dash as zero.
 
-### 3. Currency Convert (`currency-convert`; the HTTP plugin)
+### 3. Currency Convert (`currency-convert`; the HTTP plugin) — done 2026-10-13
+Landed with: `wasi:http` for plugins via `wasmtime-wasi-http` (requests made
+by the host, TLS included), per-host network permission (`network` is now a
+list of hosts, `*.` and `:port` forms; raw sockets are gone), time waiting
+on responses credited back to the call's limit, and SDK `http::get`. Rates
+from Frankfurter (ECB), cached in storage; `settings.json` `base_url`
+overrides the server (the host test uses a local one). `$` is read as USD
+and `¥` as JPY.
+
 Find every foreign-currency amount in the document and convert it, using a
 free public exchange-rate service (e.g. Frankfurter / ECB rates). Rates are
 cached in storage. Pairs with Subtotal (convert a region's sum). Needs the

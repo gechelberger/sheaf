@@ -190,7 +190,7 @@ pub struct Consent {
 fn covers(have: &Permissions, want: &Permissions) -> bool {
     want.read.iter().all(|d| have.read.contains(d))
         && want.write.iter().all(|d| have.write.contains(d))
-        && (!want.network || have.network)
+        && want.network.iter().all(|h| have.network.contains(h))
 }
 
 fn intersect(a: &Permissions, b: &Permissions) -> Permissions {
@@ -207,12 +207,17 @@ fn intersect(a: &Permissions, b: &Permissions) -> Permissions {
             .filter(|d| b.write.contains(d))
             .cloned()
             .collect(),
-        network: a.network && b.network,
+        network: a
+            .network
+            .iter()
+            .filter(|h| b.network.contains(h))
+            .cloned()
+            .collect(),
     }
 }
 
 fn is_empty(p: &Permissions) -> bool {
-    p.read.is_empty() && p.write.is_empty() && !p.network
+    p.read.is_empty() && p.write.is_empty() && p.network.is_empty()
 }
 
 impl PluginState {
@@ -1149,7 +1154,7 @@ mod tests {
         let mut st = PluginState::default();
         let none = manifest("");
         assert!(!st.needs_consent(&none), "nothing to ask");
-        let m = manifest("read = [\"/data\"]\nnetwork = true");
+        let m = manifest("read = [\"/data\"]\nnetwork = [\"api.example.com\"]");
         assert!(st.needs_consent(&m));
         assert_eq!(st.granted(&m), Permissions::default());
         st.consent.insert(
@@ -1170,7 +1175,7 @@ mod tests {
             Permissions {
                 read: vec!["/data".into()],
                 write: vec![],
-                network: false,
+                network: vec![],
             }
         );
         // "Don't allow" is an answer too.

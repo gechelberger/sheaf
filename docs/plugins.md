@@ -125,7 +125,7 @@ running any plugin code.
 | `events` | Document events to receive: any of `"opened"`, `"edited"`, `"saved"`, `"selection-changed"`, `"closed"`, `"region"` (the region the user Shift+drags on a page, live while dragging, and its clearing). |
 | `[[presets]]` | `name`, `regex`: pattern-search presets shown (read-only) in the Patterns panel. |
 | `[marks]` | `tickmarks = [{ name, marks = ["Σ", …] }]` and `stamps = ["PBC", …]` for the markup toolbar. |
-| `[permissions]` | `read = ["~/Documents/Clients"]`, `write = [...]`, `network = false`. Absolute paths or `~/…`. See [Trust model](#trust-model). |
+| `[permissions]` | `read = ["~/Documents/Clients"]`, `write = [...]`: absolute paths or `~/…`. `network = ["api.example.com"]`: hosts the plugin may make HTTP requests to (`"*.example.com"` includes subdomains, `"host:8080"` limits the port). See [Trust model](#trust-model). |
 
 A command runs as the action `plugin::Run`, so users can bind it themselves:
 
@@ -196,6 +196,12 @@ when there is none). Uninstalling keeps this data.
 
 **`log`**: `log(level, message)` goes to sheaf's log with the plugin id.
 
+**HTTP** is standard `wasi:http`: sheaf makes the request (and the TLS
+connection) if the host is one the manifest lists and the user allowed;
+anything else fails as denied. The SDK's `http::get(url)` reads a whole
+response. Time spent waiting on the network doesn't count against the
+call's limit. There are no raw sockets.
+
 ### Limits
 
 - **Time**: each call has 30 seconds of the plugin's own time. Waiting for the
@@ -236,7 +242,8 @@ boundary (wasmtime) plus WASI with nothing granted by default:
   `[permissions]` *and* the user allows it. A granted directory is visible to
   the plugin at its own path (with `/` separators). `read` directories are
   read-only. `write` directories can be read and written.
-- **Network.** None, unless `network = true` and the user allows it.
+- **Network.** HTTP only, to the hosts the manifest names, and only after
+  the user allows it (the prompt lists each host). No raw sockets.
 - **Consent.** When a plugin asks for permissions the user hasn't answered,
   it runs without them and sheaf asks once, in a prompt listing exactly what
   it wants. Answers are kept in `<config>/plugins.json`. A later version

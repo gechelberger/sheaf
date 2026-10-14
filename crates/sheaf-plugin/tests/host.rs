@@ -788,7 +788,7 @@ fn granted_directories_are_reachable_and_only_as_granted() {
             grants: Grants {
                 read: vec![ro.clone()],
                 write: vec![rw.clone()],
-                network: false,
+                network: vec![],
             },
             ..LoadOptions::default()
         },
@@ -1052,4 +1052,145 @@ fn subtotal_bundled_plugin() {
     );
     call(Call::Event(DocEvent::RegionCleared));
     assert_eq!(ui.notices.lock().unwrap().last().unwrap(), "");
+}
+
+/// A tiny HTTP server answering Frankfurter-style rate requests with EUR→USD
+/// 1.1 and GBP→USD 1.25 on 2026-10-09. Returns its port and a request count.
+fn rate_server() -> (u16, Arc<std::sync::atomic::AtomicUsize>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let hits = count.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut s) = stream else { continue };
+            let mut buf = [0u8; 4096];
+            let n = s.read(&mut buf).unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let rate = if req.contains("from=GBP") {
+                "1.25"
+            } else {
+                "1.1"
+            };
+            let body = format!(
+                r#"{{"amount":1.0,"base":"X","date":"2026-10-09","rates":{{"USD":{rate}}}}}"#
+            );
+            let _ = write!(
+                s,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    (port, count)
+}
+
+#[test]
+fn currency_convert_bundled_plugin() {
+    let src = workspace_root().join("plugins/currency-convert");
+    let wasm = build_plugin(&src, "currency_convert.wasm");
+    let dir = install("currency-convert", &src, &wasm);
+    let manifest = Manifest::load(&dir).unwrap();
+    assert_eq!(manifest.permissions.network, ["api.frankfurter.app"]);
+    let (port, requests) = rate_server();
+    let data = scratch("currency-data");
+    std::fs::write(
+        data.join("settings.json"),
+        format!(r#"{{"base_url":"http://127.0.0.1:{port}"}}"#),
+    )
+    .unwrap();
+    let load = |network: Vec<String>| {
+        Runtime::new(Limits::default()).unwrap().load(
+            dir.clone(),
+            manifest.clone(),
+            LoadOptions {
+                data_dir: Some(data.clone()),
+                grants: Grants {
+                    network,
+                    ..Grants::default()
+                },
+            },
+        )
+    };
+    let text: Arc<dyn TextSource> = Arc::new(Pages(vec![
+        "Invoice total €1.234,56 and fee GBP 20.00",
+        "Already dollars: $500.00",
+    ]));
+    let mut d = doc(2);
+    let ui = Arc::new(FakeUi::default());
+    let ctx = |d: &Document| CallContext {
+        doc: Some(DocContext {
+            path: "statement.pdf".into(),
+            snapshot: d.snapshot(),
+            selection: Vec::new(),
+            current_page: None,
+            text: text.clone(),
+            ocr: None,
+        }),
+        ui: Some(ui.clone()),
+        presets: Vec::new(),
+    };
+    let answer = |date: &str| {
+        Some(vec![
+            FieldAnswer {
+                id: "target".into(),
+                value: FieldValue::Choice(0), // USD
+            },
+            FieldAnswer {
+                id: "date".into(),
+                value: FieldValue::Text(date.into()),
+            },
+        ])
+    };
+
+    // Not granted: the request is refused before it leaves.
+    let p = load(Vec::new());
+    *ui.answer.lock().unwrap() = answer("2026-10-10");
+    let err = run(&p, "convert", None, ctx(&d)).unwrap_err();
+    assert!(
+        matches!(&err, PluginError::Failed(m) if m.contains("denied")),
+        "{err:?}"
+    );
+    assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    // Granted the test server.
+    let p = load(vec![format!("127.0.0.1:{port}")]);
+    *ui.answer.lock().unwrap() = answer("2026-10-10");
+    let out = run(&p, "convert", None, ctx(&d)).unwrap();
+    let b = &out.batches[0];
+    assert_eq!(b.label, "Convert 2 amounts to USD");
+    let notes: Vec<String> = b
+        .edits
+        .iter()
+        .map(|e| match e {
+            Edit::AnnotAdd { annot, .. } => annot.contents.clone(),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        notes,
+        [
+            "≈ USD 1,358.02 (EUR 1,234.56 × 1.1, ECB 2026-10-09)",
+            "≈ USD 25.00 (GBP 20.00 × 1.25, ECB 2026-10-09)",
+        ]
+    );
+    assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 2);
+    d.apply_batch(b.edits.clone(), &b.label).unwrap();
+
+    // Again: already converted, and no new requests for cached rates.
+    *ui.answer.lock().unwrap() = answer("2026-10-10");
+    let out = run(&p, "convert", None, ctx(&d)).unwrap();
+    assert!(out.batches.is_empty());
+    assert_eq!(
+        ui.notices.lock().unwrap().last().unwrap(),
+        "No amounts to convert to USD"
+    );
+    // Undone, then again: the rates come from storage, not the network.
+    d.undo();
+    *ui.answer.lock().unwrap() = answer("2026-10-10");
+    let out = run(&p, "convert", None, ctx(&d)).unwrap();
+    assert_eq!(out.batches[0].edits.len(), 2);
+    assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 2);
 }

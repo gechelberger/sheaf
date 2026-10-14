@@ -17,6 +17,9 @@ semver = { version = "1", features = ["serde"] }
 regex.workspace = true
 wasmtime = { version = "49.0.2", default-features = false, features = ["component-model", "cranelift", "runtime", "std", "parallel-compilation", "anyhow"] }
 wasmtime-wasi = { version = "49.0.2", default-features = false, features = ["p2"] }
+wasmtime-wasi-http = { version = "49.0.2", default-features = false, features = ["p2", "default-send-request"] }
+http = "1"
+http-body-util = "0.1"
 
 [dev-dependencies]
 env_logger.workspace = true

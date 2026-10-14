@@ -256,6 +256,8 @@ impl Runtime {
         let engine = Engine::new(&config).map_err(anyhow::Error::from)?;
         let mut linker = Linker::new(&engine);
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker).map_err(anyhow::Error::from)?;
+        wasmtime_wasi_http::p2::add_only_http_to_linker_sync(&mut linker)
+            .map_err(anyhow::Error::from)?;
         bindings::Plugin::add_to_linker::<_, HasSelf<_>>(&mut linker, |s| s)
             .map_err(anyhow::Error::from)?;
         let token = Arc::new(());
@@ -421,6 +423,7 @@ impl Instance {
             .map_err(anyhow::Error::from)
             .with_context(|| format!("loading {}", wasm.display()))?;
         let wasi = wasi_ctx(&opts.grants)?;
+        let credit = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let state = HostState {
             wasi,
             table: ResourceTable::new(),
@@ -430,6 +433,12 @@ impl Instance {
             plugin: id.to_string(),
             panels,
             storage: Storage::new(opts.data_dir),
+            http: wasmtime_wasi_http::WasiHttpCtx::new(),
+            net: NetHooks {
+                grants: opts.grants.clone(),
+                credit: credit.clone(),
+            },
+            credit,
             call: None,
             batches: Vec::new(),
             deadline: Instant::now() + rt.limits.call_timeout,
@@ -439,7 +448,9 @@ impl Instance {
         // Checked every tick against a wall-clock deadline, which host calls
         // that wait for the user push back.
         store.epoch_deadline_callback(|cx| {
-            Ok(if Instant::now() < cx.data().deadline {
+            let d = cx.data();
+            let waited = Duration::from_nanos(d.credit.load(std::sync::atomic::Ordering::Relaxed));
+            Ok(if Instant::now() < d.deadline + waited {
                 UpdateDeadline::Continue(1)
             } else {
                 UpdateDeadline::Interrupt
@@ -476,6 +487,7 @@ impl Instance {
         data.call = Some(ctx);
         data.batches.clear();
         data.deadline = Instant::now() + self.timeout;
+        data.credit.store(0, std::sync::atomic::Ordering::Relaxed);
         store.set_epoch_deadline(1);
         let result = match call {
             Call::Command { id, args } => world.call_run_command(&mut *store, id, args.as_deref()),
@@ -496,8 +508,9 @@ impl Instance {
 }
 
 /// WASI with only what the user granted: the listed directories (seen by
-/// the plugin at their own paths, with `/` separators) and, if allowed, the
-/// network. Stderr goes to ours, for panic messages.
+/// the plugin at their own paths, with `/` separators). No sockets: the
+/// network is HTTP only, through `wasi:http` and [`NetHooks`]. Stderr goes
+/// to ours, for panic messages.
 fn wasi_ctx(grants: &Grants) -> Result<WasiCtx> {
     use wasmtime_wasi::{FsPerms, WasiCtxBuilder};
     let mut b = WasiCtxBuilder::new();
@@ -517,13 +530,63 @@ fn wasi_ctx(grants: &Grants) -> Result<WasiCtx> {
                 .with_context(|| format!("opening {}", d.display()))?;
         }
     }
-    if grants.network {
-        b.allow_tcp(true)
-            .allow_udp(true)
-            .allow_ip_name_lookup(true)
-            .socket_addr_check(|_, _| Box::pin(async { true }));
-    }
     Ok(b.build())
+}
+
+/// `wasi:http` for a plugin: requests only to the hosts it was granted,
+/// sent by the host (which does TLS). Time waiting on a response is added
+/// to `credit`, which the call's time limit doesn't count.
+pub(crate) struct NetHooks {
+    grants: Grants,
+    credit: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl wasmtime_wasi_http::WasiHttpHooks for NetHooks {
+    fn send_request(
+        &mut self,
+        request: http::Request<wasmtime_wasi_http::WasiBody>,
+        options: Option<wasmtime_wasi_http::RequestOptions>,
+        fut: Box<dyn std::future::Future<Output = Result<(), wasmtime_wasi_http::Error>> + Send>,
+    ) -> Box<
+        dyn std::future::Future<
+                Output = Result<
+                    (
+                        http::Response<wasmtime_wasi_http::WasiBody>,
+                        Box<
+                            dyn std::future::Future<Output = Result<(), wasmtime_wasi_http::Error>>
+                                + Send,
+                        >,
+                    ),
+                    wasmtime_wasi_http::Error,
+                >,
+            > + Send,
+    > {
+        _ = fut;
+        let uri = request.uri();
+        let host = uri.host().unwrap_or("").to_string();
+        let allowed = self.grants.allows_host(&host, uri.port_u16());
+        if !allowed {
+            log::warn!(target: "plugin", "HTTP request to {host} denied");
+        }
+        let credit = self.credit.clone();
+        Box::new(async move {
+            use http_body_util::BodyExt;
+            if !allowed {
+                return Err(wasmtime_wasi_http::Error::HttpRequestDenied);
+            }
+            let started = Instant::now();
+            let sent = wasmtime_wasi_http::default_send_request(request, options).await;
+            credit.fetch_add(
+                started.elapsed().as_nanos() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            let (res, io) = sent?;
+            Ok((
+                res.map(BodyExt::boxed_unsync),
+                Box::new(io) as Box<dyn std::future::Future<Output = _> + Send>,
+            ))
+        })
+    }
 }
 
 fn describe_trap(e: &wasmtime::Error, timeout: Duration) -> String {
@@ -543,6 +606,10 @@ pub(crate) struct HostState {
     /// Panel ids the manifest declares.
     panels: Vec<String>,
     storage: Storage,
+    http: wasmtime_wasi_http::WasiHttpCtx,
+    net: NetHooks,
+    /// Nanoseconds this call spent waiting on the network (not charged).
+    credit: Arc<std::sync::atomic::AtomicU64>,
     call: Option<CallContext>,
     batches: Vec<EditBatch>,
     /// When the running call times out.
@@ -564,6 +631,16 @@ impl WasiView for HostState {
         WasiCtxView {
             ctx: &mut self.wasi,
             table: &mut self.table,
+        }
+    }
+}
+
+impl wasmtime_wasi_http::WasiHttpView for HostState {
+    fn http(&mut self) -> wasmtime_wasi_http::WasiHttpCtxView<'_> {
+        wasmtime_wasi_http::WasiHttpCtxView {
+            ctx: &mut self.http,
+            table: &mut self.table,
+            hooks: &mut self.net,
         }
     }
 }

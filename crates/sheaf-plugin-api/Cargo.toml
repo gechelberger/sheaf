@@ -8,3 +8,5 @@ repository.workspace = true
 
 [dependencies]
 wit-bindgen = "0.62"
+# wasi:http bindings for `http::get`.
+wasi = "0.14"
