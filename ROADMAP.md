@@ -125,7 +125,7 @@ portal. Reasons in [`todos/m7.md`](todos/m7.md).
 
 ### M8: Page tools
 
-- **Combine Files** (Acrobat's File → Create → Combine Files): build a new
+- ✅ **Combine Files** (Acrobat's File → Create → Combine Files): build a new
   PDF from any number of PDFs and images (JPEG/PNG/TIFF, multi-page TIFF).
   - Add files or whole folders, or drop them in; reorder and remove in a
     list or thumbnail grid.
@@ -137,20 +137,20 @@ portal. Reasons in [`todos/m7.md`](todos/m7.md).
     decoding reuses the M5 image import.
   - Command line: `sheaf combine -o out.pdf a.pdf:1-3 scan.tif b.png`.
   - Office files are not accepted (no Office conversion, see Not planned).
-- Split document by page range, by top-level bookmark, or by file size.
-- Insert blank page; insert pages from images (shares M5 image import).
-- Replace pages (Acrobat's Replace Pages).
-- Crop pages (CropBox), with the option to apply to a range.
+- ✅ Split document by page range, by top-level bookmark, or by file size.
+- ✅ Insert blank page; insert pages from images (shares M5 image import).
+- ✅ Replace pages (Acrobat's Replace Pages).
+- ✅ Crop pages (CropBox), with the option to apply to a range.
 - ✅ Page labels: edit numbering style, prefix, start.
 - ✅ Headers / footers: add, update, remove (with date, page number, file name).
 - ✅ Bates numbering.
 - ✅ Watermarks and backgrounds (text or image, opacity, behind/in front).
-- Bookmarks: create from a page range; colorize by level; auto-bookmark from
+- ✅ Bookmarks: create from a page range; colorize by level; auto-bookmark from
   a text pattern (reuses the Patterns engine).
 
-Slices: Combine Files → split → insert blank/images + replace → crop →
-page labels → headers/footers + Bates → watermark/background → bookmark
-extras.
+Slices: Combine Files ✅ → split ✅ → insert blank/images + replace ✅ → crop ✅ →
+page labels ✅ → headers/footers + Bates ✅ → watermark/background ✅ → bookmark
+extras ✅. Done 2026-10-14; notes in [`todos/m8.md`](todos/m8.md).
 
 Headers/footers, Bates and watermarks are written as tagged artifacts the way
 Acrobat writes them, so Acrobat can update or remove them later and so can we.
@@ -292,16 +292,16 @@ Every remaining 📋 / ❓ row from the README feature tables, with its mileston
 | Attachments panel | M7 |
 | Open PDF Portfolios (read-only) | M7 |
 | Layers (OCG) panel | M7 |
-| Combine Files (PDFs + images, page subsets) | M8 |
-| Split document (range, bookmark, size) | M8 |
-| Insert blank page / from image | M8 |
+| Combine Files (PDFs + images, page subsets) | M8 ✅ |
+| Split document (range, bookmark, size) | M8 ✅ |
+| Insert blank page / from image | M8 ✅ |
 | Insert from scanner | M5 |
-| Crop pages | M8 |
-| Page labels | M7 (display), M8 (edit) |
-| Headers / footers / Bates numbering | M8 |
-| Watermarks / backgrounds | M8 |
-| Colorize bookmarks by level | M8 |
-| Bookmark from page range | M8 |
+| Crop pages | M8 ✅ |
+| Page labels | M7 (display), M8 (edit) ✅ |
+| Headers / footers / Bates numbering | M8 ✅ |
+| Watermarks / backgrounds | M8 ✅ |
+| Colorize bookmarks by level | M8 ✅ |
+| Bookmark from page range | M8 ✅ |
 | Target sheets / auto-bookmark from scan separators | M5 (separator sheets) |
 | Underline / strikethrough | M9 |
 | Polygon | M9 |

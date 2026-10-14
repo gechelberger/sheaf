@@ -7,6 +7,7 @@
 mod assets;
 mod attachments_panel;
 mod availability;
+mod bookmark_tools;
 mod brand;
 mod calc_panel;
 mod combine_dialog;
@@ -189,6 +190,8 @@ actions!(
         BatesNumbering,
         AddWatermark,
         AddBackground,
+        BookmarksFromPages,
+        ColorBookmarksByLevel,
         ToggleToolbar,
         CustomizeToolbar
     ]
@@ -339,6 +342,7 @@ fn main() {
             let lbd = Some(labels_dialog::KEY_CONTEXT);
             let hfd = Some(header_footer_dialog::KEY_CONTEXT);
             let wmd = Some(watermark_dialog::KEY_CONTEXT);
+            let bmd = Some(bookmark_tools::KEY_CONTEXT);
             let lbd_keys = Some("LabelsDialog && !TextInput");
             let crd_keys = Some("CropDialog && !TextInput");
             let ind_keys = Some("InsertDialog && !TextInput");
@@ -481,6 +485,10 @@ fn main() {
                 KeyBinding::new("tab", DialogNext, wmd),
                 KeyBinding::new("shift-tab", DialogPrev, wmd),
                 KeyBinding::new("escape", DialogCancel, wmd),
+                KeyBinding::new("tab", DialogNext, bmd),
+                KeyBinding::new("shift-tab", DialogPrev, bmd),
+                KeyBinding::new("enter", DialogRun, bmd),
+                KeyBinding::new("escape", DialogCancel, bmd),
                 KeyBinding::new("tab", DialogNext, pd),
                 KeyBinding::new("shift-tab", DialogPrev, pd),
                 KeyBinding::new("left", DialogLeft, pd_keys),

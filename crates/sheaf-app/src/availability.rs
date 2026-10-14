@@ -221,6 +221,8 @@ pub fn builtin(id: &str) -> Builtin {
         | "workspace::BatesNumbering"
         | "workspace::AddWatermark"
         | "workspace::AddBackground"
+        | "workspace::BookmarksFromPages"
+        | "workspace::ColorBookmarksByLevel"
         | "workspace::Print"
         | "workspace::DocumentProperties"
         | "workspace::CloseDocument"

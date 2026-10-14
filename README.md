@@ -197,8 +197,9 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 |---|---|
 | Create / rename / delete / nest bookmarks | ✅ |
 | Move bookmark **with its pages** | ✅ Shift+drag |
-| Colorize bookmarks by level / status | ✅ per bookmark; by level 📋 |
-| Bookmark from page range | 📋 |
+| Colorize bookmarks by level / status | ✅ per bookmark; Document > Color Bookmarks by Level… |
+| Bookmark from page range | ✅ Document > Bookmarks from Pages…: one per page, titled from a template (`Page <<label>>`), optionally under a new parent |
+| Bookmark pattern matches | ✅ Patterns panel > Bookmark matches: one per match, pointing at it |
 | Target sheets / auto-bookmark from scan separators | ❓ |
 
 ### Markup & annotation

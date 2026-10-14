@@ -307,6 +307,16 @@ pub fn info(id: &str) -> Option<Info> {
             "Add, update or remove a background: text or an image behind the pages' content.",
             &["letterhead", "underlay", "behind", "stationery"],
         ),
+        "workspace::BookmarksFromPages" => (
+            "bookmarks-from-pages",
+            "Make a bookmark for each page of a range, titled from a template like \"Page <<label>>\".",
+            &["outline", "page bookmarks", "index"],
+        ),
+        "workspace::ColorBookmarksByLevel" => (
+            "color-bookmarks",
+            "Color every bookmark by how deeply it's nested, as PDFlyer does.",
+            &["outline", "colour", "level", "depth"],
+        ),
         "workspace::PageLabels" => (
             "page-labels",
             "Number pages your way: roman numerals for the front matter, a prefix like A- for exhibits, or a new start.",

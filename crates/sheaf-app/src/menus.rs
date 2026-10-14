@@ -247,6 +247,8 @@ fn builtin_menus() -> Vec<(&'static str, Vec<Item>)> {
                 item("Cancel OC&R", CancelOcr),
                 sep(),
                 item("New &Bookmark", NewBookmark),
+                item("Bookmarks from &Pages…", BookmarksFromPages),
+                item("Color Bookmarks by Le&vel…", ColorBookmarksByLevel),
             ],
         ),
         menu(

@@ -349,6 +349,10 @@ pub struct Workspace {
         Entity<crate::watermark_dialog::WatermarkDialog>,
         Subscription,
     )>,
+    bookmark_tool: Option<(
+        Entity<crate::bookmark_tools::BookmarkToolsDialog>,
+        Subscription,
+    )>,
     /// File > Print, while open.
     print: Option<(Entity<crate::print_dialog::PrintDialog>, Subscription)>,
     /// File > Properties, while open.
@@ -451,6 +455,7 @@ impl Workspace {
             labels: None,
             header_footer: None,
             watermark: None,
+            bookmark_tool: None,
             print: None,
             properties: None,
             ocr_dialog: None,
@@ -1264,6 +1269,55 @@ impl Workspace {
             .ok();
         })
         .detach();
+    }
+
+    /// Bookmarks from Pages… or Color Bookmarks by Level….
+    fn open_bookmark_tool(&mut self, color: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.bookmark_tool.is_some() {
+            return;
+        }
+        let Some(doc) = self.doc().cloned() else {
+            return;
+        };
+        let tool = if color {
+            crate::bookmark_tools::Tool::ColorByLevel
+        } else {
+            let (page_count, targets) = doc.read(cx).target_indexes();
+            crate::bookmark_tools::Tool::FromPages {
+                page_count,
+                targets,
+            }
+        };
+        let dialog = cx.new(|cx| crate::bookmark_tools::BookmarkToolsDialog::new(tool, window, cx));
+        let sub = cx.subscribe_in(
+            &dialog,
+            window,
+            |ws, _, ev: &crate::bookmark_tools::BookmarkToolsEvent, window, cx| {
+                use crate::bookmark_tools::BookmarkToolsEvent;
+                ws.bookmark_tool = None;
+                ws.focus_active(window, cx);
+                if let Some(doc) = ws.doc().cloned() {
+                    match ev {
+                        BookmarkToolsEvent::FromPages {
+                            pages,
+                            template,
+                            parent,
+                        } => {
+                            let (p, t, par) = (pages.clone(), template.clone(), parent.clone());
+                            doc.update(cx, |d, cx| d.bookmarks_from_pages(p, t, par, cx));
+                        }
+                        BookmarkToolsEvent::ColorByLevel(colors) => {
+                            let colors = *colors;
+                            doc.update(cx, |d, cx| d.color_bookmarks_by_level(colors, cx));
+                        }
+                        BookmarkToolsEvent::Dismiss => {}
+                    }
+                }
+                cx.notify();
+            },
+        );
+        self.bookmark_tool = Some((dialog, sub));
+        cx.notify();
     }
 
     /// Watermark… or Background…: read what's there (in the background,
@@ -2579,6 +2633,16 @@ impl Render for Workspace {
                 ws.open_watermark(true, window, cx)
             }))
             .on_action(
+                cx.listener(|ws, _: &crate::BookmarksFromPages, window, cx| {
+                    ws.open_bookmark_tool(false, window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|ws, _: &crate::ColorBookmarksByLevel, window, cx| {
+                    ws.open_bookmark_tool(true, window, cx)
+                }),
+            )
+            .on_action(
                 cx.listener(|ws, a: &crate::recent::OpenRecent, window, cx| {
                     ws.open_recent(a.path.clone(), window, cx)
                 }),
@@ -2729,6 +2793,11 @@ impl Render for Workspace {
             )
             .children(
                 self.watermark
+                    .as_ref()
+                    .map(|(d, _)| deferred(d.clone()).with_priority(2)),
+            )
+            .children(
+                self.bookmark_tool
                     .as_ref()
                     .map(|(d, _)| deferred(d.clone()).with_priority(2)),
             )
