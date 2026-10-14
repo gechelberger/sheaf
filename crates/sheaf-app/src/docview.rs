@@ -23,6 +23,7 @@ use gpui::{
 use sheaf_core::{PageIndex, PageSize, Rotation};
 use sheaf_doc::save;
 use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, Pt};
+use sheaf_ui::theme;
 
 use crate::markup_tools::{Drag, Tool, arrow_head, rotate_pt, stroke_canvas};
 use sheaf_doc::{
@@ -2471,8 +2472,8 @@ impl DocView {
                 .rounded_sm()
                 .text_sm()
                 .cursor_pointer()
-                .bg(rgb(0x3a3a3a))
-                .hover(|s| s.bg(rgb(0x4a4a4a)))
+                .bg(theme::CONTROL)
+                .hover(|s| s.bg(theme::CONTROL_HOVER))
                 .child(label)
         };
         Some(
@@ -2483,14 +2484,14 @@ impl DocView {
                 .gap_2()
                 .px_2()
                 .py_1()
-                .bg(rgb(0x252525))
+                .bg(theme::PANEL)
                 .border_b_1()
-                .border_color(rgb(0x111111))
+                .border_color(theme::DIVIDER)
                 .child(div().w(px(320.0)).child(search.input.clone()))
                 .child(
                     div()
                         .text_sm()
-                        .text_color(rgb(0x9a9a9a))
+                        .text_color(theme::TEXT_MUTED)
                         .min_w(px(140.0))
                         .child(status),
                 )
@@ -3049,7 +3050,7 @@ impl Render for DocView {
                             .left(px(pl.left))
                             .w(px(pl.w))
                             .h(px(pl.h))
-                            .bg(rgb(0xffffff))
+                            .bg(theme::PAGE)
                             .shadow_md();
                         if let Some((rot, prev)) = doc.previews.get(&pl.pref.id)
                             && *rot == pl.pref.rotation
@@ -3124,9 +3125,9 @@ impl Render for DocView {
                                             .w(px(r.w * k))
                                             .h(px(r.h * k))
                                             .bg(if current {
-                                                rgba(0xff9800a0)
+                                                theme::SEARCH_HIT_CURRENT
                                             } else {
-                                                rgba(0xffe60070)
+                                                theme::SEARCH_HIT
                                             }),
                                     );
                                 }
@@ -3160,9 +3161,9 @@ impl Render for DocView {
                                             .w(px(r.w * k))
                                             .h(px(r.h * k))
                                             .bg(if current {
-                                                rgba(0xd040d0a0)
+                                                theme::PATTERN_HIT_CURRENT
                                             } else {
-                                                rgba(0x6aa6ff70)
+                                                theme::PATTERN_HIT
                                             }),
                                     );
                                 }
@@ -3223,7 +3224,7 @@ impl Render for DocView {
                                         .h(px(r.h * k))
                                         .border_1()
                                         .border_dashed()
-                                        .border_color(rgb(0x4a9eff)),
+                                        .border_color(theme::ACCENT),
                                 );
                             }
                             if let Some(ed) = &doc.annot_editor
@@ -3457,8 +3458,8 @@ impl Render for DocView {
             .flex()
             .flex_col()
             .size_full()
-            .bg(rgb(0x2b2b2b))
-            .text_color(rgb(0xd0d0d0))
+            .bg(theme::RAISED)
+            .text_color(theme::TEXT_SOFT)
             .children(search_bar)
             .child(toolbar)
             .child(div().flex_grow(1.0).min_h(px(0.0)).children(body))
@@ -3467,8 +3468,8 @@ impl Render for DocView {
                     div()
                         .h(px(3.0))
                         .flex_shrink_0()
-                        .bg(rgb(0x1e1e1e))
-                        .child(div().h_full().w(relative(frac)).bg(rgb(0x4a9eff))),
+                        .bg(theme::BACKGROUND)
+                        .child(div().h_full().w(relative(frac)).bg(theme::ACCENT)),
                 )
             })
             .child(
@@ -3478,7 +3479,7 @@ impl Render for DocView {
                     .px_2()
                     .flex()
                     .items_center()
-                    .bg(rgb(0x1e1e1e))
+                    .bg(theme::BACKGROUND)
                     .text_sm()
                     .whitespace_nowrap()
                     .child(div().flex_shrink_0().child(status))
@@ -3524,7 +3525,7 @@ impl DocView {
             return div()
                 .p_2()
                 .text_sm()
-                .text_color(rgb(0x9a9a9a))
+                .text_color(theme::TEXT_MUTED)
                 .child("No pages")
                 .into_any_element();
         }
@@ -3647,20 +3648,20 @@ impl DocView {
                             .relative()
                             .w(px(thumb_w))
                             .h(px(h))
-                            .bg(rgb(0xffffff))
+                            .bg(theme::PAGE)
                             .border_2()
                             .border_color(if current {
-                                rgb(0x4a9eff)
+                                theme::ACCENT
                             } else if selected {
-                                rgb(0x2f6fbf)
+                                theme::SELECTED_BORDER
                             } else {
-                                rgb(0x3a3a3a)
+                                theme::BORDER
                             })
                             .when_some(image, |d, im| {
                                 d.child(img(im).size_full().object_fit(ObjectFit::Fill))
                             })
                             .when(selected, |d| {
-                                d.child(div().absolute().inset_0().bg(rgba(0x4a9eff30)))
+                                d.child(div().absolute().inset_0().bg(theme::SELECTION_WASH))
                             })
                             .when(bookmarked, |d| {
                                 d.child(
@@ -3670,7 +3671,7 @@ impl DocView {
                                         .right(px(4.0))
                                         .w(px(10.0))
                                         .h(px(14.0))
-                                        .bg(rgb(0xe0a000)),
+                                        .bg(theme::BOOKMARK),
                                 )
                             }),
                     )
@@ -3679,9 +3680,9 @@ impl DocView {
                             .h(px(THUMB_LABEL_H))
                             .text_xs()
                             .text_color(if current || selected {
-                                rgb(0xffffff)
+                                theme::TEXT_BRIGHT
                             } else {
-                                rgb(0x9a9a9a)
+                                theme::TEXT_MUTED
                             })
                             .child(format!("{}", i + 1)),
                     ),
@@ -3701,7 +3702,7 @@ impl DocView {
                 .top(px(y - 1.0))
                 .w(px(thumb_w + THUMB_PAD))
                 .h(px(2.0))
-                .bg(rgb(0x4a9eff))
+                .bg(theme::ACCENT)
         });
 
         let mids_for_move = mids.clone();
@@ -3756,8 +3757,8 @@ impl Render for DragPreview {
             .px_2()
             .py_1()
             .rounded_md()
-            .bg(rgb(0x4a9eff))
-            .text_color(rgb(0xffffff))
+            .bg(theme::ACCENT)
+            .text_color(theme::TEXT_BRIGHT)
             .text_sm()
             .child(if self.count == 1 {
                 "1 page".to_string()
@@ -3811,12 +3812,12 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
                 place(b)
                     .bg(fill)
                     .border_1()
-                    .border_color(rgb(0x000000))
+                    .border_color(theme::INK)
                     .rounded_sm()
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_color(rgb(0x000000))
+                    .text_color(theme::INK)
                     .text_size(px((NOTE_GLYPH * k).max(6.0)))
                     .child("…")
                     .into_any_element(),
@@ -3878,7 +3879,7 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
                         .h(px(*size * TAPE_LINE * k))
                         .when(total, |d| {
                             d.border_t_1()
-                                .border_color(rgb(0x606060))
+                                .border_color(theme::TAPE_RULE)
                                 .font_weight(gpui::FontWeight::BOLD)
                         })
                         .child(div().child(v))
@@ -3893,9 +3894,9 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
                 .collect();
             out.push(
                 place(*rect)
-                    .bg(rgb(0xffffff))
+                    .bg(theme::PAGE)
                     .border_1()
-                    .border_color(rgb(0x999999))
+                    .border_color(theme::TAPE_BORDER)
                     .p(px(TAPE_PAD * k))
                     .flex()
                     .flex_col()
@@ -3915,7 +3916,7 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_color(rgb(0xffffff))
+                    .text_color(theme::TEXT_BRIGHT)
                     .text_size(px(rect.h * 0.55 * k))
                     .font_weight(gpui::FontWeight::BOLD)
                     .child(label.clone())
@@ -3987,9 +3988,9 @@ fn locked_card(path: &std::path::Path, l: &Locked, cx: &mut Context<DocView>) ->
                 .flex()
                 .flex_col()
                 .gap_2()
-                .bg(rgb(0x262626))
+                .bg(theme::CARD)
                 .border_1()
-                .border_color(rgb(0x4a4a4a))
+                .border_color(theme::BORDER_CARD)
                 .rounded_md()
                 .child(
                     div()
@@ -4000,9 +4001,9 @@ fn locked_card(path: &std::path::Path, l: &Locked, cx: &mut Context<DocView>) ->
                     div()
                         .text_xs()
                         .text_color(if l.wrong {
-                            rgb(0xe08080)
+                            theme::ERROR
                         } else {
-                            rgb(0x9a9a9a)
+                            theme::TEXT_MUTED
                         })
                         .child(if l.wrong {
                             "That password didn't work. Try again."
@@ -4020,9 +4021,9 @@ fn locked_card(path: &std::path::Path, l: &Locked, cx: &mut Context<DocView>) ->
                             .rounded_sm()
                             .text_sm()
                             .cursor_pointer()
-                            .bg(rgb(0x4a9eff))
-                            .text_color(rgb(0xffffff))
-                            .hover(|s| s.bg(rgb(0x5aaeff)))
+                            .bg(theme::ACCENT)
+                            .text_color(theme::TEXT_BRIGHT)
+                            .hover(|s| s.bg(theme::ACCENT_HOVER))
                             .on_click(cx.listener(move |v, _, _, cx| {
                                 let pw = input.read(cx).text().to_string();
                                 if !pw.is_empty() {

@@ -9,8 +9,9 @@ use gpui::{
     EntityInputHandler, FocusHandle, Focusable, GlobalElementId, LayoutId, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine,
     SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div, fill,
-    point, prelude::*, px, relative, rgb, rgba, size,
+    point, prelude::*, px, relative, size,
 };
+use sheaf_ui::theme;
 use unicode_segmentation::UnicodeSegmentation;
 
 actions!(
@@ -500,7 +501,7 @@ impl Element for TextElement {
         let style = window.text_style();
 
         let (display_text, text_color) = if content.is_empty() {
-            (input.placeholder.clone(), rgba(0xffffff50).into())
+            (input.placeholder.clone(), theme::PLACEHOLDER.into())
         } else {
             (content, style.color)
         };
@@ -554,7 +555,7 @@ impl Element for TextElement {
                         point(bounds.left() + cursor_pos, bounds.top()),
                         size(px(2.), bounds.bottom() - bounds.top()),
                     ),
-                    rgb(0x4a9eff),
+                    theme::ACCENT,
                 )),
             )
         } else {
@@ -570,7 +571,7 @@ impl Element for TextElement {
                             bounds.bottom(),
                         ),
                     ),
-                    rgba(0x4a9eff60),
+                    theme::SELECTION,
                 )),
                 None,
             )
@@ -655,15 +656,15 @@ impl Render for TextInput {
             .px_2()
             .py_1()
             .rounded_sm()
-            .bg(rgb(0x1a1a1a))
+            .bg(theme::SUNKEN)
             .border_1()
             .border_color(if self.focus_handle.is_focused(_window) {
-                rgb(0x4a9eff)
+                theme::ACCENT
             } else {
-                rgb(0x3a3a3a)
+                theme::BORDER
             })
             .text_sm()
-            .text_color(rgb(0xe0e0e0))
+            .text_color(theme::TEXT)
             .child(TextElement { input: cx.entity() })
     }
 }

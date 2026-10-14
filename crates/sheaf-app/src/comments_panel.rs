@@ -3,12 +3,11 @@
 //! F2 edits the text, Delete removes); comments other tools left in the
 //! file are listed read-only and can be jumped to.
 
-use gpui::{
-    AnyElement, Context, Entity, FocusHandle, Subscription, Window, div, prelude::*, px, rgb,
-};
+use gpui::{AnyElement, Context, Entity, FocusHandle, Subscription, Window, div, prelude::*, px};
 use sheaf_core::PageSize;
 use sheaf_doc::{Annot, AnnotId, AnnotKind, PageId, file::ForeignAnnot};
 use sheaf_render::Rect;
+use sheaf_ui::theme;
 
 use crate::docview::{DocView, ScrollTo, State, rotate_rect};
 use crate::text_input::{TextInput, TextInputEvent};
@@ -312,8 +311,8 @@ impl DocView {
                         .items_center()
                         .px_2()
                         .text_xs()
-                        .text_color(rgb(0x9a9a9a))
-                        .bg(rgb(0x202020))
+                        .text_color(theme::TEXT_MUTED)
+                        .bg(theme::LIST_HEADER)
                         .child(format!("Page {}  ·  {count}", index + 1))
                         .into_any_element(),
                 ),
@@ -354,8 +353,8 @@ impl DocView {
                                 .px_1()
                                 .rounded_sm()
                                 .text_xs()
-                                .text_color(rgb(0x9a9a9a))
-                                .hover(|s| s.bg(rgb(0x5a3a3a)).text_color(rgb(0xffffff)))
+                                .text_color(theme::TEXT_MUTED)
+                                .hover(|s| s.bg(theme::DANGER_HOVER).text_color(theme::TEXT_BRIGHT))
                                 .on_click(cx.listener(move |v, _, _, cx| {
                                     if let State::Ready(doc) = &mut v.state {
                                         doc.selected_annot = Some((page, id));
@@ -425,9 +424,9 @@ impl DocView {
                     .gap_1()
                     .p_2()
                     .border_b_1()
-                    .border_color(rgb(0x111111))
+                    .border_color(theme::DIVIDER)
                     .child(filter)
-                    .child(div().text_xs().text_color(rgb(0x9a9a9a)).child(status)),
+                    .child(div().text_xs().text_color(theme::TEXT_MUTED).child(status)),
             )
             .child(
                 div()
@@ -480,8 +479,8 @@ fn comment_row(
         .flex()
         .flex_col()
         .cursor_pointer()
-        .when(selected, |d| d.bg(rgb(0x2f4a6f)))
-        .hover(|s| s.bg(rgb(0x3a3a3a)))
+        .when(selected, |d| d.bg(theme::SELECTED))
+        .hover(|s| s.bg(theme::HOVER))
         .child(
             div()
                 .flex()
@@ -493,7 +492,7 @@ fn comment_row(
                         .overflow_hidden()
                         .whitespace_nowrap()
                         .text_ellipsis()
-                        .text_color(rgb(0xc0c0c0))
+                        .text_color(theme::TEXT_SUBTLE)
                         .child(title),
                 )
                 .child(
@@ -501,7 +500,7 @@ fn comment_row(
                         .flex_shrink_0()
                         .pl_2()
                         .pr(px(18.0))
-                        .text_color(rgb(0x7a7a7a))
+                        .text_color(theme::TEXT_FAINT)
                         .child(fmt_pdf_date(modified)),
                 ),
         )
@@ -512,7 +511,7 @@ fn comment_row(
                 .line_height(px(TEXT_LH))
                 .line_clamp(MAX_TEXT_LINES)
                 .text_ellipsis()
-                .text_color(rgb(0xe0e0e0))
+                .text_color(theme::TEXT)
                 .child(snippet),
         )
 }
@@ -542,7 +541,7 @@ pub(crate) fn foreign_outline(
         .h(px(r.h * k))
         .border_1()
         .border_dashed()
-        .border_color(rgb(0x4a9eff))
+        .border_color(theme::ACCENT)
         .into_any_element()
 }
 

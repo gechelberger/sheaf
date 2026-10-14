@@ -5,8 +5,9 @@
 
 use gpui::{
     Action, AnyElement, App, Context, Entity, EventEmitter, Focusable, MouseButton, Subscription,
-    Window, div, prelude::*, px, rgb, rgba,
+    Window, div, prelude::*, px,
 };
+use sheaf_ui::theme;
 
 use crate::commands::CommandRegistry;
 use crate::menus::parse_label;
@@ -179,8 +180,8 @@ impl Render for Palette {
                     .items_center()
                     .gap_2()
                     .cursor_pointer()
-                    .when(selected, |d| d.bg(rgb(0x2f4a6f)))
-                    .hover(|s| s.bg(rgb(0x3a3a3a)))
+                    .when(selected, |d| d.bg(theme::SELECTED))
+                    .hover(|s| s.bg(theme::HOVER))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.selected = row;
                         this.run_selected(cx);
@@ -188,27 +189,27 @@ impl Render for Palette {
                     .child(
                         div()
                             .text_sm()
-                            .text_color(rgb(0x9a9a9a))
+                            .text_color(theme::TEXT_MUTED)
                             .child(format!("{}:", c.category)),
                     )
                     .child(
                         div()
                             .text_sm()
-                            .text_color(rgb(0xe8e8e8))
+                            .text_color(theme::TEXT_STRONG)
                             .child(c.label.clone()),
                     )
                     .child(
                         div()
                             .flex_1()
                             .text_xs()
-                            .text_color(rgb(0x6a6a6a))
+                            .text_color(theme::TEXT_DISABLED)
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .text_ellipsis()
                             .child(c.id.clone()),
                     )
                     .when_some(c.shortcut.clone(), |d, s| {
-                        d.child(div().text_xs().text_color(rgb(0xb0b0b0)).child(s))
+                        d.child(div().text_xs().text_color(theme::TEXT_DETAIL).child(s))
                     })
                     .into_any_element()
             })
@@ -224,7 +225,7 @@ impl Render for Palette {
             .on_action(cx.listener(|this, _: &PalettePageDown, _, cx| this.step(8, cx)))
             .absolute()
             .inset_0()
-            .bg(rgba(0x00000060))
+            .bg(theme::BACKDROP)
             .flex()
             .justify_center()
             .items_start()
@@ -239,9 +240,9 @@ impl Render for Palette {
                     .w(px(620.0))
                     .flex()
                     .flex_col()
-                    .bg(rgb(0x262626))
+                    .bg(theme::CARD)
                     .border_1()
-                    .border_color(rgb(0x4a4a4a))
+                    .border_color(theme::BORDER_CARD)
                     .rounded_md()
                     .shadow_lg()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -249,7 +250,7 @@ impl Render for Palette {
                         div()
                             .p_2()
                             .border_b_1()
-                            .border_color(rgb(0x111111))
+                            .border_color(theme::DIVIDER)
                             .child(self.input.clone()),
                     )
                     .child(
@@ -265,7 +266,7 @@ impl Render for Palette {
                                     .flex()
                                     .items_center()
                                     .text_sm()
-                                    .text_color(rgb(0x8a8a8a))
+                                    .text_color(theme::TEXT_DIM)
                                     .child("No matching commands")
                                     .into_any_element()
                             } else {

@@ -4,10 +4,11 @@
 
 use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, MouseButton,
-    PathPromptOptions, Subscription, Window, div, prelude::*, px, rgb, rgba,
+    PathPromptOptions, Subscription, Window, div, prelude::*, px,
 };
 use sheaf_doc::PageId;
 use sheaf_plugin::ui::{FieldAnswer, FieldKind, FieldValue, Form, parse_page_range};
+use sheaf_ui::theme;
 
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::{DialogCancel, DialogLeft, DialogNext, DialogPrev, DialogRight, DialogRun};
@@ -298,14 +299,14 @@ impl PluginForm {
             .text_sm()
             .border_1()
             .border_color(if selected {
-                rgb(0x4a9eff)
+                theme::ACCENT
             } else {
-                rgb(0x3a3a3a)
+                theme::BORDER
             })
-            .when(selected, |d| d.bg(rgb(0x2f4a6f)))
-            .text_color(rgb(0xe8e8e8))
+            .when(selected, |d| d.bg(theme::SELECTED))
+            .text_color(theme::TEXT_STRONG)
             .cursor_pointer()
-            .hover(|s| s.bg(rgb(0x3a3a3a)))
+            .hover(|s| s.bg(theme::HOVER))
             .on_click(cx.listener(move |this, _, window, cx| on_click(this, window, cx)))
             .child(label)
             .into_any_element()
@@ -325,7 +326,7 @@ impl PluginForm {
                     d.child(
                         div()
                             .text_xs()
-                            .text_color(rgb(0x7a7a7a))
+                            .text_color(theme::TEXT_FAINT)
                             .child(bounds_text(*min, *max)),
                     )
                 })
@@ -379,7 +380,7 @@ impl PluginForm {
                     div()
                         .flex_1()
                         .text_xs()
-                        .text_color(rgb(0xb0b0b0))
+                        .text_color(theme::TEXT_DETAIL)
                         .overflow_hidden()
                         .whitespace_nowrap()
                         .text_ellipsis()
@@ -419,14 +420,14 @@ impl Render for PluginForm {
                     .py_1()
                     .px_2()
                     .rounded_sm()
-                    .when(self.row == i, |d| d.bg(rgb(0x2e2e2e)))
+                    .when(self.row == i, |d| d.bg(theme::ROW_FOCUS))
                     .child(
                         div()
                             .w(px(130.0))
                             .flex_shrink_0()
                             .pt_1()
                             .text_sm()
-                            .text_color(rgb(0x9a9a9a))
+                            .text_color(theme::TEXT_MUTED)
                             .child(self.form.fields[i].label.clone()),
                     )
                     .child(div().flex_1().min_w(px(0.0)).child(content))
@@ -446,8 +447,8 @@ impl Render for PluginForm {
                     .rounded_sm()
                     .text_sm()
                     .cursor_pointer()
-                    .bg(rgb(0x3a3a3a))
-                    .hover(|s| s.bg(rgb(0x4a4a4a)))
+                    .bg(theme::CONTROL)
+                    .hover(|s| s.bg(theme::CONTROL_HOVER))
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(PluginFormEvent::Dismiss)))
                     .child("Cancel"),
             )
@@ -459,15 +460,15 @@ impl Render for PluginForm {
                     .rounded_sm()
                     .text_sm()
                     .cursor_pointer()
-                    .bg(rgb(0x4a9eff))
-                    .text_color(rgb(0xffffff))
+                    .bg(theme::ACCENT)
+                    .text_color(theme::TEXT_BRIGHT)
                     .border_1()
                     .border_color(if buttons_focused {
-                        rgb(0xffffff)
+                        theme::FOCUS_RING
                     } else {
-                        rgb(0x4a9eff)
+                        theme::ACCENT
                     })
-                    .hover(|s| s.bg(rgb(0x5aaeff)))
+                    .hover(|s| s.bg(theme::ACCENT_HOVER))
                     .on_click(cx.listener(|this, _, _, cx| this.submit(cx)))
                     .child(self.form.submit_label.clone()),
             );
@@ -486,7 +487,7 @@ impl Render for PluginForm {
             .on_action(cx.listener(|_, _: &DialogCancel, _, cx| cx.emit(PluginFormEvent::Dismiss)))
             .absolute()
             .inset_0()
-            .bg(rgba(0x00000060))
+            .bg(theme::BACKDROP)
             .flex()
             .justify_center()
             .items_start()
@@ -503,33 +504,33 @@ impl Render for PluginForm {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .bg(rgb(0x262626))
+                    .bg(theme::CARD)
                     .border_1()
-                    .border_color(rgb(0x4a4a4a))
+                    .border_color(theme::BORDER_CARD)
                     .rounded_md()
                     .shadow_lg()
-                    .text_color(rgb(0xd0d0d0))
+                    .text_color(theme::TEXT_SOFT)
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(
                         div()
                             .pb_2()
                             .mb_1()
                             .border_b_1()
-                            .border_color(rgb(0x111111))
+                            .border_color(theme::DIVIDER)
                             .flex()
                             .items_baseline()
                             .gap_2()
                             .child(
                                 div()
                                     .text_sm()
-                                    .text_color(rgb(0xe8e8e8))
+                                    .text_color(theme::TEXT_STRONG)
                                     .child(self.form.title.clone()),
                             )
                             .when(!same_name(&self.form.title, &self.source), |d| {
                                 d.child(
                                     div()
                                         .text_xs()
-                                        .text_color(rgb(0x7a7a7a))
+                                        .text_color(theme::TEXT_FAINT)
                                         .child(format!("from {}", self.source)),
                                 )
                             }),
@@ -541,7 +542,7 @@ impl Render for PluginForm {
                                 .px_2()
                                 .pt_1()
                                 .text_xs()
-                                .text_color(rgb(0xe08080))
+                                .text_color(theme::ERROR)
                                 .child(e),
                         )
                     })
@@ -554,7 +555,7 @@ impl Render for PluginForm {
                                 div()
                                     .flex_1()
                                     .text_xs()
-                                    .text_color(rgb(0x7a7a7a))
+                                    .text_color(theme::TEXT_FAINT)
                                     .child("Tab moves, ←/→ change, Enter submits, Esc cancels"),
                             )
                             .child(buttons),

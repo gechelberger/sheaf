@@ -10,9 +10,10 @@ use std::time::Instant;
 use futures::StreamExt;
 use gpui::{
     AnchoredPositionMode, AnyElement, Context, Entity, Focusable, MouseButton, Pixels, Point,
-    Subscription, Task, Window, anchored, deferred, div, prelude::*, px, rgb,
+    Subscription, Task, Window, anchored, deferred, div, prelude::*, px,
 };
 use sheaf_render::SearchEvent;
+use sheaf_ui::theme;
 
 use crate::docview::{DocView, Hit, ScrollTo, State};
 use crate::patterns::{self, Preset};
@@ -359,8 +360,8 @@ impl DocView {
                     .rounded_sm()
                     .text_xs()
                     .cursor_pointer()
-                    .bg(rgb(0x3a3a3a))
-                    .hover(|s| s.bg(rgb(0x4a4a4a)))
+                    .bg(theme::CONTROL)
+                    .hover(|s| s.bg(theme::CONTROL_HOVER))
                     .on_click(cx.listener(move |v, _, _, cx| {
                         input.update(cx, |i, cx| i.set_text(re.clone(), cx));
                         v.start_pattern_search(re.clone(), cx);
@@ -394,8 +395,8 @@ impl DocView {
                 .text_xs()
                 .cursor_pointer()
                 .border_1()
-                .border_color(rgb(0x4a4a4a))
-                .hover(|s| s.bg(rgb(0x4a4a4a)))
+                .border_color(theme::BORDER_CARD)
+                .hover(|s| s.bg(theme::CONTROL_HOVER))
                 .tooltip(crate::tooltip::Tooltip::text(format!(
                     "From the {} plugin",
                     p.plugin
@@ -415,8 +416,8 @@ impl DocView {
                 .rounded_sm()
                 .text_xs()
                 .cursor_pointer()
-                .text_color(rgb(0x9a9a9a))
-                .hover(|s| s.bg(rgb(0x4a4a4a)).text_color(rgb(0xe0e0e0)))
+                .text_color(theme::TEXT_MUTED)
+                .hover(|s| s.bg(theme::CONTROL_HOVER).text_color(theme::TEXT))
                 .on_click(cx.listener(|v, _, window, cx| v.edit_preset(None, window, cx)))
                 .child("+ Save…")
                 .into_any_element(),
@@ -430,7 +431,7 @@ impl DocView {
                 .flex()
                 .flex_col()
                 .gap_1()
-                .child(div().text_xs().text_color(rgb(0x9a9a9a)).child(title))
+                .child(div().text_xs().text_color(theme::TEXT_MUTED).child(title))
                 .child(
                     div()
                         .flex()
@@ -445,8 +446,8 @@ impl DocView {
                                 .rounded_sm()
                                 .text_xs()
                                 .cursor_pointer()
-                                .bg(rgb(0x4a9eff))
-                                .text_color(rgb(0xffffff))
+                                .bg(theme::ACCENT)
+                                .text_color(theme::TEXT_BRIGHT)
                                 .on_click(cx.listener(|v, _, _, cx| v.save_preset(cx)))
                                 .child("Save"),
                         )
@@ -458,7 +459,7 @@ impl DocView {
                                 .rounded_sm()
                                 .text_xs()
                                 .cursor_pointer()
-                                .bg(rgb(0x3a3a3a))
+                                .bg(theme::CONTROL)
                                 .on_click(cx.listener(|v, _, _, cx| {
                                     if let Some(ps) = &mut v.pattern {
                                         ps.editing = None;
@@ -533,8 +534,8 @@ impl DocView {
                 Row::Header { page, count } => base
                     .px_2()
                     .text_xs()
-                    .text_color(rgb(0x9a9a9a))
-                    .bg(rgb(0x202020))
+                    .text_color(theme::TEXT_MUTED)
+                    .bg(theme::LIST_HEADER)
                     .child(format!("Page {}  ·  {count}", page + 1))
                     .into_any_element(),
                 Row::Hit(ix) => {
@@ -544,15 +545,15 @@ impl DocView {
                         .pr_2()
                         .text_sm()
                         .cursor_pointer()
-                        .when(current == Some(ix), |d| d.bg(rgb(0x4a2f6f)))
-                        .hover(|s| s.bg(rgb(0x3a3a3a)))
+                        .when(current == Some(ix), |d| d.bg(theme::PATTERN_ROW_CURRENT))
+                        .hover(|s| s.bg(theme::HOVER))
                         .on_click(cx.listener(move |v, _, _, cx| v.go_to_pattern_hit(ix, cx)))
                         .child(
                             div()
                                 .overflow_hidden()
                                 .whitespace_nowrap()
                                 .text_ellipsis()
-                                .text_color(rgb(0xd0d0d0))
+                                .text_color(theme::TEXT_SOFT)
                                 .child(hits[ix].text.clone()),
                         )
                         .into_any_element()
@@ -573,9 +574,9 @@ impl DocView {
                 div()
                     .text_xs()
                     .text_color(if ps.error.is_some() {
-                        rgb(0xe08080)
+                        theme::ERROR
                     } else {
-                        rgb(0x9a9a9a)
+                        theme::TEXT_MUTED
                     })
                     .child(status),
             );
@@ -595,7 +596,7 @@ impl DocView {
                     controls
                         .w(px(340.0))
                         .border_r_1()
-                        .border_color(rgb(0x111111)),
+                        .border_color(theme::DIVIDER),
                 )
                 .child(results)
                 .children(menu)
@@ -605,7 +606,7 @@ impl DocView {
                 .size_full()
                 .flex()
                 .flex_col()
-                .child(controls.border_b_1().border_color(rgb(0x111111)))
+                .child(controls.border_b_1().border_color(theme::DIVIDER))
                 .child(results)
                 .children(menu)
                 .into_any_element()
@@ -625,7 +626,7 @@ fn preset_menu(index: usize, pos: Point<Pixels>, cx: &mut Context<DocView>) -> A
             .py_1()
             .text_sm()
             .cursor_pointer()
-            .hover(|s| s.bg(rgb(0x3a3a3a)))
+            .hover(|s| s.bg(theme::HOVER))
             .on_click(cx.listener(move |v, _, window, cx| f(v, index, window, cx)))
             .child(label)
     };
@@ -646,9 +647,9 @@ fn preset_menu(index: usize, pos: Point<Pixels>, cx: &mut Context<DocView>) -> A
                     .min_w(px(180.0))
                     .py_1()
                     .rounded_md()
-                    .bg(rgb(0x2a2a2a))
+                    .bg(theme::POPOVER)
                     .border_1()
-                    .border_color(rgb(0x111111))
+                    .border_color(theme::DIVIDER)
                     .shadow_lg()
                     .flex()
                     .flex_col()
@@ -658,7 +659,7 @@ fn preset_menu(index: usize, pos: Point<Pixels>, cx: &mut Context<DocView>) -> A
                     .child(item("preset-delete", "Delete", cx, |v, i, _, cx| {
                         v.delete_preset(i, cx)
                     }))
-                    .child(div().h(px(1.0)).my_1().bg(rgb(0x111111)))
+                    .child(div().h(px(1.0)).my_1().bg(theme::DIVIDER))
                     .child(item(
                         "preset-restore",
                         "Restore default presets",

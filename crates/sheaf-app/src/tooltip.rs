@@ -1,9 +1,8 @@
 //! Hover tooltip for toolbar buttons: a title, an optional shortcut, and a
 //! line of description.
 
-use gpui::{
-    Action, AnyView, App, Context, IntoElement, SharedString, Window, div, prelude::*, px, rgb,
-};
+use gpui::{Action, AnyView, App, Context, IntoElement, SharedString, Window, div, prelude::*, px};
+use sheaf_ui::theme;
 
 pub struct Tooltip {
     title: SharedString,
@@ -58,9 +57,9 @@ impl Render for Tooltip {
                 .px_2()
                 .py_1()
                 .rounded_md()
-                .bg(rgb(0x2b2b2b))
+                .bg(theme::RAISED)
                 .border_1()
-                .border_color(rgb(0x4a4a4a))
+                .border_color(theme::BORDER_CARD)
                 .shadow_md()
                 .text_xs()
                 .child(
@@ -68,20 +67,24 @@ impl Render for Tooltip {
                         .flex()
                         .items_center()
                         .gap_3()
-                        .child(div().text_color(rgb(0xe8e8e8)).child(self.title.clone()))
+                        .child(
+                            div()
+                                .text_color(theme::TEXT_STRONG)
+                                .child(self.title.clone()),
+                        )
                         .children(self.shortcut.clone().map(|s| {
                             div()
                                 .px_1()
                                 .rounded_sm()
-                                .bg(rgb(0x3a3a3a))
-                                .text_color(rgb(0xb0b0b0))
+                                .bg(theme::CONTROL)
+                                .text_color(theme::TEXT_DETAIL)
                                 .child(s)
                         })),
                 )
                 .children(
                     self.description
                         .clone()
-                        .map(|d| div().text_color(rgb(0x9a9a9a)).child(d)),
+                        .map(|d| div().text_color(theme::TEXT_MUTED).child(d)),
                 ),
         )
     }

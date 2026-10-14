@@ -8,9 +8,10 @@ use std::time::Duration;
 
 use gpui::{
     AnyElement, App, Context, EventEmitter, FocusHandle, Focusable, MouseButton, PathPromptOptions,
-    PromptLevel, ScrollHandle, Window, div, prelude::*, px, rgb, rgba,
+    PromptLevel, ScrollHandle, Window, div, prelude::*, px,
 };
 use sheaf_plugin::Status;
+use sheaf_ui::theme;
 
 use crate::DialogCancel;
 use crate::plugins::{self, PluginHost};
@@ -65,9 +66,11 @@ fn button(
         .rounded_sm()
         .text_xs()
         .cursor_pointer()
-        .when(primary, |d| d.bg(rgb(0x4a9eff)).text_color(rgb(0xffffff)))
-        .when(!primary, |d| d.bg(rgb(0x3a3a3a)))
-        .hover(|s| s.bg(rgb(0x5a5a5a)))
+        .when(primary, |d| {
+            d.bg(theme::ACCENT).text_color(theme::TEXT_BRIGHT)
+        })
+        .when(!primary, |d| d.bg(theme::CONTROL))
+        .hover(|s| s.bg(theme::CONTROL_HOVER_STRONG))
         .on_click(cx.listener(move |this, _, window, cx| on_click(this, window, cx)))
         .child(label.to_string())
         .into_any_element()
@@ -194,11 +197,11 @@ impl PluginManager {
 
     fn render_row(&self, i: usize, r: &Row, cx: &mut Context<Self>) -> AnyElement {
         let (status, color) = match (&r.status, r.enabled) {
-            (_, false) => ("Off".to_string(), 0x8a8a8a),
-            (Some(Status::Ready), _) => ("On".to_string(), 0x6fcf6f),
-            (Some(Status::Loading), _) => ("Loading…".to_string(), 0xd0b060),
-            (Some(Status::Failed(_)), _) => ("Error".to_string(), 0xe08080),
-            (None, true) => ("Not running".to_string(), 0xe08080),
+            (_, false) => ("Off".to_string(), theme::TEXT_DIM),
+            (Some(Status::Ready), _) => ("On".to_string(), theme::RUNNING),
+            (Some(Status::Loading), _) => ("Loading…".to_string(), theme::PENDING),
+            (Some(Status::Failed(_)), _) => ("Error".to_string(), theme::ERROR),
+            (None, true) => ("Not running".to_string(), theme::ERROR),
         };
         let error = match &r.status {
             Some(Status::Failed(m)) if r.enabled => Some(m.clone()),
@@ -245,9 +248,9 @@ impl PluginManager {
                         .flex_col()
                         .text_xs()
                         .text_color(if allowed {
-                            rgb(0xb0b0b0)
+                            theme::TEXT_DETAIL
                         } else {
-                            rgb(0xd0b060)
+                            theme::PENDING
                         })
                         .child(if allowed {
                             "Allowed to:"
@@ -272,7 +275,7 @@ impl PluginManager {
             .py_2()
             .px_2()
             .border_b_1()
-            .border_color(rgb(0x333333))
+            .border_color(theme::BORDER_SUBTLE)
             .flex()
             .flex_col()
             .child(
@@ -283,16 +286,16 @@ impl PluginManager {
                     .child(
                         div()
                             .text_sm()
-                            .text_color(rgb(0xe8e8e8))
+                            .text_color(theme::TEXT_STRONG)
                             .child(r.name.clone()),
                     )
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(0x7a7a7a))
+                            .text_color(theme::TEXT_FAINT)
                             .child(format!("{} · {}", r.version, r.id)),
                     )
-                    .child(div().text_xs().text_color(rgb(color)).child(status))
+                    .child(div().text_xs().text_color(color).child(status))
                     .child(div().flex_1())
                     .child(toggle)
                     .child(remove),
@@ -301,12 +304,12 @@ impl PluginManager {
                 d.child(
                     div()
                         .text_xs()
-                        .text_color(rgb(0x9a9a9a))
+                        .text_color(theme::TEXT_MUTED)
                         .child(r.description.clone()),
                 )
             })
             .when_some(error, |d, e| {
-                d.child(div().text_xs().text_color(rgb(0xe08080)).child(e))
+                d.child(div().text_xs().text_color(theme::ERROR).child(e))
             })
             .children(permissions)
             .into_any_element()
@@ -343,7 +346,7 @@ impl Render for PluginManager {
             )
             .absolute()
             .inset_0()
-            .bg(rgba(0x00000060))
+            .bg(theme::BACKDROP)
             .flex()
             .justify_center()
             .items_start()
@@ -361,18 +364,18 @@ impl Render for PluginManager {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .bg(rgb(0x262626))
+                    .bg(theme::CARD)
                     .border_1()
-                    .border_color(rgb(0x4a4a4a))
+                    .border_color(theme::BORDER_CARD)
                     .rounded_md()
                     .shadow_lg()
-                    .text_color(rgb(0xd0d0d0))
+                    .text_color(theme::TEXT_SOFT)
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(
                         div()
                             .pb_2()
                             .border_b_1()
-                            .border_color(rgb(0x111111))
+                            .border_color(theme::DIVIDER)
                             .flex()
                             .items_baseline()
                             .gap_2()
@@ -380,7 +383,7 @@ impl Render for PluginManager {
                                 div()
                                     .flex_shrink_0()
                                     .text_sm()
-                                    .text_color(rgb(0xe8e8e8))
+                                    .text_color(theme::TEXT_STRONG)
                                     .child("Plugins"),
                             )
                             .child(
@@ -392,7 +395,7 @@ impl Render for PluginManager {
                                     .whitespace_nowrap()
                                     .text_ellipsis()
                                     .text_xs()
-                                    .text_color(rgb(0x7a7a7a))
+                                    .text_color(theme::TEXT_FAINT)
                                     .tooltip(crate::tooltip::Tooltip::text(
                                         dir.display().to_string(),
                                     ))
@@ -403,7 +406,7 @@ impl Render for PluginManager {
                         div()
                             .px_2()
                             .text_xs()
-                            .text_color(rgb(0xe08080))
+                            .text_color(theme::ERROR)
                             .child(p)
                             .into_any_element()
                     }))
@@ -419,7 +422,7 @@ impl Render for PluginManager {
                                     div()
                                         .p_3()
                                         .text_sm()
-                                        .text_color(rgb(0x8a8a8a))
+                                        .text_color(theme::TEXT_DIM)
                                         .child("No plugins installed."),
                                 )
                             })
@@ -431,7 +434,7 @@ impl Render for PluginManager {
                                 .px_2()
                                 .pt_1()
                                 .text_xs()
-                                .text_color(if ok { rgb(0x9ad09a) } else { rgb(0xe08080) })
+                                .text_color(if ok { theme::SUCCESS } else { theme::ERROR })
                                 .child(m),
                         )
                     })

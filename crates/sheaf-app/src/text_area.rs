@@ -11,8 +11,9 @@ use gpui::{
     EntityInputHandler, FocusHandle, Focusable, GlobalElementId, LayoutId, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, SharedString, Style,
     TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine, actions, div, fill, point,
-    prelude::*, px, relative, rgb, rgba, size,
+    prelude::*, px, relative, size,
 };
+use sheaf_ui::theme;
 use unicode_segmentation::UnicodeSegmentation;
 
 actions!(
@@ -585,7 +586,7 @@ impl Element for AreaElement {
 
         let empty = content.is_empty();
         let (text, color) = if empty {
-            (input.placeholder.clone(), rgba(0xffffff50).into())
+            (input.placeholder.clone(), theme::PLACEHOLDER.into())
         } else {
             (content, style.color)
         };
@@ -658,9 +659,9 @@ impl Element for AreaElement {
             } else {
                 pos_of(cursor)
             };
-            p.map(|p| fill(Bounds::new(p, size(px(2.), lh)), rgb(0x4a9eff)))
+            p.map(|p| fill(Bounds::new(p, size(px(2.), lh)), theme::ACCENT))
         } else {
-            let color = rgba(0x4a9eff60);
+            let color = theme::SELECTION;
             if let (Some(a), Some(b)) = (pos_of(selected_range.start), pos_of(selected_range.end)) {
                 if a.y == b.y {
                     selection.push(fill(Bounds::from_corners(a, point(b.x, b.y + lh)), color));
@@ -772,15 +773,15 @@ impl Render for TextArea {
             .px_2()
             .py_1()
             .rounded_sm()
-            .bg(rgb(0x1a1a1a))
+            .bg(theme::SUNKEN)
             .border_1()
             .border_color(if focused {
-                rgb(0x4a9eff)
+                theme::ACCENT
             } else {
-                rgb(0x3a3a3a)
+                theme::BORDER
             })
             .text_sm()
-            .text_color(rgb(0xe0e0e0))
+            .text_color(theme::TEXT)
             .child(AreaElement { input: cx.entity() })
     }
 }

@@ -7,9 +7,10 @@ use std::collections::HashMap;
 
 use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, MouseButton,
-    Subscription, Window, div, prelude::*, px, rgb, rgba,
+    Subscription, Window, div, prelude::*, px,
 };
 use sheaf_ocr::{EngineKind, OcrConfig, Scope, page_range};
+use sheaf_ui::theme;
 
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::{DialogCancel, DialogLeft, DialogNext, DialogPrev, DialogRight, DialogRun};
@@ -339,19 +340,19 @@ impl OcrDialog {
             .text_sm()
             .border_1()
             .border_color(if selected {
-                rgb(0x4a9eff)
+                theme::ACCENT
             } else {
-                rgb(0x3a3a3a)
+                theme::BORDER
             })
-            .when(selected, |d| d.bg(rgb(0x2f4a6f)))
+            .when(selected, |d| d.bg(theme::SELECTED))
             .text_color(if enabled {
-                rgb(0xe8e8e8)
+                theme::TEXT_STRONG
             } else {
-                rgb(0x6a6a6a)
+                theme::TEXT_DISABLED
             });
         if enabled {
             base.cursor_pointer()
-                .hover(|s| s.bg(rgb(0x3a3a3a)))
+                .hover(|s| s.bg(theme::HOVER))
                 .on_click(cx.listener(move |this, _, window, cx| this.pick(pick, window, cx)))
                 .child(label)
                 .into_any_element()
@@ -369,14 +370,14 @@ impl OcrDialog {
             .py_1()
             .px_2()
             .rounded_sm()
-            .when(focused, |d| d.bg(rgb(0x2e2e2e)))
+            .when(focused, |d| d.bg(theme::ROW_FOCUS))
             .child(
                 div()
                     .w(px(110.0))
                     .flex_shrink_0()
                     .pt_1()
                     .text_sm()
-                    .text_color(rgb(0x9a9a9a))
+                    .text_color(theme::TEXT_MUTED)
                     .child(label.to_string()),
             )
             .child(div().flex_1().child(content))
@@ -410,20 +411,19 @@ impl Render for OcrDialog {
                 )
             }))
             .into_any_element();
-        let range =
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(div().w(px(200.0)).child(self.range.clone()))
-                .child(div().text_xs().text_color(rgb(0x7a7a7a)).child(
-                    if self.scope == Scope::Range {
-                        "1-based; an open end runs to the last page"
-                    } else {
-                        "typing a range here uses it"
-                    },
-                ))
-                .into_any_element();
+        let range = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(div().w(px(200.0)).child(self.range.clone()))
+            .child(div().text_xs().text_color(theme::TEXT_FAINT).child(
+                if self.scope == Scope::Range {
+                    "1-based; an open end runs to the last page"
+                } else {
+                    "typing a range here uses it"
+                },
+            ))
+            .into_any_element();
         let skip = self
             .chips()
             .child(self.chip(
@@ -464,7 +464,7 @@ impl Render for OcrDialog {
             .children(unavailable.into_iter().map(|line| {
                 div()
                     .text_xs()
-                    .text_color(rgb(0xc08080))
+                    .text_color(theme::ERROR_SOFT)
                     .child(line)
                     .into_any_element()
             }))
@@ -473,7 +473,7 @@ impl Render for OcrDialog {
         let language = if langs.is_empty() {
             div()
                 .text_xs()
-                .text_color(rgb(0xc08080))
+                .text_color(theme::ERROR_SOFT)
                 .pt_1()
                 .child(format!(
                     "No language data found; {}",
@@ -493,7 +493,7 @@ impl Render for OcrDialog {
             .items_center()
             .gap_2()
             .child(div().w(px(80.0)).child(self.dpi.clone()))
-            .child(div().text_xs().text_color(rgb(0x7a7a7a)).child(format!(
+            .child(div().text_xs().text_color(theme::TEXT_FAINT).child(format!(
                 "dpi ({}–{})",
                 OcrConfig::MIN_DPI,
                 OcrConfig::MAX_DPI
@@ -512,8 +512,8 @@ impl Render for OcrDialog {
                     .rounded_sm()
                     .text_sm()
                     .cursor_pointer()
-                    .bg(rgb(0x3a3a3a))
-                    .hover(|s| s.bg(rgb(0x4a4a4a)))
+                    .bg(theme::CONTROL)
+                    .hover(|s| s.bg(theme::CONTROL_HOVER))
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(OcrDialogEvent::Dismiss)))
                     .child("Cancel"),
             )
@@ -525,15 +525,15 @@ impl Render for OcrDialog {
                     .rounded_sm()
                     .text_sm()
                     .cursor_pointer()
-                    .bg(rgb(0x4a9eff))
-                    .text_color(rgb(0xffffff))
+                    .bg(theme::ACCENT)
+                    .text_color(theme::TEXT_BRIGHT)
                     .border_1()
                     .border_color(if run_focused {
-                        rgb(0xffffff)
+                        theme::FOCUS_RING
                     } else {
-                        rgb(0x4a9eff)
+                        theme::ACCENT
                     })
-                    .hover(|s| s.bg(rgb(0x5aaeff)))
+                    .hover(|s| s.bg(theme::ACCENT_HOVER))
                     .on_click(cx.listener(|this, _, _, cx| this.run(cx)))
                     .child("Recognize"),
             )
@@ -553,7 +553,7 @@ impl Render for OcrDialog {
             .on_action(cx.listener(|_, _: &DialogCancel, _, cx| cx.emit(OcrDialogEvent::Dismiss)))
             .absolute()
             .inset_0()
-            .bg(rgba(0x00000060))
+            .bg(theme::BACKDROP)
             .flex()
             .justify_center()
             .items_start()
@@ -570,21 +570,21 @@ impl Render for OcrDialog {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .bg(rgb(0x262626))
+                    .bg(theme::CARD)
                     .border_1()
-                    .border_color(rgb(0x4a4a4a))
+                    .border_color(theme::BORDER_CARD)
                     .rounded_md()
                     .shadow_lg()
-                    .text_color(rgb(0xd0d0d0))
+                    .text_color(theme::TEXT_SOFT)
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(
                         div()
                             .pb_2()
                             .mb_1()
                             .border_b_1()
-                            .border_color(rgb(0x111111))
+                            .border_color(theme::DIVIDER)
                             .text_sm()
-                            .text_color(rgb(0xe8e8e8))
+                            .text_color(theme::TEXT_STRONG)
                             .child("Recognize Text (OCR)"),
                     )
                     .child(self.row(ROW_PAGES, "Pages", pages))
@@ -599,7 +599,7 @@ impl Render for OcrDialog {
                                 .px_2()
                                 .pt_1()
                                 .text_xs()
-                                .text_color(rgb(0xe08080))
+                                .text_color(theme::ERROR)
                                 .child(e),
                         )
                     })
@@ -612,7 +612,7 @@ impl Render for OcrDialog {
                                 div()
                                     .flex_1()
                                     .text_xs()
-                                    .text_color(rgb(0x7a7a7a))
+                                    .text_color(theme::TEXT_FAINT)
                                     .child("Tab moves, ←/→ change, Enter runs, Esc cancels"),
                             )
                             .child(buttons),

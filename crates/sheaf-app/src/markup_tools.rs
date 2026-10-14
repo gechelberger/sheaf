@@ -8,11 +8,12 @@
 
 use gpui::{
     AnyElement, Context, CursorStyle, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    PathBuilder, Pixels, Point, Window, canvas, div, prelude::*, px, rgb, rgba, svg,
+    PathBuilder, Pixels, Point, Window, canvas, div, prelude::*, px, rgb, svg,
 };
 use sheaf_core::{PageSize, Rotation};
 use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, Edit, PageId, Pt, annot::CONNECTOR_SIZE};
 use sheaf_render::Rect;
+use sheaf_ui::theme;
 
 use crate::docview::{DocView, State, rotate_rect};
 use crate::tooltip::Tooltip;
@@ -736,15 +737,29 @@ impl DocView {
                     .justify_center()
                     .rounded_sm()
                     .cursor_pointer()
-                    .bg(if active { rgb(0x4a9eff) } else { rgb(0x3a3a3a) })
-                    .text_color(if active { rgb(0xffffff) } else { rgb(0xc0c0c0) })
-                    .hover(|s| s.bg(if active { rgb(0x5aaaff) } else { rgb(0x4a4a4a) }))
+                    .bg(if active {
+                        theme::ACCENT
+                    } else {
+                        theme::CONTROL
+                    })
+                    .text_color(if active {
+                        theme::TEXT_BRIGHT
+                    } else {
+                        theme::TEXT_SUBTLE
+                    })
+                    .hover(|s| {
+                        s.bg(if active {
+                            theme::ACCENT_HOVER
+                        } else {
+                            theme::CONTROL_HOVER
+                        })
+                    })
                     .on_click(cx.listener(move |v, _, _, cx| v.set_tool(t, cx)))
                     .tooltip(Tooltip::for_action(t.title(), t.description(), t.action()))
                     .child(svg().path(t.icon()).size(px(18.0)).text_color(if active {
-                        rgb(0xffffff)
+                        theme::TEXT_BRIGHT
                     } else {
-                        rgb(0xc0c0c0)
+                        theme::TEXT_SUBTLE
                     }))
             })
             .collect();
@@ -764,7 +779,11 @@ impl DocView {
                         | ((c[1] as u32) << 8)
                         | c[2] as u32))
                     .border_2()
-                    .border_color(if active { rgb(0xffffff) } else { rgb(0x1a1a1a) })
+                    .border_color(if active {
+                        theme::FOCUS_RING
+                    } else {
+                        theme::SUNKEN
+                    })
                     .cursor_pointer()
                     .tooltip(Tooltip::text(name))
                     .on_click(cx.listener(move |v, _, _, cx| {
@@ -794,8 +813,12 @@ impl DocView {
                     .text_xs()
                     .font_weight(gpui::FontWeight::BOLD)
                     .cursor_pointer()
-                    .bg(if active { rgb(0x4a9eff) } else { rgb(0x3a3a3a) })
-                    .hover(|s| s.bg(rgb(0x4a4a4a)))
+                    .bg(if active {
+                        theme::ACCENT
+                    } else {
+                        theme::CONTROL
+                    })
+                    .hover(|s| s.bg(theme::CONTROL_HOVER))
                     .tooltip(Tooltip::for_action(
                         format!("{} {g}", if wide { "Stamp" } else { "Tickmark" }),
                         "Click on the page to stamp this mark",
@@ -815,9 +838,9 @@ impl DocView {
             .gap_1()
             .px_2()
             .py_1()
-            .bg(rgb(0x252525))
+            .bg(theme::PANEL)
             .border_b_1()
-            .border_color(rgb(0x111111))
+            .border_color(theme::DIVIDER)
             .children(tools)
             .child(div().w(px(12.0)))
             .children(colors)
@@ -903,7 +926,7 @@ impl DocView {
                     .w(px(r.w * k))
                     .h(px(r.h * k));
                 Some(match tool {
-                    Tool::Highlight => el.bg(rgba(0xffe60060)).into_any_element(),
+                    Tool::Highlight => el.bg(theme::HIGHLIGHT_PREVIEW).into_any_element(),
                     Tool::Ellipse => el
                         .border_1()
                         .border_color(c)

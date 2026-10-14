@@ -14,8 +14,9 @@
 use gpui::{
     Action, App, Bounds, Context, FocusHandle, HighlightStyle, KeyDownEvent, Keystroke,
     MouseButton, OwnedMenu, OwnedMenuItem, Pixels, SharedString, StyledText, Subscription,
-    UnderlineStyle, Window, actions, anchored, canvas, deferred, div, prelude::*, px, rgb,
+    UnderlineStyle, Window, actions, anchored, canvas, deferred, div, prelude::*, px,
 };
+use sheaf_ui::theme;
 
 use crate::menus::{mnemonic, parse_label};
 
@@ -299,11 +300,11 @@ impl MenuBar {
                         .justify_between()
                         .gap_6()
                         .text_sm()
-                        .when(highlighted && enabled, |d| d.bg(rgb(0x3a3a3a)))
+                        .when(highlighted && enabled, |d| d.bg(theme::HOVER))
                         .text_color(if enabled {
-                            rgb(0xd0d0d0)
+                            theme::TEXT_SOFT
                         } else {
-                            rgb(0x6a6a6a)
+                            theme::TEXT_DISABLED
                         })
                         .on_mouse_move(cx.listener(move |bar, _, _, cx| {
                             if bar.item != Some(ix) {
@@ -316,15 +317,19 @@ impl MenuBar {
                         .children(shortcut(action.as_ref(), cx).map(|s| {
                             div()
                                 .text_color(if enabled {
-                                    rgb(0x8a8a8a)
+                                    theme::TEXT_DIM
                                 } else {
-                                    rgb(0x5a5a5a)
+                                    theme::TEXT_DISABLED_DIM
                                 })
                                 .child(s)
                         }))
                         .into_any_element()
                 }
-                _ => div().my_1().h(px(1.0)).bg(rgb(0x3a3a3a)).into_any_element(),
+                _ => div()
+                    .my_1()
+                    .h(px(1.0))
+                    .bg(theme::SEPARATOR)
+                    .into_any_element(),
             });
         let bar_bounds = self.bounds;
         deferred(
@@ -343,9 +348,9 @@ impl MenuBar {
                     .min_w(px(220.0))
                     .py_1()
                     .rounded_md()
-                    .bg(rgb(0x2a2a2a))
+                    .bg(theme::POPOVER)
                     .border_1()
-                    .border_color(rgb(0x111111))
+                    .border_color(theme::DIVIDER)
                     .shadow_lg()
                     .flex()
                     .flex_col()
@@ -374,8 +379,8 @@ impl Render for MenuBar {
                     .items_center()
                     .text_sm()
                     .rounded_sm()
-                    .when(active, |d| d.bg(rgb(0x3a3a3a)))
-                    .hover(|s| s.bg(rgb(0x2e2e2e)))
+                    .when(active, |d| d.bg(theme::HOVER))
+                    .hover(|s| s.bg(theme::ROW_FOCUS))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |bar, _, window, cx| {
@@ -416,7 +421,7 @@ impl Render for MenuBar {
             .py_1()
             .flex()
             .items_stretch()
-            .text_color(rgb(0xd0d0d0))
+            .text_color(theme::TEXT_SOFT)
             .on_action(cx.listener(|bar, _: &MenuLeft, window, cx| bar.move_title(-1, window, cx)))
             .on_action(cx.listener(|bar, _: &MenuRight, window, cx| bar.move_title(1, window, cx)))
             .on_action(cx.listener(|bar, _: &MenuUp, window, cx| bar.move_item(-1, window, cx)))

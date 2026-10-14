@@ -9,8 +9,9 @@ use std::time::Instant;
 use gpui::{
     AnchoredPositionMode, AnyElement, App, Context, Entity, Focusable, KeyDownEvent, MouseButton,
     MouseMoveEvent, PathPromptOptions, Pixels, Point, PromptButton, PromptLevel, SharedString,
-    Subscription, Task, Window, WindowHandle, anchored, deferred, div, prelude::*, px, rgb,
+    Subscription, Task, Window, WindowHandle, anchored, deferred, div, prelude::*, px,
 };
+use sheaf_ui::theme;
 
 use crate::commands::{PanelAction, Run, ShowPluginPanel};
 use crate::docview::{DocEvent, DocView};
@@ -1064,8 +1065,8 @@ impl Workspace {
             .when(!vertical, |d| {
                 d.h(px(SPLITTER)).w_full().cursor_row_resize()
             })
-            .bg(if active { rgb(0x4a9eff) } else { rgb(0x1a1a1a) })
-            .hover(|s| s.bg(rgb(0x4a9eff)))
+            .bg(if active { theme::ACCENT } else { theme::SUNKEN })
+            .hover(|s| s.bg(theme::ACCENT))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |ws, _, _, cx| {
@@ -1103,16 +1104,16 @@ impl Workspace {
                 .cursor_pointer()
                 .border_b_2()
                 .border_color(if is_active {
-                    rgb(0x4a9eff)
+                    theme::ACCENT
                 } else {
-                    rgb(0x252525)
+                    theme::PANEL
                 })
                 .text_color(if is_active {
-                    rgb(0xffffff)
+                    theme::TEXT_BRIGHT
                 } else {
-                    rgb(0x9a9a9a)
+                    theme::TEXT_MUTED
                 })
-                .hover(|s| s.bg(rgb(0x333333)))
+                .hover(|s| s.bg(theme::HOVER_SUBTLE))
                 .on_click(cx.listener(move |ws, _, _, cx| {
                     ws.show_panel(show.clone());
                     cx.notify();
@@ -1133,9 +1134,9 @@ impl Workspace {
             .items_stretch()
             .gap_1()
             .px_1()
-            .bg(rgb(0x252525))
+            .bg(theme::PANEL)
             .border_b_1()
-            .border_color(rgb(0x111111))
+            .border_color(theme::DIVIDER)
             .children(tabs)
             .child(div().flex_1())
             .child(
@@ -1145,9 +1146,9 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .text_xs()
-                    .text_color(rgb(0x8a8a8a))
+                    .text_color(theme::TEXT_DIM)
                     .cursor_pointer()
-                    .hover(|s| s.text_color(rgb(0xffffff)))
+                    .hover(|s| s.text_color(theme::TEXT_BRIGHT))
                     .on_click(cx.listener(move |ws, _, _, cx| {
                         ws.dock_mut(side).open = false;
                         cx.notify();
@@ -1167,7 +1168,7 @@ impl Workspace {
             _ => div().into_any_element(),
         };
 
-        let mut el = div().flex_shrink_0().flex().flex_col().bg(rgb(0x252525));
+        let mut el = div().flex_shrink_0().flex().flex_col().bg(theme::PANEL);
         el = match side {
             Side::Left | Side::Right => el.w(px(size)).h_full(),
             Side::Bottom => el.h(px(size)).w_full(),
@@ -1277,9 +1278,9 @@ impl Workspace {
                         .min_w(px(160.0))
                         .py_1()
                         .rounded_md()
-                        .bg(rgb(0x2a2a2a))
+                        .bg(theme::POPOVER)
                         .border_1()
-                        .border_color(rgb(0x111111))
+                        .border_color(theme::DIVIDER)
                         .shadow_lg()
                         .flex()
                         .flex_col()
@@ -1303,9 +1304,17 @@ impl Workspace {
                 .gap_2()
                 .text_sm()
                 .cursor_pointer()
-                .bg(if active { rgb(0x2b2b2b) } else { rgb(0x1e1e1e) })
-                .text_color(if active { rgb(0xffffff) } else { rgb(0x9a9a9a) })
-                .hover(|s| s.bg(rgb(0x333333)))
+                .bg(if active {
+                    theme::RAISED
+                } else {
+                    theme::BACKGROUND
+                })
+                .text_color(if active {
+                    theme::TEXT_BRIGHT
+                } else {
+                    theme::TEXT_MUTED
+                })
+                .hover(|s| s.bg(theme::HOVER_SUBTLE))
                 .on_click(cx.listener(move |ws, _, window, cx| ws.activate(i, window, cx)))
                 .on_mouse_down(
                     MouseButton::Right,
@@ -1323,8 +1332,11 @@ impl Workspace {
                         .id(("tab-close", i))
                         .px_1()
                         .rounded_sm()
-                        .text_color(rgb(0x8a8a8a))
-                        .hover(|s| s.bg(rgb(0x555555)).text_color(rgb(0xffffff)))
+                        .text_color(theme::TEXT_DIM)
+                        .hover(|s| {
+                            s.bg(theme::CONTROL_HOVER_STRONG)
+                                .text_color(theme::TEXT_BRIGHT)
+                        })
                         .on_click(cx.listener(move |ws, _, window, cx| {
                             ws.close(i, window, cx);
                             cx.stop_propagation();
@@ -1339,9 +1351,9 @@ impl Workspace {
             .flex_shrink_0()
             .flex()
             .items_stretch()
-            .bg(rgb(0x1e1e1e))
+            .bg(theme::BACKGROUND)
             .border_b_1()
-            .border_color(rgb(0x111111))
+            .border_color(theme::DIVIDER)
             .children(tabs)
             .into_any_element()
     }
@@ -1358,7 +1370,7 @@ impl Render for Workspace {
                 .gap_4()
                 .items_center()
                 .justify_center()
-                .text_color(rgb(0x8a8a8a))
+                .text_color(theme::TEXT_DIM)
                 .child(crate::brand::logo(px(96.0)))
                 .child(SharedString::from(
                     "No document open — Ctrl+O to open a PDF",
@@ -1565,8 +1577,8 @@ impl Render for Workspace {
             .flex()
             .flex_col()
             .size_full()
-            .bg(rgb(0x2b2b2b))
-            .text_color(rgb(0xd0d0d0))
+            .bg(theme::RAISED)
+            .text_color(theme::TEXT_SOFT)
             .child(title_bar)
             .child(self.render_tabs(cx))
             .child(
@@ -1663,7 +1675,7 @@ fn menu_item(
         .py_1()
         .text_sm()
         .cursor_pointer()
-        .hover(|s| s.bg(rgb(0x3a3a3a)))
+        .hover(|s| s.bg(theme::HOVER))
         .on_click(cx.listener(move |ws, _, window, cx| {
             ws.tab_menu = None;
             ws.dock_menu = None;
@@ -1710,7 +1722,7 @@ fn plugin_panel_body(
     div()
         .p_3()
         .text_sm()
-        .text_color(rgb(0x8a8a8a))
+        .text_color(theme::TEXT_DIM)
         .child(format!("The plugin that provides “{id}” isn't loaded."))
         .into_any_element()
 }
