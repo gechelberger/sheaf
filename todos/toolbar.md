@@ -1,6 +1,7 @@
 # Configurable floating toolbar (planned)
 
-Status: notes only, not started. Written 2026-10-13. The fixed markup
+Status: slice 1 (command metadata) done 2026-10-14 on `cmd-icons`; the
+toolbar itself not started. Written 2026-10-13. The fixed markup
 toolbar (`markup_tools.rs` `render_toolbar`) covers what we have today and
 stays as is for now; this is the toolbar we want once the command set is
 big enough that no fixed layout fits everyone.
@@ -239,6 +240,33 @@ This is the part that makes it worth doing.
    updated. Palette shows help text and searches keywords. Tests for
    manifest parsing, missing icons and path escapes. Useful on its own,
    toolbar or not.
+   *Done 2026-10-14.* Notes and deviations:
+   - Built-in metadata lives in `sheaf-app/src/command_info.rs`, keyed by
+     action name, rather than on each menu item (several commands sit in
+     two menus). `Command::builtin` fills it in; the registry refuses a
+     command with an empty icon or help (`RegistryError::Incomplete`), and
+     an `assets.rs` test walks every built-in and loads its icon.
+   - 20 new icons for the M7 commands (print, export pages, properties,
+     page layouts, cover page, view rotation, split, read mode, full
+     screen, rulers, grid, clear guides, go to page, attachments, layers,
+     clear recent). `ShowPatterns` uses a copy of the regex variant
+     (`pattern-search/icon.svg`) until one is picked.
+   - Commands that aren't in a manifest get stand-ins: Open Recent entries
+     use `open`, plugin panels' Show commands use `right-dock`.
+   - `Tool::description()` now reads the command's help; tool icons come
+     from the same table.
+   - Plugin icons are read at plugin start (`Manifest::icon` checks path,
+     size ≤ 64 KB and `usvg` parse) and served from memory as
+     `plugin-icons/<plugin>/<command>-<hash>.svg`, so a reinstalled
+     plugin's new artwork isn't hidden by GPUI's cache.
+   - Packages copy only top-level files and `icons/` (not `target/`).
+   - API bumped to 0.2 (WIT text unchanged). Bundled upgrades compare the
+     installed manifest's `version` alone, so 0.1 copies that no longer
+     load still upgrade.
+   - Palette rows are two lines (icon, label, id; help underneath);
+     keyword-only matches rank below label matches. The plugin manager
+     shows a Website link and each plugin's command icons.
+   - Not done: icons in the menus (optional in the plan).
 2. `when` availability plus the built-in active/enabled hooks, used by the
    menu bar and palette first so it's exercised before the toolbar exists.
 3. `sheaf-ui` toolbar widget: static items, separators, tooltips, state,
