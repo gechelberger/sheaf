@@ -1,6 +1,6 @@
 # M8 follow-up: `sheaf-image`
 
-Status: **in progress** (2026-10-14). Branch `m8`, after slice 12. One commit per slice.
+Status: **done** (2026-10-14), slices 1–4. Branch `m8`, after slice 12. One commit per slice.
 
 ## Context
 `sheaf-scan` was made a crate on the grounds that it's "image in, image out; it knows
@@ -233,3 +233,13 @@ sheaf-image/src/
    big. `io::resolution` now reads RATIONAL (and the other numeric types). Checked end
    to end: `sheaf export -f tiff` at 200 dpi, re-imported with `images-to-pdf
    --page original`, gives 612×792 in all three modes.
+4. Done.
+   - The crate docs (`sheaf-image/src/lib.rs`) state the boundary.
+   - CI has a "sheaf-image stays pixels only" step. It fails if
+     `cargo tree -p sheaf-image` reaches lopdf, pdfium, gpui, an OCR runtime, or a
+     `sheaf-*` crate other than `sheaf-core` and `sheaf-progress`. I checked that it
+     passes here and catches the forbidden crates when pointed at `sheaf-ops`.
+   - There were no re-exports to remove (none were ever added).
+   - Still to fix: ROADMAP's M5 image-import line names `sheaf_doc::images`. It's left
+     as it is because ROADMAP had uncommitted edits in progress.
+

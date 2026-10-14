@@ -9,7 +9,8 @@
 //! - [`blank`]: whether a page image is blank.
 //! - [`raster`]: rendered pages as pixels, and their conversions.
 //! - [`io`]: image files in, as [`io::PageImage`]s or upright RGB.
-//! - [`encode`]: compact encodings out (CCITT G4, …).
+//! - [`encode`]: images out: PNG, JPEG and TIFF with their resolution, and
+//!   CCITT G4.
 
 pub mod blank;
 pub mod clean;

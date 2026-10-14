@@ -61,6 +61,14 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
 
+      - name: sheaf-image stays pixels only
+        shell: bash
+        # No PDFs, OCR or windows under it (see crates/sheaf-image/src/lib.rs).
+        run: |
+          bad=$(cargo tree -p sheaf-image -e normal --prefix none | awk '{print $1}' | sort -u \
+            | grep -E '^(lopdf|pdfium-render|gpui|tesseract|oar-ocr|ort|sheaf-(doc|render|ocr|ops|ui|app|plugin|print))$' || true)
+          if [ -n "$bad" ]; then echo "sheaf-image depends on: $bad"; exit 1; fi
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
