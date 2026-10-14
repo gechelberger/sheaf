@@ -310,6 +310,10 @@ pub struct Workspace {
     doc_subs: Vec<(gpui::EntityId, Subscription)>,
     /// File/Edit/View… in the title bar; None where the OS draws menus.
     menu_bar: Option<Entity<MenuBar>>,
+    /// The configurable toolbar, and what's on it.
+    toolbar: Entity<sheaf_ui::toolbar::Toolbar>,
+    toolbar_layout: Vec<crate::toolbar::Entry>,
+    _toolbar_sub: Subscription,
     /// Bounds of the dock area from the last frame, for splitter math.
     area: gpui::Bounds<Pixels>,
     timing: bool,
@@ -348,6 +352,10 @@ impl Workspace {
             settings.docks.as_ref().unwrap_or(&DockLayout::default()),
             &plugin_panels,
         );
+        let toolbar = cx.new(|_| sheaf_ui::toolbar::Toolbar::new(Default::default()));
+        let toolbar_sub = cx.subscribe_in(&toolbar, window, |ws, _, ev, window, cx| {
+            ws.on_toolbar(ev, window, cx)
+        });
         let mut this = Self {
             focus: cx.focus_handle(),
             closing: false,
@@ -375,6 +383,9 @@ impl Workspace {
                     bar
                 })
             }),
+            toolbar,
+            toolbar_layout: crate::toolbar::default_layout(),
+            _toolbar_sub: toolbar_sub,
             area: gpui::Bounds::default(),
             timing,
             launched,
@@ -1296,6 +1307,52 @@ impl Workspace {
         self.popup_menu("dock-menu", pos, items, cx)
     }
 
+    /// The configurable toolbar above the document, with its items for
+    /// this frame; None while it's off or the document is presenting.
+    fn render_toolbar(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let doc = self.doc().cloned()?;
+        let normal = doc.read(cx).presentation() == crate::presentation::Presentation::Normal;
+        if !self.settings.new_toolbar || !normal {
+            return None;
+        }
+        let facts = crate::availability::Facts::from_workspace(self, cx);
+        let items = crate::toolbar::resolve(&self.toolbar_layout, &facts, Some(&doc), cx);
+        self.toolbar.update(cx, |t, _| t.set_items(items));
+        Some(
+            div()
+                .flex_shrink_0()
+                .border_b_1()
+                .border_color(theme::DIVIDER)
+                .child(self.toolbar.clone())
+                .into_any_element(),
+        )
+    }
+
+    /// The toolbar's items as they'd be drawn now, one line each.
+    pub(crate) fn toolbar_dump(&mut self, cx: &mut Context<Self>) -> Vec<String> {
+        let facts = crate::availability::Facts::from_workspace(self, cx);
+        let doc = self.doc().cloned();
+        let items = crate::toolbar::resolve(&self.toolbar_layout, &facts, doc.as_ref(), cx);
+        crate::toolbar::describe(&items)
+    }
+
+    /// What the toolbar asked for.
+    fn on_toolbar(
+        &mut self,
+        ev: &sheaf_ui::toolbar::ToolbarEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match ev {
+            sheaf_ui::toolbar::ToolbarEvent::Run(action) => {
+                self.focus_active(window, cx);
+                window.dispatch_action(action.boxed_clone(), cx);
+            }
+            sheaf_ui::toolbar::ToolbarEvent::Context { .. } => {}
+        }
+        cx.notify();
+    }
+
     /// A right-click menu at `pos`; clicking outside it dismisses it.
     fn popup_menu(
         &self,
@@ -1334,8 +1391,15 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let toolbar = self.render_toolbar(cx);
         let main: AnyElement = match self.doc().cloned() {
-            Some(doc) => doc.into_any_element(),
+            Some(doc) => div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .children(toolbar)
+                .child(div().flex_1().min_h(px(0.0)).child(doc))
+                .into_any_element(),
             None => div()
                 .size_full()
                 .flex()

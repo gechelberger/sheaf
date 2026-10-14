@@ -698,7 +698,6 @@ impl DocView {
     /// Toolbar: tools, colors, and the tickmark palette.
     pub(crate) fn render_toolbar(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let tool = self.tool;
-        let color = self.tool_color;
         let tools: Vec<_> = Tool::ALL
             .iter()
             .map(|&t| {
@@ -737,6 +736,27 @@ impl DocView {
                     }))
             })
             .collect();
+        div()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .bg(theme::PANEL)
+            .border_b_1()
+            .border_color(theme::DIVIDER)
+            .children(tools)
+            .child(div().w(px(12.0)))
+            .child(self.render_colors(cx))
+            .child(div().w(px(12.0)))
+            .child(self.render_ticks(cx))
+            .into_any_element()
+    }
+
+    /// The markup color swatches, and their length along a toolbar.
+    pub(crate) fn render_colors(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let color = self.tool_color;
         let colors: Vec<_> = COLORS
             .iter()
             .map(|&(c, name)| {
@@ -766,6 +786,22 @@ impl DocView {
                     }))
             })
             .collect();
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .children(colors)
+            .into_any_element()
+    }
+
+    pub(crate) fn colors_length() -> f32 {
+        // 16px swatches, gap_1 between.
+        COLORS.len() as f32 * 20.0 - 4.0
+    }
+
+    /// The tickmark and stamp palette, and its length along a toolbar.
+    pub(crate) fn render_ticks(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let tool = self.tool;
         let tick = self.tick_glyph.clone();
         let marks = cx.global::<crate::contrib::Contributions>().toolbar_marks();
         let ticks: Vec<_> = marks
@@ -806,21 +842,25 @@ impl DocView {
             })
             .collect();
         div()
-            .flex_shrink_0()
             .flex()
             .items_center()
             .gap_1()
-            .px_2()
-            .py_1()
-            .bg(theme::PANEL)
-            .border_b_1()
-            .border_color(theme::DIVIDER)
-            .children(tools)
-            .child(div().w(px(12.0)))
-            .children(colors)
-            .child(div().w(px(12.0)))
             .children(ticks)
             .into_any_element()
+    }
+
+    /// The tickmark palette's length: 22px per single mark, wider stamps
+    /// about 7px a character plus padding, gap_1 between.
+    pub(crate) fn ticks_length(cx: &gpui::App) -> f32 {
+        let marks = cx.global::<crate::contrib::Contributions>().toolbar_marks();
+        let along: f32 = marks
+            .iter()
+            .map(|g| match g.chars().count() {
+                1 => 22.0,
+                n => n as f32 * 7.0 + 12.0,
+            } + 4.0)
+            .sum();
+        (along - 4.0).max(0.0)
     }
 
     pub(crate) fn page_cursor(&self) -> CursorStyle {

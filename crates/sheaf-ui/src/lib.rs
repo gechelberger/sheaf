@@ -15,6 +15,7 @@ pub mod prompts;
 pub mod text_area;
 pub mod text_input;
 pub mod theme;
+pub mod toolbar;
 pub mod tooltip;
 
 /// The widgets' own key bindings. Call once at startup, after the app's

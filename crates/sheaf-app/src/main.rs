@@ -44,6 +44,7 @@ mod region;
 mod rulers;
 mod script;
 mod settings;
+mod toolbar;
 mod workspace;
 
 use std::path::PathBuf;

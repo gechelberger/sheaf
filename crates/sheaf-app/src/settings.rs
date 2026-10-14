@@ -19,6 +19,9 @@ pub struct Settings {
     pub ocr: sheaf_ocr::OcrConfig,
     /// File > Print's last choices.
     pub print: crate::print_dialog::PrintPrefs,
+    /// Show the configurable toolbar (`toolbar.rs`) above the document,
+    /// while it's being built alongside the fixed one.
+    pub new_toolbar: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -180,6 +183,7 @@ mod tests {
                 markup: false,
                 ..Default::default()
             },
+            new_toolbar: true,
         };
         s.save().unwrap();
         assert_eq!(Settings::load(), s);

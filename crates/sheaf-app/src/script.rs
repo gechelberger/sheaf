@@ -17,7 +17,7 @@
 //!   two minutes) until `<script>.go` contains that name, so a harness can
 //!   take a screenshot first.
 //! - `{"dump": "outline" | "notice" | "annots" | "pages" | "panels" |
-//!   "plugins" | "region" | "view" | "layout" | "focus"}`: print state as `SCRIPT <what>: …` lines.
+//!   "plugins" | "region" | "view" | "layout" | "toolbar" | "focus"}`: print state as `SCRIPT <what>: …` lines.
 //! - `{"quit": true}`
 //!
 //! File pickers can't be driven; set `SHEAF_SCRIPT_PICK=<path>` and every
@@ -375,6 +375,11 @@ impl Workspace {
                     .and_then(|id| st.outline_flat().into_iter().find(|(_, n)| n.id == id))
                     .map(|(_, n)| n.title.clone())
             ),
+            "toolbar" => {
+                for line in self.toolbar_dump(cx) {
+                    eprintln!("SCRIPT toolbar: {line}");
+                }
+            }
             "layout" => {
                 for (i, pane) in d.panes.iter().enumerate() {
                     eprintln!(

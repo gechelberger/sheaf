@@ -298,6 +298,21 @@ This is the part that makes it worth doing.
    overflow. Docked at the top only. App renders one from a hardcoded
    default layout that matches today's bar, behind a setting, beside the
    old bar.
+   *Done 2026-10-14.* Notes and deviations:
+   - `sheaf_ui::toolbar::Toolbar` is an entity the host refills each frame
+     (`set_items`): `Button` (icon, title, help, action, enabled,
+     checked), `Separator`, `Widget` (an element plus its length). Events:
+     `Run(action)` and `Context { item, position }` (for slice 6).
+   - Overflow is decided from fixed lengths (26px buttons, widgets say
+     theirs) against the length measured last frame; the rest go in a `»`
+     dropdown, widgets included. Vertical orientation is in from the start.
+   - The workspace hosts it (above the document view) so later docking
+     can use all four edges; `Run` focuses the document and dispatches,
+     like the palette. Colors and tickmarks became `DocView::render_colors`
+     / `render_ticks`, shared with the old bar, and are already widget
+     items (`toolbar::Colors`, `toolbar::Tickmarks`).
+   - Setting: `"new_toolbar": true` in `settings.json`. Script dump:
+     `{"dump": "toolbar"}`.
 4. `toolbar.json`: load, resolve, report bad entries like `keymap.json`,
    keep unknown ids. Widget items for colors and tickmarks.
 5. Docking to all four edges and floating with drag, dock targets and

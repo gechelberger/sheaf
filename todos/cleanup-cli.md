@@ -1,0 +1,248 @@
+# Plan: ops layer, CLI, shared progress, scan cleanup
+
+Status: **planned** (2026-10-14). Not started.
+
+## Why
+
+Many commands still to come (export, OCR, combine, scan cleanup, running
+plugin commands in batch) are as useful headless as in the GUI. Most of the
+real work already lives in GUI-free crates (`sheaf-doc`, `sheaf-render`,
+`sheaf-ocr`, `sheaf-plugin`). The glue between them is stuck in `sheaf-app`:
+the export pipeline, `patterns.rs`, and the logic inside the `--selftest-*`
+hooks. Those flags in `main.rs` are a CLI already, but they have to start GPUI
+to run.
+
+Scan cleanup is the first op. It is on the roadmap as an unfinished M5 slice
+("image import → cleanup filters"). The roadmap covers flatbed-style cleanup
+(deskew, despeckle, auto-rotate, blank pages) but not **phone photos**:
+perspective, shadows, white balance and curled pages. Turning a pile of phone
+shots into a straight, readable, OCR-ready PDF is valuable in both the GUI
+and the CLI.
+
+## Decided
+
+- **The command registry stays in the app.** `commands.rs` is GPUI (actions,
+  menus, globals). Its built-in handlers become thin wrappers over ops.
+- **The CLI ships both ways.** The `sheaf-cli` crate holds the clap
+  subcommands and builds a lean `sheaf-cli` binary with no GPUI, for servers
+  and CI. `sheaf-app/src/main.rs` hands off to `sheaf_cli::run` when the first
+  argument is a known subcommand, so `sheaf scan …` and `sheaf combine …` work
+  as the roadmap writes them.
+- **We write our own progress trait.** No dedicated crate fits:
+  - prodash is MIT only, on its 31st major version, has no cancellation, and
+    its `counter()` hands out a shared atomic that can't cross into WASM;
+  - howudoin is stale (2023) and relies on a global consumer loop;
+  - progress-token pulls in tokio;
+  - indicatif, kdam and the like are renderers, not traits.
+
+  We borrow ideas, not code: nesting, max/unit and levelled messages from
+  prodash; weighted children and a `check()?` cancel from progress-token. No
+  attribution is needed.
+- **Plugins get progress too**, through a WIT resource that mirrors the trait.
+- **Scan cleanup starts with the classic, pure-Rust path.** ML unwarping
+  (UVDoc) comes in the slice after, opt-in only. See "UVDoc" below.
+- **Move ops one at a time.** An op moves into `sheaf-ops` only when a CLI
+  subcommand needs it. No big-bang move out of `docview.rs`.
+
+## Crates
+
+### `sheaf-progress` (std only)
+
+```rust
+pub enum Unit { Items, Pages, Bytes }   // closed set, mirrors a WIT enum
+pub enum Level { Info, Warn, Error }
+pub struct Cancelled;                   // error type for `?`
+
+pub trait Progress: Send + Sync {
+    fn set_total(&self, total: Option<u64>, unit: Unit); // None = indeterminate
+    fn set(&self, done: u64);
+    fn inc(&self, n: u64);
+    fn message(&self, level: Level, msg: &str);
+    fn is_cancelled(&self) -> bool;
+    fn check(&self) -> Result<(), Cancelled> { … }
+    /// Covers `weight` of this progress's span; shares cancellation.
+    fn child(&self, name: &str, weight: f32) -> Box<dyn Progress + '_>;
+}
+pub struct NoProgress;
+```
+
+- Ops take `&dyn Progress`, so generics don't spread through the API.
+- It ships an `Arc`-of-atomics implementation (plus a `Mutex<String>` for the
+  latest message). The GUI polls it each frame. The CLI renders it with
+  `indicatif`, which only `sheaf-cli` depends on.
+- Each root has one `AtomicBool`, shared by all its children. Ops call
+  `p.check()?` once per page or chunk.
+- What this replaces:
+  - export's `FnMut(Progress) -> bool` (`export.rs:67`, `:79`) moves to the
+    trait when export moves.
+  - OCR keeps its `OcrEvent` channel for now, because the events carry
+    results. Its `JobHandle` cancel can adopt the trait later.
+
+### `sheaf-scan`
+
+Image in, image out; it knows nothing about PDFs. It uses `imageproc` (MIT,
+pure Rust, already in the lockfile through oar-ocr). An optional `uvdoc`
+feature adds ML unwarping.
+
+### `sheaf-ops`
+
+- Ops have the shape `fn(inputs, &Params, &dyn Progress) -> Result<Output>`,
+  with serde `Params`. A keymap `args` blob, a plugin's `args` and CLI flags
+  can then all deserialize into the same struct.
+- Depends on `sheaf-doc`, `sheaf-render` and `sheaf-scan`, and optionally on
+  `sheaf-ocr`. **No gpui.**
+- Owns the page-range parser (`1-3, 7, 10-`) that turns a range into
+  `PageId`s. M8 Combine needs it too.
+
+### `sheaf-cli`
+
+- A library of clap subcommands, plus the `sheaf-cli` binary.
+- The `--selftest-*` flags move here as integration tests wherever they don't
+  need a window.
+
+## Image import (prerequisite, `sheaf-doc`)
+
+No image import exists today: `SourceInfo` (`model.rs:31`) covers PDFs only.
+Each image becomes a one-page PDF in memory, built with lopdf, and is added
+as an ordinary source:
+
+- JPEG passes through as DCTDecode.
+- Gray and color images use Flate.
+- 1-bit images use CCITT G4, reusing `g4` from `export.rs`.
+
+M8 Combine Files and Insert from image share this path. Multi-page TIFF
+input comes in the same slice.
+
+## Scan pipeline (classic)
+
+Each step is a pure function with its own params, so the GUI can preview the
+steps one by one. Noise-sensitive analysis runs on a downscaled copy (~1000px);
+pixel operations run at full resolution.
+
+1. **Decode** and apply the EXIF orientation.
+2. **Page quad:**
+   - blur → `canny` → dilate → `find_contours` → `approximate_polygon_dp`;
+   - keep the largest convex 4-gon covering at least 20% of the frame;
+   - fall back to `min_area_rect`.
+
+   Warp the full-resolution image with `Projection::from_control_points` +
+   `warp`. The output aspect ratio comes from the mean edge lengths.
+3. **Coarse orientation (0/90/180/270):**
+   - use oar-ocr's doc-orientation model when the `oar` feature and the model
+     are present, with model lookup through `sheaf-ocr` `data.rs`;
+   - otherwise use a projection-profile heuristic, which decides 0 vs 90 only.
+4. **Deskew:** maximize projection-profile variance over ±15° (1° steps, then
+   0.1°), then rotate with a white fill.
+5. **Illumination:**
+   - per channel, estimate the background (dilate, then median) and divide the
+     image by it, which removes shadows and lighting gradients;
+   - gray-world white balance on that background, so the paper comes out
+     white;
+   - percentile contrast stretch.
+6. **Output mode `color | gray | bw`.** `bw` uses Sauvola thresholding (integral
+   images; k ≈ 0.2–0.34, R = 128, window ≈ 2% of page width), then despeckle
+   (drop connected components below about 0.02% of the page area).
+7. **Page size `original | letter | a4`** at a chosen DPI, centered.
+8. **Assemble:** build the pages through image import, then optionally OCR the
+   cleaned pages. The text layer lines up because OCR ran on the very image
+   that became the page.
+
+Written by us, since no permissive crate has these: the quad finder, deskew,
+Sauvola, background flattening and the orientation heuristic. That's roughly
+1.5–2 weeks with a fixture corpus; most of it is tuning on real photos.
+
+Ruled out:
+
+- `opencv` (needs native OpenCV and libclang to build);
+- unpaper and ScanTailor (GPL, though their published algorithms are fair
+  game as ideas);
+- `superbook-pdf` (AGPL).
+
+Leptonica (BSD-2) is a possible fallback for deskew and background
+normalization in tesseract-enabled builds; not pursued.
+
+Later, optional: a **noteshrink** mode, a palette reduction for colored
+handwritten notes (an MIT algorithm, about 150 lines), and blank-page removal.
+
+## UVDoc (ML unwarp, opt-in)
+
+- **What it does:** for curled or bound pages. An 8M-parameter network predicts
+  a coarse 45×31 sampling grid. The grid is upsampled and applied to the
+  full-resolution photo, so detail is kept, but sharp creases don't fully
+  flatten.
+- **License:** the weights are MIT (original repo) or Apache-2.0 (Paddle port).
+  Unverified: whether the Paddle port was retrained.
+- **Cost:** about 31 MB of model and about 0.9 s per page on CPU (PaddleX
+  figures, not measured here).
+- **In oar-ocr 0.10:** `DocumentRectificationPredictor` (example:
+  `examples/document_rectification.rs`). The model is `uvdoc.onnx` from
+  ModelScope `greatv/oar-ocr`.
+- **Placement:** after the perspective warp and before deskew, behind
+  `--flatten-curl`, and never on by default. It can add slight wobble to pages
+  that are already flat, and flat receipts and forms don't need it.
+- **OCR:** we disabled UVDoc inside OCR (`oar.rs:50`) because its text boxes
+  can't be mapped back to the original page. That doesn't apply here, since
+  OCR runs on the rectified output.
+- **Alternatives:**
+  - DocTr, DocGeoNet and DocTr++ have non-commercial or undeclared licenses.
+  - Newer permissive models (SyntheticDoc, AADD) have no confirmed weights or
+    ONNX exports.
+  - Revisit if that changes.
+
+## Plugins
+
+- Add a `progress` interface to `wit/sheaf.wit` with a `task` resource:
+  `constructor(label, total: option<u64>, unit)`, `set`, `inc`, `message`,
+  `is-cancelled` and `child`.
+- The host adapts the resource to `sheaf_progress::Progress` and shows it in
+  the GUI status area.
+- `is-cancelled` lets a plugin stop cleanly before the epoch deadline
+  (`runtime.rs`).
+- The safe wrapper goes in a new `crates/sheaf-plugin-api/src/progress.rs`.
+- Bump the WIT package version as the icons change did.
+- Test: a command in the test-plugin fixture that reports progress and honours
+  cancellation (`crates/sheaf-plugin/tests/host.rs`).
+
+## Slices (one commit each)
+
+1. **`sheaf-progress`** + tests. Move export's GUI-free half (`export.rs:67-345`)
+   into `sheaf-ops`. `export::run` takes `&dyn Progress`, and the app's
+   `run_export` uses the shared implementation.
+2. **`sheaf-cli`** skeleton, the `export` subcommand, and the `main.rs` hand-off.
+3. **Image import** in `sheaf-doc`, plus `sheaf images-to-pdf`.
+4. **`sheaf-scan` classic pipeline**, plus
+   `sheaf scan photos/*.jpg -o out.pdf [--mode bw] [--page letter] [--ocr]`.
+   Fixtures: real phone shots in `crates/sheaf-scan/tests/fixtures`, including
+   a shadowed one, a skewed one and one shot at an angle.
+5. **GUI:** a File → Create → From Scans/Photos… dialog over the same
+   `ScanParams`, with a per-step preview.
+6. **UVDoc** opt-in (`--flatten-curl` and a dialog toggle).
+7. **Plugin progress:** WIT, API and host.
+8. **`ROADMAP.md`:**
+   - M5 cleanup gains camera capture (perspective, illumination, white
+     balance, curl);
+   - the M15 CLI line notes the ops/CLI split;
+   - fix the stale parity rows that say M6 for scanner intake and separator
+     sheets (should be M5).
+
+## Verification
+
+- `cargo test --workspace`. `cargo tree -p sheaf-cli | grep gpui` prints
+  nothing.
+- `sheaf-cli scan <phone photos> -o out.pdf --mode bw --ocr`, then open the
+  result in sheaf. Pages are straight, cropped and on white backgrounds, and
+  text selection lines up.
+- `sheaf export …` through the main binary gives the same output as File >
+  Export in the GUI.
+- Ctrl-C during `sheaf-cli scan` exits cleanly through `check()`, and the GUI
+  Cancel button stops an export.
+
+## Open
+
+- Should a scan job save the raw photos as attachments, so it can be redone
+  with other settings later?
+- Cleaning pages already in a PDF (rather than importing photos) changes
+  geometry under existing OCR text and annotations (see
+  [`plugin-image-writes.md`](plugin-image-writes.md)). It's a separate later
+  slice, and it probably reruns OCR and refuses to run on pages that have
+  annotations.
