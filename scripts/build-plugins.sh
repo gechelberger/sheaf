@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build the plugins that ship with sheaf (plugins/*) for wasm32-wasip2 and
-# stage each as <out>/<id>/{sheaf-plugin.toml,plugin.wasm}, the layout sheaf
+# stage each as <out>/<id>/{sheaf-plugin.toml,plugin.wasm,icons/}, the layout sheaf
 # installs from. Debug builds of sheaf find target/plugins on their own;
 # package.sh puts the set in plugins/ beside the binary.
 #
@@ -19,6 +19,10 @@ for dir in plugins/*/; do
   cargo build --release --target wasm32-wasip2 --manifest-path "$dir/Cargo.toml"
   mkdir -p "$out/$id"
   cp "$dir/sheaf-plugin.toml" "$out/$id/"
+  if [[ -d "$dir/icons" ]]; then
+    mkdir -p "$out/$id/icons"
+    cp "$dir"/icons/*.svg "$out/$id/icons/"
+  fi
   cp "$CARGO_TARGET_DIR/wasm32-wasip2/release/${crate//-/_}.wasm" "$out/$id/plugin.wasm"
   echo "staged $out/$id"
 done

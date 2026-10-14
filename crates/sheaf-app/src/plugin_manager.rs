@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use gpui::{
     AnyElement, App, Context, EventEmitter, FocusHandle, Focusable, MouseButton, PathPromptOptions,
-    PromptLevel, ScrollHandle, Window, div, prelude::*, px,
+    PromptLevel, ScrollHandle, Window, div, prelude::*, px, svg,
 };
 use sheaf_plugin::Status;
 use sheaf_ui::button::Button;
@@ -47,6 +47,9 @@ struct Row {
     name: String,
     version: String,
     description: String,
+    homepage: Option<String>,
+    /// Its commands while it's on: id, icon, label, help.
+    commands: Vec<(String, String, String, String)>,
     enabled: bool,
     status: Option<Status>,
     /// Permission lines, if it asks for any.
@@ -85,6 +88,7 @@ impl PluginManager {
         let Some(host) = cx.try_global::<PluginHost>() else {
             return Vec::new();
         };
+        let registry = cx.global::<crate::commands::CommandRegistry>();
         let mut rows: Vec<Row> = host
             .installed
             .iter()
@@ -96,6 +100,16 @@ impl PluginManager {
                     name: m.name.clone(),
                     version: m.version.to_string(),
                     description: m.description.clone(),
+                    homepage: m.homepage.clone(),
+                    commands: m
+                        .commands
+                        .iter()
+                        .filter_map(|c| {
+                            let r = registry.get(&format!("{}::{}", m.id, c.id))?;
+                            let label = sheaf_ui::menu_bar::parse_label(&r.label).0;
+                            Some((c.id.clone(), r.icon.clone(), label, r.help.clone()))
+                        })
+                        .collect(),
                     enabled: host.is_enabled(&m.id),
                     status: host.status(&m.id),
                     asks: m.permissions.grants().describe(),
@@ -289,6 +303,19 @@ impl PluginManager {
                             .child(format!("{} · {}", r.version, r.id)),
                     )
                     .child(div().text_xs().text_color(color).child(status))
+                    .when_some(r.homepage.clone(), |d, url| {
+                        d.child(
+                            div()
+                                .id(("plugin-home", i))
+                                .text_xs()
+                                .text_color(theme::LINK)
+                                .cursor_pointer()
+                                .hover(|s| s.underline())
+                                .tooltip(Tooltip::text(url.clone()))
+                                .on_click(move |_, _, cx| cx.open_url(&url))
+                                .child("Website"),
+                        )
+                    })
                     .child(div().flex_1())
                     .child(toggle)
                     .child(remove),
@@ -299,6 +326,36 @@ impl PluginManager {
                         .text_xs()
                         .text_color(theme::TEXT_MUTED)
                         .child(r.description.clone()),
+                )
+            })
+            .when(!r.commands.is_empty(), |d| {
+                d.child(
+                    div()
+                        .mt_1()
+                        .flex()
+                        .gap_1()
+                        .children(r.commands.iter().enumerate().map(
+                            |(j, (command, icon, label, help))| {
+                                div()
+                                    .id(("plugin-cmd", i * 64 + j))
+                                    .p_0p5()
+                                    .tooltip(Tooltip::for_action(
+                                        label.clone(),
+                                        help.clone(),
+                                        Box::new(crate::commands::Run {
+                                            plugin: r.id.clone(),
+                                            command: command.clone(),
+                                            args: None,
+                                        }),
+                                    ))
+                                    .child(
+                                        svg()
+                                            .path(icon.clone())
+                                            .size(px(16.0))
+                                            .text_color(theme::TEXT_MUTED),
+                                    )
+                            },
+                        )),
                 )
             })
             .when_some(error, |d, e| {

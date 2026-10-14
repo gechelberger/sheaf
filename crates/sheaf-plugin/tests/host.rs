@@ -53,13 +53,20 @@ fn fixture_wasm() -> &'static Path {
     WASM.get_or_init(|| build_plugin(&fixture_dir(), "test_plugin.wasm"))
 }
 
-/// An installed plugin directory (manifest + wasm) for one test.
+/// An installed plugin directory (manifest, wasm, icons) for one test.
 fn install(name: &str, src: &Path, wasm: &Path) -> PathBuf {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("plugins-{name}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::copy(src.join("sheaf-plugin.toml"), dir.join("sheaf-plugin.toml")).unwrap();
     std::fs::copy(wasm, dir.join("plugin.wasm")).unwrap();
+    if let Ok(icons) = std::fs::read_dir(src.join("icons")) {
+        std::fs::create_dir_all(dir.join("icons")).unwrap();
+        for icon in icons {
+            let icon = icon.unwrap();
+            std::fs::copy(icon.path(), dir.join("icons").join(icon.file_name())).unwrap();
+        }
+    }
     dir
 }
 
@@ -358,15 +365,15 @@ fn discover_finds_plugins_and_reports_bad_ones() {
     for (name, manifest) in [
         (
             "a",
-            "id = \"alpha\"\nname = \"A\"\nversion = \"1.0.0\"\napi = \"^0.1\"\n",
+            "id = \"alpha\"\nname = \"A\"\nversion = \"1.0.0\"\napi = \"^0.2\"\n",
         ),
         (
             "b",
-            "id = \"alpha\"\nname = \"B\"\nversion = \"1.0.0\"\napi = \"^0.1\"\n",
+            "id = \"alpha\"\nname = \"B\"\nversion = \"1.0.0\"\napi = \"^0.2\"\n",
         ),
         (
             "c",
-            "id = \"Bad\"\nname = \"C\"\nversion = \"1.0.0\"\napi = \"^0.1\"\n",
+            "id = \"Bad\"\nname = \"C\"\nversion = \"1.0.0\"\napi = \"^0.2\"\n",
         ),
     ] {
         std::fs::create_dir_all(root.join(name)).unwrap();

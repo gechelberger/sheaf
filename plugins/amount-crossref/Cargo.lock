@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "amount-crossref"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "sheaf-plugin-api",
 ]
@@ -179,7 +179,7 @@ dependencies = [
 
 [[package]]
 name = "sheaf-plugin-api"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "wasi",
  "wit-bindgen 0.62.0",

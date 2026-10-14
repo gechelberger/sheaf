@@ -1,7 +1,12 @@
 //! Assets compiled into the binary and served to GPUI by path (`svg().path`).
-//! Button artwork lives in `assets/icons/fns/<command>/icon.svg`.
+//! Button artwork lives in `assets/icons/fns/<command>/icon.svg`. Plugin
+//! command icons are read from the plugin's folder when it starts and
+//! served from memory under `plugin-icons/` (see [`add_plugin_icon`]).
 
 use std::borrow::Cow;
+use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::{Arc, LazyLock, RwLock};
 
 use gpui::{AssetSource, SharedString};
 
@@ -92,10 +97,42 @@ const FILES: &[(&str, &[u8])] = icons![
     "zoom-out",
 ];
 
+/// Plugin icons by asset path.
+static PLUGIN_ICONS: LazyLock<RwLock<HashMap<String, Arc<[u8]>>>> = LazyLock::new(Default::default);
+
+/// Serve a plugin command's icon and return the path to load it by. The
+/// path carries a hash of the artwork, so a reinstalled plugin's new icon
+/// isn't drawn from GPUI's cache of the old one.
+#[cfg_attr(not(feature = "plugins"), allow(dead_code))]
+pub fn add_plugin_icon(plugin: &str, command: &str, svg: Vec<u8>) -> String {
+    let mut h = DefaultHasher::new();
+    svg.hash(&mut h);
+    let path = format!("plugin-icons/{plugin}/{command}-{:016x}.svg", h.finish());
+    if let Ok(mut icons) = PLUGIN_ICONS.write() {
+        icons.insert(path.clone(), svg.into());
+    }
+    path
+}
+
+/// Stop serving a plugin's icons.
+#[cfg_attr(not(feature = "plugins"), allow(dead_code))]
+pub fn remove_plugin_icons(plugin: &str) {
+    let prefix = format!("plugin-icons/{plugin}/");
+    if let Ok(mut icons) = PLUGIN_ICONS.write() {
+        icons.retain(|p, _| !p.starts_with(&prefix));
+    }
+}
+
 pub struct Assets;
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
+        if path.starts_with("plugin-icons/") {
+            let icons = PLUGIN_ICONS
+                .read()
+                .map_err(|_| anyhow::anyhow!("poisoned"))?;
+            return Ok(icons.get(path).map(|b| Cow::Owned(b.to_vec())));
+        }
         Ok(FILES
             .iter()
             .find(|(p, _)| *p == path)
@@ -103,17 +140,37 @@ impl AssetSource for Assets {
     }
 
     fn list(&self, path: &str) -> anyhow::Result<Vec<SharedString>> {
-        Ok(FILES
+        let mut out: Vec<SharedString> = FILES
             .iter()
             .filter(|(p, _)| p.starts_with(path))
             .map(|(p, _)| (*p).into())
-            .collect())
+            .collect();
+        if let Ok(icons) = PLUGIN_ICONS.read() {
+            out.extend(
+                icons
+                    .keys()
+                    .filter(|p| p.starts_with(path))
+                    .map(|p| p.clone().into()),
+            );
+        }
+        Ok(out)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plugin_icons_are_served_until_removed() {
+        let a = add_plugin_icon("test-assets", "scan", b"<svg/>".to_vec());
+        let b = add_plugin_icon("test-assets", "scan", b"<svg></svg>".to_vec());
+        assert_ne!(a, b, "new artwork, new path");
+        assert_eq!(Assets.load(&a).unwrap().as_deref(), Some(&b"<svg/>"[..]));
+        remove_plugin_icons("test-assets");
+        assert!(Assets.load(&a).unwrap().is_none());
+        assert!(Assets.load(&b).unwrap().is_none());
+    }
 
     #[test]
     fn every_builtin_command_has_artwork_and_help() {

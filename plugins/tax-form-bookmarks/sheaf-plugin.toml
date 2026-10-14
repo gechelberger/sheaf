@@ -1,12 +1,16 @@
 id = "tax-form-bookmarks"
 name = "Tax Form Bookmarks"
-version = "0.1.0"
-api = "^0.1"
+version = "0.2.0"
+api = "^0.2"
+homepage = "https://github.com/gechelberger/sheaf/tree/main/plugins/tax-form-bookmarks"
 description = "Bookmarks each tax form in a return or source-document binder: Form 1040, Schedule C, W-2, 1099-INT — Chase, and so on."
 
 [[commands]]
 id = "scan"
 label = "Bookmarks from Tax &Forms"
+icon = "icons/scan.svg"
+help = "Bookmark each tax form in the document: Form 1040, Schedule C, W-2, 1099 and so on."
+keywords = ["irs", "1040", "w-2", "1099", "outline"]
 category = "Bookmarks"
 menu = "Tools/Tax"
 keys = "ctrl-alt-b"
