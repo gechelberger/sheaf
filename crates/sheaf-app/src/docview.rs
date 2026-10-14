@@ -2872,6 +2872,25 @@ impl DocView {
         }
     }
 
+    /// What File > Properties needs from the view.
+    pub(crate) fn properties_context(&self) -> Option<crate::properties_dialog::PropertiesContext> {
+        let State::Ready(doc) = &self.state else {
+            return None;
+        };
+        let src = doc.model.source(doc.model.primary())?;
+        Some(crate::properties_dialog::PropertiesContext {
+            path: self.path.clone(),
+            source: src.path.clone(),
+            password: src.password.clone(),
+            bytes: src.bytes,
+            page_size: doc
+                .shown_ref(doc.current_page())
+                .map(|p| doc.model.page_size(&p))
+                .map(|s| (s.width, s.height)),
+            dirty: doc.model.is_dirty(),
+        })
+    }
+
     pub fn current_page(&self) -> usize {
         match &self.state {
             State::Ready(doc) => doc.current_page(),

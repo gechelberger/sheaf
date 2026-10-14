@@ -33,6 +33,7 @@ mod plugin_panel;
 #[cfg(feature = "plugins")]
 mod plugins;
 mod presentation;
+mod properties_dialog;
 mod region;
 mod rulers;
 mod script;
@@ -153,7 +154,8 @@ actions!(
         About,
         CommandPalette,
         RecognizeText,
-        ManagePlugins
+        ManagePlugins,
+        DocumentProperties
     ]
 );
 actions!(
@@ -282,6 +284,7 @@ fn main() {
             let od_keys = Some("OcrDialog && !TextInput");
             let pf = Some("PluginForm");
             let pm = Some("PluginManager");
+            let props = Some(properties_dialog::KEY_CONTEXT);
             let pf_keys = Some("PluginForm && !TextInput");
             cx.bind_keys([
                 KeyBinding::new("right", NextPage, doc_keys),
@@ -369,6 +372,12 @@ fn main() {
                 KeyBinding::new("ctrl-shift-k", CommandPalette, None),
                 // Recognize Text (OCR). Acrobat has no default shortcut for it.
                 KeyBinding::new("ctrl-shift-t", RecognizeText, ws),
+                KeyBinding::new("alt-enter", DocumentProperties, ws),
+                KeyBinding::new("tab", DialogNext, props),
+                KeyBinding::new("shift-tab", DialogPrev, props),
+                KeyBinding::new("left", DialogLeft, props),
+                KeyBinding::new("right", DialogRight, props),
+                KeyBinding::new("escape", DialogCancel, props),
                 KeyBinding::new("tab", DialogNext, od),
                 KeyBinding::new("shift-tab", DialogPrev, od),
                 KeyBinding::new("down", DialogNext, od_keys),

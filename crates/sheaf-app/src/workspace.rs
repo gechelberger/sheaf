@@ -287,6 +287,11 @@ pub struct Workspace {
     dock_menu: Option<(Panel, Point<Pixels>)>,
     /// The command palette, while open.
     palette: Option<(Entity<Palette>, Subscription)>,
+    /// File > Properties, while open.
+    properties: Option<(
+        Entity<crate::properties_dialog::PropertiesDialog>,
+        Subscription,
+    )>,
     /// Document > Recognize Text (OCR)…, while open.
     ocr_dialog: Option<(Entity<OcrDialog>, Subscription)>,
     /// A plugin's `ui.show-form`, while open.
@@ -349,6 +354,7 @@ impl Workspace {
             resizing: None,
             dock_menu: None,
             palette: None,
+            properties: None,
             ocr_dialog: None,
             #[cfg(feature = "plugins")]
             plugin_form: None,
@@ -817,6 +823,29 @@ impl Workspace {
 
     /// Document > Recognize Text (OCR)…: open the options card for the
     /// active document (or close it if it's open).
+    fn toggle_properties(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.properties.take().is_some() {
+            self.focus_active(window, cx);
+            cx.notify();
+            return;
+        }
+        let Some(ctx) = self.doc().and_then(|d| d.read(cx).properties_context()) else {
+            return;
+        };
+        let dialog = cx.new(|cx| crate::properties_dialog::PropertiesDialog::new(ctx, window, cx));
+        let sub = cx.subscribe_in(
+            &dialog,
+            window,
+            |ws, _, _: &crate::properties_dialog::PropertiesEvent, window, cx| {
+                ws.properties = None;
+                ws.focus_active(window, cx);
+                cx.notify();
+            },
+        );
+        self.properties = Some((dialog, sub));
+        cx.notify();
+    }
+
     fn toggle_ocr_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.ocr_dialog.take().is_some() {
             self.focus_active(window, cx);
@@ -1335,6 +1364,11 @@ impl Render for Workspace {
             .on_action(
                 cx.listener(|ws, _: &RecognizeText, window, cx| ws.toggle_ocr_dialog(window, cx)),
             )
+            .on_action(
+                cx.listener(|ws, _: &crate::DocumentProperties, window, cx| {
+                    ws.toggle_properties(window, cx)
+                }),
+            )
             .on_action(cx.listener(|ws, _: &ActivateMenuBar, window, cx| {
                 if let Some(bar) = &ws.menu_bar {
                     bar.update(cx, |bar, cx| bar.toggle(window, cx));
@@ -1414,6 +1448,11 @@ impl Render for Workspace {
             )
             .children(
                 self.ocr_dialog
+                    .as_ref()
+                    .map(|(d, _)| deferred(d.clone()).with_priority(2)),
+            )
+            .children(
+                self.properties
                     .as_ref()
                     .map(|(d, _)| deferred(d.clone()).with_priority(2)),
             );

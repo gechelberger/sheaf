@@ -102,6 +102,8 @@ fn builtin_menus() -> Vec<(&'static str, Vec<Item>)> {
                 item("&Export Clean Copy…", ExportCleanCopy),
                 item("Export &Flattened Copy…", ExportFlattened),
                 sep(),
+                item("Propert&ies…", DocumentProperties),
+                sep(),
                 item("&Close", CloseDocument),
                 item("Close &Window", CloseWindow),
                 sep(),
