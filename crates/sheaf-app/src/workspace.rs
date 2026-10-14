@@ -339,6 +339,7 @@ pub struct Workspace {
     split: Option<(Entity<crate::split_dialog::SplitDialog>, Subscription)>,
     insert_dialog: Option<(Entity<crate::insert_dialog::InsertDialog>, Subscription)>,
     replace_dialog: Option<(Entity<crate::insert_dialog::ReplaceDialog>, Subscription)>,
+    crop: Option<(Entity<crate::crop_dialog::CropDialog>, Subscription)>,
     /// File > Print, while open.
     print: Option<(Entity<crate::print_dialog::PrintDialog>, Subscription)>,
     /// File > Properties, while open.
@@ -437,6 +438,7 @@ impl Workspace {
             split: None,
             insert_dialog: None,
             replace_dialog: None,
+            crop: None,
             print: None,
             properties: None,
             ocr_dialog: None,
@@ -1250,6 +1252,51 @@ impl Workspace {
             .ok();
         })
         .detach();
+    }
+
+    fn toggle_crop(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.crop.take().is_some() {
+            self.focus_active(window, cx);
+            cx.notify();
+            return;
+        }
+        let Some(doc) = self.doc().cloned() else {
+            return;
+        };
+        let ctx = doc.read_with(cx, |d, _| {
+            let (page_count, targets) = d.target_indexes();
+            crate::crop_dialog::CropContext {
+                page_count,
+                current: d.current_index(),
+                selected: if targets.len() > 1 {
+                    targets
+                } else {
+                    Vec::new()
+                },
+                size: d.current_size(),
+            }
+        });
+        if ctx.page_count == 0 {
+            return;
+        }
+        let dialog = cx.new(|cx| crate::crop_dialog::CropDialog::new(ctx, window, cx));
+        let sub = cx.subscribe_in(
+            &dialog,
+            window,
+            |ws, _, ev: &crate::crop_dialog::CropEvent, window, cx| {
+                ws.crop = None;
+                ws.focus_active(window, cx);
+                if let crate::crop_dialog::CropEvent::Crop { pages, spec } = ev
+                    && let Some(doc) = ws.doc().cloned()
+                {
+                    let (pages, spec) = (pages.clone(), *spec);
+                    doc.update(cx, |d, cx| d.crop_pages(pages, spec, cx));
+                }
+                cx.notify();
+            },
+        );
+        self.crop = Some((dialog, sub));
+        cx.notify();
     }
 
     fn toggle_split(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2333,6 +2380,9 @@ impl Render for Workspace {
                 cx.listener(|ws, _: &crate::ReplacePages, window, cx| ws.replace_pages(window, cx)),
             )
             .on_action(
+                cx.listener(|ws, _: &crate::CropPages, window, cx| ws.toggle_crop(window, cx)),
+            )
+            .on_action(
                 cx.listener(|ws, a: &crate::recent::OpenRecent, window, cx| {
                     ws.open_recent(a.path.clone(), window, cx)
                 }),
@@ -2463,6 +2513,11 @@ impl Render for Workspace {
             )
             .children(
                 self.replace_dialog
+                    .as_ref()
+                    .map(|(d, _)| deferred(d.clone()).with_priority(2)),
+            )
+            .children(
+                self.crop
                     .as_ref()
                     .map(|(d, _)| deferred(d.clone()).with_priority(2)),
             )

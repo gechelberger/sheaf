@@ -157,53 +157,7 @@ pub fn rotate_pt(p: Pt, src: PageSize, rot: Rotation) -> Pt {
 }
 
 fn translate(kind: &AnnotKind, dx: f32, dy: f32) -> AnnotKind {
-    let mv = |p: &Pt| Pt {
-        x: p.x + dx,
-        y: p.y + dy,
-    };
-    let mb = |b: &Box2| Box2 {
-        x: b.x + dx,
-        y: b.y + dy,
-        w: b.w,
-        h: b.h,
-    };
-    match kind {
-        AnnotKind::Highlight { rects } => AnnotKind::Highlight {
-            rects: rects.iter().map(mb).collect(),
-        },
-        AnnotKind::Note { pos } => AnnotKind::Note { pos: mv(pos) },
-        AnnotKind::FreeText { rect, size } => AnnotKind::FreeText {
-            rect: mb(rect),
-            size: *size,
-        },
-        AnnotKind::Square { rect } => AnnotKind::Square { rect: mb(rect) },
-        AnnotKind::Ellipse { rect } => AnnotKind::Ellipse { rect: mb(rect) },
-        AnnotKind::Line { a, b, arrow } => AnnotKind::Line {
-            a: mv(a),
-            b: mv(b),
-            arrow: *arrow,
-        },
-        AnnotKind::Ink { paths } => AnnotKind::Ink {
-            paths: paths.iter().map(|p| p.iter().map(mv).collect()).collect(),
-        },
-        AnnotKind::Stamp { rect, glyph } => AnnotKind::Stamp {
-            rect: mb(rect),
-            glyph: glyph.clone(),
-        },
-        AnnotKind::Connector {
-            rect,
-            label,
-            partner,
-        } => AnnotKind::Connector {
-            rect: mb(rect),
-            label: label.clone(),
-            partner: *partner,
-        },
-        AnnotKind::Tape { rect, size } => AnnotKind::Tape {
-            rect: mb(rect),
-            size: *size,
-        },
-    }
+    kind.translated(dx, dy)
 }
 
 fn connector_rect(center: Pt) -> Box2 {

@@ -73,6 +73,7 @@ an image element does not inherit the parent element's color.
 | [manage-plugins](manage-plugins/icon.svg) | Manage plugins | `ManagePlugins` |
 | [combine-files](combine-files/icon.svg) | Combine files | `CombineFiles` |
 | [split-document](split-document/icon.svg) | Split document | `SplitDocument` |
+| [crop-pages](crop-pages/icon.svg) | Crop pages | `CropPages` |
 | [create-from-scans](create-from-scans/icon.svg) | Create from scans/photos | `CreateFromScans` |
 | [export-pages](export-pages/icon.svg) | Export pages | `ExportPages` |
 | [print](print/icon.svg) | Print | `Print` |

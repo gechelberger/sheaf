@@ -279,9 +279,10 @@ fn annots_in(pdf: &lopdf::Document) -> AnnotsInFile {
     out
 }
 
-/// MediaBox and /Rotate of a page (inherited attributes resolved).
+/// The visible box and /Rotate of a page (inherited attributes resolved).
 pub fn page_geom(pdf: &lopdf::Document, page: lopdf::ObjectId) -> PageGeom {
     let mut media = None;
+    let mut crop = None;
     let mut rotate = None;
     let mut id = page;
     for _ in 0..64 {
@@ -303,6 +304,14 @@ pub fn page_geom(pdf: &lopdf::Document, page: lopdf::ObjectId) -> PageGeom {
                 v[1].max(v[3]),
             ]);
         }
+        if crop.is_none()
+            && let Ok(cb) = dict
+                .get(b"CropBox")
+                .and_then(|o| pdf.dereference(o).map(|(_, o)| o))
+            && let Ok(arr) = cb.as_array()
+        {
+            crop = crate::annot::box_of(arr);
+        }
         if rotate.is_none()
             && let Ok(r) = dict.get(b"Rotate").and_then(|o| o.as_i64())
         {
@@ -314,7 +323,7 @@ pub fn page_geom(pdf: &lopdf::Document, page: lopdf::ObjectId) -> PageGeom {
         }
     }
     PageGeom {
-        media: media.unwrap_or([0.0, 0.0, 612.0, 792.0]),
+        media: crate::annot::visible_box(media.unwrap_or([0.0, 0.0, 612.0, 792.0]), crop),
         rotate: rotate.unwrap_or(0).rem_euclid(360),
     }
 }

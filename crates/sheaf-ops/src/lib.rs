@@ -6,6 +6,7 @@
 //! command line needs them.
 
 pub mod combine;
+pub mod crop;
 pub mod export;
 pub mod images;
 pub mod open;

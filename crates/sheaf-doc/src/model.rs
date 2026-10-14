@@ -312,6 +312,22 @@ pub enum Edit {
     ClearTextLayers {
         ids: Vec<PageId>,
     },
+    /// Show pages from other source pages (a cropped copy, say) while
+    /// keeping their ids, rotation and bookmarks. Their marks and OCR text
+    /// move by each `shift` (source-displayed points) to stay on the same
+    /// content.
+    RebasePages {
+        pages: Vec<Rebase>,
+    },
+}
+
+/// One page of [`Edit::RebasePages`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Rebase {
+    pub id: PageId,
+    pub source: SourceId,
+    pub index: u32,
+    pub shift: (f32, f32),
 }
 
 /// Serde for `Option<Option<T>>` fields that distinguishes "absent"
@@ -1315,6 +1331,42 @@ impl Document {
             Edit::ClearTextLayers { ids } => {
                 for id in ids {
                     st.text_layers.remove(&id);
+                }
+            }
+            Edit::RebasePages { pages } => {
+                let pos = st.page_positions();
+                for r in pages {
+                    let i = *pos.get(&r.id).context("page to rebase not found")?;
+                    let info = self.sources.get(&r.source).context("unknown source")?;
+                    if r.index >= info.page_count {
+                        bail!("page {} isn't in the source", r.index);
+                    }
+                    let size = info.page_size(r.index);
+                    let old = st.pages[i];
+                    st.pages.set(
+                        i,
+                        PageRef {
+                            id: r.id,
+                            source: r.source,
+                            index: r.index,
+                            rotation: old.rotation,
+                        },
+                    );
+                    let (dx, dy) = r.shift;
+                    if let Some(list) = st.annots.get(&r.id).cloned() {
+                        let moved = list
+                            .into_iter()
+                            .map(|mut a| {
+                                a.kind = a.kind.translated(dx, dy);
+                                a
+                            })
+                            .collect();
+                        st.annots.insert(r.id, moved);
+                    }
+                    if let Some(layer) = st.text_layers.get(&r.id).cloned() {
+                        st.text_layers
+                            .insert(r.id, Arc::new(layer.shifted(dx, dy, size)));
+                    }
                 }
             }
         }

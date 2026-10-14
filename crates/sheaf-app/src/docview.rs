@@ -107,6 +107,9 @@ pub(crate) struct Doc {
     /// thumbnails and a rotated view of the same page need both.
     pub(crate) previews: HashMap<(PageId, Rotation), Arc<RenderImage>>,
     pub(crate) tiles: HashMap<TileKey, Arc<RenderImage>>,
+    /// The source page each page id showed when last checked: a page that
+    /// now shows another (replaced, cropped, or undone) drops its images.
+    pub(crate) shown: HashMap<PageId, (SourceId, u32)>,
     /// Dropping the task drops the oneshot receiver, which tells the worker
     /// to skip the render if it hasn't started.
     pub(crate) inflight: HashMap<TileKey, Task<()>>,
@@ -280,6 +283,46 @@ impl Doc {
         for p in &mut self.panes {
             p.layout = None;
         }
+        self.drop_stale_images();
+    }
+
+    /// Forget images of pages that now show a different source page.
+    fn drop_stale_images(&mut self) {
+        let mut stale: HashSet<PageId> = HashSet::new();
+        for p in self.model.state().pages.iter() {
+            let now = (p.source, p.index);
+            if let Some(was) = self.shown.insert(p.id, now)
+                && was != now
+            {
+                stale.insert(p.id);
+            }
+        }
+        if stale.is_empty() {
+            return;
+        }
+        let tiles: Vec<TileKey> = self
+            .tiles
+            .keys()
+            .filter(|k| stale.contains(&k.0))
+            .copied()
+            .collect();
+        for k in tiles {
+            if let Some(im) = self.tiles.remove(&k) {
+                self.retired.push(im);
+            }
+        }
+        let previews: Vec<(PageId, Rotation)> = self
+            .previews
+            .keys()
+            .filter(|k| stale.contains(&k.0))
+            .copied()
+            .collect();
+        for k in previews {
+            if let Some(im) = self.previews.remove(&k) {
+                self.retired.push(im);
+            }
+        }
+        self.inflight.retain(|k, _| !stale.contains(&k.0));
     }
 
     /// Drop every rendered image so pages re-rasterize (after the engine's
@@ -652,6 +695,7 @@ impl DocView {
             active: 0,
             previews: HashMap::new(),
             tiles: HashMap::new(),
+            shown: HashMap::new(),
             inflight: HashMap::new(),
             retired: Vec::new(),
             first_paint: None,

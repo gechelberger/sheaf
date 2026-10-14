@@ -215,6 +215,7 @@ pub fn builtin(id: &str) -> Builtin {
         | "workspace::InsertBlankPages"
         | "workspace::InsertFromImages"
         | "workspace::ReplacePages"
+        | "workspace::CropPages"
         | "workspace::Print"
         | "workspace::DocumentProperties"
         | "workspace::CloseDocument"

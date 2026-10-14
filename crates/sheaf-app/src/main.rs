@@ -14,6 +14,7 @@ mod command_info;
 mod commands;
 mod comments_panel;
 mod contrib;
+mod crop_dialog;
 mod docview;
 mod export;
 mod export_dialog;
@@ -179,6 +180,7 @@ actions!(
         InsertBlankPages,
         InsertFromImages,
         ReplacePages,
+        CropPages,
         ToggleToolbar,
         CustomizeToolbar
     ]
@@ -325,6 +327,8 @@ fn main() {
             let cd = Some("CombineDialog && !TextInput");
             let spd = Some(split_dialog::KEY_CONTEXT);
             let ind = Some(insert_dialog::KEY_CONTEXT);
+            let crd = Some(crop_dialog::KEY_CONTEXT);
+            let crd_keys = Some("CropDialog && !TextInput");
             let ind_keys = Some("InsertDialog && !TextInput");
             let spd_keys = Some("SplitDialog && !TextInput");
             let ed_keys = Some("ExportDialog && !TextInput");
@@ -447,6 +451,12 @@ fn main() {
                 KeyBinding::new("right", DialogRight, ind_keys),
                 KeyBinding::new("enter", DialogRun, ind_keys),
                 KeyBinding::new("escape", DialogCancel, ind_keys),
+                KeyBinding::new("tab", DialogNext, crd),
+                KeyBinding::new("shift-tab", DialogPrev, crd),
+                KeyBinding::new("left", DialogLeft, crd_keys),
+                KeyBinding::new("right", DialogRight, crd_keys),
+                KeyBinding::new("enter", DialogRun, crd_keys),
+                KeyBinding::new("escape", DialogCancel, crd_keys),
                 KeyBinding::new("tab", DialogNext, pd),
                 KeyBinding::new("shift-tab", DialogPrev, pd),
                 KeyBinding::new("left", DialogLeft, pd_keys),

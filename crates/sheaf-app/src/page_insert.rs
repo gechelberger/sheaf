@@ -258,3 +258,88 @@ impl DocView {
             .collect()
     }
 }
+
+impl DocView {
+    /// Document > Crop Pages: plan in the background (cropped copies go to
+    /// the generated cache), then show the pages from them as one step.
+    pub(crate) fn crop_pages(
+        &mut self,
+        pages: Vec<usize>,
+        spec: sheaf_ops::crop::CropSpec,
+        cx: &mut Context<Self>,
+    ) {
+        let ids = self.page_ids_at(&pages);
+        let State::Ready(doc) = &self.state else {
+            return;
+        };
+        if ids.is_empty() {
+            return;
+        }
+        let snapshot = doc.model.snapshot();
+        let n = ids.len();
+        self.set_notice(
+            format!("Cropping {n} page{}…", if n == 1 { "" } else { "s" }),
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            let planned = cx
+                .background_executor()
+                .spawn(async move {
+                    let plan =
+                        sheaf_ops::crop::plan(&snapshot, &ids, spec, &sheaf_ops::NoProgress)?;
+                    let mut opened = Vec::new();
+                    for c in plan {
+                        let handle = RenderHandle::open(c.info.path.clone(), None)?;
+                        opened.push((c, handle));
+                    }
+                    anyhow::Ok(opened)
+                })
+                .await;
+            this.update(cx, |v, cx| {
+                let opened = match planned {
+                    Ok(o) => o,
+                    Err(e) => {
+                        v.set_notice(format!("Crop failed: {e:#}"), cx);
+                        return;
+                    }
+                };
+                let State::Ready(doc) = &mut v.state else {
+                    return;
+                };
+                let mut rebases = Vec::new();
+                for (c, handle) in opened {
+                    let sid = doc.model.add_source(c.info.clone());
+                    doc.handles.insert(sid, handle);
+                    rebases.extend(c.rebases(sid));
+                }
+                let label = format!("Crop {n} page{}", if n == 1 { "" } else { "s" });
+                match doc
+                    .model
+                    .apply(Edit::RebasePages { pages: rebases }, &label)
+                {
+                    Ok(out) => {
+                        doc.touched();
+                        v.after_model_change(label.clone(), out, cx);
+                        v.set_notice(
+                            format!("Cropped {n} page{}", if n == 1 { "" } else { "s" }),
+                            cx,
+                        );
+                    }
+                    Err(e) => v.set_notice(format!("Crop failed: {e:#}"), cx),
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+}
+
+impl DocView {
+    /// The current page's 0-based index.
+    pub(crate) fn current_index(&self) -> usize {
+        match &self.state {
+            State::Ready(doc) => doc.current_page(),
+            _ => 0,
+        }
+    }
+}

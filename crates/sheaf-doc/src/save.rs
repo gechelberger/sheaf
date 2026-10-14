@@ -14,7 +14,7 @@ use im::Vector;
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, StringFormat, dictionary};
 
 use crate::annot::{Annot, AnnotId, AnnotKind, PageGeom, to_pdf};
-use crate::model::{DocState, OutlineNode, PageId, PageRef, Snapshot, SourceId};
+use crate::model::{DocState, OutlineNode, PageId, PageRef, Snapshot, SourceId, SourceInfo};
 use crate::text_layer;
 use sheaf_core::{DestView, PageFrame};
 
@@ -485,6 +485,52 @@ fn build_rewrite(model: &Snapshot, clean: bool) -> Result<Pdf> {
     Ok(pdf)
 }
 
+/// Pages of `src`, each given a new `/CropBox` (`[x0, y0, x1, y1]` in its
+/// user space), as a new PDF: what a cropped page becomes, since sources
+/// are files. sheaf's own marks are left out, since the model keeps them;
+/// other annotations, links and fields come along.
+pub fn cropped_copy(src: &SourceInfo, pages: &[(u32, [f32; 4])]) -> Result<Vec<u8>> {
+    let from = crate::file::load_pdf(&src.path, src.password.as_deref())?;
+    let loaded = LoadedSource::from_pdf(&from)?;
+    let mut pdf = Pdf::with_version("1.7");
+    let pages_id = pdf.new_object_id();
+    let mut map: HashMap<ObjectId, ObjectId> = HashMap::new();
+    let mut kids: Vec<Object> = Vec::with_capacity(pages.len());
+    for &(index, crop) in pages {
+        let page = *loaded
+            .pages
+            .get(index as usize)
+            .with_context(|| format!("no page {index} in {}", src.path.display()))?;
+        let mut dict = copy_page_dict(&from, page, &mut pdf, &mut map)?;
+        let id = map[&page];
+        for (k, v) in loaded.inherited.get(&page).into_iter().flatten() {
+            if !dict.has(k) {
+                let v = remap(&from, v, &mut pdf, &mut map)?;
+                dict.set(k.clone(), v);
+            }
+        }
+        strip_sheaf_annots(&pdf, &mut dict);
+        dict.set(
+            "CropBox",
+            crop.iter().map(|&v| Object::Real(v)).collect::<Vec<_>>(),
+        );
+        dict.set("Parent", pages_id);
+        dict.set("Type", Object::Name(b"Page".to_vec()));
+        pdf.objects.insert(id, Object::Dictionary(dict));
+        kids.push(id.into());
+    }
+    let count = kids.len() as i64;
+    pdf.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => kids, "Count" => count }),
+    );
+    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    pdf.trailer.set("Root", catalog);
+    let mut out = Vec::new();
+    pdf.save_to(&mut out)?;
+    Ok(out)
+}
+
 /// Which strategy a save used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Strategy {
@@ -793,23 +839,15 @@ pub fn validate(model: &Snapshot) -> Result<()> {
 
 /// Page geometry from a (flattened) page dictionary and its original rotation.
 pub(crate) fn geom_of(dict: &Dictionary, rotate: i32) -> PageGeom {
-    let media = dict
-        .get(b"MediaBox")
-        .ok()
-        .and_then(|o| o.as_array().ok())
-        .filter(|a| a.len() == 4)
-        .map(|a| {
-            let v: Vec<f32> = a.iter().map(|o| o.as_float().unwrap_or(0.0)).collect();
-            [
-                v[0].min(v[2]),
-                v[1].min(v[3]),
-                v[0].max(v[2]),
-                v[1].max(v[3]),
-            ]
-        })
-        .unwrap_or([0.0, 0.0, 612.0, 792.0]);
+    let boxed = |key: &[u8]| {
+        dict.get(key)
+            .ok()
+            .and_then(|o| o.as_array().ok())
+            .and_then(|a| crate::annot::box_of(a))
+    };
+    let media = boxed(b"MediaBox").unwrap_or([0.0, 0.0, 612.0, 792.0]);
     PageGeom {
-        media,
+        media: crate::annot::visible_box(media, boxed(b"CropBox")),
         rotate: rotate.rem_euclid(360),
     }
 }
@@ -963,7 +1001,7 @@ pub(crate) fn link_connectors(
 mod tests {
     use super::*;
     use crate::history::FixedCount;
-    use crate::model::{Document, Edit, FlatOutlineItem, SourceInfo};
+    use crate::model::{Document, Edit, FlatOutlineItem};
     use lopdf::content::{Content, Operation};
     use sheaf_core::{PageSize, Rotation};
 
@@ -2137,6 +2175,25 @@ mod tests {
 
     /// The print file has just the chosen pages, no bookmarks, and its marks
     /// drawn in or left out.
+    /// Displayed positions start at the CropBox's corner, as viewers draw.
+    #[test]
+    fn geometry_follows_the_crop_box() {
+        let d = dictionary! {
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "CropBox" => vec![100.into(), 100.into(), 400.into(), 500.into()],
+        };
+        let g = geom_of(&d, 0);
+        assert_eq!(g.media, [100.0, 100.0, 400.0, 500.0]);
+        let u = g.to_user(crate::annot::Pt { x: 10.0, y: 10.0 });
+        assert_eq!((u.x, u.y), (110.0, 490.0));
+        // A crop outside the media box is ignored.
+        let d = dictionary! {
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "CropBox" => vec![700.into(), 700.into(), 800.into(), 900.into()],
+        };
+        assert_eq!(geom_of(&d, 0).media, [0.0, 0.0, 612.0, 792.0]);
+    }
+
     #[test]
     fn print_pdf_flattens_or_drops_markup() {
         use crate::annot::{AnnotKind, Box2};

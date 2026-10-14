@@ -322,10 +322,12 @@ pub mod pdfium {
                 }
             }
 
-            /// The page's MediaBox and `/Rotate`, for converting positions.
+            /// The page's visible box (CropBox, else MediaBox) and `/Rotate`,
+            /// for converting positions.
             fn frame_of(doc: &PdfDocument<'_>, index: u32) -> Option<sheaf_core::PageFrame> {
                 let page = doc.pages().get(index as i32).ok()?;
-                let b = page.boundaries().media().ok()?.bounds;
+                let bounds = page.boundaries();
+                let b = bounds.crop().or_else(|_| bounds.media()).ok()?.bounds;
                 let rotate = match page.rotation().ok()? {
                     PdfPageRenderRotation::None => 0,
                     PdfPageRenderRotation::Degrees90 => 90,

@@ -40,6 +40,7 @@ const FILES: &[(&str, &[u8])] = icons![
     "connector",
     "cover-page",
     "create-from-scans",
+    "crop-pages",
     "delete-pages",
     "duplicate-pages",
     "ellipse",

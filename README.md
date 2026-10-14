@@ -187,7 +187,7 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 | Insert blank page / from image | ✅ Document > Insert Pages > Blank Pages… (size of the current page or Letter/A4/Legal, how many, where) and From Images… (fitted to a page size or at their own) |
 | Replace pages | ✅ Document > Replace Pages…: pages of this document with a run of another PDF's; bookmarks and comments on them stay |
 | Insert from scanner | 📋 M5 |
-| Crop pages | 📋 |
+| Crop pages | ✅ Document > Crop Pages…: margins (in, mm or pt, as the page is shown) or trim white margins, on the current, selected, all or a range of pages; marks and OCR text stay on their content; saved as `/CropBox` |
 | Page labels (roman numerals, prefixes) | 📋 |
 | Headers / footers / Bates numbering | 📋 |
 | Watermarks / backgrounds | 📋 |

@@ -281,6 +281,11 @@ pub fn info(id: &str) -> Option<Info> {
                 "add pages",
             ],
         ),
+        "workspace::CropPages" => (
+            "crop-pages",
+            "Crop pages by margins, or trim them to their content. What's cropped is hidden, not deleted.",
+            &["trim", "margins", "cropbox", "cut"],
+        ),
         "workspace::ReplacePages" => (
             "replace-pages",
             "Replace pages with pages from another PDF, keeping their bookmarks and comments.",
