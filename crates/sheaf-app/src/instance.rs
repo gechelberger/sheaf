@@ -17,7 +17,8 @@ const WAIT: Duration = Duration::from_secs(3);
 
 static OWNS_STATE: AtomicBool = AtomicBool::new(true);
 
-/// Whether this process may write sheaf's state (settings, recent files).
+/// Whether this process may write sheaf's state (`state.json`, recent
+/// files).
 /// Only the owner does; a process running alone beside it writes nothing.
 pub fn owns_state() -> bool {
     OWNS_STATE.load(Ordering::Relaxed)
@@ -39,7 +40,7 @@ pub struct Launch {
 /// scratch config (tests, scripts) gets an instance of its own.
 fn runtime_dir() -> Option<PathBuf> {
     if std::env::var_os("SHEAF_CONFIG_DIR").is_some() {
-        return Some(crate::settings::config_dir().join("run"));
+        return Some(sheaf_ops::dirs::config_dir().join("run"));
     }
     sheaf_instance::default_dir()
 }
@@ -86,12 +87,13 @@ impl Launch {
     }
 }
 
-/// Quit, first telling later launches to wait for the lock rather than
-/// hand files to a process on its way out.
+/// Quit: tell later launches to wait for the lock rather than hand files
+/// to a process on its way out, and write the state's last changes.
 pub fn quit(cx: &mut App) {
     if let Some(Instance(Some(owner))) = cx.try_global::<Instance>() {
         owner.stop();
     }
+    crate::state::flush(cx);
     cx.quit();
 }
 

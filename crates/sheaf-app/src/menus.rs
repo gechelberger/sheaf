@@ -150,6 +150,8 @@ fn builtin_menus() -> Vec<(&'static str, Vec<Item>)> {
                 sep(),
                 item("&Find…", Find),
                 item("&Pattern Search…", ShowPatterns),
+                sep(),
+                item("Open Se&ttings File", OpenSettingsFile),
             ],
         ),
         menu(

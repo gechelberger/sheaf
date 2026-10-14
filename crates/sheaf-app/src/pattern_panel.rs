@@ -33,7 +33,6 @@ pub struct PresetEdit {
 }
 
 pub struct PatternSearch {
-    pub presets: Vec<Preset>,
     /// Right-click menu on a preset chip: (index, where).
     pub preset_menu: Option<(usize, Point<Pixels>)>,
     pub editing: Option<PresetEdit>,
@@ -76,7 +75,6 @@ impl DocView {
             TextInputEvent::Cancel => this.pending_focus = true,
         });
         self.pattern = Some(PatternSearch {
-            presets: patterns::load(),
             preset_menu: None,
             editing: None,
             preset_error: None,
@@ -207,7 +205,7 @@ impl DocView {
         let ps = self.pattern.as_mut().unwrap();
         ps.preset_menu = None;
         ps.preset_error = None;
-        let existing = index.and_then(|i| ps.presets.get(i).cloned());
+        let existing = index.and_then(|i| patterns::list(cx).get(i).cloned());
         if let Some(p) = &existing {
             let input = ps.input.clone();
             input.update(cx, |i, cx| i.set_text(p.regex.clone(), cx));
@@ -257,14 +255,15 @@ impl DocView {
             return;
         }
         let preset = Preset { name, regex };
-        match edit.index {
-            Some(i) if i < ps.presets.len() => ps.presets[i] = preset,
-            _ => ps.presets.push(preset),
-        }
+        let index = edit.index;
         ps.editing = None;
-        ps.preset_error = patterns::save(&ps.presets)
-            .err()
-            .map(|e| format!("Couldn't save presets: {e:#}"));
+        let saved = patterns::update(cx, |list| match index {
+            Some(i) if i < list.len() => list[i] = preset,
+            _ => list.push(preset),
+        });
+        if let Some(ps) = &mut self.pattern {
+            ps.preset_error = saved.err().map(|e| format!("Couldn't save presets: {e:#}"));
+        }
         self.pending_focus = true;
         cx.notify();
     }
@@ -272,11 +271,13 @@ impl DocView {
     fn delete_preset(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(ps) = &mut self.pattern else { return };
         ps.preset_menu = None;
-        if index < ps.presets.len() {
-            ps.presets.remove(index);
-            ps.preset_error = patterns::save(&ps.presets)
-                .err()
-                .map(|e| format!("Couldn't save presets: {e:#}"));
+        let saved = patterns::update(cx, |list| {
+            if index < list.len() {
+                list.remove(index);
+            }
+        });
+        if let Some(ps) = &mut self.pattern {
+            ps.preset_error = saved.err().map(|e| format!("Couldn't save presets: {e:#}"));
         }
         cx.notify();
     }
@@ -286,14 +287,16 @@ impl DocView {
     fn restore_default_presets(&mut self, cx: &mut Context<Self>) {
         let Some(ps) = &mut self.pattern else { return };
         ps.preset_menu = None;
-        for d in patterns::defaults() {
-            if !ps.presets.iter().any(|p| p.name == d.name) {
-                ps.presets.push(d);
+        let saved = patterns::update(cx, |list| {
+            for d in patterns::defaults() {
+                if !list.iter().any(|p| p.name == d.name) {
+                    list.push(d);
+                }
             }
+        });
+        if let Some(ps) = &mut self.pattern {
+            ps.preset_error = saved.err().map(|e| format!("Couldn't save presets: {e:#}"));
         }
-        ps.preset_error = patterns::save(&ps.presets)
-            .err()
-            .map(|e| format!("Couldn't save presets: {e:#}"));
         cx.notify();
     }
 
@@ -344,11 +347,11 @@ impl DocView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         self.ensure_pattern(cx);
+        let presets = patterns::list(cx);
         let ps = self.pattern.as_ref().unwrap();
         let input = ps.input.clone();
 
-        let mut chips: Vec<AnyElement> = ps
-            .presets
+        let mut chips: Vec<AnyElement> = presets
             .iter()
             .enumerate()
             .map(|(i, p)| {

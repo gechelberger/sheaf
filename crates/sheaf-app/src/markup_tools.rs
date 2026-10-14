@@ -339,7 +339,7 @@ impl DocView {
                     x: p.x - 10.0,
                     y: p.y - 10.0,
                 };
-                let a = self.new_annot(AnnotKind::Note { pos }, color);
+                let a = self.new_annot(AnnotKind::Note { pos }, color, cx);
                 self.add_annot(page_id, a, "Note", cx);
                 self.start_annot_editor(page_id, window, cx);
             }
@@ -356,6 +356,7 @@ impl DocView {
                         glyph,
                     },
                     color,
+                    cx,
                 );
                 self.add_annot(page_id, a, "Tickmark", cx);
             }
@@ -383,6 +384,7 @@ impl DocView {
                                     partner: None,
                                 },
                                 color,
+                                cx,
                             )
                         };
                         let a = mk(first.rect, first.label.clone());
@@ -509,6 +511,7 @@ impl DocView {
                         size: 12.0,
                     },
                     color,
+                    cx,
                 );
                 self.add_annot(page_id, a, "Text", cx);
                 self.start_annot_editor(page_id, window, cx);
@@ -522,7 +525,7 @@ impl DocView {
                 } else {
                     AnnotKind::Ellipse { rect }
                 };
-                let a = self.new_annot(kind, color);
+                let a = self.new_annot(kind, color, cx);
                 self.add_annot(page_id, a, tool.label(), cx);
             }
             Tool::Line | Tool::Arrow => {
@@ -536,6 +539,7 @@ impl DocView {
                         arrow: tool == Tool::Arrow,
                     },
                     color,
+                    cx,
                 );
                 self.add_annot(page_id, a, tool.label(), cx);
             }
@@ -548,6 +552,7 @@ impl DocView {
                         paths: vec![drag.path],
                     },
                     color,
+                    cx,
                 );
                 an.stroke = 2.0;
                 self.add_annot(page_id, an, "Pencil", cx);
@@ -600,7 +605,7 @@ impl DocView {
                         })
                         .collect()
                 };
-                let mut a = view.new_annot(AnnotKind::Highlight { rects }, color);
+                let mut a = view.new_annot(AnnotKind::Highlight { rects }, color, cx);
                 a.opacity = 0.6;
                 view.add_annot(page_id, a, "Highlight", cx);
             })

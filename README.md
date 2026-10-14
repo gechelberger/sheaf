@@ -483,18 +483,30 @@ Notes:
 
 ## Configuration
 
-sheaf keeps its files in the platform config directory: `~/.config/sheaf`
-on Linux, `%APPDATA%\sheaf` on Windows, `~/Library/Application Support/sheaf`
-on macOS (`SHEAF_CONFIG_DIR` overrides).
+sheaf keeps what you choose in the platform config directory:
+`~/.config/sheaf` on Linux, `%APPDATA%\sheaf` on Windows (which roams with
+your profile), `~/Library/Application Support/sheaf` on macOS. What it
+remembers for itself goes in a local state directory: `~/.local/state/sheaf`,
+`%LOCALAPPDATA%\sheaf\state`, `~/Library/Application Support/sheaf/state`.
+`SHEAF_CONFIG_DIR` overrides both (state goes in its `state/`).
 
-- `settings.json` — written by the app: dock layout (which panels sit where,
-  tab order, sizes, open state), window placement, and the OCR options under
-  `"ocr"`: `engine` (`"tesseract"` or `"oar"`), `dpi` (150–600, default
-  300), `skip_pages_with_text`, `tesseract.lang` (e.g. `"eng+deu"`, each
-  needing a `.traineddata` file), `tesseract.tessdata_dir` and
-  `oar.{det,rec,dict,textline_ori,doc_ori}` to point at your own data or
-  models, `oar.model_set` (`"en"` or `"multi"`), and
-  `oar.use_doc_orientation`. The Recognize Text dialog edits the common ones.
+- `settings.toml` — your preferences, edited by hand; there's no settings
+  view yet. Edit > Open Settings File opens it, writing one with every
+  setting explained if there isn't one. sheaf only reads it, again whenever a
+  window comes forward; a mistake shows in a banner with its line, and only
+  that setting falls back to its default.
+  - `[identity]`: `name` (the author of your comments and marks; your user
+    name otherwise) and `initials`.
+  - `[ocr]`: what the Recognize Text dialog doesn't choose:
+    `tessdata_dir` for your own Tesseract data, `det`, `rec`, `dict`,
+    `textline_ori` and `doc_ori` for your own PaddleOCR models, `psm`, and
+    `use_doc_orientation`.
+- `state.json` (state directory) — written by the app: window placement,
+  dock layout (which panels sit where, tab order, sizes, open state), and
+  each dialog's last choices, among them the OCR engine, `dpi`, language and
+  scope. Safe to delete; a copy that doesn't parse is set aside as
+  `state.json.bad`. Only the sheaf that owns the instance writes it.
+- `recent.json` (state directory) — File > Open Recent.
 - `patterns.json` — the Patterns panel's presets, seeded from the built-ins on
   first run. Edit, delete, or add them from the panel (right-click a chip;
   "+ Save…" stores the current pattern) or by hand.

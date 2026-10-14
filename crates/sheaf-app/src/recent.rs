@@ -1,7 +1,7 @@
 //! File > Open Recent: the last ten documents opened or saved, kept in
-//! `recent.json` beside `settings.json`. Every window shares one list, and
-//! each change re-reads the file first so two sheaf processes don't drop
-//! each other's entries.
+//! `recent.json` in the state folder (`sheaf_ops::dirs`). Every window
+//! shares one list, and each change re-reads the file first. Only the
+//! process that owns the instance writes it.
 
 use std::path::{Path, PathBuf};
 
@@ -34,7 +34,23 @@ pub struct Recent {
 impl Global for Recent {}
 
 fn file() -> PathBuf {
-    crate::settings::config_dir().join("recent.json")
+    sheaf_ops::dirs::state_dir().join("recent.json")
+}
+
+/// Before M9 the list lived in the config folder; move it once.
+fn migrate() {
+    let (old, new) = (sheaf_ops::dirs::config_dir().join("recent.json"), file());
+    if !crate::instance::owns_state() || new.exists() || !old.exists() {
+        return;
+    }
+    let moved = new
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| std::fs::copy(&old, &new))
+        .and_then(|_| std::fs::remove_file(&old));
+    if let Err(e) = moved {
+        log::warn!("moving {} to {}: {e}", old.display(), new.display());
+    }
 }
 
 fn read() -> Vec<PathBuf> {
@@ -80,6 +96,7 @@ fn push_front(list: &mut Vec<PathBuf>, path: PathBuf) {
 /// Load the list and put it in the File menu. Call once at startup, after
 /// the built-in menus are registered.
 pub fn init(cx: &mut App) {
+    migrate();
     cx.set_global(Recent { paths: read() });
     sync_menu(cx);
 }

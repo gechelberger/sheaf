@@ -6475,6 +6475,7 @@ dependencies = [
  "sheaf-render",
  "sheaf-ui",
  "smallvec",
+ "tempfile",
  "unicode-segmentation",
  "zip 9.0.2",
 ]
@@ -6594,6 +6595,7 @@ dependencies = [
  "sheaf-ocr",
  "sheaf-progress",
  "sheaf-render",
+ "toml 0.9.12+spec-1.1.0",
 ]
 
 [[package]]

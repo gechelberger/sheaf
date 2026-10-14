@@ -65,7 +65,7 @@ impl Global for PluginHost {}
 
 /// Where plugins are installed.
 pub fn dir() -> PathBuf {
-    crate::settings::config_dir().join("plugins")
+    sheaf_ops::dirs::config_dir().join("plugins")
 }
 
 /// Where the plugins that ship with sheaf are: `SHEAF_BUNDLED_PLUGINS` if set, else
@@ -185,7 +185,7 @@ fn copy_tree(from: &Path, to: &Path) -> Result<()> {
 }
 
 /// `<config>/plugins.json`: which plugins are off and what each may reach.
-/// Its own file so windows saving `settings.json` can't clobber it.
+/// Its own file, apart from the state sheaf remembers for itself.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PluginState {
@@ -238,7 +238,7 @@ fn is_empty(p: &Permissions) -> bool {
 
 impl PluginState {
     fn path() -> PathBuf {
-        crate::settings::config_dir().join("plugins.json")
+        sheaf_ops::dirs::config_dir().join("plugins.json")
     }
 
     pub fn load() -> Self {
@@ -278,7 +278,7 @@ impl PluginState {
 
 /// Where a plugin's `storage` lives.
 fn data_dir(id: &str) -> PathBuf {
-    crate::settings::config_dir().join("plugin-data").join(id)
+    sheaf_ops::dirs::config_dir().join("plugin-data").join(id)
 }
 
 /// Install any new bundled plugins, then discover, register and start
@@ -895,8 +895,8 @@ fn to_box(r: sheaf_render::Rect) -> sheaf_doc::Box2 {
 }
 
 /// OCR for plugins: one page at a time through `sheaf_ocr::job`, with the
-/// user's engine and settings.
-struct EngineOcr(HashMap<SourceId, RenderHandle>);
+/// user's engine and options as they were when the plugin started.
+struct EngineOcr(HashMap<SourceId, RenderHandle>, sheaf_ocr::OcrConfig);
 
 impl sheaf_plugin::OcrSource for EngineOcr {
     fn recognize(
@@ -907,7 +907,7 @@ impl sheaf_plugin::OcrSource for EngineOcr {
         dpi: Option<u32>,
     ) -> Result<sheaf_doc::TextLayer> {
         use sheaf_ocr::{OcrEvent, OcrPage, OcrRequest, PageSource};
-        let mut config = crate::settings::Settings::load().ocr;
+        let mut config = self.1.clone();
         if let Some(l) = language {
             sheaf_ocr::set_language(config.engine, &mut config, &l);
         }
@@ -995,8 +995,11 @@ pub fn render_source(
     Arc::new(EngineRender(handles.clone()))
 }
 
-pub fn ocr_source(handles: &HashMap<SourceId, RenderHandle>) -> Arc<dyn sheaf_plugin::OcrSource> {
-    Arc::new(EngineOcr(handles.clone()))
+pub fn ocr_source(
+    handles: &HashMap<SourceId, RenderHandle>,
+    config: sheaf_ocr::OcrConfig,
+) -> Arc<dyn sheaf_plugin::OcrSource> {
+    Arc::new(EngineOcr(handles.clone(), config))
 }
 
 pub fn text_source(handles: &HashMap<SourceId, RenderHandle>) -> Arc<dyn TextSource> {
@@ -1044,7 +1047,7 @@ impl Ui for AppUi {
 
 /// Pattern presets for `patterns.presets`: the user's, then plugins'.
 fn presets(cx: &App) -> Vec<sheaf_plugin::Preset> {
-    let mut out: Vec<sheaf_plugin::Preset> = crate::patterns::load()
+    let mut out: Vec<sheaf_plugin::Preset> = crate::patterns::list(cx)
         .into_iter()
         .map(|p| sheaf_plugin::Preset {
             name: p.name,
@@ -1130,7 +1133,9 @@ pub fn run(
     let tracker = matches!(call, Call::Command { .. } | Call::PanelAction { .. })
         .then(sheaf_ops::Tracker::new);
     let ctx = CallContext {
-        doc: doc.as_ref().and_then(|d| d.read(cx).plugin_context()),
+        doc: doc
+            .as_ref()
+            .and_then(|d| d.read(cx).plugin_context(crate::prefs::ocr_config(cx))),
         ui: Some(Arc::new(AppUi(ui_tx))),
         presets: presets(cx),
         progress: tracker.clone(),

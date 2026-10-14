@@ -422,7 +422,7 @@ fn temp_path(name: &str) -> anyhow::Result<PathBuf> {
 }
 
 /// Hand a file to the desktop's default program for its type.
-fn open_with_system(path: &std::path::Path) -> anyhow::Result<()> {
+pub(crate) fn open_with_system(path: &std::path::Path) -> anyhow::Result<()> {
     let mut cmd = if cfg!(target_os = "windows") {
         let mut c = std::process::Command::new("explorer");
         c.arg(path);

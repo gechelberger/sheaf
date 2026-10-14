@@ -9,10 +9,12 @@ pub mod blank;
 pub mod combine;
 pub mod crop;
 pub mod derive;
+pub mod dirs;
 pub mod export;
 pub mod images;
 pub mod open;
 pub mod pages;
+pub mod prefs;
 pub mod scan;
 pub mod split;
 

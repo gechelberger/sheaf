@@ -1120,9 +1120,13 @@ impl DocView {
         cx.notify();
     }
 
-    /// What a plugin command sees of this document.
+    /// What a plugin command sees of this document; `ocr` is the OCR
+    /// choices it runs with.
     #[cfg(feature = "plugins")]
-    pub(crate) fn plugin_context(&self) -> Option<sheaf_plugin::DocContext> {
+    pub(crate) fn plugin_context(
+        &self,
+        ocr: sheaf_ocr::OcrConfig,
+    ) -> Option<sheaf_plugin::DocContext> {
         let State::Ready(doc) = &self.state else {
             return None;
         };
@@ -1140,7 +1144,7 @@ impl DocView {
             selection,
             current_page: doc.page_ref(doc.current_page()).map(|p| p.id),
             text: crate::plugins::text_source(&doc.handles),
-            ocr: Some(crate::plugins::ocr_source(&doc.handles)),
+            ocr: Some(crate::plugins::ocr_source(&doc.handles, ocr)),
             render: Some(crate::plugins::render_source(&doc.handles)),
         })
     }
@@ -1609,14 +1613,15 @@ impl DocView {
     }
 
     /// A new annotation with the document's defaults filled in.
-    pub(crate) fn new_annot(&self, kind: AnnotKind, color: [u8; 3]) -> Annot {
+    /// A new mark by whoever `settings.toml` names (the OS user otherwise).
+    pub(crate) fn new_annot(&self, kind: AnnotKind, color: [u8; 3], cx: &App) -> Annot {
         Annot {
             id: sheaf_doc::AnnotId(0),
             kind,
             color,
             opacity: 1.0,
             stroke: 1.5,
-            author: sheaf_doc::default_author(),
+            author: crate::prefs::get(cx).identity.name(),
             contents: String::new(),
             modified: sheaf_doc::pdf_date_now(),
         }
@@ -1650,6 +1655,7 @@ impl DocView {
                 }],
             },
             [255, 230, 0],
+            cx,
         );
         hl.opacity = 0.6;
         self.add_annot(p0, hl, "Highlight", cx);
@@ -1658,6 +1664,7 @@ impl DocView {
                 pos: Pt { x: 400.0, y: 60.0 },
             },
             [255, 200, 0],
+            cx,
         );
         note.contents = "A sticky note".into();
         self.add_annot(p0, note, "Note", cx);
@@ -1672,6 +1679,7 @@ impl DocView {
                 size: 12.0,
             },
             [200, 0, 0],
+            cx,
         );
         text.contents = "Free text written by sheaf, wrapped onto a second line.".into();
         self.add_annot(p0, text, "Text", cx);
@@ -1685,6 +1693,7 @@ impl DocView {
                 },
             },
             [0, 120, 255],
+            cx,
         );
         self.add_annot(p0, sq, "Square", cx);
         let tick = self.new_annot(
@@ -1698,6 +1707,7 @@ impl DocView {
                 glyph: "✓".into(),
             },
             [0, 150, 0],
+            cx,
         );
         self.add_annot(p0, tick, "Tickmark", cx);
         let tick2 = self.new_annot(
@@ -1711,6 +1721,7 @@ impl DocView {
                 glyph: "F".into(),
             },
             [200, 0, 0],
+            cx,
         );
         self.add_annot(p0, tick2, "Tickmark", cx);
         let arrow = self.new_annot(
@@ -1720,6 +1731,7 @@ impl DocView {
                 arrow: true,
             },
             [0, 120, 255],
+            cx,
         );
         self.add_annot(p0, arrow, "Arrow", cx);
         let mut ink = self.new_annot(
@@ -1734,6 +1746,7 @@ impl DocView {
                 ],
             },
             [160, 60, 220],
+            cx,
         );
         ink.stroke = 2.5;
         self.add_annot(p0, ink, "Pencil", cx);
@@ -1749,6 +1762,7 @@ impl DocView {
                     partner: None,
                 },
                 [220, 40, 40],
+                cx,
             )
         };
         let a = mk(Box2 {
@@ -1782,6 +1796,7 @@ impl DocView {
                 size: 10.0,
             },
             [20, 20, 20],
+            cx,
         );
         tape.contents = "1,234.50 +\n250.00 +\n84.50 -\n1,400.00 T".into();
         self.add_annot(p0, tape, "Place tape", cx);
@@ -1812,6 +1827,7 @@ impl DocView {
                 pos: Pt { x: 400.0, y: 60.0 },
             },
             [255, 200, 0],
+            cx,
         );
         note.contents = "should not survive".into();
         self.add_annot(p0, note, "Note", cx);
@@ -1826,6 +1842,7 @@ impl DocView {
                 glyph: "✓".into(),
             },
             [0, 150, 0],
+            cx,
         );
         self.add_annot(p0, tick, "Tickmark", cx);
         self.export_clean_to(path, cx);
@@ -1863,6 +1880,7 @@ impl DocView {
                 size: 12.0,
             },
             [200, 0, 0],
+            cx,
         );
         text.contents = "Flattened free text".into();
         self.add_annot(p0, text, "Text", cx);
@@ -1876,6 +1894,7 @@ impl DocView {
                 },
             },
             [0, 120, 255],
+            cx,
         );
         self.add_annot(p0, sq, "Square", cx);
         let tick = self.new_annot(
@@ -1889,6 +1908,7 @@ impl DocView {
                 glyph: "✓".into(),
             },
             [0, 150, 0],
+            cx,
         );
         self.add_annot(p0, tick, "Tickmark", cx);
         self.export_flattened_to(path, cx);

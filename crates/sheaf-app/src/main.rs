@@ -47,6 +47,7 @@ mod plugin_manager;
 mod plugin_panel;
 #[cfg(feature = "plugins")]
 mod plugins;
+mod prefs;
 mod presentation;
 mod print_dialog;
 mod properties_dialog;
@@ -55,8 +56,8 @@ mod region;
 mod rulers;
 mod scan_dialog;
 mod script;
-mod settings;
 mod split_dialog;
+mod state;
 mod toolbar;
 mod toolbar_dialog;
 mod watermark_dialog;
@@ -197,7 +198,8 @@ actions!(
         ColorBookmarksByLevel,
         FindBlankPages,
         ToggleToolbar,
-        CustomizeToolbar
+        CustomizeToolbar,
+        OpenSettingsFile
     ]
 );
 actions!(
@@ -596,6 +598,9 @@ fn main() {
             KeyBinding::new("f10", ActivateMenuBar, ws),
         ]);
         sheaf_ui::bind_keys(cx);
+        state::init(cx);
+        prefs::init(cx);
+        patterns::init(cx);
         cx.set_global(commands::CommandRegistry::builtin());
         recent::init(cx);
         cx.set_global(contrib::Contributions::load());
@@ -624,7 +629,6 @@ fn main() {
                 start_panel: cli.panel.take(),
                 pattern: cli.pattern.take(),
                 launched,
-                settings: settings::Settings::load(),
                 password: cli.password.take(),
                 selftest_extract: cli.selftest_extract,
                 selftest_flatten: cli.selftest_flatten,
@@ -662,8 +666,7 @@ fn open_workspace(
     menu: Option<char>,
     cx: &mut App,
 ) -> anyhow::Result<gpui::WindowHandle<Workspace>> {
-    let window_bounds = launch
-        .settings
+    let window_bounds = state::get(cx)
         .window
         .as_ref()
         .and_then(|w| workspace::restore_window_bounds(w, cx))

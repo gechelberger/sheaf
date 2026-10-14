@@ -29,6 +29,11 @@ pub fn info(id: &str) -> Option<Info> {
             "Forget the files listed under Open Recent.",
             &["history", "mru"],
         ),
+        "workspace::OpenSettingsFile" => (
+            "settings",
+            "Open settings.toml, where your name, initials and other preferences are set, in a text editor. If there's no file yet, sheaf writes one with every setting explained.",
+            &["preferences", "options", "identity", "configure", "toml"],
+        ),
         "docview::Save" => (
             "save",
             "Save changes to this file. Annotations are added without rewriting the original when possible.",

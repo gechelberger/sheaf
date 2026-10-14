@@ -306,6 +306,7 @@ impl DocView {
                 size,
             },
             [20, 20, 20],
+            cx,
         );
         a.contents = contents;
         self.add_annot(page, a, "Place tape", cx);

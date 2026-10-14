@@ -97,6 +97,7 @@ const FILES: &[(&str, &[u8])] = icons![
     "save-as",
     "save",
     "select-all-pages",
+    "settings",
     "select",
     "single-page-continuous",
     "single-page",

@@ -1,4 +1,4 @@
-//! User key bindings from `keymap.json` next to `settings.json`, in Zed's
+//! User key bindings from `keymap.json` in the config folder, in Zed's
 //! format: a list of `{ "context": "...", "bindings": { "keys": "action" } }`.
 //! Bindings load after the defaults, so they win. An action is its
 //! registered name (shown in the command palette), e.g. `tools::ToolTick`;
@@ -31,7 +31,7 @@ struct Entry {
 }
 
 pub fn path() -> PathBuf {
-    crate::settings::config_dir().join("keymap.json")
+    sheaf_ops::dirs::config_dir().join("keymap.json")
 }
 
 /// Load and apply the user keymap. Returns one message per entry that

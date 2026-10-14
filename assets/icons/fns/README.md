@@ -87,6 +87,7 @@ an image element does not inherit the parent element's color.
 | [print](print/icon.svg) | Print | `Print` |
 | [properties](properties/icon.svg) | Document properties | `DocumentProperties` |
 | [clear-recent](clear-recent/icon.svg) | Clear recent files | `ClearRecent` |
+| [settings](settings/icon.svg) | Open settings file | `OpenSettingsFile` |
 | [pattern-search](pattern-search/icon.svg) | Pattern search | `ShowPatterns` |
 | [single-page](single-page/icon.svg) | Single page | `SinglePage` |
 | [single-page-continuous](single-page-continuous/icon.svg) | Single page continuous | `SinglePageContinuous` |

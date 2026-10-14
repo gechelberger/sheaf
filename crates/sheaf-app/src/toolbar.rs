@@ -310,7 +310,7 @@ impl Toolbars {
 }
 
 pub fn path() -> PathBuf {
-    crate::settings::config_dir().join("toolbar.json")
+    sheaf_ops::dirs::config_dir().join("toolbar.json")
 }
 
 /// Load `toolbar.json` into the global, reporting problems the way
@@ -334,13 +334,29 @@ pub fn init(cx: &mut App) {
         }
     }
     cx.set_global(bars);
+    cx.set_global(Loaded(crate::prefs::stamp(&path())));
 }
 
+/// `toolbar.json`'s stamp when last read or written.
+struct Loaded(Option<crate::prefs::Stamp>);
+impl Global for Loaded {}
+
 /// Save the toolbars after a change, logging a failure.
-pub fn save(cx: &App) {
+pub fn save(cx: &mut App) {
     if let Err(e) = cx.global::<Toolbars>().save() {
         log::warn!("saving toolbar.json: {e:#}");
     }
+    cx.set_global(Loaded(crate::prefs::stamp(&path())));
+}
+
+/// Re-read `toolbar.json` if it was changed outside sheaf.
+pub fn reload_if_changed(cx: &mut App) {
+    let now = crate::prefs::stamp(&path());
+    if cx.try_global::<Loaded>().is_some_and(|l| l.0 == now) {
+        return;
+    }
+    init(cx);
+    cx.refresh_windows();
 }
 
 pub fn is_widget(id: &str) -> bool {
