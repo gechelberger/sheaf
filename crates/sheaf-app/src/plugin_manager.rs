@@ -376,12 +376,27 @@ impl Render for PluginManager {
                             .flex()
                             .items_baseline()
                             .gap_2()
-                            .child(div().text_sm().text_color(rgb(0xe8e8e8)).child("Plugins"))
                             .child(
                                 div()
+                                    .flex_shrink_0()
+                                    .text_sm()
+                                    .text_color(rgb(0xe8e8e8))
+                                    .child("Plugins"),
+                            )
+                            .child(
+                                div()
+                                    .id("plugins-dir")
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
                                     .text_xs()
                                     .text_color(rgb(0x7a7a7a))
-                                    .child(dir.display().to_string()),
+                                    .tooltip(crate::tooltip::Tooltip::text(
+                                        dir.display().to_string(),
+                                    ))
+                                    .child(short_path(&dir)),
                             ),
                     )
                     .children(problems.into_iter().map(|p| {
@@ -449,5 +464,16 @@ impl Render for PluginManager {
                             )),
                     ),
             )
+    }
+}
+
+/// `path` with the home folder written as `~`.
+fn short_path(path: &std::path::Path) -> String {
+    match std::env::var_os("HOME").map(PathBuf::from) {
+        Some(home) if !home.as_os_str().is_empty() => match path.strip_prefix(&home) {
+            Ok(rest) => format!("~/{}", rest.display()),
+            Err(_) => path.display().to_string(),
+        },
+        _ => path.display().to_string(),
     }
 }
