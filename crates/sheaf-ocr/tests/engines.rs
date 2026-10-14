@@ -198,10 +198,14 @@ fn oar_orientation_undoes_a_turn() {
 }
 
 #[test]
-#[ignore = "needs the UVDoc model (fetch-ocr-data.sh --uvdoc) and libpdfium"]
+#[ignore = "needs libpdfium; skips without the UVDoc model (fetch-ocr-data.sh --uvdoc)"]
 #[cfg(feature = "oar")]
 fn uvdoc_returns_a_page() {
-    assert!(sheaf_ocr::rectify::available());
+    // The model is opt-in (fetch-ocr-data.sh --uvdoc); CI doesn't fetch it.
+    if !sheaf_ocr::rectify::available() {
+        eprintln!("skipped: no UVDoc model");
+        return;
+    }
     let page = text_page();
     let flat = sheaf_ocr::rectify::unwarp(&page).expect("an image");
     // Same page, roughly the same size.
