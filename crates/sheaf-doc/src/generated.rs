@@ -26,14 +26,35 @@ pub fn cache_dir() -> PathBuf {
     base.unwrap_or_else(std::env::temp_dir).join("sheaf")
 }
 
-/// FNV-1a, 64 bits: a file name, not a security boundary.
-fn fnv(bytes: &[u8]) -> u64 {
+/// A file's name in the cache: its checksum and length. Files stored
+/// before sheaf used xxh3 are named by FNV-1a (16 hex digits); they keep
+/// those names, which marks saved since then refer to.
+fn name_of(bytes: &[u8]) -> String {
+    format!("{}-{}", sheaf_core::checksum_hex(bytes), bytes.len())
+}
+
+/// The name `bytes` had before xxh3 (FNV-1a, 64 bits), to recognize one.
+pub(crate) fn legacy_name_of(bytes: &[u8]) -> String {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in bytes {
         h ^= *b as u64;
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    h
+    format!("{h:016x}-{}", bytes.len())
+}
+
+/// Whether `stem` is a name the cache gives ([`name_of`], or
+/// [`legacy_name_of`]): hex, a dash, and digits. Marks carry these names
+/// from whatever file they're read from, so nothing else is taken for
+/// one; a name in a crafted file can't point outside the cache.
+pub fn is_stem(stem: &str) -> bool {
+    let Some((hash, len)) = stem.split_once('-') else {
+        return false;
+    };
+    matches!(hash.len(), 16 | 32)
+        && hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        && (1..=20).contains(&len.len())
+        && len.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// Write `pdf` to the cache (once) and return its path.
@@ -44,7 +65,7 @@ pub fn store(pdf: &[u8]) -> Result<PathBuf> {
 /// [`store`], into `dir`.
 fn store_in(dir: &std::path::Path, pdf: &[u8]) -> Result<PathBuf> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    let path = dir.join(format!("{:016x}-{}.pdf", fnv(pdf), pdf.len()));
+    let path = dir.join(format!("{}.pdf", name_of(pdf)));
     let same = |path: &PathBuf| std::fs::read(path).is_ok_and(|b| b == pdf);
     if !same(&path) {
         write_new(&path, pdf)?;
@@ -71,9 +92,10 @@ fn write_new(path: &PathBuf, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// The cache file named `stem` (what [`stem_of`] gives for a stored file).
-pub fn path_of(stem: &str) -> PathBuf {
-    cache_dir().join("generated").join(format!("{stem}.pdf"))
+/// The cache file named `stem` (what [`stem_of`] gives for a stored
+/// file); None if `stem` isn't a cache name ([`is_stem`]).
+pub fn path_of(stem: &str) -> Option<PathBuf> {
+    is_stem(stem).then(|| cache_dir().join("generated").join(format!("{stem}.pdf")))
 }
 
 /// A stored file's name without `.pdf`: how marks refer to one.
@@ -86,7 +108,7 @@ pub fn stem_of(path: &std::path::Path) -> String {
 /// Write `pdf` to the cache as `stem`, for a file recovered from a saved
 /// document whose original isn't on this machine.
 pub fn store_as(stem: &str, pdf: &[u8]) -> Result<PathBuf> {
-    let path = path_of(stem);
+    let path = path_of(stem).with_context(|| format!("{stem:?} isn't a cache name"))?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
@@ -99,7 +121,7 @@ pub fn store_as(stem: &str, pdf: &[u8]) -> Result<PathBuf> {
 pub fn store_blob(bytes: &[u8]) -> Result<String> {
     let dir = cache_dir().join("files");
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    let stem = format!("{:016x}-{}", fnv(bytes), bytes.len());
+    let stem = name_of(bytes);
     let path = dir.join(&stem);
     if !std::fs::read(&path).is_ok_and(|b| b == bytes) {
         write_new(&path, bytes)?;
@@ -107,9 +129,26 @@ pub fn store_blob(bytes: &[u8]) -> Result<String> {
     Ok(stem)
 }
 
+/// Write `bytes` to the cache as `stem`, for an attachment recovered from
+/// a saved document: under the name its mark has, as long as that's the
+/// name of these bytes (now or before xxh3). Anything else could put one
+/// file's bytes in another's place, for every document that has it.
+pub fn store_blob_as(stem: &str, bytes: &[u8]) -> Result<PathBuf> {
+    if stem != name_of(bytes) && stem != legacy_name_of(bytes) {
+        anyhow::bail!("the file embedded isn't the one {stem:?} names");
+    }
+    let path = blob_path(stem).with_context(|| format!("{stem:?} isn't a cache name"))?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    write_new(&path, bytes)?;
+    Ok(path)
+}
+
 /// Where the cache keeps the file named `stem` (see [`store_blob`]).
-pub fn blob_path(stem: &str) -> PathBuf {
-    cache_dir().join("files").join(stem)
+/// None if `stem` isn't a cache name ([`is_stem`]).
+pub fn blob_path(stem: &str) -> Option<PathBuf> {
+    is_stem(stem).then(|| cache_dir().join("files").join(stem))
 }
 
 /// One blank page of `width` × `height` points.
@@ -165,5 +204,34 @@ mod tests {
         let doc = lopdf::Document::load(&pb).unwrap();
         assert_eq!(doc.get_pages().len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_cache_names_are_paths() {
+        let bytes = b"notes";
+        assert!(is_stem(&name_of(bytes)));
+        assert!(is_stem(&legacy_name_of(bytes)));
+        assert_eq!(legacy_name_of(b""), "cbf29ce484222325-0");
+        for bad in [
+            "",
+            "../../.bashrc",
+            "/etc/passwd",
+            "0123456789abcdef-12/../x",
+            "0123456789ABCDEF-12",
+            "0123456789abcdef",
+            "0123456789abcdef-",
+            "0123456789abcde-12",
+            "C:\\x",
+        ] {
+            assert!(!is_stem(bad), "{bad:?}");
+            assert!(
+                path_of(bad).is_none() && blob_path(bad).is_none(),
+                "{bad:?}"
+            );
+            assert!(store_as(bad, b"%PDF").is_err(), "{bad:?}");
+        }
+        // A recovered file is kept only under its own name.
+        assert!(store_blob_as(&name_of(b"other"), bytes).is_err());
+        assert!(store_blob_as("../x", bytes).is_err());
     }
 }

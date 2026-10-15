@@ -216,7 +216,8 @@ impl DocView {
                 }
             }
         };
-        let a = self.new_annot(kind, self.tool_color, cx);
+        let color = crate::markup_tools::color_of(crate::markup_tools::Tool::Stamp, cx);
+        let a = self.new_annot(kind, color, cx);
         self.add_annot(page, a, "Stamp", cx);
         crate::state::update(cx, |s| {
             s.recent_stamps.retain(|r| *r != choice);

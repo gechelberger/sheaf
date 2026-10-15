@@ -103,7 +103,8 @@ pub fn attachments_in(pdf: &Pdf) -> Vec<Attachment> {
 /// The bytes of attachment `at` in the file at `path`.
 pub fn read_attachment(path: &Path, password: Option<&str>, at: &AttachmentRef) -> Result<Vec<u8>> {
     if let AttachmentRef::Cached(stem) = at {
-        let p = crate::generated::blob_path(stem);
+        let p = crate::generated::blob_path(stem)
+            .with_context(|| format!("{stem:?} isn't a cache name"))?;
         return std::fs::read(&p).with_context(|| format!("reading {}", p.display()));
     }
     let pdf = crate::file::load_pdf(path, password)?;
@@ -113,7 +114,8 @@ pub fn read_attachment(path: &Path, password: Option<&str>, at: &AttachmentRef) 
 /// The bytes of attachment `at` in a loaded file.
 pub fn attachment_bytes(pdf: &Pdf, at: &AttachmentRef) -> Result<Vec<u8>> {
     if let AttachmentRef::Cached(stem) = at {
-        let p = crate::generated::blob_path(stem);
+        let p = crate::generated::blob_path(stem)
+            .with_context(|| format!("{stem:?} isn't a cache name"))?;
         return std::fs::read(&p).with_context(|| format!("reading {}", p.display()));
     }
     let spec = match at {

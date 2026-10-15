@@ -86,7 +86,7 @@ impl DocView {
                 label: label.clone(),
                 partner: None,
             },
-            self.tool_color,
+            crate::markup_tools::color_of(Tool::Connector, cx),
             cx,
         );
         self.add_annot(page, a, &format!("Connector {label}"), cx);

@@ -177,13 +177,12 @@ pub fn removed_with_threads<'a>(
 /// every time it's read, so a reply made in sheaf can name it, and a save
 /// writes it in as its `/NM`.
 pub fn anon_name(dict: &lopdf::Dictionary) -> String {
-    // FNV-1a: stable across builds, unlike std's hasher.
-    let mut h: u64 = 0xcbf29ce484222325;
+    // The fields one after another, each ended by a byte no text has, and
+    // their checksum: stable across builds, unlike std's hasher.
+    let mut fields: Vec<u8> = Vec::new();
     let mut eat = |bytes: &[u8]| {
-        for b in bytes.iter().chain(&[0xff]) {
-            h ^= *b as u64;
-            h = h.wrapping_mul(0x100000001b3);
-        }
+        fields.extend_from_slice(bytes);
+        fields.push(0xff);
     };
     for key in [
         b"Subtype".as_slice(),
@@ -205,7 +204,7 @@ pub fn anon_name(dict: &lopdf::Dictionary) -> String {
             None => eat(b""),
         }
     }
-    format!("sheaf-anon:{h:016x}")
+    format!("sheaf-anon:{}", sheaf_core::checksum_hex(&fields))
 }
 
 /// What an annotation is called in threads: its `/NM`, else [`anon_name`].
@@ -436,7 +435,7 @@ pub fn recover_cached(pdf: &lopdf::Document) {
                 kind: crate::annot::AnnotKind::FileAttachment { file, .. },
                 ..
             }) = &mark
-                && !crate::generated::blob_path(file).exists()
+                && !crate::generated::blob_path(file).is_some_and(|p| p.exists())
             {
                 let bytes = dict
                     .get(b"FS")
@@ -455,7 +454,7 @@ pub fn recover_cached(pdf: &lopdf::Document) {
                         ),
                         _ => None,
                     });
-                match bytes.map(|b| crate::generated::store_blob(&b)) {
+                match bytes.map(|b| crate::generated::store_blob_as(file, &b)) {
                     Some(Ok(_)) => {}
                     Some(Err(e)) => log::warn!("recovering attachment {file}: {e:#}"),
                     None => log::warn!("attachment {file} has no embedded file"),
@@ -469,7 +468,7 @@ pub fn recover_cached(pdf: &lopdf::Document) {
             else {
                 continue;
             };
-            if crate::generated::path_of(&stamp).exists() {
+            if crate::generated::path_of(&stamp).is_some_and(|p| p.exists()) {
                 continue;
             }
             // /AP /N → its /Resources /XObject /SheafStamp.

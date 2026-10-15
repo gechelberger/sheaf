@@ -6505,6 +6505,7 @@ name = "sheaf-core"
 version = "0.1.0-alpha.1"
 dependencies = [
  "serde",
+ "twox-hash",
 ]
 
 [[package]]
@@ -7567,6 +7568,12 @@ checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
 dependencies = [
  "core_maths",
 ]
+
+[[package]]
+name = "twox-hash"
+version = "2.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2"
 
 [[package]]
 name = "typed-path"

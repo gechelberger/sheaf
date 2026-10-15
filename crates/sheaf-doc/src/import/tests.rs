@@ -312,7 +312,7 @@ fn a_stamp_keeps_its_appearance() {
     };
     assert_eq!(name, "Approved");
     assert_eq!(*rect, b(100.0, 152.0, 100.0, 40.0));
-    let page = Pdf::load(crate::generated::path_of(stamp)).unwrap();
+    let page = Pdf::load(crate::generated::path_of(stamp).unwrap()).unwrap();
     assert_eq!(page.get_pages().len(), 1);
     // With no appearance, its name in a frame.
     let mut bare = dict.clone();

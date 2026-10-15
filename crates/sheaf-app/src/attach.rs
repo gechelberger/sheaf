@@ -59,7 +59,11 @@ impl DocView {
                             name: name.clone(),
                             size,
                         };
-                        let a = v.new_annot(kind, v.tool_color, cx);
+                        let color = crate::markup_tools::color_of(
+                            crate::markup_tools::Tool::AttachFile,
+                            cx,
+                        );
+                        let a = v.new_annot(kind, color, cx);
                         v.add_annot(page, a, &format!("Attach {name}"), cx);
                     }
                     Err(e) => v.set_notice(format!("Couldn't attach {name}: {e:#}"), cx),

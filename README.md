@@ -222,7 +222,7 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 ### Markup & annotation
 | Feature | Status |
 |---|---|
-| Sticky notes, highlight, underline, strikethrough | ✅ also squiggly. Drag across text (or select it, then press the tool's key: U highlights); Shift+U cycles highlight, underline, strikethrough, squiggly |
+| Sticky notes, highlight, underline, strikethrough | ✅ also squiggly. Drag across text (or select it, then press the tool's key: U highlights); Shift+U cycles highlight, underline, strikethrough, squiggly. Each tool keeps its own color, as Acrobat's do: yellow notes and highlights, red strikethroughs, drawings and tickmarks, blue text edits, until you pick another for it; with the Select tool, the swatches recolor the selected marks |
 | Text edits: replace or insert text (Acrobat's) | ✅ Text Edits (E): drag across text and type the replacement, or click between characters and type what to insert. Written as Acrobat writes them (a Caret, with the StrikeOut grouped under it); the Comments panel reads Replace “x” with “y” |
 | Free text, shapes (rect, ellipse, line, arrow, polygon) | ✅ also polyline, cloud (Q: a cloudy polygon; any rectangle, ellipse or polygon can be made cloudy) and callout (a text box with a leader; Shift+X from the text box). Polygons: click each corner, double-click or Enter finishes, Backspace takes one off. Shift+D cycles the drawing tools. Every handle drags: corners, vertices, a callout's box, knee and point |
 | Ink / freehand | ✅ |
@@ -524,7 +524,8 @@ remembers for itself goes in a local state directory: `~/.local/state/sheaf`,
 - `state.json` (state directory) — written by the app: window placement,
   dock layout (which panels sit where, tab order, sizes, open state), and
   each dialog's last choices, among them the OCR engine, `dpi`, language and
-  scope; recent stamps; the comment CSV's columns; the last measuring scale.
+  scope; recent stamps; the comment CSV's columns; the last measuring scale;
+  each markup tool's color (`tool_colors`, by tool: `"strikeout": [0, 0, 0]`).
   Safe to delete; a copy that doesn't parse is set aside as
   `state.json.bad`. Only the sheaf that owns the instance writes it.
 - `recent.json` (state directory) — File > Open Recent.

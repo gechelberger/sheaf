@@ -161,7 +161,7 @@ impl DocView {
                 points: vec![a, b],
                 scale: Box::new(self.measure_scale()),
             },
-            self.tool_color,
+            crate::markup_tools::color_of(Tool::Distance, cx),
             cx,
         );
         self.add_annot(page, a, "Distance", cx);

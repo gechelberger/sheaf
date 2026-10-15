@@ -613,7 +613,6 @@ pub struct DocView {
     /// When the edits since the last sidecar write began.
     autosave_since: Option<Instant>,
     pub(crate) tool: Tool,
-    pub(crate) tool_color: [u8; 3],
     pub(crate) tick_glyph: String,
     /// The Select tool is over text (the pointer is an I-beam).
     pub(crate) text_hover: bool,
@@ -720,7 +719,6 @@ impl DocView {
             autosave: None,
             autosave_since: None,
             tool: Tool::Select,
-            tool_color: [255, 230, 0],
             tick_glyph: "✓".into(),
             text_hover: false,
             last_hover: None,
@@ -4243,7 +4241,7 @@ impl DocView {
             pattern: self.pattern.as_ref().filter(|p| !p.hits.is_empty()),
             region: self.region.as_ref(),
             tool: self.tool,
-            tool_color: self.tool_color,
+            tool_color: crate::markup_tools::color_of(self.tool, cx),
             grid: self.grid && !full,
             guides: if full { &[] } else { &self.guides },
         };

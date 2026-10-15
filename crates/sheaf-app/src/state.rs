@@ -46,6 +46,9 @@ pub struct State {
     pub comment_columns: Vec<String>,
     /// The scale measurements were last made at, for the next document.
     pub measure_scale: Option<sheaf_doc::measure::Scale>,
+    /// The color picked for each markup tool, by `Tool::id`; one not here
+    /// draws in its default.
+    pub tool_colors: std::collections::BTreeMap<String, [u8; 3]>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -374,6 +377,7 @@ mod tests {
             set_status: Some(crate::set_status::StatusSpec::default()),
             comment_columns: vec!["Number".into(), "Text".into()],
             measure_scale: Some(sheaf_doc::measure::Scale::calibrated(180.0, 25.0, "ft", 1)),
+            tool_colors: [("strikeout".to_string(), [0, 0, 0])].into(),
         }
     }
 

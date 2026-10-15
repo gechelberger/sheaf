@@ -3,6 +3,29 @@
 //! Everything here is plain data with no engine dependency, so `sheaf-doc`,
 //! `sheaf-render`, and `sheaf-ui` can all speak the same vocabulary.
 
+/// sheaf's quick checksum: xxh3-128 of `bytes`. Fast, and stable across
+/// builds and platforms, so what's named by it (cache files, comments
+/// without `/NM`) keeps its name. Not a security boundary.
+pub fn checksum(bytes: &[u8]) -> u128 {
+    twox_hash::XxHash3_128::oneshot(bytes)
+}
+
+/// [`checksum`] as 32 lowercase hex digits.
+pub fn checksum_hex(bytes: &[u8]) -> String {
+    format!("{:032x}", checksum(bytes))
+}
+
+#[cfg(test)]
+mod checksum_tests {
+    #[test]
+    fn checksum_is_xxh3_128() {
+        // XXH3_128bits of nothing, from the reference implementation.
+        assert_eq!(super::checksum(b""), 0x99aa06d3014798d86001c324468d497f);
+        assert_eq!(super::checksum_hex(b"").len(), 32);
+        assert_ne!(super::checksum(b"a"), super::checksum(b"b"));
+    }
+}
+
 /// Zero-based index of a page within a *source file* (what the engine sees).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PageIndex(pub u32);

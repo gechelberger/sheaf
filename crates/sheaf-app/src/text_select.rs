@@ -465,7 +465,7 @@ impl DocView {
             Tool::Squiggly => AnnotKind::Squiggly { rects },
             _ => return,
         };
-        let mut a = self.new_annot(kind, self.tool_color, cx);
+        let mut a = self.new_annot(kind, crate::markup_tools::color_of(tool, cx), cx);
         if tool == Tool::Highlight {
             a.opacity = 0.6;
         }
@@ -490,7 +490,8 @@ impl DocView {
             return;
         };
         let kind = AnnotKind::Replace { rects, struck, at };
-        let a = self.new_annot(kind, self.tool_color, cx);
+        let color = crate::markup_tools::color_of(Tool::TextEdit, cx);
+        let a = self.new_annot(kind, color, cx);
         self.add_annot(page, a, "Replace text", cx);
         self.clear_text_sel(cx);
         self.pending_edit_last = Some(page);
@@ -503,7 +504,8 @@ impl DocView {
         let Some(at) = self.cached_chars(page).and_then(|c| c.caret_at(at)) else {
             return;
         };
-        let a = self.new_annot(AnnotKind::Insert { at }, self.tool_color, cx);
+        let color = crate::markup_tools::color_of(Tool::TextEdit, cx);
+        let a = self.new_annot(AnnotKind::Insert { at }, color, cx);
         self.add_annot(page, a, "Insert text", cx);
         self.pending_edit_last = Some(page);
         cx.notify();

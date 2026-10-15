@@ -1129,14 +1129,13 @@ pub fn to_pdf_in(
     } = &a.kind
     {
         let form = *forms.entry(stamp.clone()).or_insert_with(|| {
-            let path = crate::generated::path_of(stamp);
-            let loaded = std::fs::read(&path)
-                .ok()
+            let loaded = crate::generated::path_of(stamp)
+                .and_then(|path| std::fs::read(path).ok())
                 .and_then(|b| lopdf::Document::load_mem(&b).ok());
             match loaded {
                 Some(src) => crate::stamp_lib::page_form(&src, pdf).ok(),
                 None => {
-                    log::warn!("stamp {name} ({}) isn't on this machine", path.display());
+                    log::warn!("stamp {name} ({stamp}) isn't on this machine");
                     None
                 }
             }
@@ -1192,7 +1191,10 @@ pub fn to_pdf_in(
         file, name, size, ..
     } = &a.kind
     {
-        match std::fs::read(crate::generated::blob_path(file)) {
+        let read = crate::generated::blob_path(file)
+            .ok_or_else(|| std::io::Error::other("not a cache name"))
+            .and_then(std::fs::read);
+        match read {
             Ok(bytes) => {
                 let mut stream = Stream::new(
                     dictionary! {

@@ -551,7 +551,7 @@ impl DocView {
                             },
                             glyph: glyph.clone(),
                         },
-                        self.tool_color,
+                        crate::markup_tools::color_of(crate::markup_tools::Tool::Tick, cx),
                         cx,
                     );
                     Edit::AnnotAdd { page, annot: a }

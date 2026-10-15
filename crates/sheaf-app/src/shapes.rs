@@ -180,7 +180,7 @@ impl DocView {
             (None, true) => AnnotKind::Polygon { points },
             (None, false) => AnnotKind::Polyline { points },
         };
-        let mut a = self.new_annot(kind, self.tool_color, cx);
+        let mut a = self.new_annot(kind, crate::markup_tools::color_of(tool, cx), cx);
         a.cloudy = tool == Tool::Cloud;
         self.add_annot(d.page_id, a, tool.label(), cx);
         true
@@ -220,7 +220,7 @@ impl DocView {
             point,
             size: 12.0,
         };
-        let a = self.new_annot(kind, self.tool_color, cx);
+        let a = self.new_annot(kind, crate::markup_tools::color_of(Tool::Callout, cx), cx);
         self.add_annot(page, a, "Callout", cx);
         self.pending_edit_last = Some(page);
     }

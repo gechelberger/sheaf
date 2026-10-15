@@ -2777,9 +2777,23 @@ mod tests {
 
     #[test]
     fn an_attachment_is_embedded_and_recovered() {
+        // Named as sheaf names files now, and as it did before xxh3 (a
+        // mark saved then keeps that name).
+        for legacy in [false, true] {
+            attachment_round_trip(legacy);
+        }
+    }
+
+    fn attachment_round_trip(legacy: bool) {
         use crate::annot::{AnnotKind, Pt};
         let bytes = format!("workpaper notes {:x}", fastrand::u64(..)).into_bytes();
-        let stem = crate::generated::store_blob(&bytes).unwrap();
+        let stem = if legacy {
+            let stem = crate::generated::legacy_name_of(&bytes);
+            crate::generated::store_blob_as(&stem, &bytes).unwrap();
+            stem
+        } else {
+            crate::generated::store_blob(&bytes).unwrap()
+        };
         let dir = tempdir();
         let a_path = make_pdf(&dir, "a.pdf", "A", 1, &[]);
         let original = std::fs::read(&a_path).unwrap();
@@ -2834,7 +2848,7 @@ mod tests {
         assert_eq!(embedded, bytes);
         assert!(crate::attachments::attachments_in(&pdf).is_empty());
         // Elsewhere, without the cache: back from the file.
-        let path = crate::generated::blob_path(&stem);
+        let path = crate::generated::blob_path(&stem).unwrap();
         std::fs::remove_file(&path).unwrap();
         crate::file::recover_cached(&pdf);
         assert_eq!(std::fs::read(&path).unwrap(), bytes);

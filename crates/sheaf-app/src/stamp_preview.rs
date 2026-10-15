@@ -26,18 +26,18 @@ struct Previews {
 
 static PREVIEWS: LazyLock<Mutex<Previews>> = LazyLock::new(Default::default);
 
-/// Where stamp `stem`'s picture goes.
-pub fn png_path(stem: &str) -> PathBuf {
-    sheaf_doc::generated::path_of(stem).with_extension("png")
+/// Where stamp `stem`'s picture goes; None if `stem` isn't a cache name.
+pub fn png_path(stem: &str) -> Option<PathBuf> {
+    sheaf_doc::generated::path_of(stem).map(|p| p.with_extension("png"))
 }
 
 /// The picture of stamp `stem` when it's made; otherwise it's asked for.
 pub fn picture(stem: &str) -> Option<PathBuf> {
     let mut p = PREVIEWS.lock().ok()?;
+    let path = png_path(stem)?;
     if p.ready.contains(stem) {
-        return Some(png_path(stem));
+        return Some(path);
     }
-    let path = png_path(stem);
     if path.exists() {
         p.ready.insert(stem.to_string());
         return Some(path);
@@ -49,18 +49,17 @@ pub fn picture(stem: &str) -> Option<PathBuf> {
 }
 
 /// Tapes' pictures, by what the tape is: the cache name of its PDF.
-static TAPES: LazyLock<Mutex<std::collections::HashMap<u64, String>>> =
+static TAPES: LazyLock<Mutex<std::collections::HashMap<u128, String>>> =
     LazyLock::new(Default::default);
 
 /// The picture of a turned tape (GPUI can't turn text): its appearance as a
 /// one-page PDF in the cache, rendered like a stamp's.
 pub fn tape_picture(a: &sheaf_doc::Annot) -> Option<PathBuf> {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    serde_json::to_string(&(&a.kind, a.color, &a.contents))
-        .ok()?
-        .hash(&mut h);
-    let key = h.finish();
+    let key = sheaf_core::checksum(
+        serde_json::to_string(&(&a.kind, a.color, &a.contents))
+            .ok()?
+            .as_bytes(),
+    );
     let known = TAPES.lock().ok()?.get(&key).cloned();
     let stem = match known {
         Some(s) => s,
@@ -100,7 +99,7 @@ pub fn make_wanted(cx: &mut gpui::App) {
         if let Ok(mut p) = PREVIEWS.lock() {
             for stem in done {
                 p.making.remove(&stem);
-                if png_path(&stem).exists() {
+                if png_path(&stem).is_some_and(|p| p.exists()) {
                     p.ready.insert(stem);
                 }
             }
@@ -112,11 +111,11 @@ pub fn make_wanted(cx: &mut gpui::App) {
 
 /// Render stamp `stem`'s page to its PNG.
 pub fn make(stem: &str) -> anyhow::Result<PathBuf> {
-    let engine =
-        sheaf_render::pdfium::PdfiumEngine::open(sheaf_doc::generated::path_of(stem), None)?;
+    let pdf = sheaf_doc::generated::path_of(stem).context("not a cache name")?;
+    let engine = sheaf_render::pdfium::PdfiumEngine::open(pdf, None)?;
     let r = engine.render_transparent(PageIndex(0), WIDTH)?;
     let img = image::RgbaImage::from_raw(r.width, r.height, r.data).context("short render")?;
-    let png = png_path(stem);
+    let png = png_path(stem).context("not a cache name")?;
     let tmp = png.with_extension("png.part");
     img.save_with_format(&tmp, image::ImageFormat::Png)?;
     std::fs::rename(&tmp, &png)?;

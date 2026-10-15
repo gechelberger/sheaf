@@ -5,7 +5,6 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, LazyLock, RwLock};
 
 use gpui::{AssetSource, SharedString};
@@ -150,9 +149,10 @@ static PLUGIN_ICONS: LazyLock<RwLock<HashMap<String, Arc<[u8]>>>> = LazyLock::ne
 /// isn't drawn from GPUI's cache of the old one.
 #[cfg_attr(not(feature = "plugins"), allow(dead_code))]
 pub fn add_plugin_icon(plugin: &str, command: &str, svg: Vec<u8>) -> String {
-    let mut h = DefaultHasher::new();
-    svg.hash(&mut h);
-    let path = format!("plugin-icons/{plugin}/{command}-{:016x}.svg", h.finish());
+    let path = format!(
+        "plugin-icons/{plugin}/{command}-{}.svg",
+        sheaf_core::checksum_hex(&svg)
+    );
     if let Ok(mut icons) = PLUGIN_ICONS.write() {
         icons.insert(path.clone(), svg.into());
     }

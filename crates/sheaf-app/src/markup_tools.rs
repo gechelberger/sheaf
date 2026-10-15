@@ -85,6 +85,69 @@ impl Tool {
         }
     }
 
+    /// Its name in `state.json`'s `tool_colors`.
+    pub fn id(self) -> &'static str {
+        match self {
+            Tool::Select => "select",
+            Tool::Note => "note",
+            Tool::Highlight => "highlight",
+            Tool::Underline => "underline",
+            Tool::StrikeOut => "strikeout",
+            Tool::Squiggly => "squiggly",
+            Tool::TextEdit => "text-edit",
+            Tool::FreeText => "free-text",
+            Tool::Square => "square",
+            Tool::Ellipse => "ellipse",
+            Tool::Line => "line",
+            Tool::Arrow => "arrow",
+            Tool::Ink => "ink",
+            Tool::Tick => "tick",
+            Tool::Stamp => "stamp",
+            Tool::Polygon => "polygon",
+            Tool::Polyline => "polyline",
+            Tool::Cloud => "cloud",
+            Tool::Callout => "callout",
+            Tool::AttachFile => "attach-file",
+            Tool::Connector => "connector",
+            Tool::Distance => "distance",
+            Tool::Perimeter => "perimeter",
+            Tool::Area => "area",
+        }
+    }
+
+    /// What it draws in until the user picks another color for it, as
+    /// Acrobat starts its tools: yellow notes and highlights, red
+    /// strikethroughs, drawings and tickmarks, blue text edits.
+    pub fn default_color(self) -> [u8; 3] {
+        const YELLOW: [u8; 3] = [255, 230, 0];
+        const RED: [u8; 3] = [220, 40, 40];
+        const BLUE: [u8; 3] = [0, 120, 255];
+        const GREEN: [u8; 3] = [0, 150, 0];
+        const ORANGE: [u8; 3] = [255, 140, 0];
+        match self {
+            Tool::Select | Tool::Note | Tool::Highlight => YELLOW,
+            Tool::Underline => GREEN,
+            Tool::Squiggly => ORANGE,
+            Tool::TextEdit | Tool::AttachFile | Tool::Connector => BLUE,
+            Tool::StrikeOut
+            | Tool::FreeText
+            | Tool::Square
+            | Tool::Ellipse
+            | Tool::Line
+            | Tool::Arrow
+            | Tool::Ink
+            | Tool::Tick
+            | Tool::Stamp
+            | Tool::Polygon
+            | Tool::Polyline
+            | Tool::Cloud
+            | Tool::Callout
+            | Tool::Distance
+            | Tool::Perimeter
+            | Tool::Area => RED,
+        }
+    }
+
     /// Tools that mark up text: a press on text selects it (as the Select
     /// tool does), and letting go marks the selection up.
     pub fn marks_text(self) -> bool {
@@ -164,6 +227,17 @@ impl Tool {
 }
 
 pub use sheaf_doc::annot::COLORS;
+
+/// The color `tool` draws in: the last one picked for it, else its own
+/// default ([`Tool::default_color`]). Each tool keeps its own, in
+/// `state.json`, so a strikethrough after a highlight is still red.
+pub(crate) fn color_of(tool: Tool, cx: &gpui::App) -> [u8; 3] {
+    crate::state::get(cx)
+        .tool_colors
+        .get(tool.id())
+        .copied()
+        .unwrap_or_else(|| tool.default_color())
+}
 
 /// A mouse drag in progress on a page.
 #[derive(Debug, Clone)]
@@ -713,7 +787,7 @@ impl DocView {
             }
         }
         let tool = self.tool;
-        let color = self.tool_color;
+        let color = color_of(tool, cx);
         let glyph = self.tick_glyph.clone();
         let State::Ready(doc) = &mut self.state else {
             return;
@@ -843,7 +917,7 @@ impl DocView {
             return;
         }
         let tool = self.tool;
-        let color = self.tool_color;
+        let color = color_of(tool, cx);
         let State::Ready(doc) = &mut self.state else {
             return;
         };
@@ -1058,13 +1132,27 @@ impl DocView {
         true
     }
 
-    /// The markup color swatches, and their length along a toolbar.
+    /// The markup color swatches, and their length along a toolbar: the
+    /// tool's color, which a click changes for that tool; with Select, the
+    /// selected marks' color, which a click changes for them.
     pub(crate) fn render_colors(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let color = self.tool_color;
+        let color = match self.tool {
+            Tool::Select => match &self.state {
+                State::Ready(doc) => {
+                    let marks = doc.selected_mark_list();
+                    marks
+                        .first()
+                        .map(|(_, a)| a.color)
+                        .filter(|c| marks.iter().all(|(_, a)| a.color == *c))
+                }
+                _ => None,
+            },
+            tool => Some(color_of(tool, cx)),
+        };
         let colors: Vec<_> = COLORS
             .iter()
             .map(|&(c, name)| {
-                let active = c == color;
+                let active = Some(c) == color;
                 div()
                     .id((
                         "color",
@@ -1088,7 +1176,12 @@ impl DocView {
                         // The toolbar sits outside the document; keep its
                         // keys (Ctrl+Z after a recolor) going to it.
                         window.focus(&v.focus_handle, cx);
-                        v.tool_color = c;
+                        let tool = v.tool;
+                        if tool != Tool::Select {
+                            crate::state::update(cx, |s| {
+                                s.tool_colors.insert(tool.id().to_string(), c);
+                            });
+                        }
                         // With marks selected, they take the color too.
                         v.restyle(
                             "Color annotation",
@@ -1281,7 +1374,7 @@ impl DocView {
                     .w(px(r.w * k))
                     .h(px(r.h * k));
                 Some(match tool {
-                    Tool::Highlight => el.bg(theme::HIGHLIGHT_PREVIEW).into_any_element(),
+                    Tool::Highlight => el.bg(gpui::Rgba { a: 0.375, ..c }).into_any_element(),
                     Tool::Underline | Tool::StrikeOut | Tool::Squiggly => el
                         .bg(theme::REGION_FILL)
                         .border_1()
@@ -1879,6 +1972,19 @@ impl DocView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_tool_has_its_own_key_and_a_swatch_for_a_default() {
+        let ids: std::collections::HashSet<&str> = Tool::ALL.iter().map(|t| t.id()).collect();
+        assert_eq!(ids.len(), Tool::ALL.len());
+        assert_eq!(Tool::Highlight.default_color(), [255, 230, 0]);
+        assert_eq!(Tool::StrikeOut.default_color(), [220, 40, 40]);
+        assert_eq!(Tool::TextEdit.default_color(), [0, 120, 255]);
+        // Each default is a swatch, so the toolbar shows which is the tool's.
+        for t in Tool::ALL {
+            assert!(COLORS.iter().any(|(c, _)| *c == t.default_color()), "{t:?}");
+        }
+    }
 
     fn mark(kind: AnnotKind) -> Annot {
         Annot {

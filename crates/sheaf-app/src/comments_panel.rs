@@ -373,8 +373,8 @@ impl DocView {
                 }
             }
             None => {
-                let mut a =
-                    self.new_annot(AnnotKind::Reply { parent: rb.parent }, self.tool_color, cx);
+                let color = crate::markup_tools::color_of(crate::markup_tools::Tool::Note, cx);
+                let mut a = self.new_annot(AnnotKind::Reply { parent: rb.parent }, color, cx);
                 a.contents = text;
                 self.add_annot(rb.page, a, "Reply", cx);
             }
@@ -398,7 +398,7 @@ impl DocView {
                 model: model.to_string(),
                 state: state.to_string(),
             },
-            self.tool_color,
+            crate::markup_tools::color_of(crate::markup_tools::Tool::Note, cx),
             cx,
         );
         // What Acrobat writes, for viewers that list statuses as text.
