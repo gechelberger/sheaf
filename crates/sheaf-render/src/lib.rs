@@ -7,9 +7,9 @@
 //!   services render requests over a channel, so the UI thread never blocks on
 //!   PDFium. Replies come back on `oneshot` channels the caller can `.await`.
 //!
-//! PDFium is process-global and (with pdfium-render's `thread_safe` feature)
-//! serializes every FFI call behind a mutex, so one worker thread is the right
-//! amount of parallelism; more threads would just queue on that lock.
+//! PDFium is process-global and not thread-safe, so every use of it holds one
+//! lock (`pdfium::lock`): workers for different documents take turns, a call
+//! into the engine at a time, and more threads for one would just queue.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -187,9 +187,34 @@ impl OpenError {
 
 pub mod pdfium {
     use super::*;
+    use parking_lot::{FairMutex, FairMutexGuard};
     use pdfium_render::prelude::*;
     use std::collections::HashMap;
+    use std::mem::ManuallyDrop;
     use std::sync::OnceLock;
+
+    /// Held across every use of PDFium, from a load to the document's
+    /// drop: a call into an engine, or a page or bookmark of a walk over
+    /// the whole document. pdfium-render's `thread_safe` feature isn't
+    /// enough: 185 of the 467 functions it binds (0.9.4) take no lock,
+    /// among them `FPDFDOC_InitFormFillEnvironment` (every load makes it)
+    /// and the page size, text and bitmap calls. PDFium's parser keeps
+    /// its depth in a process global
+    /// (`CPDF_SyntaxParser::s_CurrentRecursionDepth`) that each object
+    /// parse saves, adds one to and puts back, so parses on two threads
+    /// at once leave it too high. Once it nears its limit (64), objects
+    /// stop parsing, and every load after fails with `FormatError`, from
+    /// any thread (M10 slice 1's note).
+    ///
+    /// Fair: a thread that unlocks and locks again at once, as a walk or
+    /// a search does, goes behind the threads already waiting. (With
+    /// std's mutex it kept winning, and a page-size walk beside another
+    /// document's renders took minutes.) Not re-entrant: never call into
+    /// an engine, or lock again, while holding it.
+    fn lock() -> FairMutexGuard<'static, ()> {
+        static LOCK: FairMutex<()> = parking_lot::const_fair_mutex(());
+        LOCK.lock()
+    }
 
     /// Locate and bind libpdfium. Search order: `$PDFIUM_LIB_DIR`, next to
     /// the executable (and its `lib/`, how packaged builds ship it),
@@ -236,8 +261,9 @@ pub mod pdfium {
 
     /// The process-wide PDFium instance. PDFium itself is a global library
     /// (`FPDF_InitLibrary` once per process), so a `'static` handle is the
-    /// honest model and sidesteps the `PdfDocument<'a>` borrow.
-    pub fn pdfium() -> Result<&'static Pdfium> {
+    /// honest model and sidesteps the `PdfDocument<'a>` borrow. Use it
+    /// only under [`lock`].
+    fn pdfium() -> Result<&'static Pdfium> {
         static CELL: OnceLock<std::result::Result<Pdfium, String>> = OnceLock::new();
         match CELL.get_or_init(|| bind().map_err(|e| format!("{e:#}"))) {
             Ok(p) => Ok(p),
@@ -246,10 +272,18 @@ pub mod pdfium {
     }
 
     pub struct PdfiumEngine {
-        // Declared before `bytes`, so it's dropped first: PDFium reads the
-        // buffer for as long as the document is open.
-        doc: PdfDocument<'static>,
+        // Dropped under the lock, before `bytes`: PDFium reads the buffer
+        // for as long as the document is open.
+        doc: ManuallyDrop<PdfDocument<'static>>,
         bytes: Arc<Vec<u8>>,
+    }
+
+    impl Drop for PdfiumEngine {
+        fn drop(&mut self) {
+            let _pdfium = lock();
+            // SAFETY: `doc` is dropped here only, and not used after.
+            unsafe { ManuallyDrop::drop(&mut self.doc) }
+        }
     }
 
     impl PdfiumEngine {
@@ -272,9 +306,10 @@ pub mod pdfium {
         pub fn open_bytes(bytes: Arc<Vec<u8>>, password: Option<&str>) -> Result<Self> {
             // SAFETY: the slice points into `bytes`, which the engine owns
             // and never changes, and `doc` (which borrows it) is dropped
-            // before it (field order).
+            // before it (in `drop`).
             let slice: &'static [u8] =
                 unsafe { std::slice::from_raw_parts(bytes.as_ptr(), bytes.len()) };
+            let _pdfium = lock();
             let doc = match pdfium()?.load_pdf_from_byte_slice(slice, password) {
                 Ok(d) => d,
                 Err(PdfiumError::PdfiumLibraryInternalError(
@@ -284,7 +319,10 @@ pub mod pdfium {
                 }
                 Err(e) => return Err(e).context("pdfium loading"),
             };
-            Ok(Self { doc, bytes })
+            Ok(Self {
+                doc: ManuallyDrop::new(doc),
+                bytes,
+            })
         }
 
         /// The file's bytes, shared.
@@ -295,6 +333,7 @@ pub mod pdfium {
         /// A page `width` pixels wide, RGBA, transparent where nothing is
         /// drawn: a stamp's picture, to lay over another page.
         pub fn render_transparent(&self, page: PageIndex, width: u32) -> Result<Raster> {
+            let _pdfium = lock();
             let p = self.doc.pages().get(page.0 as i32)?;
             let w = width.max(1);
             let h = ((w as f32) * p.height().value / p.width().value.max(1.0))
@@ -334,8 +373,9 @@ pub mod pdfium {
         page: PageIndex,
         width: u32,
     ) -> Result<Raster> {
+        let _pdfium = lock();
         let doc = pdfium()?
-            .load_pdf_from_byte_vec(bytes.to_vec(), password)
+            .load_pdf_from_byte_slice(bytes, password)
             .context("pdfium loading")?;
         let mut p = doc.pages().get(page.0 as i32)?;
         // pdfium-render flattens what would print; make that what shows.
@@ -371,10 +411,12 @@ pub mod pdfium {
 
     impl Renderer for PdfiumEngine {
         fn page_count(&self) -> u32 {
+            let _pdfium = lock();
             self.doc.pages().len() as u32
         }
 
         fn form_type(&self) -> FormType {
+            let _pdfium = lock();
             match self.doc.form().map(|f| f.form_type()) {
                 Some(PdfFormType::Acrobat) => FormType::AcroForm,
                 Some(PdfFormType::XfaForeground) => FormType::XfaForeground,
@@ -384,6 +426,7 @@ pub mod pdfium {
         }
 
         fn page_size(&self, page: PageIndex) -> Result<PageSize> {
+            let _pdfium = lock();
             let r = self.doc.pages().page_size(page.0 as i32)?;
             Ok(PageSize {
                 width: r.width().value,
@@ -394,17 +437,11 @@ pub mod pdfium {
         fn page_sizes(&self) -> Result<Vec<PageSize>> {
             // FPDF_GetPageSizeByIndexF reads the page dictionary without
             // loading page content: ~30µs/page, so ~200ms for 7k pages. Cheap
-            // but not free, which is why DocInfo doesn't wait for it.
-            Ok(self
-                .doc
-                .pages()
-                .page_sizes()?
-                .into_iter()
-                .map(|r| PageSize {
-                    width: r.width().value,
-                    height: r.height().value,
-                })
-                .collect())
+            // but not free, which is why DocInfo doesn't wait for it. Locked
+            // a page at a time, so other documents get turns during it.
+            (0..self.page_count())
+                .map(|i| self.page_size(PageIndex(i)))
+                .collect()
         }
 
         fn outline(&self) -> Result<Vec<OutlineItem>> {
@@ -519,6 +556,9 @@ pub mod pdfium {
                     if out.len() >= MAX_ITEMS {
                         return;
                     }
+                    // Locked a bookmark at a time, so other documents
+                    // get turns during a long outline.
+                    let pdfium = lock();
                     let child = b.first_child();
                     let (page, view) = locate(&b, doc, frames);
                     out.push(OutlineItem {
@@ -529,22 +569,22 @@ pub mod pdfium {
                         has_children: child.is_some(),
                         view,
                     });
+                    drop(pdfium);
                     if depth < MAX_DEPTH {
                         walk(child, depth + 1, doc, frames, out);
                     }
+                    let _pdfium = lock();
                     node = b.next_sibling();
                 }
             }
 
+            let root = {
+                let _pdfium = lock();
+                self.doc.bookmarks().root()
+            };
             let mut out = Vec::new();
             let mut frames = HashMap::new();
-            walk(
-                self.doc.bookmarks().root(),
-                0,
-                &self.doc,
-                &mut frames,
-                &mut out,
-            );
+            walk(root, 0, &self.doc, &mut frames, &mut out);
             Ok(out)
         }
 
@@ -557,6 +597,7 @@ pub mod pdfium {
             if query.is_empty() {
                 return Ok(Vec::new());
             }
+            let _pdfium = lock();
             let p = self.doc.pages().get(page.0 as i32)?;
             let text = p.text()?;
             let opts = PdfSearchOptions::new().match_case(match_case);
@@ -609,6 +650,7 @@ pub mod pdfium {
         }
 
         fn page_text_len(&self, page: PageIndex) -> Result<usize> {
+            let _pdfium = lock();
             let p = self.doc.pages().get(page.0 as i32)?;
             let text = p.text()?;
             Ok(text
@@ -620,6 +662,7 @@ pub mod pdfium {
         }
 
         fn page_chars(&self, page: PageIndex) -> Result<PageCharList> {
+            let _pdfium = lock();
             let p = self.doc.pages().get(page.0 as i32)?;
             let text = p.text()?;
             const SCALE: f32 = 16.0;
@@ -655,11 +698,13 @@ pub mod pdfium {
         }
 
         fn page_text(&self, page: PageIndex) -> Result<String> {
+            let _pdfium = lock();
             let p = self.doc.pages().get(page.0 as i32)?;
             Ok(p.text()?.all())
         }
 
         fn text_boxes_in_rect(&self, page: PageIndex, rect: Rect) -> Result<Vec<Rect>> {
+            let _pdfium = lock();
             let p = self.doc.pages().get(page.0 as i32)?;
             let text = p.text()?;
             const SCALE: f32 = 16.0;
@@ -714,6 +759,7 @@ pub mod pdfium {
         }
 
         fn set_annots_hidden(&self, page: PageIndex, slots: &[(usize, bool)]) -> Result<usize> {
+            let _pdfium = lock();
             let mut p = self.doc.pages().get(page.0 as i32)?;
             let annots = p.annotations_mut();
             let mut n = 0;
@@ -728,6 +774,7 @@ pub mod pdfium {
         }
 
         fn hide_annots(&self, page: PageIndex, names: &[String]) -> Result<usize> {
+            let _pdfium = lock();
             let mut p = self.doc.pages().get(page.0 as i32)?;
             let annots = p.annotations_mut();
             let mut n = 0;
@@ -747,6 +794,7 @@ pub mod pdfium {
             page: PageIndex,
             re: &regex::Regex,
         ) -> Result<Vec<SearchHit>> {
+            let _pdfium = lock();
             let p = self.doc.pages().get(page.0 as i32)?;
             let text = p.text()?;
             let chars = text.chars();
@@ -838,6 +886,7 @@ pub mod pdfium {
         }
 
         fn render(&self, page: PageIndex, job: Job, format: PixelFormat) -> Result<Raster> {
+            let _pdfium = lock();
             let p = self.doc.pages().get(page.0 as i32)?;
             let rot = match job.rotation() {
                 Rotation::R0 => PdfPageRenderRotation::None,

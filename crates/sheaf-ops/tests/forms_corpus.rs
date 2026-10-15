@@ -25,9 +25,9 @@ struct Outcome {
 }
 
 /// Open the file in PDFium as the app does and, if `draw`, draw its first
-/// page's appearances. PDFium is called from one thread only: from
-/// several, most loads fail (found in slice 1, not fixed; see the slice
-/// notes in `todos/m10.md`).
+/// page's appearances. PDFium is called from one thread only: sheaf
+/// holds one lock across every use of it (slice 1's note in
+/// `todos/m10.md`), so more threads wouldn't open files faster.
 fn open(bytes: &[u8], draw: bool) -> Result<(u32, FormType), String> {
     let engine = PdfiumEngine::open_bytes(Arc::new(bytes.to_vec()), None);
     engine

@@ -3,9 +3,7 @@
 //! opens with no fields, and the file still opens. PDFium's form type
 //! agrees with the class sheaf reads.
 //!
-//! One test, so PDFium is only ever called from one thread (see the slice
-//! notes in `todos/m10.md`, slice 1). Needs libpdfium
-//! (`scripts/fetch-pdfium.sh`), like the app itself.
+//! Needs libpdfium (`scripts/fetch-pdfium.sh`), like the app itself.
 
 use std::path::{Path, PathBuf};
 

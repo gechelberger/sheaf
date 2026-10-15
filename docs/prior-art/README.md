@@ -38,7 +38,9 @@ The gpui-kit spike itself is in [../gpui-kit-eval.md](../gpui-kit-eval.md).
    progressive API with a `NeedToPauseNow` callback so a slow page can't block
    newer, more important tiles.
 5. **PDFium is one lock per process.** pdfium-render's `thread_safe` is a
-   global mutex. Real parallelism means more processes (Chrome) or a second,
+   global mutex, but about 185 of its calls skip it (one in every load), so
+   sheaf holds its own lock (`pdfium::lock` in sheaf-render; M10 slice 1's
+   note). Real parallelism means more processes (Chrome) or a second,
    thread-safe engine (hayro, later).
 6. **Acrobat exposes its render trade-offs as user toggles** (one-page
    lookahead cache, 2D GPU acceleration, smooth zooming, "show large images").

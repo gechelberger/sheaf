@@ -14,6 +14,7 @@ log.workspace = true
 image.workspace = true
 futures.workspace = true
 regex.workspace = true
+parking_lot.workspace = true
 
 [dev-dependencies]
 env_logger.workspace = true

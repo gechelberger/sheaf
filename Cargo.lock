@@ -6687,6 +6687,7 @@ dependencies = [
  "image",
  "log",
  "lopdf",
+ "parking_lot",
  "pdfium-render",
  "regex",
  "sheaf-core",
