@@ -201,6 +201,37 @@ pub struct Field {
     pub tooltip: Option<String>,
     /// Its own `/AA`: keystroke, format, validate and calculate.
     pub actions: Vec<(Trigger, Action)>,
+    /// Which copy of its source's form it's in (M10 proposal 5): 0 for the
+    /// form as the source has it, and another each time its pages come in
+    /// again (Duplicate Pages). A save writes each copy with field and
+    /// widget objects of its own.
+    pub copy: u32,
+    /// The parent field a save puts this copy's fields under, its `/T`,
+    /// when their names clashed with the document's (proposal 5). The
+    /// full name starts with it.
+    pub under: Option<Arc<str>>,
+}
+
+impl Field {
+    /// The full name in its source's form: without [`Field::under`].
+    pub fn source_name(&self) -> &str {
+        match &self.under {
+            Some(u) => self
+                .name
+                .strip_prefix(&**u)
+                .and_then(|n| n.strip_prefix('.'))
+                .unwrap_or(&self.name),
+            None => &self.name,
+        }
+    }
+
+    /// Whether any of its own actions, or its widgets', is a script.
+    pub fn has_scripts(&self, widgets: &[&Widget]) -> bool {
+        self.actions.iter().any(|(_, a)| a.has_script())
+            || widgets
+                .iter()
+                .any(|w| w.actions.iter().any(|(_, a)| a.has_script()))
+    }
 }
 
 impl Field {

@@ -13,6 +13,7 @@ pub mod corpus;
 pub mod field;
 #[cfg(any(test, feature = "fixtures"))]
 pub mod fixture;
+pub(crate) mod merge;
 pub mod read;
 
 #[cfg(test)]

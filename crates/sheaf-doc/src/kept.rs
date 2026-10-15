@@ -568,6 +568,27 @@ fn clean_fields(pdf: &mut Pdf, catalog_id: ObjectId, kept: &HashSet<ObjectId>) {
     }
 }
 
+/// `roots`, fields in `pdf`, with what isn't on a page taken out of their
+/// trees as [`clean_fields`] does it: widgets that aren't among
+/// `on_pages` (the annotations on the pages written), and fields left with
+/// no widgets. What's left of them, and the fields and widgets that went.
+pub(crate) fn prune_fields(
+    pdf: &mut Pdf,
+    roots: &[Object],
+    on_pages: HashSet<ObjectId>,
+) -> (Vec<Object>, HashSet<ObjectId>) {
+    let mut cleaning = Cleaning {
+        on_kept: on_pages,
+        removed: HashSet::new(),
+        seen: HashMap::new(),
+    };
+    let left = roots
+        .iter()
+        .filter_map(|r| cleaning.keep(pdf, r, 0))
+        .collect();
+    (left, cleaning.removed)
+}
+
 /// [`clean_fields`]'s walk of the field tree.
 struct Cleaning {
     /// Annotations on kept pages.

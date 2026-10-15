@@ -1279,6 +1279,11 @@ impl DocView {
                 } else {
                     format!("{label}: removed {} — Ctrl+Z to undo", parts.join(" and "))
                 });
+                // Duplicate Pages' copies of a form.
+                if let Some(form) = doc.model.form_notice(&out, true, true) {
+                    let n = doc.notice.take().unwrap_or_default();
+                    doc.notice = Some(format!("{n}. {form}"));
+                }
                 doc.touched();
                 self.after_model_change(label.to_string(), out, cx);
             }
@@ -2633,6 +2638,8 @@ impl DocView {
                 sheaf_doc::file::style_flat_items(&mut flat, &incoming.outline_styles);
                 let label = format!("Insert {name}");
                 let mut outcome = None;
+                let mixed = doc.model.scripts_mixed();
+                doc.model.set_source_form(sid, incoming.form.clone());
                 match doc.model.apply(
                     Edit::InsertPages {
                         source: sid,
@@ -2661,6 +2668,10 @@ impl DocView {
                                 }
                             )
                         });
+                        if let Some(form) = doc.model.form_notice(&out, false, mixed) {
+                            let n = doc.notice.take().unwrap_or_default();
+                            doc.notice = Some(format!("{n}. {form}"));
+                        }
                         if timing {
                             eprintln!(
                                 "[timing] inserted {name} ({page_count} pages) in {:?}",

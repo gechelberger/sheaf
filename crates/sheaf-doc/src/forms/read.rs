@@ -554,6 +554,8 @@ impl<'a> Reader<'a> {
             options: here.options.unwrap_or_else(|| Arc::from([])),
             tooltip: tooltip.map(|t| t.to_string()),
             actions,
+            copy: 0,
+            under: None,
         });
     }
 

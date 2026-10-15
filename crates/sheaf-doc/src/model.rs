@@ -1,6 +1,6 @@
 //! Virtual document, edits, and snapshot history.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use sheaf_core::{DestView, PageSize, Rotation};
 
 use crate::annot::{Annot, AnnotId, AnnotKind};
-use crate::forms::{Field, FieldId, Widget};
+use crate::forms::{Field, FieldId, FileForm, Widget};
 use crate::history::{HistoryPolicy, HistoryStats};
 use crate::text_layer::TextLayer;
 
@@ -510,6 +510,10 @@ pub struct EditOutcome {
     pub pages_added: usize,
     pub bookmarks_removed: usize,
     pub bookmarks_added: usize,
+    /// Forms that came in with pages and were put under a new parent
+    /// field, since their names clashed (M10 proposal 5): its name, and the
+    /// file they came from.
+    pub forms_renamed: Vec<(String, SourceId)>,
 }
 
 /// A version's place in the history tree. Ids aren't reused.
@@ -529,6 +533,7 @@ pub struct Step {
 struct Ids {
     next_page: u64,
     next_outline: u64,
+    next_field: u64,
     seed: u64,
 }
 
@@ -655,6 +660,12 @@ pub struct Document {
     /// dirty tracking.
     saved_fields: im::OrdMap<FieldId, Field>,
     next_field: u64,
+    /// Each source's form as read (`set_source_form`), for the fields that
+    /// come in with its pages.
+    forms: HashMap<SourceId, Arc<FileForm>>,
+    /// A save made one form of forms whose scripts came from more than one
+    /// file (see [`Document::scripts_mixed`]).
+    scripts_mixed: bool,
 }
 
 impl Document {
@@ -688,6 +699,8 @@ impl Document {
             saved_annots: im::HashMap::new(),
             saved_fields: im::OrdMap::new(),
             next_field: 0,
+            forms: HashMap::new(),
+            scripts_mixed: false,
         };
         let pages: Vector<PageRef> = (0..primary.page_count)
             .map(|index| PageRef {
@@ -773,6 +786,105 @@ impl Document {
         self.next_source += 1;
         self.sources.insert(id, Arc::new(info));
         id
+    }
+
+    /// Source `id`'s form, as `forms::read` read it: the fields that come
+    /// in with its pages when they're inserted or replace others. Call it
+    /// before the edit that brings them.
+    pub fn set_source_form(&mut self, id: SourceId, form: FileForm) {
+        if !form.fields.is_empty() {
+            self.forms.insert(id, Arc::new(form));
+        }
+    }
+
+    /// Sources whose fields in the document, or the document scripts
+    /// beside them, have scripts. More than one, and scripts are off by
+    /// default (M10 proposal 5): document scripts share one scope.
+    pub fn script_sources(&self) -> Vec<SourceId> {
+        let st = self.state();
+        let mut widgets: HashMap<FieldId, Vec<&Widget>> = HashMap::new();
+        for w in st.widgets.values().flatten() {
+            widgets.entry(w.field).or_default().push(w);
+        }
+        let mut out: Vec<SourceId> = Vec::new();
+        for f in st.fields.values() {
+            if out.contains(&f.source) {
+                continue;
+            }
+            let documents = self
+                .forms
+                .get(&f.source)
+                .is_some_and(|form| form.facts.document_scripts > 0);
+            let own = widgets.get(&f.id).map_or(&[][..], |w| &w[..]);
+            if documents || f.has_scripts(own) {
+                out.push(f.source);
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// Whether the document's scripts came from more than one file, now
+    /// or before a save this session: then they're off by default (M10
+    /// proposal 5).
+    pub fn scripts_mixed(&self) -> bool {
+        self.scripts_mixed || self.script_sources().len() > 1
+    }
+
+    /// What to tell the reader about the forms an edit brought: fields put
+    /// under a new parent (a copy's, after Duplicate Pages, when `copies`),
+    /// whether their scripts still name the old fields, and scripts turned
+    /// off when `mixed_before` (`scripts_mixed` before the edit) wasn't.
+    pub fn form_notice(
+        &self,
+        out: &EditOutcome,
+        copies: bool,
+        mixed_before: bool,
+    ) -> Option<String> {
+        let st = self.state();
+        let mut parts = Vec::new();
+        for (under, sid) in &out.forms_renamed {
+            let file = self
+                .sources
+                .get(sid)
+                .and_then(|s| s.path.file_name())
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let scripted = st.fields.values().any(|f| {
+                f.under.as_deref() == Some(under.as_str())
+                    && (f.has_scripts(&[])
+                        || self
+                            .forms
+                            .get(sid)
+                            .is_some_and(|form| form.facts.document_scripts > 0))
+            });
+            let mut part = if copies {
+                format!("the copies' fields are under “{under}”, apart from the originals")
+            } else {
+                format!("fields from {file} are under “{under}”, since their names were taken")
+            };
+            if scripted {
+                part.push_str("; its scripts still use the old names");
+            }
+            parts.push(part);
+        }
+        if !mixed_before && self.scripts_mixed() {
+            parts.push("scripts are off: fields from more than one form have them".into());
+        }
+        if parts.is_empty() {
+            return None;
+        }
+        let sentences: Vec<String> = parts
+            .iter()
+            .map(|p| {
+                let mut chars = p.chars();
+                chars
+                    .next()
+                    .map(|c| c.to_uppercase().chain(chars).collect())
+                    .unwrap_or_default()
+            })
+            .collect();
+        Some(sentences.join(". "))
     }
 
     /// Page sizes arrive after open; they're not part of any snapshot.
@@ -873,6 +985,9 @@ impl Document {
         st.widgets = widgets;
         self.saved_fields = fields;
         self.next_field = self.next_field.max(next);
+        if !form.fields.is_empty() {
+            self.forms.insert(primary, Arc::new(form.clone()));
+        }
         Ok(())
     }
 
@@ -1050,6 +1165,9 @@ impl Document {
     /// an edit. Saved versions keep their snapshots (see `trim`), so
     /// nothing is ever replayed across a save.
     pub fn rebase_to_saved(&mut self, saved: SourceInfo) -> SourceId {
+        // The forms it was made of are one now; whether their scripts
+        // were from more than one is the session's to remember.
+        self.scripts_mixed |= self.script_sources().len() > 1;
         let path = saved.path.clone();
         let id = self.register_source(saved);
         self.primary = id;
@@ -1075,6 +1193,21 @@ impl Document {
                 source: id,
                 index: i as u32,
                 rotation: Rotation::R0,
+            })
+            .collect();
+        // Every field is the saved file's own now, under the name it was
+        // saved with. (Their objects there are slice 9's to find.)
+        st.fields = st
+            .fields
+            .iter()
+            .map(|(fid, f)| {
+                let f = Field {
+                    source: id,
+                    copy: 0,
+                    under: None,
+                    ..f.clone()
+                };
+                (*fid, f)
             })
             .collect();
         let st = self.state().clone();
@@ -1235,6 +1368,7 @@ impl Document {
             total.pages_added += out.pages_added;
             total.bookmarks_removed += out.bookmarks_removed;
             total.bookmarks_added += out.bookmarks_added;
+            total.forms_renamed.extend(out.forms_renamed);
         }
         if state != *self.state() {
             self.push(state, label.into(), steps, None);
@@ -1314,6 +1448,7 @@ impl Document {
         let ids = Ids {
             next_page: self.next_page,
             next_outline: self.next_outline,
+            next_field: self.next_field,
             seed: fastrand::u64(..),
         };
         self.rng = fastrand::Rng::with_seed(ids.seed);
@@ -1323,14 +1458,16 @@ impl Document {
 
     /// Run a recorded step again, exactly as the first time.
     fn replay_step(&mut self, state: DocState, step: &Step) -> Result<DocState> {
-        let (page, outline) = (self.next_page, self.next_outline);
+        let (page, outline, field) = (self.next_page, self.next_outline, self.next_field);
         self.next_page = step.ids.next_page;
         self.next_outline = step.ids.next_outline;
+        self.next_field = step.ids.next_field;
         self.rng = fastrand::Rng::with_seed(step.ids.seed);
         let result = self.compute(state, step.edit.clone()).map(|(s, _)| s);
         // Counters only grow; leave them as they were before the replay.
         self.next_page = self.next_page.max(page);
         self.next_outline = self.next_outline.max(outline);
+        self.next_field = self.next_field.max(field);
         result
     }
 
@@ -1651,6 +1788,204 @@ impl Document {
         id
     }
 
+    /// Source `source`'s fields with widgets on the pages coming in
+    /// (`shown`: each page's index in the source, and the page showing it),
+    /// and its fields with no widget at all, into `st` as a copy of their
+    /// own (M10 proposal 5). Only widgets on those pages come along. When
+    /// any of their names clashes with a field in the document, or a parent
+    /// of one, they all go under a new parent field named for the file:
+    /// its name. Pages of a file whose form is here already (a run of its
+    /// pages after another, as Combine inserts them) join that form.
+    fn take_in_fields(
+        &mut self,
+        st: &mut DocState,
+        source: SourceId,
+        shown: &[(u32, PageId)],
+    ) -> Option<String> {
+        let form = self.forms.get(&source)?.clone();
+        let on_pages: HashSet<FieldId> = shown
+            .iter()
+            .flat_map(|(index, _)| form.widgets.get(index).into_iter().flatten())
+            .map(|w| w.field)
+            .collect();
+        if on_pages.is_empty() {
+            return None;
+        }
+        let with_widgets: HashSet<FieldId> =
+            form.widgets.values().flatten().map(|w| w.field).collect();
+        let fields: Vec<&Field> = form
+            .fields
+            .iter()
+            .filter(|f| on_pages.contains(&f.id) || !with_widgets.contains(&f.id))
+            .collect();
+        // The form as it's here already, by object: each field's id, and
+        // the parent they're all under.
+        let here: HashMap<lopdf::ObjectId, (FieldId, Option<Arc<str>>)> = st
+            .fields
+            .values()
+            .filter(|f| f.source == source && f.copy == 0)
+            .map(|f| (f.object, (f.id, f.under.clone())))
+            .collect();
+        let (under, ids) = match here.values().next() {
+            Some((_, joined)) => {
+                let joined = joined.as_deref().map(str::to_string);
+                let mut ids = HashMap::new();
+                let mut new = Vec::new();
+                for f in fields {
+                    match here.get(&f.object) {
+                        Some((id, _)) => {
+                            ids.insert(f.id, *id);
+                        }
+                        None => new.push(f),
+                    }
+                }
+                ids.extend(self.bring_fields(st, source, 0, new, joined));
+                (None, ids)
+            }
+            None => {
+                let under = self.name_apart(st, source, fields.iter().map(|f| f.name.as_str()));
+                let copy = next_copy(st, source);
+                (
+                    under.clone(),
+                    self.bring_fields(st, source, copy, fields, under),
+                )
+            }
+        };
+        for &(index, page) in shown {
+            let list: Vector<Widget> = form
+                .widgets
+                .get(&index)
+                .into_iter()
+                .flatten()
+                .filter_map(|w| {
+                    Some(Widget {
+                        field: *ids.get(&w.field)?,
+                        ..w.clone()
+                    })
+                })
+                .collect();
+            if !list.is_empty() {
+                st.widgets.insert(page, list);
+            }
+        }
+        under
+    }
+
+    /// Duplicate Pages: each copy's widgets get fields of their own, a new
+    /// copy of each form the pages show, renamed by
+    /// [`take_in_fields`](Self::take_in_fields)'s rule, so filling one never
+    /// fills the other (M10 bug 4). `copies` pairs each page with its copy.
+    fn copy_fields(
+        &mut self,
+        st: &mut DocState,
+        copies: &[(PageId, PageId)],
+    ) -> Vec<(String, SourceId)> {
+        // The forms the pages show, and their fields there, in order.
+        let mut forms: BTreeMap<(SourceId, u32), BTreeSet<FieldId>> = BTreeMap::new();
+        for (page, _) in copies {
+            for w in st.widgets.get(page).into_iter().flatten() {
+                if let Some(f) = st.fields.get(&w.field) {
+                    forms.entry((f.source, f.copy)).or_default().insert(f.id);
+                }
+            }
+        }
+        let mut renamed = Vec::new();
+        let mut ids = HashMap::new();
+        for ((source, _), fields) in forms {
+            let fields: Vec<Field> = fields.iter().map(|id| st.fields[id].clone()).collect();
+            let under = self.name_apart(st, source, fields.iter().map(|f| f.source_name()));
+            renamed.extend(under.clone().map(|u| (u, source)));
+            let copy = next_copy(st, source);
+            ids.extend(self.bring_fields(st, source, copy, fields.iter(), under));
+        }
+        for &(page, copy) in copies {
+            let list: Vector<Widget> = st
+                .widgets
+                .get(&page)
+                .into_iter()
+                .flatten()
+                .filter_map(|w| {
+                    Some(Widget {
+                        field: *ids.get(&w.field)?,
+                        ..w.clone()
+                    })
+                })
+                .collect();
+            if !list.is_empty() {
+                st.widgets.insert(copy, list);
+            }
+        }
+        renamed
+    }
+
+    /// `fields` of `source` into `st` with new ids, as copy `copy` of its
+    /// form, under `under` when given. Each old id, and its new one.
+    fn bring_fields<'a>(
+        &mut self,
+        st: &mut DocState,
+        source: SourceId,
+        copy: u32,
+        fields: impl IntoIterator<Item = &'a Field>,
+        under: Option<String>,
+    ) -> HashMap<FieldId, FieldId> {
+        let under: Option<Arc<str>> = under.map(Arc::from);
+        let mut ids = HashMap::new();
+        for f in fields {
+            let id = FieldId(self.next_field);
+            self.next_field += 1;
+            let name = match &under {
+                Some(u) => format!("{u}.{}", f.source_name()),
+                None => f.source_name().to_string(),
+            };
+            st.fields.insert(
+                id,
+                Field {
+                    id,
+                    source,
+                    copy,
+                    under: under.clone(),
+                    name,
+                    ..f.clone()
+                },
+            );
+            ids.insert(f.id, id);
+        }
+        ids
+    }
+
+    /// The parent field `names` (full names, as their source has them) go
+    /// under, when any of them, or a parent of one, is a field or parent
+    /// in `st` already: the file's name, or with `_2`, `_3`… when that's
+    /// taken. None when nothing clashes.
+    fn name_apart<'a>(
+        &self,
+        st: &DocState,
+        source: SourceId,
+        names: impl IntoIterator<Item = &'a str>,
+    ) -> Option<String> {
+        let existing = field_nodes(st.fields.values().map(|f| f.name.as_str()));
+        if !field_nodes(names).iter().any(|n| existing.contains(n)) {
+            return None;
+        }
+        // A dot would make it two names.
+        let stem = self
+            .sources
+            .get(&source)
+            .and_then(|s| s.path.file_stem())
+            .map(|s| s.to_string_lossy().replace('.', "_"))
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "form".to_string());
+        (1..)
+            .map(|n| {
+                if n == 1 {
+                    stem.clone()
+                } else {
+                    format!("{stem}_{n}")
+                }
+            })
+            .find(|name| !existing.contains(name.as_str()))
+    }
+
     fn fresh_outline_id(&mut self) -> OutlineId {
         let id = OutlineId(self.next_outline);
         self.next_outline += 1;
@@ -1860,10 +2195,16 @@ impl Document {
                     })
                     .collect();
                 import_marks(&mut self.rng, &mut st, incoming);
+                let shown: Vec<(u32, PageId)> = range.map(|i| (i, by_index[i as usize])).collect();
+                if let Some(under) = self.take_in_fields(&mut st, source, &shown) {
+                    out.forms_renamed.push((under, source));
+                }
             }
             Edit::DuplicatePages { ids } => {
                 let set: HashSet<PageId> = ids.into_iter().collect();
                 let mut pages = Vector::new();
+                // (page, its copy), for their fields.
+                let mut copies = Vec::new();
                 for p in st.pages.iter() {
                     pages.push_back(*p);
                     if set.contains(&p.id) {
@@ -1885,11 +2226,13 @@ impl Document {
                         if let Some(layer) = st.text_layers.get(&p.id).cloned() {
                             st.text_layers.insert(copy, layer);
                         }
+                        copies.push((p.id, copy));
                         pages.push_back(PageRef { id: copy, ..*p });
                         out.pages_added += 1;
                     }
                 }
                 st.pages = pages;
+                out.forms_renamed = self.copy_fields(&mut st, &copies);
             }
             Edit::ReplacePages {
                 ids,
@@ -1970,6 +2313,11 @@ impl Document {
                     .filter_map(|(index, list)| Some((*shown_by.get(&index)?, list)))
                     .collect();
                 import_marks(&mut self.rng, &mut st, incoming);
+                let mut shown: Vec<(u32, PageId)> = shown_by.into_iter().collect();
+                shown.sort();
+                if let Some(under) = self.take_in_fields(&mut st, source, &shown) {
+                    out.forms_renamed.push((under, source));
+                }
             }
             Edit::OutlineInsert {
                 parent,
@@ -2410,6 +2758,30 @@ fn fresh_annot_id(rng: &mut fastrand::Rng, st: &DocState, taken: &mut HashSet<An
             return id;
         }
     }
+}
+
+/// The copy of `source`'s form fields brought in next take: one past the
+/// last one `st` has, or 0.
+fn next_copy(st: &DocState, source: SourceId) -> u32 {
+    st.fields
+        .values()
+        .filter(|f| f.source == source)
+        .map(|f| f.copy + 1)
+        .max()
+        .unwrap_or(0)
+}
+
+/// Every node of a field tree with these full names: each name, and the
+/// parents in it (what comes before each dot).
+fn field_nodes<'a>(names: impl IntoIterator<Item = &'a str>) -> HashSet<&'a str> {
+    let mut out = HashSet::new();
+    for name in names {
+        out.insert(name);
+        for (i, _) in name.match_indices('.') {
+            out.insert(&name[..i]);
+        }
+    }
+    out
 }
 
 /// Marks that came with pages from another file, onto their new pages in
@@ -3043,7 +3415,12 @@ mod tests {
                 &flat(&[("A", Some(0), 0), ("B", Some(3), 0)]),
                 Box::new(FixedCount(2)),
             );
+            // Both files have forms: inserts and duplicates bring fields,
+            // renamed, with new ids (M10 slice 4).
+            let form = crate::forms::read(&crate::forms::fixture::every_kind().pdf);
+            d.set_initial_fields(&form).unwrap();
             let other = d.add_source(src(4));
+            d.set_source_form(other, form);
             let mut made: Vec<(VersionId, DocState)> = Vec::new();
             for step in 0..25 {
                 let n = d.page_count();
