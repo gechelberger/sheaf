@@ -220,29 +220,36 @@ notes in [`todos/m9.md`](todos/m9.md).
 
 ### M10: Forms
 
+Started 2026-10-15, before M11 after all. The plan, with the decisions
+made while planning and at kickoff and the bugs found, is in
+[`todos/m10.md`](todos/m10.md).
+
 - Fill AcroForms: text, checkbox, radio, combo/list, with correct appearance
   stream generation so values look the same in every viewer.
-- Field calculations and format/validate/keystroke scripts. IRS and state
-  forms depend on these. Run a sandboxed subset of Acrobat form JavaScript
-  (AFNumber_Format, AFSimple_Calculate and friends, plus simple custom
-  scripts), not a general JS runtime.
+- Field calculations and format/validate/keystroke scripts. Run a
+  sandboxed subset of Acrobat form JavaScript (AFNumber_Format,
+  AFSimple_Calculate and friends, plus custom scripts), not a general JS
+  runtime: pdf.js's form-script library in boa_engine, run as a
+  WebAssembly guest in sheaf's wasmtime.
 - Create / edit fields: all field types, properties, tab order, alignment
   tools.
 - Automatic field detection on flat forms.
-- Import / export form data: FDF, XFDF, CSV/XML.
+- Import / export form data: FDF, XFDF, CSV, tab-delimited text, JSON.
+  Acrobat's XML later.
 - Flatten form fields (Export Flattened Copy already keeps fields; add the
   option to flatten them).
 - XFA: still not planned. Show a clear notice when a document is XFA-only.
+- Forms survive page tools, and saves follow rules for hybrid XFA, usage
+  rights and signed files.
 
-Slices: fill + appearances → calculation/format scripts → field authoring →
-auto-detect → data import/export → flatten.
-
-**Decide at kickoff:** which JS engine (boa, QuickJS via rquickjs) and how big
-a subset to allow. Measure against a corpus of real IRS/state fillable forms.
+Slices: corpus and form check → field model → page tools → appearances →
+saving → filling → flatten → data import/export → AF functions → script
+host → scripts → field authoring → auto-detect (the cut line) → plugin API.
 
 ### M11: Security & redaction
 
-Planned 2026-10-14; next after M9 (M10 is skipped for now, on purpose).
+Planned 2026-10-14; follows M10 (M10 was first skipped, then started
+2026-10-15 ahead of it).
 The plan, with the decisions made while planning, the proposals for
 kickoff and the bugs found, is in [`todos/m11.md`](todos/m11.md).
 
