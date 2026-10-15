@@ -359,3 +359,128 @@ fn another_tools_comment_hides_and_shows_by_slot() {
     assert!(red_at_center(&engine));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn tapes_draw_turned_and_from_old_text() {
+    use sheaf_doc::tape::{Line, Op, Row, Tape, TapeLook};
+    let dir = tempdir();
+    let src = dir.join("src.pdf");
+    blank_pdf(&src, 0);
+    let letter = PageSize {
+        width: 612.0,
+        height: 792.0,
+    };
+    let mut model = Document::new(
+        SourceInfo {
+            path: src.clone(),
+            page_count: 1,
+            first_page: letter,
+            page_sizes: None,
+            bytes: 0,
+            password: None,
+            data: None,
+        },
+        &[],
+        Box::new(FixedCount(10)),
+    );
+    let page = model.page(0).unwrap().id;
+    let mut tape = Tape {
+        lines: vec![
+            Line::new(Row::Title("Cash".into())),
+            Line::new(Row::Entry {
+                value: 1234.5,
+                op: Op::Add,
+            }),
+            Line::new(Row::Entry {
+                value: 250.0,
+                op: Op::Add,
+            }),
+            Line::new(Row::Total(0.0)),
+        ],
+    };
+    tape.retotal();
+    let look = TapeLook {
+        rotation: 90,
+        paper: [255, 250, 205],
+        ..Default::default()
+    };
+    // Turned: its box is tall.
+    let (w, h) = sheaf_doc::annot::tape_size(&tape, 10.0, &look);
+    let turned = Box2 {
+        x: 100.0,
+        y: 100.0,
+        w: h,
+        h: w,
+    };
+    let mut a = mark(
+        AnnotKind::Tape {
+            rect: turned,
+            size: 10.0,
+            tape: tape.clone(),
+            look,
+        },
+        [20, 20, 20],
+    );
+    a.contents = tape.text(2);
+    model
+        .apply(Edit::AnnotAdd { page, annot: a }, "tape")
+        .unwrap();
+    // From before rows were kept: text only, read back from it.
+    let mut old = mark(
+        AnnotKind::Tape {
+            rect: Box2 {
+                x: 300.0,
+                y: 100.0,
+                w: 110.0,
+                h: 60.0,
+            },
+            size: 10.0,
+            tape: Tape::default(),
+            look: TapeLook::default(),
+        },
+        [20, 20, 20],
+    );
+    old.contents = "1,234.50 +\n250.00 +\n1,484.50 T".into();
+    model
+        .apply(Edit::AnnotAdd { page, annot: old }, "tape")
+        .unwrap();
+    let out = dir.join("tapes.pdf");
+    sheaf_doc::save::rewrite_to_path(&model.snapshot(), &out).unwrap();
+
+    let engine = PdfiumEngine::open(&out, None).unwrap();
+    let r = engine
+        .render(
+            PageIndex(0),
+            Job::Page {
+                width: 612,
+                rotation: Rotation::R0,
+            },
+            PixelFormat::Rgba,
+        )
+        .unwrap();
+    let px = |x: f32, y: f32| {
+        let i = ((y as u32 * r.width + x as u32) * 4) as usize;
+        [r.data[i], r.data[i + 1], r.data[i + 2]]
+    };
+    let inked = |x0: f32, y0: f32, x1: f32, y1: f32| {
+        let mut n = 0;
+        for y in y0 as u32..y1 as u32 {
+            for x in x0 as u32..x1 as u32 {
+                if px(x as f32, y as f32).iter().all(|c| *c < 100) {
+                    n += 1;
+                }
+            }
+        }
+        n
+    };
+    // The turned tape: yellow paper over its whole tall box, with text on
+    // it, and the page white beside it.
+    let paper = px(turned.x + 3.0, turned.bottom() - 3.0);
+    assert!(paper[0] > 240 && paper[2] < 230, "paper {paper:?}");
+    assert!(inked(turned.x, turned.y, turned.right(), turned.bottom()) > 50);
+    let beside = px(turned.right() + 5.0, turned.y + 10.0);
+    assert!(beside.iter().all(|c| *c > 245), "beside {beside:?}");
+    // The old one: its text drawn too.
+    assert!(inked(300.0, 100.0, 410.0, 160.0) > 50);
+    let _ = std::fs::remove_dir_all(&dir);
+}

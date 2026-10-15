@@ -519,7 +519,12 @@ impl DocView {
             }
             if let Some(a) = mark {
                 if ev.click_count >= 2 && self.tool == Tool::Select {
-                    self.start_annot_editor_for(page_id, a.id, window, cx);
+                    // A tape goes back to the calculator to be edited.
+                    if matches!(a.kind, AnnotKind::Tape { .. }) {
+                        self.edit_tape(page_id, a.id, cx);
+                    } else {
+                        self.start_annot_editor_for(page_id, a.id, window, cx);
+                    }
                     return;
                 }
                 let State::Ready(doc) = &mut self.state else {

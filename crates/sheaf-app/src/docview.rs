@@ -554,6 +554,8 @@ pub struct DocView {
     pub(crate) pattern: Option<crate::pattern_panel::PatternSearch>,
     pub(crate) initial_pattern: Option<String>,
     pub(crate) calc: Option<crate::calc_panel::CalcTape>,
+    /// Focus to give the calculator's entry next frame (a note finished).
+    pub(crate) pending_calc_focus: Option<Entity<sheaf_ui::text_input::TextInput>>,
     pub(crate) comments: Option<crate::comments_panel::Comments>,
     pub(crate) history: Option<crate::history_panel::History>,
     /// The Connector tool's label; None for the next unused one.
@@ -674,6 +676,7 @@ impl DocView {
             pattern: None,
             initial_pattern: None,
             calc: None,
+            pending_calc_focus: None,
             comments: None,
             ocr: None,
             job: None,
@@ -2000,6 +2003,8 @@ impl DocView {
                     h: 60.0,
                 },
                 size: 10.0,
+                tape: Default::default(),
+                look: Default::default(),
             },
             [20, 20, 20],
             cx,
@@ -5101,48 +5106,103 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
                     .into_any_element(),
             );
         }
-        AnnotKind::Tape { rect, size } => {
-            use sheaf_doc::annot::{TAPE_LINE, TAPE_OP_W, TAPE_PAD, tape_lines};
-            let fs = *size * k;
-            let rows: Vec<AnyElement> = tape_lines(&a.contents)
-                .into_iter()
-                .map(|(v, op)| {
-                    let total = op == "T";
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_end()
-                        .h(px(*size * TAPE_LINE * k))
-                        .when(total, |d| {
-                            d.border_t_1()
-                                .border_color(theme::TAPE_RULE)
-                                .font_weight(gpui::FontWeight::BOLD)
-                        })
-                        .child(div().child(v))
-                        .child(
+        AnnotKind::Tape {
+            rect, size, look, ..
+        } => {
+            use sheaf_doc::annot::{TAPE_LINE, TAPE_PAD, tape_columns};
+            use sheaf_doc::tape::{Row, fmt_amount};
+            let [pr, pg, pb] = look.paper;
+            let paper = rgb(((pr as u32) << 16) | ((pg as u32) << 8) | pb as u32);
+            if look.rotation % 360 != 0 {
+                // GPUI can't turn text: a picture of the tape as the file
+                // draws it.
+                let el = match crate::stamp_preview::tape_picture(a) {
+                    Some(path) => {
+                        place(*rect).child(img(path).size_full().object_fit(ObjectFit::Fill))
+                    }
+                    None => place(*rect)
+                        .bg(paper)
+                        .border_1()
+                        .border_color(theme::TAPE_BORDER),
+                };
+                out.push(el.into_any_element());
+            } else {
+                let tape = a.tape().unwrap_or_default();
+                let (number_w, amount_w, symbol_w, _) = tape_columns(&tape, *size, look);
+                let fs = *size * k;
+                let line_h = *size * TAPE_LINE * k;
+                let rows: Vec<AnyElement> =
+                    look.shown(&tape)
+                        .into_iter()
+                        .map(|(number, l)| {
+                            let total = l.row.is_total();
+                            let body: AnyElement = match &l.row {
+                                Row::Title(t) => div()
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .whitespace_nowrap()
+                                    .child(t.clone())
+                                    .into_any_element(),
+                                row => div()
+                                    .flex()
+                                    .child(div().w(px(amount_w * k)).flex().justify_end().child(
+                                        fmt_amount(row.value().unwrap_or(0.0), look.decimals),
+                                    ))
+                                    .child(
+                                        div()
+                                            .w(px(symbol_w * k))
+                                            .pl(px(*size * 0.3 * k))
+                                            .child(row.symbol()),
+                                    )
+                                    .into_any_element(),
+                            };
                             div()
-                                .w(px(*size * TAPE_OP_W * k))
-                                .pl(px(fs * 0.2))
-                                .child(op),
-                        )
-                        .into_any_element()
-                })
-                .collect();
-            out.push(
-                place(*rect)
-                    .bg(theme::PAGE)
-                    .border_1()
-                    .border_color(theme::TAPE_BORDER)
-                    .p(px(TAPE_PAD * k))
-                    .flex()
-                    .flex_col()
-                    .overflow_hidden()
-                    .text_color(color)
-                    .text_size(px(fs))
-                    .line_height(px(*size * TAPE_LINE * k))
-                    .children(rows)
-                    .into_any_element(),
-            );
+                                .flex()
+                                .items_center()
+                                .h(px(line_h))
+                                .whitespace_nowrap()
+                                .when(total, |d| {
+                                    d.border_t_1()
+                                        .border_color(theme::TAPE_RULE)
+                                        .font_weight(gpui::FontWeight::BOLD)
+                                })
+                                .when(look.numbers, |d| {
+                                    d.child(
+                                        div()
+                                            .w(px(number_w * k))
+                                            .flex_shrink_0()
+                                            .text_color(theme::TAPE_RULE)
+                                            .font_weight(gpui::FontWeight::NORMAL)
+                                            .child(number),
+                                    )
+                                })
+                                .child(body)
+                                .when(!l.note.is_empty(), |d| {
+                                    d.child(
+                                        div()
+                                            .pl(px(*size * 0.4 * k))
+                                            .font_weight(gpui::FontWeight::NORMAL)
+                                            .child(l.note.clone()),
+                                    )
+                                })
+                                .into_any_element()
+                        })
+                        .collect();
+                out.push(
+                    place(*rect)
+                        .bg(paper)
+                        .border_1()
+                        .border_color(theme::TAPE_BORDER)
+                        .p(px(TAPE_PAD * k))
+                        .flex()
+                        .flex_col()
+                        .overflow_hidden()
+                        .text_color(color)
+                        .text_size(px(fs))
+                        .line_height(px(line_h))
+                        .children(rows)
+                        .into_any_element(),
+                );
+            }
         }
         AnnotKind::Connector { rect, label, .. } => {
             out.push(

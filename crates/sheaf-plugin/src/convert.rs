@@ -188,7 +188,7 @@ pub fn annot_to_wit(a: &Annot) -> Option<w::Annot> {
             label: label.clone(),
             partner: partner.map(|p| p.0),
         }),
-        AnnotKind::Tape { rect, size } => w::AnnotKind::Tape(w::TextBox {
+        AnnotKind::Tape { rect, size, .. } => w::AnnotKind::Tape(w::TextBox {
             rect: box_to_wit(*rect),
             size: *size,
         }),
@@ -255,9 +255,13 @@ pub fn annot_from_wit(a: w::Annot) -> Annot {
             label: c.label,
             partner: c.partner.map(AnnotId),
         },
+        // A plugin sees a tape as its text (`contents`); its rows are read
+        // back from that.
         w::AnnotKind::Tape(t) => AnnotKind::Tape {
             rect: box_from_wit(t.rect),
             size: t.size,
+            tape: Default::default(),
+            look: Default::default(),
         },
     };
     Annot {

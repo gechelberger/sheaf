@@ -23,6 +23,7 @@ pub mod recovery;
 pub mod save;
 pub mod stamp_lib;
 pub mod stamps;
+pub mod tape;
 pub mod text_layer;
 pub mod watermark;
 

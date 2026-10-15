@@ -48,6 +48,32 @@ pub fn picture(stem: &str) -> Option<PathBuf> {
     None
 }
 
+/// Tapes' pictures, by what the tape is: the cache name of its PDF.
+static TAPES: LazyLock<Mutex<std::collections::HashMap<u64, String>>> =
+    LazyLock::new(Default::default);
+
+/// The picture of a turned tape (GPUI can't turn text): its appearance as a
+/// one-page PDF in the cache, rendered like a stamp's.
+pub fn tape_picture(a: &sheaf_doc::Annot) -> Option<PathBuf> {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    serde_json::to_string(&(&a.kind, a.color, &a.contents))
+        .ok()?
+        .hash(&mut h);
+    let key = h.finish();
+    let known = TAPES.lock().ok()?.get(&key).cloned();
+    let stem = match known {
+        Some(s) => s,
+        None => {
+            let pdf = sheaf_doc::annot::tape_pdf(a)?;
+            let stem = sheaf_doc::generated::stem_of(&sheaf_doc::generated::store(&pdf).ok()?);
+            TAPES.lock().ok()?.insert(key, stem.clone());
+            stem
+        }
+    };
+    picture(&stem)
+}
+
 /// Make the pictures asked for since last time.
 pub fn make_wanted(cx: &mut gpui::App) {
     let wanted: Vec<String> = {

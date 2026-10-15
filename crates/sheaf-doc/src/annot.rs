@@ -115,12 +115,17 @@ pub enum AnnotKind {
         label: String,
         partner: Option<AnnotId>,
     },
-    /// Calculator tape. `contents` holds one entry per line as
-    /// `"<amount> <op>"` (see `tape_lines`); drawn as a paper tape with
-    /// right-aligned amounts, totals (`T`) ruled and bold.
+    /// Calculator tape, as PDFlyer prints it (see `tape`): `tape`'s rows,
+    /// `size` points tall, drawn on paper as `look` says. `contents` holds
+    /// its text for other viewers; a tape from before rows were kept has
+    /// only that, and is read from it (`Annot::tape`).
     Tape {
         rect: Box2,
         size: f32,
+        #[serde(default, skip_serializing_if = "crate::tape::Tape::is_empty")]
+        tape: crate::tape::Tape,
+        #[serde(default)]
+        look: crate::tape::TapeLook,
     },
     /// Text markup: a line under the text.
     Underline {
@@ -354,9 +359,16 @@ impl AnnotKind {
                 label: label.clone(),
                 partner: *partner,
             },
-            AnnotKind::Tape { rect, size: s } => AnnotKind::Tape {
+            AnnotKind::Tape {
+                rect,
+                size: s,
+                tape,
+                look,
+            } => AnnotKind::Tape {
                 rect: mb(rect),
                 size: size(*s),
+                tape: tape.clone(),
+                look: look.clone(),
             },
         }
     }
@@ -388,6 +400,12 @@ impl AnnotKind {
             x: to.x + (p.x - from.x) * sx,
             y: to.y + (p.y - from.y) * sy,
         };
+        // A turned tape's text runs across the box's height: it scales with
+        // the width.
+        let along = match self {
+            AnnotKind::Tape { look, .. } if look.rotation % 180 == 90 => sx,
+            _ => sy,
+        };
         self.mapped(
             &mp,
             &|b| {
@@ -399,7 +417,7 @@ impl AnnotKind {
                     h: b.h * sy,
                 }
             },
-            &|s| (s * sy).max(4.0),
+            &|s| (s * along).max(4.0),
         )
     }
 
@@ -626,6 +644,18 @@ impl Annot {
         match self.kind {
             AnnotKind::Replace { .. } => vec![self.name(), self.strike_name()],
             _ => vec![self.name()],
+        }
+    }
+
+    /// A tape's rows: its own, or for a tape from before rows were kept,
+    /// read from its text. None for any other mark.
+    pub fn tape(&self) -> Option<crate::tape::Tape> {
+        match &self.kind {
+            AnnotKind::Tape { tape, .. } if tape.lines.is_empty() => {
+                Some(crate::tape::Tape::from_text(&self.contents))
+            }
+            AnnotKind::Tape { tape, .. } => Some(tape.clone()),
+            _ => None,
         }
     }
 
@@ -1293,65 +1323,17 @@ fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
             }
             content.push_str(" ET");
         }
-        AnnotKind::Tape { rect, size } => {
+        AnnotKind::Tape {
+            rect, size, look, ..
+        } => {
             dict.set("Subtype", Object::Name(b"FreeText".to_vec()));
             dict.set(
                 "DA",
                 pdf_text_string(&format!("{HELV} {size} Tf {}", color_ops(c, true))),
             );
             dict.set("C", Object::Array(vec![Object::Real(1.0); 3]));
-            // Paper: white, thin grey border.
-            let [x0, y0, x1, y1] = geom.box_to_user(*rect);
-            content.push_str(&format!(
-                " 1 1 1 rg 0.6 G 0.5 w {x0:.2} {y0:.2} {:.2} {:.2} re B",
-                x1 - x0,
-                y1 - y0
-            ));
-            let lines = tape_lines(&a.contents);
-            let op_w = size * TAPE_OP_W;
-            let right = rect.right() - TAPE_PAD;
-            let baseline = |i: usize| rect.y + TAPE_PAD + size * (1.0 + TAPE_LINE * i as f32);
-            // Rules above totals (paths can't go inside BT/ET).
-            content.push_str(" 0.3 G 0.5 w");
-            for (i, (_, op)) in lines.iter().enumerate() {
-                if op == "T" {
-                    let y = baseline(i) - size * 1.05;
-                    let p = up(Pt {
-                        x: rect.x + TAPE_PAD,
-                        y,
-                    });
-                    let q = up(Pt { x: right, y });
-                    content.push_str(&format!(
-                        " {:.2} {:.2} m {:.2} {:.2} l S",
-                        p.x, p.y, q.x, q.y
-                    ));
-                }
-            }
-            content.push_str(&format!(" BT {}", color_ops(c, true)));
-            for (i, (val, op)) in lines.iter().enumerate() {
-                let font = if op == "T" { HELV_BOLD } else { HELV };
-                let origin = Pt {
-                    x: right - op_w - helv_width(val, *size),
-                    y: baseline(i),
-                };
-                content.push_str(&format!(
-                    " {font} {size:.2} Tf {} {} Tj",
-                    text_matrix(origin),
-                    content_literal(val)
-                ));
-                if !op.is_empty() {
-                    let origin = Pt {
-                        x: right - op_w + size * 0.2,
-                        y: baseline(i),
-                    };
-                    content.push_str(&format!(
-                        " {} {} Tj",
-                        text_matrix(origin),
-                        content_literal(op)
-                    ));
-                }
-            }
-            content.push_str(" ET");
+            let tape = a.tape().unwrap_or_default();
+            content.push_str(&tape_content(*rect, *size, look, &tape, c, geom));
         }
         AnnotKind::Square { rect } | AnnotKind::Ellipse { rect } => {
             let square = matches!(a.kind, AnnotKind::Square { .. });
@@ -1744,6 +1726,212 @@ pub fn helv_text_width(s: &str, size: f32, bold: bool) -> f32 {
         / 1000.0
 }
 
+/// A tape's frame as it reads (width, height): the mark's box, turned
+/// back when the tape is turned.
+fn tape_frame(rect: Box2, look: &crate::tape::TapeLook) -> (f32, f32) {
+    if look.rotation % 180 == 90 {
+        (rect.h, rect.w)
+    } else {
+        (rect.w, rect.h)
+    }
+}
+
+/// Where a point of the tape's frame (x right, y down, as it reads) is
+/// in the page's displayed space, the tape turned as `look` says.
+fn tape_to_shown(rect: Box2, look: &crate::tape::TapeLook, u: f32, v: f32) -> Pt {
+    match look.rotation % 360 {
+        90 => Pt {
+            x: rect.right() - v,
+            y: rect.y + u,
+        },
+        270 => Pt {
+            x: rect.x + v,
+            y: rect.bottom() - u,
+        },
+        180 => Pt {
+            x: rect.right() - u,
+            y: rect.bottom() - v,
+        },
+        _ => Pt {
+            x: rect.x + u,
+            y: rect.y + v,
+        },
+    }
+}
+
+/// The columns of a tape at `size`: (number, amount, symbol, note) widths.
+pub fn tape_columns(
+    tape: &crate::tape::Tape,
+    size: f32,
+    look: &crate::tape::TapeLook,
+) -> (f32, f32, f32, f32) {
+    use crate::tape::{Row, fmt_amount};
+    let shown = look.shown(tape);
+    let width = |s: &str, bold: bool| helv_text_width(s, size, bold);
+    let number = if look.numbers {
+        shown
+            .iter()
+            .map(|(n, _)| width(n, false))
+            .fold(0.0, f32::max)
+            + size * 0.8
+    } else {
+        0.0
+    };
+    let amount = shown
+        .iter()
+        .map(|(_, l)| match &l.row {
+            Row::Title(t) => width(t, true) - size * 1.8,
+            row => width(
+                &fmt_amount(row.value().unwrap_or(0.0), look.decimals),
+                row.is_total(),
+            ),
+        })
+        .fold(size * 3.0, f32::max);
+    let symbol = size * 1.8;
+    let note = shown
+        .iter()
+        .map(|(_, l)| {
+            if l.note.is_empty() {
+                0.0
+            } else {
+                width(&l.note, false) + size
+            }
+        })
+        .fold(0.0, f32::max);
+    (number, amount, symbol, note)
+}
+
+/// A tape's natural size at `size` (as it reads, before it's turned).
+pub fn tape_size(tape: &crate::tape::Tape, size: f32, look: &crate::tape::TapeLook) -> (f32, f32) {
+    let (n, a, s, note) = tape_columns(tape, size, look);
+    let rows = look.shown(tape).len().max(1) as f32;
+    (
+        n + a + s + note + 2.0 * TAPE_PAD,
+        rows * size * TAPE_LINE + 2.0 * TAPE_PAD + size * 0.3,
+    )
+}
+
+/// A tape's appearance: paper, then its rows (number, amount or title,
+/// symbol, note), drawn in the tape's own frame and mapped onto the page,
+/// so it reads the right way whichever way it's turned.
+fn tape_content(
+    rect: Box2,
+    size: f32,
+    look: &crate::tape::TapeLook,
+    tape: &crate::tape::Tape,
+    c: [u8; 3],
+    geom: &PageGeom,
+) -> String {
+    use crate::tape::{Row, fmt_amount};
+    let (w, h) = tape_frame(rect, look);
+    // The frame, PDF-style (y up from its bottom left), to user space.
+    let user = |x: f32, y: f32| geom.to_user(tape_to_shown(rect, look, x, h - y));
+    let o = user(0.0, 0.0);
+    let ex = user(1.0, 0.0);
+    let ey = user(0.0, 1.0);
+    let mut out = format!(
+        " q {:.5} {:.5} {:.5} {:.5} {:.3} {:.3} cm",
+        ex.x - o.x,
+        ex.y - o.y,
+        ey.x - o.x,
+        ey.y - o.y,
+        o.x,
+        o.y
+    );
+    // Paper, a thin grey border, and nothing drawn outside it.
+    out.push_str(&format!(
+        " {} 0.6 G 0.5 w 0 0 {w:.2} {h:.2} re B 0 0 {w:.2} {h:.2} re W n",
+        color_ops(look.paper, true)
+    ));
+    let (number_w, amount_w, symbol_w, _) = tape_columns(tape, size, look);
+    let amount_right = TAPE_PAD + number_w + amount_w;
+    let note_x = amount_right + symbol_w;
+    let shown = look.shown(tape);
+    let baseline = |i: usize| h - (TAPE_PAD + size * (1.0 + TAPE_LINE * i as f32));
+    // Rules above totals first: paths can't go inside BT/ET.
+    out.push_str(" 0.3 G 0.5 w");
+    for (i, (_, l)) in shown.iter().enumerate() {
+        if l.row.is_total() {
+            let y = baseline(i) + size * 1.05;
+            out.push_str(&format!(
+                " {:.2} {y:.2} m {:.2} {y:.2} l S",
+                TAPE_PAD + number_w,
+                note_x
+            ));
+        }
+    }
+    out.push_str(&format!(" BT {}", color_ops(c, true)));
+    let text = |out: &mut String, font: &str, x: f32, y: f32, s: &str| {
+        out.push_str(&format!(
+            " {font} {size:.2} Tf 1 0 0 1 {x:.2} {y:.2} Tm {} Tj",
+            content_literal(s)
+        ));
+    };
+    for (i, (number, l)) in shown.iter().enumerate() {
+        let y = baseline(i);
+        if look.numbers {
+            text(&mut out, HELV, TAPE_PAD, y, number);
+        }
+        match &l.row {
+            Row::Title(t) => text(&mut out, HELV_BOLD, TAPE_PAD + number_w, y, t),
+            row => {
+                let font = if row.is_total() { HELV_BOLD } else { HELV };
+                let v = fmt_amount(row.value().unwrap_or(0.0), look.decimals);
+                let x = amount_right - helv_text_width(&v, size, row.is_total());
+                text(&mut out, font, x, y, &v);
+                text(&mut out, font, amount_right + size * 0.3, y, row.symbol());
+            }
+        }
+        if !l.note.is_empty() {
+            text(&mut out, HELV, note_x + size * 0.4, y, &l.note);
+        }
+    }
+    out.push_str(" ET Q");
+    out
+}
+
+/// A tape alone as a one-page PDF its size: how sheaf shows a turned tape
+/// on screen, from a picture of it.
+pub fn tape_pdf(a: &Annot) -> Option<Vec<u8>> {
+    let AnnotKind::Tape {
+        rect, size, look, ..
+    } = &a.kind
+    else {
+        return None;
+    };
+    let tape = a.tape()?;
+    let at = Box2 {
+        x: 0.0,
+        y: 0.0,
+        w: rect.w,
+        h: rect.h,
+    };
+    let geom = PageGeom {
+        media: [0.0, 0.0, rect.w, rect.h],
+        rotate: 0,
+    };
+    let content = tape_content(at, *size, look, &tape, a.color, &geom);
+    let mut pdf = lopdf::Document::with_version("1.5");
+    let pages_id = pdf.new_object_id();
+    let content = pdf.add_object(Stream::new(dictionary! {}, content.into_bytes()));
+    let page = pdf.add_object(dictionary! {
+        "Type" => "Page", "Parent" => pages_id, "Contents" => content,
+        "MediaBox" => vec![0.into(), 0.into(), Object::Real(rect.w), Object::Real(rect.h)],
+        "Resources" => font_resources(),
+    });
+    pdf.objects.insert(
+        pages_id,
+        Object::Dictionary(
+            dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 },
+        ),
+    );
+    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    pdf.trailer.set("Root", catalog);
+    let mut bytes = Vec::new();
+    pdf.save_to(&mut bytes).ok()?;
+    Some(bytes)
+}
+
 /// Parse a `/SheafAnnot` payload.
 pub fn from_json(s: &[u8]) -> Option<Annot> {
     serde_json::from_slice(s).ok()
@@ -1905,6 +2093,8 @@ mod tests {
         let tape = AnnotKind::Tape {
             rect: from,
             size: 10.0,
+            tape: Default::default(),
+            look: Default::default(),
         };
         assert_eq!(tape.resized(from, to).text_size(), Some(5.0));
         let text = AnnotKind::FreeText {

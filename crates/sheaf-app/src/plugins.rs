@@ -1041,6 +1041,21 @@ fn keep_unseen(edits: &mut [sheaf_doc::Edit], st: &sheaf_doc::DocState) {
         {
             *arrow_start = *before;
         }
+        // A tape's look; and its rows, unless the plugin changed its text.
+        if let (
+            sheaf_doc::AnnotKind::Tape { tape, look, .. },
+            sheaf_doc::AnnotKind::Tape {
+                tape: tape_before,
+                look: look_before,
+                ..
+            },
+        ) = (&mut annot.kind, &was.kind)
+        {
+            *look = look_before.clone();
+            if annot.contents == was.contents {
+                *tape = tape_before.clone();
+            }
+        }
     }
 }
 

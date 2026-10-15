@@ -18,6 +18,14 @@ use sheaf_ui::theme;
 use crate::docview::{DocView, ScrollTo, State};
 use crate::markup_tools::Tool;
 
+/// Paper colors a placed tape offers.
+const PAPERS: [([u8; 3], &str); 4] = [
+    ([255, 255, 255], "White"),
+    ([255, 250, 205], "Yellow"),
+    ([230, 245, 225], "Green"),
+    ([225, 238, 250], "Blue"),
+];
+
 /// "Pages with" or "without" a group: which, and the display pages.
 pub struct GroupList {
     pub title: String,
@@ -377,6 +385,99 @@ impl DocView {
             }
         };
         let mut items: Vec<AnyElement> = Vec::new();
+        let tape = doc
+            .selected_mark_list()
+            .pop()
+            .and_then(|(page, a)| match a.kind {
+                AnnotKind::Tape { look, .. } => Some((page, a.id, look)),
+                _ => None,
+            });
+        if let Some((page, id, look)) = tape {
+            items.push(
+                entry("mm-edit-tape", "Edit Tape".into())
+                    .on_click(cx.listener(move |v, _, _, cx| {
+                        close(v);
+                        v.edit_tape(page, id, cx)
+                    }))
+                    .into_any_element(),
+            );
+            for (key, label, by) in [
+                ("mm-turn-l", "Turn Left", 270),
+                ("mm-turn-r", "Turn Right", 90),
+            ] {
+                items.push(
+                    entry(key, label.into())
+                        .on_click(cx.listener(move |v, _, _, cx| {
+                            close(v);
+                            v.turn_tape(by, cx)
+                        }))
+                        .into_any_element(),
+                );
+            }
+            let (numbers, titles) = (look.numbers, look.titles);
+            items.push(
+                entry(
+                    "mm-numbers",
+                    format!("{} Row Numbers", if numbers { "Hide" } else { "Show" }),
+                )
+                .on_click(cx.listener(move |v, _, _, cx| {
+                    close(v);
+                    v.tape_look("Tape row numbers", move |l| l.numbers = !numbers, cx)
+                }))
+                .into_any_element(),
+            );
+            items.push(
+                entry(
+                    "mm-titles",
+                    format!("{} Titles", if titles { "Hide" } else { "Show" }),
+                )
+                .on_click(cx.listener(move |v, _, _, cx| {
+                    close(v);
+                    v.tape_look("Tape titles", move |l| l.titles = !titles, cx)
+                }))
+                .into_any_element(),
+            );
+            items.push(
+                div()
+                    .px_3()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(div().text_sm().text_color(theme::TEXT_MUTED).child("Paper"))
+                    .children(PAPERS.iter().enumerate().map(|(i, (c, name))| {
+                        let c = *c;
+                        div()
+                            .id(("mm-paper", i))
+                            .w(px(16.0))
+                            .h(px(16.0))
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .border_1()
+                            .border_color(if look.paper == c {
+                                theme::FOCUS_RING
+                            } else {
+                                theme::DIVIDER
+                            })
+                            .bg(gpui::rgb(
+                                ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | c[2] as u32,
+                            ))
+                            .tooltip(sheaf_ui::tooltip::Tooltip::text(*name))
+                            .on_click(cx.listener(move |v, _, _, cx| {
+                                close(v);
+                                v.tape_look("Tape paper", move |l| l.paper = c, cx)
+                            }))
+                    }))
+                    .into_any_element(),
+            );
+            items.push(
+                div()
+                    .h(px(1.0))
+                    .my_1()
+                    .bg(theme::DIVIDER)
+                    .into_any_element(),
+            );
+        }
         if let Some(g) = &group {
             let what = g.label();
             items.push(
@@ -454,5 +555,52 @@ impl DocView {
             )
             .into_any_element(),
         )
+    }
+
+    /// Change the selected tape's look, as one undo step.
+    pub(crate) fn tape_look(
+        &mut self,
+        label: &str,
+        f: impl Fn(&mut sheaf_doc::tape::TapeLook) + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        self.restyle(
+            label,
+            |a| match &mut a.kind {
+                AnnotKind::Tape { look, .. } => {
+                    f(look);
+                    true
+                }
+                _ => false,
+            },
+            cx,
+        );
+    }
+
+    /// Turn the selected tape a quarter (`by` 90: right, 270: left) about
+    /// its middle.
+    pub(crate) fn turn_tape(&mut self, by: u16, cx: &mut Context<Self>) {
+        self.restyle(
+            if by == 90 {
+                "Turn tape right"
+            } else {
+                "Turn tape left"
+            },
+            |a| match &mut a.kind {
+                AnnotKind::Tape { rect, look, .. } => {
+                    let (cx_, cy) = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+                    *rect = Box2 {
+                        x: cx_ - rect.h / 2.0,
+                        y: cy - rect.w / 2.0,
+                        w: rect.h,
+                        h: rect.w,
+                    };
+                    look.rotation = (look.rotation + by) % 360;
+                    true
+                }
+                _ => false,
+            },
+            cx,
+        );
     }
 }
