@@ -15,6 +15,7 @@ pub mod history;
 pub mod images;
 pub mod import;
 pub mod incremental;
+pub(crate) mod kept;
 pub mod labels;
 pub mod layers;
 pub mod model;

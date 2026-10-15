@@ -584,6 +584,10 @@ pub struct Snapshot {
     pub header_footer_dirty: bool,
     /// Pages whose markup differs from what's in the primary file.
     pub annots_dirty: HashSet<PageId>,
+    /// Something in the primary file is gone from the document (see
+    /// `Document::removes_content`): only a full rewrite takes it out of
+    /// the file.
+    pub removes_content: bool,
 }
 
 impl Snapshot {
@@ -902,7 +906,54 @@ impl Document {
             labels_dirty: self.state().labels != self.saved_labels,
             header_footer_dirty: self.header_footer_dirty(),
             annots_dirty: self.annots_dirty_pages(),
+            removes_content: self.removes_content(),
         }
+    }
+
+    /// Whether something in the primary file is gone from the document: a
+    /// page (deleted, or shown from another source now, as a crop makes
+    /// it), a mark or reply, another tool's comment, a bookmark. An
+    /// incremental save would keep it in the file's earlier revision (M9
+    /// bug 14). Undoing back to what was saved clears it.
+    pub fn removes_content(&self) -> bool {
+        let st = self.state();
+        if let Some(primary) = self.sources.get(&self.primary) {
+            let shown: HashSet<u32> = st
+                .pages
+                .iter()
+                .filter(|p| p.source == self.primary)
+                .map(|p| p.index)
+                .collect();
+            if (0..primary.page_count).any(|i| !shown.contains(&i)) {
+                return true;
+            }
+        }
+        let marks: HashSet<AnnotId> = st.annots.values().flatten().map(|a| a.id).collect();
+        if self
+            .saved_annots
+            .values()
+            .flatten()
+            .any(|a| !marks.contains(&a.id))
+        {
+            return true;
+        }
+        let deleted_since = st.removed_comments.iter().any(|(pid, names)| {
+            let before = self.saved_removed.get(pid);
+            names.iter().any(|n| !before.is_some_and(|b| b.contains(n)))
+        });
+        if deleted_since {
+            return true;
+        }
+        fn ids(nodes: &Vector<OutlineNode>, out: &mut HashSet<OutlineId>) {
+            for n in nodes {
+                out.insert(n.id);
+                ids(&n.children, out);
+            }
+        }
+        let (mut now, mut before) = (HashSet::new(), HashSet::new());
+        ids(&st.outline, &mut now);
+        ids(&self.saved_outline, &mut before);
+        before.iter().any(|id| !now.contains(id))
     }
 
     /// After a successful save of the current version to a file described by

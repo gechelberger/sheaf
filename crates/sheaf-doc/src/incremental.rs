@@ -18,21 +18,25 @@ use crate::save::{
 };
 use crate::text_layer;
 
-/// Produce the full new file (original bytes + update section).
+/// Produce the full new file (original bytes + update section). Refuses
+/// to replace a page's OCR text already in the file, which would stay in
+/// the earlier revision (M9 bug 14). Whether anything else was removed is
+/// `save::save_to_path`'s to check (`Snapshot::removes_content`).
 pub fn incremental(snap: &Snapshot) -> Result<Vec<u8>> {
-    Ok(build(snap)?.1)
+    Ok(build(snap, true)?.1)
 }
 
 /// Just the update section, with the length of the original it appends
 /// to. Empty when there's nothing to write. Used for crash recovery.
 pub fn incremental_section(snap: &Snapshot) -> Result<(usize, Vec<u8>)> {
-    let (original_len, mut full) = build(snap)?;
+    let (original_len, mut full) = build(snap, false)?;
     let section = full.split_off(original_len);
     Ok((original_len, section))
 }
 
 /// The original bytes with the update appended, and where the original ends.
-fn build(snap: &Snapshot) -> Result<(usize, Vec<u8>)> {
+/// `saving`: refuse to replace an OCR layer already in the file.
+fn build(snap: &Snapshot, saving: bool) -> Result<(usize, Vec<u8>)> {
     let primary_id = snap.primary;
     let info = snap.source(primary_id).context("primary source missing")?;
     let original = crate::file::source_bytes(info)?;
@@ -79,6 +83,21 @@ fn build(snap: &Snapshot) -> Result<(usize, Vec<u8>)> {
         let pages_id = pdf.new_object_id();
         let mut kids = Vec::with_capacity(snap.state.pages.len());
         let mut used = std::collections::HashSet::new();
+        // Pages from other files get their ids first, so links among them
+        // follow and links to their other pages don't copy those (bug 14).
+        for pref in &snap.state.pages {
+            if pref.source != primary_id
+                && let Some(&p) = others
+                    .get(&pref.source)
+                    .and_then(|s| s.pages.get(pref.index as usize))
+            {
+                crate::save::reserve_pages(
+                    [p],
+                    &mut pdf,
+                    copy_maps.entry(pref.source).or_default(),
+                );
+            }
+        }
         for pref in &snap.state.pages {
             let (src_page, inherited, mut dict) = if pref.source == primary_id {
                 let id = *primary
@@ -97,7 +116,8 @@ fn build(snap: &Snapshot) -> Result<(usize, Vec<u8>)> {
                     .get(pref.index as usize)
                     .context("page index out of range")?;
                 let map = copy_maps.entry(pref.source).or_default();
-                let dict = copy_page_dict(src.pdf.as_ref().unwrap(), id, &mut pdf, map)?;
+                let mut dict = copy_page_dict(src.pdf.as_ref().unwrap(), id, &mut pdf, map)?;
+                crate::kept::drop_dead_links(&pdf, &mut dict);
                 (
                     id,
                     src.inherited.get(&id).cloned().unwrap_or_default(),
@@ -137,16 +157,22 @@ fn build(snap: &Snapshot) -> Result<(usize, Vec<u8>)> {
                 }
             }
             if let Some(layer) = snap.state.text_layers.get(&pref.id) {
+                if saving && text_layer::has_layer(&pdf, &dict) {
+                    bail!(
+                        "a page's OCR text is replaced: a full save takes the old out of the file"
+                    );
+                }
                 let geom = geom_of(&dict, original_rot);
                 text_layer::install(&mut pdf, &mut dict, layer, &geom, &mut ocr_objects);
             }
             apply_rotation(&mut dict, pref.rotation.degrees());
             dict.set("Parent", pages_id);
             dict.set("Type", Object::Name(b"Page".to_vec()));
-            let id = if pref.source == primary_id && used.insert(src_page) {
+            let first = used.insert((pref.source, src_page));
+            let id = if pref.source == primary_id && first {
                 src_page
-            } else if pref.source != primary_id {
-                // copy_page_dict reserved an id for the page itself.
+            } else if pref.source != primary_id && first {
+                // Its id was reserved above; a second use is a copy.
                 copy_maps[&pref.source][&src_page]
             } else {
                 pdf.new_object_id()
@@ -183,6 +209,11 @@ fn build(snap: &Snapshot) -> Result<(usize, Vec<u8>)> {
                     }
                 }
                 if let Some(layer) = layer {
+                    if saving && text_layer::has_layer(&pdf, &dict) {
+                        bail!(
+                            "a page's OCR text is replaced: a full save takes the old out of the file"
+                        );
+                    }
                     let geom = crate::file::page_geom(&pdf, id);
                     text_layer::install(&mut pdf, &mut dict, layer, &geom, &mut ocr_objects);
                 }

@@ -615,6 +615,13 @@ pub(crate) fn install(
 }
 
 /// Remove a layer we wrote earlier from the page's `/Contents`.
+/// Whether the page has an OCR layer of ours in its content.
+pub(crate) fn has_layer(pdf: &Pdf, page: &Dictionary) -> bool {
+    let mut probe = page.clone();
+    strip(pdf, &mut probe);
+    probe.get(b"Contents").ok() != page.get(b"Contents").ok()
+}
+
 pub(crate) fn strip(pdf: &Pdf, page: &mut Dictionary) {
     let Some(entries) = page
         .get(b"Contents")

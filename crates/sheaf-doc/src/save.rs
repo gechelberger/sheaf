@@ -24,7 +24,7 @@ const INHERITED: [&[u8]; 4] = [b"Resources", b"MediaBox", b"CropBox", b"Rotate"]
 
 /// Serialize a snapshot as a complete new PDF.
 pub fn rewrite(model: &Snapshot) -> Result<Vec<u8>> {
-    rewrite_with(model, false)
+    Ok(rewrite_with(model, false)?.0)
 }
 
 /// PDFlyer's "Export Clean Copy": the document as it stands, with every
@@ -39,13 +39,15 @@ pub fn export_clean_copy(model: &Snapshot, path: &Path) -> Result<()> {
     {
         bail!("a clean copy can't replace the open file; choose another name");
     }
-    let bytes = rewrite_with(model, true)?;
+    let (bytes, _) = rewrite_with(model, true)?;
     write_atomic(path, &bytes)
 }
 
-/// `clean`: strip all markup instead of writing our annotations.
-fn rewrite_with(model: &Snapshot, clean: bool) -> Result<Vec<u8>> {
-    finish(build_rewrite(model, clean)?)
+/// `clean`: strip all markup instead of writing our annotations. With what
+/// the reader should be told (see `kept::keep_only`).
+fn rewrite_with(model: &Snapshot, clean: bool) -> Result<(Vec<u8>, Vec<String>)> {
+    let (pdf, notes) = build_rewrite(model, clean)?;
+    Ok((finish(pdf)?, notes))
 }
 
 /// Prune, renumber, compress and serialize a rewritten document.
@@ -70,7 +72,7 @@ pub fn extract_pages(model: &Snapshot, ids: &[PageId], path: &Path) -> Result<us
 /// What [`extract_pages`] would write, in memory.
 pub fn extract_bytes(model: &Snapshot, ids: &[PageId]) -> Result<Vec<u8>> {
     let snap = subset(model, ids, true).context("no pages to extract")?;
-    rewrite_with(&snap, false)
+    Ok(rewrite_with(&snap, false)?.0)
 }
 
 /// `ids` (in document order) with their markup and text layers, and their
@@ -119,6 +121,7 @@ fn subset(model: &Snapshot, ids: &[PageId], outline: bool) -> Option<Snapshot> {
         labels_dirty: true,
         header_footer_dirty: model.header_footer_dirty,
         annots_dirty: HashSet::new(),
+        removes_content: false,
     })
 }
 
@@ -128,7 +131,7 @@ fn subset(model: &Snapshot, ids: &[PageId], outline: bool) -> Option<Snapshot> {
 /// markup is left out (Export Clean Copy). Form fields print either way.
 pub fn print_pdf(model: &Snapshot, ids: &[PageId], markup: bool) -> Result<Vec<u8>> {
     let snap = subset(model, ids, false).context("no pages to print")?;
-    let mut pdf = build_rewrite(&snap, !markup)?;
+    let (mut pdf, _) = build_rewrite(&snap, !markup)?;
     if markup {
         flatten_annots(&mut pdf)?;
     }
@@ -172,7 +175,7 @@ pub fn export_flattened(model: &Snapshot, path: &Path) -> Result<usize> {
     {
         bail!("a flattened copy can't replace the open file; choose another name");
     }
-    let mut pdf = build_rewrite(model, false)?;
+    let (mut pdf, _) = build_rewrite(model, false)?;
     let n = flatten_annots(&mut pdf)?;
     let bytes = finish(pdf)?;
     write_atomic(path, &bytes)?;
@@ -358,8 +361,9 @@ fn normal_appearance(pdf: &Pdf, annot: &Dictionary) -> Option<ObjectId> {
     states.get(&state).ok()?.as_reference().ok()
 }
 
-/// The rewritten document, before serialization.
-fn build_rewrite(model: &Snapshot, clean: bool) -> Result<Pdf> {
+/// The rewritten document, before serialization, and what the reader
+/// should be told about it.
+fn build_rewrite(model: &Snapshot, clean: bool) -> Result<(Pdf, Vec<String>)> {
     let primary_id = model.primary;
     let primary_info = model.source(primary_id).context("primary source missing")?;
     let mut pdf = crate::file::load_source(primary_info)?;
@@ -387,6 +391,18 @@ fn build_rewrite(model: &Snapshot, clean: bool) -> Result<Pdf> {
     let mut stamp_forms = StampForms::new();
     let mut ocr_objects = None;
     let mut stamp_objects = None;
+    // Pages from other files get their ids first, so links among them
+    // follow (bug 14); the first use of each fills its id.
+    for pref in &state.pages {
+        if pref.source != primary_id
+            && let Some(&p) = sources
+                .get(&pref.source)
+                .and_then(|s| s.pages.get(pref.index as usize))
+        {
+            reserve_pages([p], &mut pdf, copy_maps.entry(pref.source).or_default());
+        }
+    }
+    let mut filled: HashSet<(SourceId, ObjectId)> = HashSet::new();
     let page_ids: Vec<PageId> = state.pages.iter().map(|p| p.id).collect();
     let bates = state
         .header_footer
@@ -523,6 +539,10 @@ fn build_rewrite(model: &Snapshot, clean: bool) -> Result<Pdf> {
         let id = if pref.source == primary_id && used.insert(src_page) {
             *pdf.get_object_mut(src_page)? = Object::Dictionary(dict);
             src_page
+        } else if pref.source != primary_id && filled.insert((pref.source, src_page)) {
+            let id = copy_maps[&pref.source][&src_page];
+            pdf.objects.insert(id, Object::Dictionary(dict));
+            id
         } else {
             pdf.add_object(dict)
         };
@@ -583,8 +603,14 @@ fn build_rewrite(model: &Snapshot, clean: bool) -> Result<Pdf> {
         pdf.get_dictionary_mut(catalog_id)?
             .set("Outlines", outlines_id);
     }
-
-    Ok(pdf)
+    // Nothing reaches a page that isn't kept (bug 14), so pruning takes it
+    // out of the file.
+    let kept: HashSet<ObjectId> = page_obj.values().copied().collect();
+    let notes = crate::kept::keep_only(&mut pdf, &kept);
+    for n in &notes {
+        log::warn!("{n}");
+    }
+    Ok((pdf, notes))
 }
 
 /// Pages of `src`, each given a new `/CropBox` (`[x0, y0, x1, y1]` in its
@@ -611,13 +637,25 @@ pub fn derived_copy(
     let pages_id = pdf.new_object_id();
     let mut map: HashMap<ObjectId, ObjectId> = HashMap::new();
     let mut kids: Vec<Object> = Vec::with_capacity(pages.len());
+    reserve_pages(
+        pages
+            .iter()
+            .filter_map(|&(index, _)| loaded.pages.get(index as usize).copied()),
+        &mut pdf,
+        &mut map,
+    );
+    let mut filled = HashSet::new();
     for (position, &(index, crop)) in pages.iter().enumerate() {
         let page = *loaded
             .pages
             .get(index as usize)
             .with_context(|| format!("no page {index} in {}", src.path.display()))?;
         let mut dict = copy_page_dict(&from, page, &mut pdf, &mut map)?;
-        let id = map[&page];
+        let id = if filled.insert(page) {
+            map[&page]
+        } else {
+            pdf.new_object_id()
+        };
         for (k, v) in loaded.inherited.get(&page).into_iter().flatten() {
             if !dict.has(k) {
                 let v = remap(&from, v, &mut pdf, &mut map)?;
@@ -644,12 +682,15 @@ pub fn derived_copy(
         kids.push(id.into());
     }
     let count = kids.len() as i64;
+    let kept: HashSet<ObjectId> = kids.iter().filter_map(|k| k.as_reference().ok()).collect();
     pdf.objects.insert(
         pages_id,
         Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => kids, "Count" => count }),
     );
     let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
     pdf.trailer.set("Root", catalog);
+    // Links to pages that weren't copied lead nowhere: they go.
+    crate::kept::keep_only(&mut pdf, &kept);
     let mut out = Vec::new();
     pdf.save_to(&mut out)?;
     Ok(out)
@@ -666,6 +707,17 @@ pub enum Strategy {
 /// (and the file on disk is still what we opened), otherwise by rewrite.
 /// An incremental failure falls back to a rewrite.
 pub fn save_to_path(model: &Snapshot, path: &Path) -> Result<Strategy> {
+    Ok(save_to_path_noting(model, path)?.0)
+}
+
+/// [`save_to_path`], and what the reader should be told about the saved
+/// file (see `kept::keep_only`).
+///
+/// When something in the file was removed since it was saved (a page, a
+/// mark, a bookmark: `Snapshot::removes_content`), it's a full rewrite:
+/// an incremental save would keep the removed content in the earlier
+/// revision (M9 bug 14).
+pub fn save_to_path_noting(model: &Snapshot, path: &Path) -> Result<(Strategy, Vec<String>)> {
     let primary = model
         .source(model.primary)
         .context("primary source missing")?;
@@ -674,17 +726,18 @@ pub fn save_to_path(model: &Snapshot, path: &Path) -> Result<Strategy> {
         || std::fs::metadata(&primary.path)
             .map(|m| m.len() as usize == primary.bytes)
             .unwrap_or(false);
-    if same_file && unchanged {
+    if same_file && unchanged && !model.removes_content {
         match crate::incremental::incremental(model) {
             Ok(bytes) => {
                 write_atomic(path, &bytes)?;
-                return Ok(Strategy::Incremental);
+                return Ok((Strategy::Incremental, Vec::new()));
             }
             Err(e) => log::warn!("incremental save failed, rewriting instead: {e:#}"),
         }
     }
-    rewrite_to_path(model, path)?;
-    Ok(Strategy::Rewrite)
+    let (bytes, notes) = rewrite_with(model, false)?;
+    write_atomic(path, &bytes)?;
+    Ok((Strategy::Rewrite, notes))
 }
 
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -774,6 +827,8 @@ pub(crate) fn is_identity(model: &Snapshot, primary: &LoadedSource) -> bool {
 
 /// Clone a page dictionary from `src` into `dst`, deep-copying everything it
 /// references (resources, content, annotations…) with fresh object numbers.
+/// Other pages aren't copied (see [`remap`]): a reference to one the caller
+/// is copying too goes through `map`, where [`reserve_pages`] put it.
 pub(crate) fn copy_page_dict(
     src: &Pdf,
     page: ObjectId,
@@ -783,8 +838,14 @@ pub(crate) fn copy_page_dict(
     let dict = src.get_dictionary(page)?.clone();
     // The page's own id must map to the object we're about to create so
     // annotations' /P back-references resolve; the caller inserts it.
-    let new_id = dst.new_object_id();
-    map.insert(page, new_id);
+    let new_id = match map.get(&page) {
+        Some(&id) => id,
+        None => {
+            let id = dst.new_object_id();
+            map.insert(page, id);
+            id
+        }
+    };
     let mut out = Dictionary::new();
     for (k, v) in dict.iter() {
         if k == b"Parent" {
@@ -792,20 +853,52 @@ pub(crate) fn copy_page_dict(
         }
         out.set(k.clone(), remap(src, v, dst, map)?);
     }
-    // Reserve the id so later allocations don't collide; the caller may
+    // Hold the id so later allocations don't collide; the caller may
     // replace this placeholder, or it stays as the page.
-    dst.objects.insert(new_id, Object::Dictionary(out.clone()));
+    dst.objects
+        .entry(new_id)
+        .or_insert_with(|| Object::Dictionary(out.clone()));
     Ok(out)
 }
 
+/// Ids in `dst` for the pages of `src` that are being copied, before any
+/// is, so a link from one to another follows it instead of being dropped.
+pub(crate) fn reserve_pages(
+    pages: impl IntoIterator<Item = ObjectId>,
+    dst: &mut Pdf,
+    map: &mut HashMap<ObjectId, ObjectId>,
+) {
+    for page in pages {
+        map.entry(page).or_insert_with(|| dst.new_object_id());
+    }
+}
+
+/// A page or a node of the page tree.
+pub(crate) fn is_page_node(pdf: &Pdf, id: ObjectId) -> bool {
+    matches!(
+        pdf.get_object(id),
+        Ok(Object::Dictionary(d)) if d
+            .get(b"Type")
+            .ok()
+            .and_then(|t| t.as_name().ok())
+            .is_some_and(|t| t == b"Page" || t == b"Pages")
+    )
+}
+
+/// `id` copied into `dst`, or None for a page that isn't being copied
+/// (bug 14: following a link, or a page's `/Parent`, used to copy the
+/// whole file it came from).
 fn copy_object(
     src: &Pdf,
     id: ObjectId,
     dst: &mut Pdf,
     map: &mut HashMap<ObjectId, ObjectId>,
-) -> Result<ObjectId> {
+) -> Result<Option<ObjectId>> {
     if let Some(&m) = map.get(&id) {
-        return Ok(m);
+        return Ok(Some(m));
+    }
+    if is_page_node(src, id) {
+        return Ok(None);
     }
     let new_id = dst.new_object_id();
     map.insert(id, new_id);
@@ -814,9 +907,12 @@ fn copy_object(
     let obj = src.get_object(id)?.clone();
     let obj = remap(src, &obj, dst, map)?;
     dst.objects.insert(new_id, obj);
-    Ok(new_id)
+    Ok(Some(new_id))
 }
 
+/// `obj` from `src` in `dst`, copying what it references. A page is never
+/// copied this way: one in `map` (being copied too) is referred to there,
+/// and any other becomes null, for [`crate::kept::keep_only`] to tidy.
 pub(crate) fn remap(
     src: &Pdf,
     obj: &Object,
@@ -824,7 +920,10 @@ pub(crate) fn remap(
     map: &mut HashMap<ObjectId, ObjectId>,
 ) -> Result<Object> {
     Ok(match obj {
-        Object::Reference(r) => Object::Reference(copy_object(src, *r, dst, map)?),
+        Object::Reference(r) => match copy_object(src, *r, dst, map)? {
+            Some(id) => Object::Reference(id),
+            None => Object::Null,
+        },
         Object::Array(items) => Object::Array(
             items
                 .iter()
@@ -1860,16 +1959,34 @@ mod tests {
         );
         assert_eq!(read_outline(&bytes), vec![(0, "Uno".into(), Some(2))]);
 
-        // Saving through the chooser picks incremental for the primary path.
+        // A page was deleted: saving the primary path is a full rewrite,
+        // so the page isn't left in an earlier revision (bug 14).
+        assert!(model.snapshot().removes_content);
         assert_eq!(
             save_to_path(&model.snapshot(), &a).unwrap(),
-            Strategy::Incremental
+            Strategy::Rewrite
         );
-        assert!(std::fs::read(&a).unwrap().starts_with(&original));
+        let saved = std::fs::read(&a).unwrap();
+        assert!(!saved.starts_with(&original));
+        assert!(!streams_say(&saved, "MARK A 0") && streams_say(&saved, "MARK A 1"));
         assert_eq!(
             save_to_path(&model.snapshot(), &dir.join("elsewhere.pdf")).unwrap(),
             Strategy::Rewrite
         );
+    }
+
+    /// Whether any stream in the file says `text`, decompressed.
+    fn streams_say(bytes: &[u8], text: &str) -> bool {
+        let pdf = Pdf::load_mem(bytes).unwrap();
+        pdf.objects.values().any(|o| match o {
+            Object::Stream(s) => {
+                let data = s
+                    .decompressed_content()
+                    .unwrap_or_else(|_| s.content.clone());
+                String::from_utf8_lossy(&data).contains(text)
+            }
+            _ => false,
+        })
     }
 
     #[test]

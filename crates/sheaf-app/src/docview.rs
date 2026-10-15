@@ -1571,12 +1571,12 @@ impl DocView {
                 .spawn({
                     let path = path.clone();
                     async move {
-                        let strategy = save::save_to_path(&snapshot, &path)?;
+                        let (strategy, notes) = save::save_to_path_noting(&snapshot, &path)?;
                         let bytes = std::fs::metadata(&path)
                             .map(|m| m.len() as usize)
                             .unwrap_or(0);
                         let handle = RenderHandle::open(path.clone(), None)?;
-                        anyhow::Ok((handle, bytes, strategy))
+                        anyhow::Ok((handle, bytes, strategy, notes))
                     }
                 })
                 .await;
@@ -1586,7 +1586,7 @@ impl DocView {
                 };
                 doc.saving = false;
                 let ok = match result {
-                    Ok((handle, bytes, strategy)) => {
+                    Ok((handle, bytes, strategy, notes)) => {
                         let (page_count, first_page) =
                             (handle.info().page_count, handle.info().first_page);
                         let saved = SourceInfo {
@@ -1642,14 +1642,15 @@ impl DocView {
                         cx.defer(move |cx| crate::recent::add(&saved_path, cx));
                         let was_encrypted = view.password.take().is_some();
                         doc.notice = Some(format!(
-                            "Saved {} ({strategy:?}) in {:?}{}",
+                            "Saved {} ({strategy:?}) in {:?}{}{}",
                             path.display(),
                             t.elapsed(),
                             if was_encrypted {
                                 " — password protection removed"
                             } else {
                                 ""
-                            }
+                            },
+                            notes.iter().map(|n| format!(" — {n}")).collect::<String>()
                         ));
                         if timing {
                             eprintln!(
