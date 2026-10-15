@@ -92,7 +92,11 @@ pub enum AnnotKind {
     Line {
         a: Pt,
         b: Pt,
+        /// An arrowhead at `b`.
         arrow: bool,
+        /// An arrowhead at `a`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        arrow_start: bool,
     },
     Ink {
         paths: Vec<Vec<Pt>>,
@@ -179,10 +183,16 @@ impl AnnotKind {
             },
             AnnotKind::Square { rect } => AnnotKind::Square { rect: mb(rect) },
             AnnotKind::Ellipse { rect } => AnnotKind::Ellipse { rect: mb(rect) },
-            AnnotKind::Line { a, b, arrow } => AnnotKind::Line {
+            AnnotKind::Line {
+                a,
+                b,
+                arrow,
+                arrow_start,
+            } => AnnotKind::Line {
                 a: mv(a),
                 b: mv(b),
                 arrow: *arrow,
+                arrow_start: *arrow_start,
             },
             AnnotKind::Ink { paths } => AnnotKind::Ink {
                 paths: paths.iter().map(|p| p.iter().map(mv).collect()).collect(),
@@ -206,6 +216,141 @@ impl AnnotKind {
             },
         }
     }
+
+    /// The same shape fitted from bounds `from` into bounds `to`: every
+    /// point scaled and moved, as dragging a resize handle does. Text sizes
+    /// scale with the height of stamps and tapes.
+    pub fn resized(&self, from: Box2, to: Box2) -> AnnotKind {
+        let sx = if from.w > 0.0 { to.w / from.w } else { 1.0 };
+        let sy = if from.h > 0.0 { to.h / from.h } else { 1.0 };
+        let mp = |p: &Pt| Pt {
+            x: to.x + (p.x - from.x) * sx,
+            y: to.y + (p.y - from.y) * sy,
+        };
+        let mb = |b: &Box2| {
+            let p = mp(&Pt { x: b.x, y: b.y });
+            Box2 {
+                x: p.x,
+                y: p.y,
+                w: b.w * sx,
+                h: b.h * sy,
+            }
+        };
+        match self {
+            AnnotKind::Highlight { rects } => AnnotKind::Highlight {
+                rects: rects.iter().map(mb).collect(),
+            },
+            AnnotKind::Note { pos } => AnnotKind::Note { pos: mp(pos) },
+            AnnotKind::FreeText { rect, size } => AnnotKind::FreeText {
+                rect: mb(rect),
+                size: *size,
+            },
+            AnnotKind::Square { rect } => AnnotKind::Square { rect: mb(rect) },
+            AnnotKind::Ellipse { rect } => AnnotKind::Ellipse { rect: mb(rect) },
+            AnnotKind::Line {
+                a,
+                b,
+                arrow,
+                arrow_start,
+            } => AnnotKind::Line {
+                a: mp(a),
+                b: mp(b),
+                arrow: *arrow,
+                arrow_start: *arrow_start,
+            },
+            AnnotKind::Ink { paths } => AnnotKind::Ink {
+                paths: paths.iter().map(|p| p.iter().map(mp).collect()).collect(),
+            },
+            AnnotKind::Stamp { rect, glyph } => AnnotKind::Stamp {
+                rect: mb(rect),
+                glyph: glyph.clone(),
+            },
+            AnnotKind::Connector {
+                rect,
+                label,
+                partner,
+            } => AnnotKind::Connector {
+                rect: mb(rect),
+                label: label.clone(),
+                partner: *partner,
+            },
+            AnnotKind::Tape { rect, size } => AnnotKind::Tape {
+                rect: mb(rect),
+                size: (*size * sy).max(4.0),
+            },
+        }
+    }
+
+    /// How the mark can be reshaped by dragging: its two ends, a box, or
+    /// not at all (sticky notes and connectors keep their size; a
+    /// highlight follows its text).
+    pub fn handles(&self) -> Handles {
+        match self {
+            AnnotKind::Line { .. } => Handles::Ends,
+            AnnotKind::FreeText { .. }
+            | AnnotKind::Square { .. }
+            | AnnotKind::Ellipse { .. }
+            | AnnotKind::Ink { .. }
+            | AnnotKind::Stamp { .. }
+            | AnnotKind::Tape { .. } => Handles::Box,
+            AnnotKind::Highlight { .. } | AnnotKind::Note { .. } | AnnotKind::Connector { .. } => {
+                Handles::None
+            }
+        }
+    }
+
+    /// Whether it has an inside to fill.
+    pub fn fillable(&self) -> bool {
+        matches!(self, AnnotKind::Square { .. } | AnnotKind::Ellipse { .. })
+    }
+
+    /// Whether it's drawn with a stroke (width and dashes apply).
+    pub fn stroked(&self) -> bool {
+        matches!(
+            self,
+            AnnotKind::Square { .. }
+                | AnnotKind::Ellipse { .. }
+                | AnnotKind::Line { .. }
+                | AnnotKind::Ink { .. }
+        )
+    }
+
+    /// The text size, for kinds whose text the user sizes.
+    pub fn text_size(&self) -> Option<f32> {
+        match self {
+            AnnotKind::FreeText { size, .. } | AnnotKind::Tape { size, .. } => Some(*size),
+            _ => None,
+        }
+    }
+
+    pub fn with_text_size(&self, to: f32) -> AnnotKind {
+        let mut k = self.clone();
+        if let AnnotKind::FreeText { size, .. } | AnnotKind::Tape { size, .. } = &mut k {
+            *size = to.clamp(4.0, 144.0);
+        }
+        k
+    }
+}
+
+/// See [`AnnotKind::handles`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Handles {
+    None,
+    Ends,
+    Box,
+}
+
+/// Distance from `p` to the segment `a`–`b`.
+fn segment_distance(p: Pt, a: Pt, b: Pt) -> f32 {
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let len2 = dx * dx + dy * dy;
+    let t = if len2 > 0.0 {
+        (((p.x - a.x) * dx + (p.y - a.y) * dy) / len2).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let (qx, qy) = (a.x + t * dx, a.y + t * dy);
+    ((p.x - qx).powi(2) + (p.y - qy).powi(2)).sqrt()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -227,6 +372,13 @@ pub struct Annot {
     /// change this. Empty for marks made before sheaf kept it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub created: String,
+    /// Interior color (`/IC`), for kinds with an inside
+    /// ([`AnnotKind::fillable`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill: Option<[u8; 3]>,
+    /// A dashed stroke (`/BS /S /D`), for kinds with one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dashed: bool,
 }
 
 impl Annot {
@@ -274,6 +426,30 @@ impl Annot {
 
     pub fn name(&self) -> String {
         format!("sheaf:{}", self.id.0)
+    }
+
+    /// Whether a click at `p` lands on the mark: on the stroke for lines
+    /// and drawings (within `tolerance` points of it), anywhere in the box
+    /// for everything else.
+    pub fn hit(&self, p: Pt, tolerance: f32) -> bool {
+        let near = |a: Pt, b: Pt| segment_distance(p, a, b) <= tolerance + self.stroke / 2.0;
+        match &self.kind {
+            AnnotKind::Line { a, b, .. } => near(*a, *b),
+            AnnotKind::Ink { paths } => paths.iter().any(|path| match path.as_slice() {
+                [one] => near(*one, *one),
+                pts => pts.windows(2).any(|w| near(w[0], w[1])),
+            }),
+            _ => {
+                let b = self.bounds();
+                Box2 {
+                    x: b.x - tolerance,
+                    y: b.y - tolerance,
+                    w: b.w + 2.0 * tolerance,
+                    h: b.h + 2.0 * tolerance,
+                }
+                .contains(p)
+            }
+        }
     }
 
     /// The `/NM` of every annotation this mark writes: its own, then any
@@ -591,6 +767,53 @@ fn font_resources() -> Dictionary {
     }
 }
 
+/// The dash pattern sheaf draws, in points: a mark's `/BS /D` and its
+/// appearance's `d`.
+pub const DASH: [f32; 2] = [4.0, 3.0];
+
+/// `/BS` for a stroked mark: its width, and dashes if it has them.
+fn border_style(a: &Annot) -> Dictionary {
+    let mut bs = dictionary! { "W" => a.stroke };
+    if a.dashed {
+        bs.set("S", Object::Name(b"D".to_vec()));
+        bs.set(
+            "D",
+            Object::Array(DASH.iter().map(|v| Object::Real(*v)).collect()),
+        );
+    }
+    bs
+}
+
+/// Content operators that set the stroke: color, width, and dashes.
+fn stroke_ops(a: &Annot) -> String {
+    let mut ops = format!(" {} {:.2} w", color_ops(a.color, false), a.stroke);
+    if a.dashed {
+        ops.push_str(&format!(" [{} {}] 0 d", DASH[0], DASH[1]));
+    }
+    ops
+}
+
+/// An open arrowhead at `tip`, pointing away from `from` (user space).
+fn arrowhead(from: Pt, tip: Pt, stroke: f32) -> String {
+    let (dx, dy) = (tip.x - from.x, tip.y - from.y);
+    let len = (dx * dx + dy * dy).sqrt().max(0.001);
+    let (ux, uy) = (dx / len, dy / len);
+    let head = 6.0 + stroke * 2.0;
+    let (lx, ly) = (
+        tip.x - head * (ux * 0.866 - uy * 0.5),
+        tip.y - head * (uy * 0.866 + ux * 0.5),
+    );
+    let (rx, ry) = (
+        tip.x - head * (ux * 0.866 + uy * 0.5),
+        tip.y - head * (uy * 0.866 - ux * 0.5),
+    );
+    // Solid even on a dashed line.
+    format!(
+        " [] 0 d {lx:.2} {ly:.2} m {:.2} {:.2} l {rx:.2} {ry:.2} l S",
+        tip.x, tip.y
+    )
+}
+
 /// The main annotation dictionary (without `/AP` or `/P`) and its
 /// appearance stream.
 fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
@@ -777,26 +1000,32 @@ fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
             }
             content.push_str(" ET");
         }
-        AnnotKind::Square { rect } => {
-            dict.set("Subtype", Object::Name(b"Square".to_vec()));
+        AnnotKind::Square { rect } | AnnotKind::Ellipse { rect } => {
+            let square = matches!(a.kind, AnnotKind::Square { .. });
+            let subtype: &[u8] = if square { b"Square" } else { b"Circle" };
+            dict.set("Subtype", Object::Name(subtype.to_vec()));
             dict.set("C", color_arr);
-            dict.set("BS", dictionary! { "W" => a.stroke });
-            let [x0, y0, x1, y1] = geom.box_to_user(*rect);
-            content.push_str(&format!(
-                " {} {:.2} w {x0:.2} {y0:.2} {:.2} {:.2} re S",
-                color_ops(c, false),
-                a.stroke,
-                x1 - x0,
-                y1 - y0
-            ));
-        }
-        AnnotKind::Ellipse { rect } => {
-            dict.set("Subtype", Object::Name(b"Circle".to_vec()));
-            dict.set("C", color_arr);
-            dict.set("BS", dictionary! { "W" => a.stroke });
-            content.push_str(&format!(" {} {:.2} w", color_ops(c, false), a.stroke));
-            content.push_str(&ellipse_path(geom.box_to_user(*rect)));
-            content.push_str(" S");
+            dict.set("BS", border_style(a));
+            content.push_str(&stroke_ops(a));
+            if let Some(f) = a.fill {
+                dict.set(
+                    "IC",
+                    Object::Array(f.iter().map(|v| Object::Real(*v as f32 / 255.0)).collect()),
+                );
+                content.push_str(&format!(" {}", color_ops(f, true)));
+            }
+            let b = geom.box_to_user(*rect);
+            if square {
+                let [x0, y0, x1, y1] = b;
+                content.push_str(&format!(
+                    " {x0:.2} {y0:.2} {:.2} {:.2} re",
+                    x1 - x0,
+                    y1 - y0
+                ));
+            } else {
+                content.push_str(&ellipse_path(b));
+            }
+            content.push_str(if a.fill.is_some() { " B" } else { " S" });
         }
         AnnotKind::Connector { rect, label, .. } => {
             // A Link so other viewers jump too; the writer fills in /Dest once
@@ -827,62 +1056,45 @@ fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
             a: pa,
             b: pb,
             arrow,
+            arrow_start,
         } => {
             dict.set("Subtype", Object::Name(b"Line".to_vec()));
             dict.set("C", color_arr);
-            dict.set("BS", dictionary! { "W" => a.stroke });
+            dict.set("BS", border_style(a));
             let (ua, ub) = (up(*pa), up(*pb));
             dict.set(
                 "L",
                 Object::Array(vec![ua.x.into(), ua.y.into(), ub.x.into(), ub.y.into()]),
             );
-            if *arrow {
-                dict.set(
-                    "LE",
-                    Object::Array(vec![
-                        Object::Name(b"None".to_vec()),
-                        Object::Name(b"OpenArrow".to_vec()),
-                    ]),
-                );
+            if *arrow || *arrow_start {
+                let end = |on: bool| {
+                    Object::Name(if on {
+                        b"OpenArrow".to_vec()
+                    } else {
+                        b"None".to_vec()
+                    })
+                };
+                dict.set("LE", Object::Array(vec![end(*arrow_start), end(*arrow)]));
             }
+            content.push_str(&stroke_ops(a));
             content.push_str(&format!(
-                " {} {:.2} w {:.2} {:.2} m {:.2} {:.2} l S",
-                color_ops(c, false),
-                a.stroke,
-                ua.x,
-                ua.y,
-                ub.x,
-                ub.y
+                " {:.2} {:.2} m {:.2} {:.2} l S",
+                ua.x, ua.y, ub.x, ub.y
             ));
             if *arrow {
-                let (dx, dy) = (ub.x - ua.x, ub.y - ua.y);
-                let len = (dx * dx + dy * dy).sqrt().max(0.001);
-                let (ux, uy) = (dx / len, dy / len);
-                let head = 6.0 + a.stroke * 2.0;
-                let (lx, ly) = (
-                    ub.x - head * (ux * 0.866 - uy * 0.5),
-                    ub.y - head * (uy * 0.866 + ux * 0.5),
-                );
-                let (rx, ry) = (
-                    ub.x - head * (ux * 0.866 + uy * 0.5),
-                    ub.y - head * (uy * 0.866 - ux * 0.5),
-                );
-                content.push_str(&format!(
-                    " {lx:.2} {ly:.2} m {:.2} {:.2} l {rx:.2} {ry:.2} l S",
-                    ub.x, ub.y
-                ));
+                content.push_str(&arrowhead(ua, ub, a.stroke));
+            }
+            if *arrow_start {
+                content.push_str(&arrowhead(ub, ua, a.stroke));
             }
         }
         AnnotKind::Ink { paths } => {
             dict.set("Subtype", Object::Name(b"Ink".to_vec()));
             dict.set("C", color_arr);
-            dict.set("BS", dictionary! { "W" => a.stroke });
+            dict.set("BS", border_style(a));
             let mut ink_list = Vec::new();
-            content.push_str(&format!(
-                " {} {:.2} w 1 J 1 j",
-                color_ops(c, false),
-                a.stroke
-            ));
+            content.push_str(&stroke_ops(a));
+            content.push_str(" 1 J 1 j");
             for path in paths {
                 let mut coords = Vec::new();
                 for (i, p) in path.iter().enumerate() {
@@ -1020,6 +1232,8 @@ mod tests {
             contents: "Hello (world) é".into(),
             modified: "D:20261011000000".into(),
             created: "D:20261010000000".into(),
+            fill: None,
+            dashed: false,
         };
         let mut pdf = lopdf::Document::with_version("1.7");
         let Written { main: dict, .. } = to_pdf(&a, &geom(0), &mut pdf);
@@ -1053,5 +1267,123 @@ mod tests {
         let content = String::from_utf8_lossy(&stream.content);
         assert!(content.contains("Tj"), "{content}");
         assert!(content.contains("\\(world\\)"), "{content}");
+    }
+
+    fn mark(kind: AnnotKind) -> Annot {
+        Annot {
+            id: AnnotId(1),
+            kind,
+            color: [0, 0, 255],
+            opacity: 1.0,
+            stroke: 2.0,
+            author: String::new(),
+            contents: String::new(),
+            modified: String::new(),
+            created: String::new(),
+            fill: None,
+            dashed: false,
+        }
+    }
+
+    fn bx(x: f32, y: f32, w: f32, h: f32) -> Box2 {
+        Box2 { x, y, w, h }
+    }
+
+    #[test]
+    fn resizing_fits_the_shape_to_the_new_bounds() {
+        let from = bx(10.0, 10.0, 100.0, 50.0);
+        let to = bx(20.0, 30.0, 200.0, 25.0);
+        let line = AnnotKind::Line {
+            a: Pt { x: 10.0, y: 60.0 },
+            b: Pt { x: 110.0, y: 10.0 },
+            arrow: true,
+            arrow_start: true,
+        };
+        match line.resized(from, to) {
+            AnnotKind::Line {
+                a,
+                b,
+                arrow,
+                arrow_start,
+            } => {
+                assert_eq!((a.x, a.y), (20.0, 55.0));
+                assert_eq!((b.x, b.y), (220.0, 30.0));
+                assert!(arrow && arrow_start);
+            }
+            k => panic!("{k:?}"),
+        }
+        // A tape's text follows its height; a text box's doesn't.
+        let tape = AnnotKind::Tape {
+            rect: from,
+            size: 10.0,
+        };
+        assert_eq!(tape.resized(from, to).text_size(), Some(5.0));
+        let text = AnnotKind::FreeText {
+            rect: from,
+            size: 10.0,
+        };
+        assert_eq!(text.resized(from, to).text_size(), Some(10.0));
+        assert_eq!(text.with_text_size(1000.0).text_size(), Some(144.0));
+    }
+
+    #[test]
+    fn clicks_hit_strokes_and_boxes() {
+        let line = mark(AnnotKind::Line {
+            a: Pt { x: 0.0, y: 0.0 },
+            b: Pt { x: 100.0, y: 0.0 },
+            arrow: false,
+            arrow_start: false,
+        });
+        assert!(line.hit(Pt { x: 50.0, y: 3.0 }, 3.0));
+        assert!(!line.hit(Pt { x: 50.0, y: 10.0 }, 3.0));
+        assert!(!line.hit(Pt { x: 110.0, y: 0.0 }, 3.0));
+        let square = mark(AnnotKind::Square {
+            rect: bx(0.0, 0.0, 100.0, 100.0),
+        });
+        assert!(square.hit(Pt { x: 50.0, y: 50.0 }, 3.0));
+        assert!(square.hit(Pt { x: -2.0, y: 50.0 }, 3.0));
+        assert!(!square.hit(Pt { x: -5.0, y: 50.0 }, 3.0));
+    }
+
+    #[test]
+    fn fills_dashes_and_arrowheads_reach_the_file() {
+        let mut pdf = lopdf::Document::with_version("1.7");
+        let mut square = mark(AnnotKind::Square {
+            rect: bx(10.0, 10.0, 100.0, 50.0),
+        });
+        square.fill = Some([255, 0, 0]);
+        square.dashed = true;
+        let main = to_pdf(&square, &geom(0), &mut pdf).main;
+        let ic = main.get(b"IC").unwrap().as_array().unwrap();
+        assert_eq!(ic.len(), 3);
+        assert_eq!(ic[0].as_float().unwrap(), 1.0);
+        let bs = main.get(b"BS").unwrap().as_dict().unwrap();
+        assert_eq!(bs.get(b"S").unwrap().as_name().unwrap(), b"D");
+        assert_eq!(bs.get(b"D").unwrap().as_array().unwrap().len(), 2);
+
+        // Unfilled and solid: neither key.
+        square.fill = None;
+        square.dashed = false;
+        let main = to_pdf(&square, &geom(0), &mut pdf).main;
+        assert!(main.get(b"IC").is_err());
+        let bs = main.get(b"BS").unwrap().as_dict().unwrap();
+        assert!(bs.get(b"S").is_err());
+
+        let line = mark(AnnotKind::Line {
+            a: Pt { x: 0.0, y: 0.0 },
+            b: Pt { x: 100.0, y: 0.0 },
+            arrow: false,
+            arrow_start: true,
+        });
+        let main = to_pdf(&line, &geom(0), &mut pdf).main;
+        let le: Vec<&[u8]> = main
+            .get(b"LE")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o.as_name().unwrap())
+            .collect();
+        assert_eq!(le, [b"OpenArrow".as_slice(), b"None".as_slice()]);
     }
 }

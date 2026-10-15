@@ -1737,6 +1737,8 @@ mod tests {
                 contents: String::new(),
                 modified: String::new(),
                 created: String::new(),
+                fill: None,
+                dashed: false,
             };
             model
                 .apply(
@@ -1942,6 +1944,8 @@ mod tests {
             contents: "note".into(),
             modified: "D:20261011000000".into(),
             created: String::new(),
+            fill: None,
+            dashed: false,
         };
         model
             .apply(
@@ -2092,6 +2096,8 @@ mod tests {
             contents: String::new(),
             modified: "D:20261011000000".into(),
             created: String::new(),
+            fill: None,
+            dashed: false,
         };
         model
             .apply(
@@ -2230,6 +2236,8 @@ mod tests {
                         contents: String::new(),
                         modified: "D:20261011000000".into(),
                         created: String::new(),
+                        fill: None,
+                        dashed: false,
                     },
                 },
                 "tick",
@@ -2256,6 +2264,8 @@ mod tests {
             contents: String::new(),
             modified: "D:20261011000000".into(),
             created: String::new(),
+            fill: None,
+            dashed: false,
         };
         model
             .apply(
@@ -2516,6 +2526,8 @@ mod tests {
                             contents: String::new(),
                             modified: String::new(),
                             created: String::new(),
+                            fill: None,
+                            dashed: false,
                         },
                     },
                     "a",
@@ -2756,6 +2768,8 @@ mod tests {
                         contents: String::new(),
                         modified: String::new(),
                         created: String::new(),
+                        fill: None,
+                        dashed: false,
                     },
                 },
                 "a",
@@ -2827,6 +2841,8 @@ mod tests {
                         contents: String::new(),
                         modified: String::new(),
                         created: String::new(),
+                        fill: None,
+                        dashed: false,
                     },
                 },
                 "sq",
@@ -3201,6 +3217,8 @@ mod tests {
                         contents: String::new(),
                         modified: String::new(),
                         created: String::new(),
+                        fill: None,
+                        dashed: false,
                     },
                 },
                 "sq",

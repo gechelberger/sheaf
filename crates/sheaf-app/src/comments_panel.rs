@@ -43,7 +43,7 @@ enum Row {
 }
 
 /// Short label for one of our marks.
-fn kind_label(kind: &AnnotKind) -> String {
+pub(crate) fn kind_label(kind: &AnnotKind) -> String {
     match kind {
         AnnotKind::Highlight { .. } => "Highlight".into(),
         AnnotKind::Note { .. } => "Note".into(),
@@ -121,7 +121,7 @@ impl DocView {
         let Some((source, f)) = doc.foreign_annots.get(ix).cloned() else {
             return;
         };
-        doc.selected_annot = None;
+        doc.selected_marks.clear();
         doc.selected_foreign = Some(ix);
         if let Some(index) = doc.index_of_page_in(source, f.page)
             && let Some(pref) = doc.shown_ref(index)
@@ -155,7 +155,7 @@ impl DocView {
         let State::Ready(doc) = &self.state else {
             return;
         };
-        let Some((page, id)) = doc.selected_annot else {
+        let Some((page, id)) = doc.selected_annot() else {
             return;
         };
         self.jump_to_annot(id, cx);
@@ -276,7 +276,7 @@ impl DocView {
         }))
         .padded(0.0, 4.0);
 
-        let selected = doc.selected_annot;
+        let selected = doc.selected_marks.clone();
         let selected_foreign = doc.selected_foreign;
         let mut els: Vec<AnyElement> = Vec::new();
         let mut count = 0usize;
@@ -306,7 +306,7 @@ impl DocView {
                     else {
                         continue;
                     };
-                    let is_sel = selected == Some((page, id));
+                    let is_sel = selected.contains(&(page, id));
                     let snippet = ours_text(a);
                     let title = format!("{}  ·  {}", kind_label(&a.kind), a.author);
                     els.push(
@@ -340,7 +340,7 @@ impl DocView {
                                 .hover(|s| s.bg(theme::DANGER_HOVER).text_color(theme::TEXT_BRIGHT))
                                 .on_click(cx.listener(move |v, _, _, cx| {
                                     if let State::Ready(doc) = &mut v.state {
-                                        doc.selected_annot = Some((page, id));
+                                        doc.select_mark(Some((page, id)));
                                     }
                                     v.delete_selected_annot(cx);
                                     cx.stop_propagation();

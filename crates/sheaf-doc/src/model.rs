@@ -2885,6 +2885,8 @@ mod tests {
             contents: String::new(),
             modified: String::new(),
             created: String::new(),
+            fill: None,
+            dashed: false,
         };
         assert_eq!(d.state().next_connector_label(), "1");
         d.apply(
@@ -2922,6 +2924,8 @@ mod tests {
             contents: String::new(),
             modified: String::new(),
             created: String::new(),
+            fill: None,
+            dashed: false,
         }
     }
 
@@ -3116,6 +3120,8 @@ mod tests {
             contents: String::new(),
             modified: String::new(),
             created: String::new(),
+            fill: None,
+            dashed: false,
         };
         d.apply(
             Edit::AnnotAdd {
@@ -3605,6 +3611,8 @@ mod tests {
             contents: String::new(),
             modified: "D:20261013000000".into(),
             created: String::new(),
+            fill: None,
+            dashed: false,
         };
         let edits = vec![
             Edit::MovePages {

@@ -82,6 +82,8 @@ fn margins_crop_and_marks_follow() {
         contents: String::new(),
         modified: String::new(),
         created: String::new(),
+        fill: None,
+        dashed: false,
     };
     doc.apply(Edit::AnnotAdd { page, annot: mark }, "mark")
         .unwrap();

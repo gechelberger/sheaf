@@ -30,6 +30,9 @@ an image element does not inherit the parent element's color.
 | [rotate-left](rotate-left/icon.svg) | Rotate counterclockwise | `RotatePageCcw` |
 | [undo](undo/icon.svg) | Undo | `Undo` |
 | [redo](redo/icon.svg) | Redo | `Redo` |
+| [copy](copy/icon.svg) | Copy | `CopySelection` |
+| [paste](paste/icon.svg) | Paste | `PasteMarks` |
+| [paste-in-place](paste-in-place/icon.svg) | Paste in place | `PasteMarksInPlace` |
 | [open](open/icon.svg) | Open PDF | `OpenFile` |
 | [save](save/icon.svg) | Save | `Save` |
 | [insert-blank](insert-blank/icon.svg) | Insert blank pages | `InsertBlankPages` |

@@ -208,8 +208,8 @@ bugs found while planning, is in [`todos/m9.md`](todos/m9.md).
 - Measurement: distance, perimeter, area, with page scale and calibration.
   The cut line: it can move later without holding up v0.5.
 
-Slices: single instance → preferences and state → groundwork and bug
-fixes → edit history → editing marks → text selection → text markup →
+Slices: single instance ✅ → preferences and state ✅ → groundwork and
+bug fixes ✅ → edit history ✅ → editing marks ✅ → text selection → text markup →
 replies and status → comment filters → stamps → connector groups → Set
 Status → tape format → tape from page text → shapes → file attachments →
 summary and CSV → FDF/XFDF → measurement → plugin API 0.3 and docs.

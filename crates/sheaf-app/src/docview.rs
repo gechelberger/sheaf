@@ -29,7 +29,7 @@ use sheaf_ui::text_area::{TextArea, TextAreaEvent};
 use sheaf_ui::text_input::{TextInput, TextInputEvent};
 use sheaf_ui::theme;
 
-use crate::markup_tools::{Drag, Tool, arrow_head, rotate_pt, stroke_canvas};
+use crate::markup_tools::{Drag, Tool, arrow_head, rotate_pt, stroke_canvas, stroke_canvas_dashed};
 pub(crate) use crate::pane::Zoom;
 use crate::pane::{Layout, LayoutSpec, MARGIN, PageMode, Pane, Spread};
 use crate::{ClearGuides, FullScreen, GoToPage, ReadMode, ToggleGrid, ToggleRulers};
@@ -42,13 +42,14 @@ use sheaf_render::{
 };
 
 use crate::{
-    CancelOcr, CloseSearch, DeletePage, DuplicatePages, ExportCleanCopy, ExportFlattened,
-    ExtractPages, Find, FirstPage, InsertPdf, LastPage, LineDown, LineUp, NewBookmark, NextPage,
-    NextPane, PrevPage, Redo, RotatePageCcw, RotatePageCw, RotateViewCcw, RotateViewCw, Save,
-    SaveAs, ScreenDown, ScreenUp, SearchNext, SearchPrev, SelectAllPages, SinglePage,
-    SinglePageContinuous, SplitView, ToggleCoverPage, ToolArrow, ToolConnector, ToolEllipse,
-    ToolFreeText, ToolHighlight, ToolInk, ToolLine, ToolNote, ToolSelect, ToolSquare, ToolTick,
-    TwoUp, TwoUpContinuous, Undo, ZoomActual, ZoomFitPage, ZoomFitWidth, ZoomIn, ZoomOut,
+    CancelOcr, CloseSearch, CopySelection, DeletePage, DuplicatePages, ExportCleanCopy,
+    ExportFlattened, ExtractPages, Find, FirstPage, InsertPdf, LastPage, LineDown, LineUp,
+    NewBookmark, NextPage, NextPane, PasteMarks, PasteMarksInPlace, PrevPage, Redo, RotatePageCcw,
+    RotatePageCw, RotateViewCcw, RotateViewCw, Save, SaveAs, ScreenDown, ScreenUp, SearchNext,
+    SearchPrev, SelectAllPages, SinglePage, SinglePageContinuous, SplitView, ToggleCoverPage,
+    ToolArrow, ToolConnector, ToolEllipse, ToolFreeText, ToolHighlight, ToolInk, ToolLine,
+    ToolNote, ToolSelect, ToolSquare, ToolTick, TwoUp, TwoUpContinuous, Undo, ZoomActual,
+    ZoomFitPage, ZoomFitWidth, ZoomIn, ZoomOut,
 };
 
 pub const KEY_CONTEXT: &str = "DocView";
@@ -148,7 +149,9 @@ pub(crate) struct Doc {
     pub(crate) outline_rows: Vec<(OutlineId, u16, Option<usize>)>,
     // Markup tool state (see markup_tools.rs).
     pub(crate) drag: Option<Drag>,
-    pub(crate) selected_annot: Option<(PageId, AnnotId)>,
+    /// The marks selected, in the order picked. The last is the one the
+    /// handles and the text editor are on ([`Doc::selected_annot`]).
+    pub(crate) selected_marks: Vec<(PageId, AnnotId)>,
     pub(crate) annot_editor: Option<AnnotEditor>,
     pub(crate) pending_connector: Option<crate::markup_tools::PendingConnector>,
     /// Comments other tools left in the files the pages come from
@@ -213,6 +216,38 @@ impl Incoming {
 }
 
 impl Doc {
+    /// The mark picked last, if any: the one with handles.
+    pub(crate) fn selected_annot(&self) -> Option<(PageId, AnnotId)> {
+        self.selected_marks.last().copied()
+    }
+
+    /// Select just this mark, or nothing.
+    pub(crate) fn select_mark(&mut self, mark: Option<(PageId, AnnotId)>) {
+        self.selected_marks = mark.into_iter().collect();
+    }
+
+    /// Shift+click: add the mark to the selection, or take it out.
+    pub(crate) fn toggle_mark(&mut self, mark: (PageId, AnnotId)) {
+        match self.selected_marks.iter().position(|m| *m == mark) {
+            Some(i) => {
+                self.selected_marks.remove(i);
+            }
+            None => self.selected_marks.push(mark),
+        }
+    }
+
+    /// The selected marks themselves, with their pages.
+    pub(crate) fn selected_mark_list(&self) -> Vec<(PageId, sheaf_doc::Annot)> {
+        let st = self.model.state();
+        self.selected_marks
+            .iter()
+            .filter_map(|(p, id)| {
+                let a = st.annots_on(*p)?.iter().find(|a| a.id == *id)?.clone();
+                Some((*p, a))
+            })
+            .collect()
+    }
+
     /// After `source`'s pages came in with `incoming`: PDFium stops drawing
     /// the marks sheaf now draws, and the file's other comments are listed.
     pub(crate) fn take_in(&mut self, source: SourceId, incoming: Incoming) {
@@ -785,7 +820,7 @@ impl DocView {
             outline_menu: None,
             outline_rows: Vec::new(),
             drag: None,
-            selected_annot: None,
+            selected_marks: Vec::new(),
             annot_editor: None,
             pending_connector: None,
             foreign_annots: Vec::new(),
@@ -1099,7 +1134,6 @@ impl DocView {
     }
 
     /// Apply edits as one undo step; if any fails, none are applied.
-    #[cfg_attr(not(feature = "plugins"), allow(dead_code))]
     pub(crate) fn apply_batch(&mut self, edits: Vec<Edit>, label: &str, cx: &mut Context<Self>) {
         let State::Ready(doc) = &mut self.state else {
             return;
@@ -1294,15 +1328,11 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return false;
         };
-        if let Some((pid, aid)) = doc.selected_annot
-            && !doc
-                .model
-                .state()
-                .annots_on(pid)
-                .is_some_and(|l| l.iter().any(|a| a.id == aid))
-        {
-            doc.selected_annot = None;
-        }
+        let st = doc.model.state().clone();
+        doc.selected_marks.retain(|(pid, aid)| {
+            st.annots_on(*pid)
+                .is_some_and(|l| l.iter().any(|a| a.id == *aid))
+        });
         let live: HashSet<PageId> = doc.model.state().pages.iter().map(|p| p.id).collect();
         let before = doc.selection.len();
         doc.selection.retain(|id| live.contains(id));
@@ -1715,6 +1745,8 @@ impl DocView {
             contents: String::new(),
             modified: sheaf_doc::pdf_date_now(),
             created: sheaf_doc::pdf_date_now(),
+            fill: None,
+            dashed: false,
         }
     }
 
@@ -1725,7 +1757,24 @@ impl DocView {
         label: &str,
         cx: &mut Context<Self>,
     ) {
+        let count = |v: &Self| match &v.state {
+            State::Ready(doc) => doc.model.state().annots_on(page).map_or(0, |l| l.len()),
+            _ => 0,
+        };
+        let before = count(self);
         self.apply(Edit::AnnotAdd { page, annot }, label, cx);
+        // The new mark comes in selected, so its properties can be set
+        // straight away.
+        if count(self) > before
+            && let State::Ready(doc) = &mut self.state
+            && let Some(id) = doc
+                .model
+                .state()
+                .annots_on(page)
+                .and_then(|l| l.last().map(|a| a.id))
+        {
+            doc.select_mark(Some((page, id)));
+        }
     }
 
     /// Dev hook: drop one of each mark on page 1 and save to `path`.
@@ -1820,6 +1869,7 @@ impl DocView {
                 a: Pt { x: 80.0, y: 220.0 },
                 b: Pt { x: 300.0, y: 260.0 },
                 arrow: true,
+                arrow_start: false,
             },
             [0, 120, 255],
             cx,
@@ -2260,7 +2310,7 @@ impl DocView {
             _sub: sub,
             _blur: blur,
         });
-        doc.selected_annot = Some((page, id));
+        doc.select_mark(Some((page, id)));
         cx.notify();
     }
 
@@ -3864,15 +3914,15 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
             page_div = page_div.children(annot_elements(a, src, rot, k));
         }
     }
-    // Selection outline, inline editor, drag preview.
-    if let Some((pid, aid)) = doc.selected_annot
-        && pid == pl.pref.id
-        && let Some(a) = doc
-            .model
-            .state()
-            .annots_on(pid)
-            .and_then(|l| l.iter().find(|a| a.id == aid))
-    {
+    // Selection outlines; handles when one mark is selected and nothing is
+    // being dragged.
+    let selected: Vec<sheaf_doc::Annot> = doc
+        .selected_mark_list()
+        .into_iter()
+        .filter(|(pid, _)| *pid == pl.pref.id)
+        .map(|(_, a)| a)
+        .collect();
+    for a in &selected {
         let b = a.bounds();
         let r = rotate_rect(
             Rect {
@@ -3895,6 +3945,26 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
                 .border_dashed()
                 .border_color(theme::ACCENT),
         );
+    }
+    if let [a] = selected.as_slice()
+        && doc.selected_marks.len() == 1
+        && doc.drag.is_none()
+    {
+        const HANDLE: f32 = 7.0;
+        for (_, q) in crate::markup_tools::handle_spots(a) {
+            let d = rotate_pt(q, src, rot);
+            page_div = page_div.child(
+                div()
+                    .absolute()
+                    .left(px(d.x * k - HANDLE / 2.0))
+                    .top(px(d.y * k - HANDLE / 2.0))
+                    .w(px(HANDLE))
+                    .h(px(HANDLE))
+                    .bg(theme::PAGE)
+                    .border_1()
+                    .border_color(theme::ACCENT),
+            );
+        }
     }
     if let Some(ed) = &doc.annot_editor
         && ed.page == pl.pref.id
@@ -4204,6 +4274,7 @@ impl Render for DocView {
         let full = presentation == Presentation::FullScreen;
         let search_bar = (!full).then(|| self.render_search_bar(cx)).flatten();
         let goto_bar = (!full).then(|| self.render_goto()).flatten();
+        let props_bar = (!full).then(|| self.render_mark_properties(cx)).flatten();
         let mut body: Option<AnyElement> = None;
         // The status bar: where you are, then the latest notice, which
         // gives way (ellipsis, full text on hover) when space is short.
@@ -4332,7 +4403,7 @@ impl Render for DocView {
                     // Esc with a tape or connector half-placed just drops it.
                 } else {
                     if let State::Ready(doc) = &mut v.state {
-                        doc.selected_annot = None;
+                        doc.selected_marks.clear();
                         doc.selected_foreign = None;
                         doc.drag = None;
                     }
@@ -4355,6 +4426,15 @@ impl Render for DocView {
                 if !v.delete_selected_annot(cx) {
                     v.delete_current(cx)
                 }
+            }))
+            .on_action(cx.listener(|v, _: &CopySelection, _, cx| {
+                v.copy_marks(cx);
+            }))
+            .on_action(cx.listener(|v, _: &PasteMarks, _, cx| {
+                v.paste_marks(false, cx);
+            }))
+            .on_action(cx.listener(|v, _: &PasteMarksInPlace, _, cx| {
+                v.paste_marks(true, cx);
             }))
             .on_action(cx.listener(|v, _: &DuplicatePages, _, cx| v.duplicate_current(cx)))
             .on_action(cx.listener(|v, _: &SelectAllPages, _, cx| v.select_all(cx)))
@@ -4395,6 +4475,7 @@ impl Render for DocView {
             .text_color(theme::TEXT_SOFT)
             .children(search_bar)
             .children(goto_bar)
+            .children(props_bar)
             .child(
                 div()
                     .relative()
@@ -4810,20 +4891,20 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
                     .into_any_element(),
             );
         }
-        AnnotKind::Square { rect } => {
+        AnnotKind::Square { rect } | AnnotKind::Ellipse { rect } => {
+            let inside = a.fill.map(|f| {
+                let u = ((f[0] as u32) << 16) | ((f[1] as u32) << 8) | f[2] as u32;
+                rgba((u << 8) | alpha)
+            });
             out.push(
                 place(*rect)
                     .border(px((a.stroke * k).max(1.0)))
-                    .border_color(color)
-                    .into_any_element(),
-            );
-        }
-        AnnotKind::Ellipse { rect } => {
-            out.push(
-                place(*rect)
-                    .border(px((a.stroke * k).max(1.0)))
-                    .border_color(color)
-                    .rounded_full()
+                    .border_color(fill)
+                    .when(a.dashed, |d| d.border_dashed())
+                    .when_some(inside, |d, c| d.bg(c))
+                    .when(matches!(a.kind, AnnotKind::Ellipse { .. }), |d| {
+                        d.rounded_full()
+                    })
                     .into_any_element(),
             );
         }
@@ -4902,20 +4983,35 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
             a: pa,
             b: pb,
             arrow,
+            arrow_start,
         } => {
             let (qa, qb) = (rotate_pt(*pa, src, rot), rotate_pt(*pb, src, rot));
             let (a2, b2) = ((qa.x * k, qa.y * k), (qb.x * k, qb.y * k));
-            let mut paths = vec![vec![a2, b2]];
-            if *arrow {
-                paths.push(arrow_head(a2, b2, (6.0 + a.stroke * 2.0) * k));
-            }
-            out.push(stroke_canvas(
-                paths,
-                color,
+            let head = (6.0 + a.stroke * 2.0) * k;
+            out.push(stroke_canvas_dashed(
+                vec![vec![a2, b2]],
+                fill,
                 a.stroke * k,
+                a.dashed.then_some(k),
                 src.rotated(rot),
                 k,
             ));
+            let mut heads = Vec::new();
+            if *arrow {
+                heads.push(arrow_head(a2, b2, head));
+            }
+            if *arrow_start {
+                heads.push(arrow_head(b2, a2, head));
+            }
+            if !heads.is_empty() {
+                out.push(stroke_canvas(
+                    heads,
+                    fill,
+                    a.stroke * k,
+                    src.rotated(rot),
+                    k,
+                ));
+            }
         }
         AnnotKind::Ink { paths } => {
             let polylines: Vec<Vec<(f32, f32)>> = paths
@@ -4929,10 +5025,11 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
                         .collect()
                 })
                 .collect();
-            out.push(stroke_canvas(
+            out.push(stroke_canvas_dashed(
                 polylines,
-                color,
+                fill,
                 a.stroke * k,
+                a.dashed.then_some(k),
                 src.rotated(rot),
                 k,
             ));

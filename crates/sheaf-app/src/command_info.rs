@@ -103,6 +103,21 @@ pub fn info(id: &str) -> Option<Info> {
         // Edit
         "docview::Undo" => ("undo", "Undo the last change to the document.", &[]),
         "docview::Redo" => ("redo", "Redo the change you just undid.", &[]),
+        "docview::CopySelection" => (
+            "copy",
+            "Copy the selected annotations, to paste here or in another document.",
+            &["clipboard", "duplicate"],
+        ),
+        "docview::PasteMarks" => (
+            "paste",
+            "Paste copied annotations onto the current page, a little offset.",
+            &["clipboard"],
+        ),
+        "docview::PasteMarksInPlace" => (
+            "paste-in-place",
+            "Paste copied annotations onto the current page where they were.",
+            &["clipboard", "same position"],
+        ),
         "docview::SelectAllPages" => (
             "select-all-pages",
             "Select every page in the thumbnails, for page commands.",

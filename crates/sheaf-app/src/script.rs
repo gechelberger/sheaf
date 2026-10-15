@@ -110,13 +110,19 @@ async fn run_step(
     if step.get("dump").and_then(Value::as_str) == Some("focus") {
         return cx
             .update_window(handle.into(), |_, window, cx| {
+                let contexts: Vec<String> = window
+                    .context_stack()
+                    .iter()
+                    .map(|c| format!("{c:?}"))
+                    .collect();
                 eprintln!(
-                    "SCRIPT focus: {}",
+                    "SCRIPT focus: {} {}",
                     if window.focused(cx).is_some() {
                         "something"
                     } else {
                         "nothing"
-                    }
+                    },
+                    contexts.join(" > ")
                 );
             })
             .map_err(|e| e.to_string());
@@ -430,7 +436,16 @@ impl Workspace {
                     for a in st.annots_on(p.id).into_iter().flatten() {
                         let kind = format!("{:?}", a.kind);
                         let kind = kind.split([' ', '{', '(']).next().unwrap_or("");
-                        eprintln!("SCRIPT annots: page {} {kind} {:?}", i + 1, a.contents);
+                        eprintln!(
+                            "SCRIPT annots: page {} {kind} {:?} color {:?} fill {:?} width {} dashed {} at {:?}",
+                            i + 1,
+                            a.contents,
+                            a.color,
+                            a.fill,
+                            a.stroke,
+                            a.dashed,
+                            a.bounds()
+                        );
                     }
                 }
             }

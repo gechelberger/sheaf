@@ -516,6 +516,8 @@ mod tests {
             contents: String::new(),
             modified: String::new(),
             created: String::new(),
+            fill: None,
+            dashed: false,
         };
         let geom = PageGeom {
             media: [0.0, 0.0, 612.0, 792.0],
@@ -599,6 +601,8 @@ mod tests {
             contents: "mine".into(),
             modified: String::new(),
             created: String::new(),
+            fill: None,
+            dashed: false,
         };
         let dict = crate::annot::to_pdf(
             &ours,

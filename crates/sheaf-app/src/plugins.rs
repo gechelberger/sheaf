@@ -1015,6 +1015,35 @@ fn sign_marks(edits: &mut [sheaf_doc::Edit], name: &str) {
     }
 }
 
+/// A plugin rewrites a mark from what API 0.2 shows it: no fill, dashes
+/// or start arrowhead, and no creation date. Updates keep the mark's own.
+fn keep_unseen(edits: &mut [sheaf_doc::Edit], st: &sheaf_doc::DocState) {
+    for e in edits {
+        let sheaf_doc::Edit::AnnotUpdate { page, annot } = e else {
+            continue;
+        };
+        let Some(was) = st
+            .annots_on(*page)
+            .and_then(|l| l.iter().find(|a| a.id == annot.id))
+        else {
+            continue;
+        };
+        annot.fill = was.fill;
+        annot.dashed = was.dashed;
+        annot.created = was.created.clone();
+        if let (
+            sheaf_doc::AnnotKind::Line { arrow_start, .. },
+            sheaf_doc::AnnotKind::Line {
+                arrow_start: before,
+                ..
+            },
+        ) = (&mut annot.kind, &was.kind)
+        {
+            *arrow_start = *before;
+        }
+    }
+}
+
 pub fn ocr_source(
     handles: &HashMap<SourceId, RenderHandle>,
     config: sheaf_ocr::OcrConfig,
@@ -1246,6 +1275,9 @@ pub fn run(
                         let me = crate::prefs::get(cx).identity.name();
                         for mut b in out.batches {
                             sign_marks(&mut b.edits, &me);
+                            if let crate::docview::State::Ready(doc) = &d.state {
+                                keep_unseen(&mut b.edits, doc.model.state());
+                            }
                             d.apply_batch(b.edits, &b.label, cx);
                             last = Some(b.label);
                         }
@@ -1562,5 +1594,64 @@ mod tests {
         assert!(install_bundled(&from, &dest).is_empty());
         assert_eq!(installed(&dest, "e").as_deref(), Some("1.1.0"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_plugin_update_keeps_what_it_cant_see() {
+        use sheaf_doc::{Annot, AnnotId, AnnotKind, Document, Edit, FixedCount, Pt, SourceInfo};
+        let mut d = Document::new(
+            SourceInfo {
+                path: "a.pdf".into(),
+                page_count: 1,
+                first_page: sheaf_core::PageSize {
+                    width: 612.0,
+                    height: 792.0,
+                },
+                page_sizes: None,
+                bytes: 0,
+                password: None,
+                data: None,
+            },
+            &[],
+            Box::new(FixedCount(10)),
+        );
+        let page = d.page(0).unwrap().id;
+        let line = Annot {
+            id: AnnotId(1),
+            kind: AnnotKind::Line {
+                a: Pt { x: 0.0, y: 0.0 },
+                b: Pt { x: 10.0, y: 0.0 },
+                arrow: true,
+                arrow_start: true,
+            },
+            color: [0, 0, 0],
+            opacity: 1.0,
+            stroke: 1.0,
+            author: "me".into(),
+            contents: String::new(),
+            modified: "D:1".into(),
+            created: "D:0".into(),
+            fill: None,
+            dashed: true,
+        };
+        d.apply(Edit::AnnotAdd { page, annot: line }, "Line")
+            .unwrap();
+        let mut placed = d.state().annots_on(page).unwrap()[0].clone();
+        // What a 0.2 plugin hands back: the styles it can't see are lost.
+        let mut back = placed.clone();
+        back.contents = "checked".into();
+        back.dashed = false;
+        back.created = "D:2".into();
+        if let AnnotKind::Line { arrow_start, .. } = &mut back.kind {
+            *arrow_start = false;
+        }
+        let mut edits = vec![Edit::AnnotUpdate { page, annot: back }];
+        keep_unseen(&mut edits, d.state());
+        let Edit::AnnotUpdate { annot, .. } = &edits[0] else {
+            panic!()
+        };
+        placed.contents = "checked".into();
+        placed.modified = annot.modified.clone();
+        assert_eq!(*annot, placed);
     }
 }

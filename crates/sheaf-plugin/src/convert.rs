@@ -162,7 +162,7 @@ pub fn annot_to_wit(a: &Annot) -> w::Annot {
         }),
         AnnotKind::Square { rect } => w::AnnotKind::Square(box_to_wit(*rect)),
         AnnotKind::Ellipse { rect } => w::AnnotKind::Ellipse(box_to_wit(*rect)),
-        AnnotKind::Line { a, b, arrow } => w::AnnotKind::Line(w::LineShape {
+        AnnotKind::Line { a, b, arrow, .. } => w::AnnotKind::Line(w::LineShape {
             a: pt_to_wit(*a),
             b: pt_to_wit(*b),
             arrow: *arrow,
@@ -226,6 +226,7 @@ pub fn annot_from_wit(a: w::Annot) -> Annot {
             a: pt_from_wit(l.a),
             b: pt_from_wit(l.b),
             arrow: l.arrow,
+            arrow_start: false,
         },
         w::AnnotKind::Ink(paths) => AnnotKind::Ink {
             paths: paths
@@ -258,6 +259,8 @@ pub fn annot_from_wit(a: w::Annot) -> Annot {
         contents: a.contents,
         modified: sheaf_doc::pdf_date_now(),
         created: sheaf_doc::pdf_date_now(),
+        fill: None,
+        dashed: false,
     }
 }
 
@@ -457,6 +460,8 @@ mod tests {
             contents: "c".into(),
             modified: "D:20260101000000".into(),
             created: "D:20260101000000".into(),
+            fill: None,
+            dashed: false,
         };
         let back = annot_from_wit(annot_to_wit(&a));
         assert_eq!(

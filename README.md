@@ -220,6 +220,8 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 | Sticky notes, highlight, underline, strikethrough | ✅ notes, highlight; underline/strikethrough 📋 |
 | Free text, shapes (rect, ellipse, line, arrow, polygon) | ✅ polygon 📋 |
 | Ink / freehand | ✅ |
+| Edit placed marks: move, resize, restyle | ✅ Drag to move (Ctrl+drag under any tool), handles to resize (Shift keeps the shape, or snaps a line to 45°), Shift+click to select several. A properties bar sets color, fill, opacity, line width, dashes, arrowheads at either end and text size; each change is one undo step |
+| Copy and paste marks | ✅ Ctrl+C, Ctrl+V (offset), Ctrl+Alt+V (in place), across documents too |
 | Stamps (built-in + custom) | ✅ tickmark library; custom 📋 |
 | **Tickmarks** (PDFlyer): quick-stamp library, keyboard-driven | ✅ |
 | **Connectors** (PDFlyer): linked markers that jump between pages | ✅ pairs saved as Link annotations, so they jump in Acrobat too. PDFlyer's are label *groups* (1–50, A–ZZ) with Prev/Next and "all pages with / without"; groups are 📋 ([Pending](ROADMAP.md#pdflyer-parity-gaps)) |

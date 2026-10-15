@@ -54,6 +54,8 @@ impl When {
 pub struct Facts {
     pub document: bool,
     pub selection: bool,
+    /// Marks of sheaf's selected (what Copy takes).
+    pub marks: bool,
     pub pages: bool,
     pub region: bool,
     pub can_undo: bool,
@@ -109,7 +111,8 @@ impl Facts {
         };
         let pane = doc.pane();
         f.document = true;
-        f.selection = doc.selected_annot.is_some() || doc.selected_foreign.is_some();
+        f.selection = !doc.selected_marks.is_empty() || doc.selected_foreign.is_some();
+        f.marks = !doc.selected_marks.is_empty();
         f.pages = !doc.selection.is_empty();
         f.region = view.region.is_some();
         f.can_undo = doc.model.can_undo();
@@ -247,7 +250,10 @@ pub fn builtin(id: &str) -> Builtin {
         | "docview::DuplicatePages"
         | "docview::ExtractPages"
         | "docview::DeletePage"
-        | "docview::NewBookmark" => (DOC, None, None),
+        | "docview::NewBookmark"
+        | "docview::PasteMarks"
+        | "docview::PasteMarksInPlace" => (DOC, None, None),
+        "docview::CopySelection" => (DOC, Some(|f| f.marks), None),
         "docview::Undo" => (DOC, Some(|f| f.can_undo), None),
         "docview::Redo" => (DOC, Some(|f| f.can_redo), None),
         "docview::SinglePage" => (DOC, None, Some(|f| f.mode(Spread::Single, false))),
