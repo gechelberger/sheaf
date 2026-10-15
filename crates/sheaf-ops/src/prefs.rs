@@ -5,7 +5,7 @@
 //! one that doesn't exist). Each setting is read on its own: a mistake in
 //! one leaves the rest working, and is reported with its line.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::path::PathBuf;
 
@@ -22,6 +22,20 @@ pub struct Prefs {
     pub identity: Identity,
     pub ocr: OcrPrefs,
     pub stamps: StampPrefs,
+    /// `[plugins.<id>]`: each plugin's own section, which only that plugin
+    /// reads (API 0.3's `storage.preferences`). Whatever it holds is the
+    /// plugin's business; its manifest can name the keys it knows.
+    pub plugins: BTreeMap<String, toml::Table>,
+}
+
+impl Prefs {
+    /// Plugin `id`'s section as JSON, "{}" when it has none.
+    pub fn plugin_json(&self, id: &str) -> String {
+        self.plugins
+            .get(id)
+            .and_then(|t| serde_json::to_string(t).ok())
+            .unwrap_or_else(|| "{}".into())
+    }
 }
 
 /// `[stamps]`: how big stamps go down, and how dynamic stamps write the
@@ -204,6 +218,7 @@ pub fn parse(text: &str) -> (Prefs, Vec<Problem>) {
             date_format: r.get("stamps.date_format"),
             time_format: r.get("stamps.time_format"),
         },
+        plugins: r.plugins(),
     };
     (prefs, r.finish())
 }
@@ -245,6 +260,27 @@ impl<'a> Reader<'a> {
         }
     }
 
+    /// `[plugins.<id>]` sections, whatever they hold.
+    fn plugins(&mut self) -> BTreeMap<String, toml::Table> {
+        let mut out = BTreeMap::new();
+        let Some(all) = self.table.get("plugins").and_then(|p| p.as_table()) else {
+            return out;
+        };
+        for (id, value) in all {
+            match value.as_table() {
+                Some(t) => {
+                    out.insert(id.clone(), t.clone());
+                }
+                None => self.problems.push(Problem {
+                    line: self.lines.get(&format!("plugins.{id}")).copied(),
+                    message: format!("`plugins.{id}` should be a section, written [plugins.{id}]"),
+                    whole_file: false,
+                }),
+            }
+        }
+        out
+    }
+
     fn finish(mut self) -> Vec<Problem> {
         let sections: HashSet<&str> = self
             .known
@@ -252,6 +288,10 @@ impl<'a> Reader<'a> {
             .filter_map(|k| k.split_once('.').map(|(s, _)| s))
             .collect();
         for (section, value) in self.table {
+            // Plugins' own sections are theirs to read (`plugins`).
+            if section == "plugins" && value.is_table() {
+                continue;
+            }
             let Some(keys) = value.as_table() else {
                 let message = if sections.contains(section.as_str()) {
                     format!("`{section}` should be a section, written [{section}]")
@@ -367,11 +407,31 @@ pub const TEMPLATE: &str = r#"# sheaf settings
 # %d day, %Y year, %I hour, %M minute, %p AM/PM).
 # date_format = "%m/%d/%Y"
 # time_format = "%-I:%M %p"
+
+# A plugin's own settings, which only it reads: a section named after
+# its id. What goes in it is up to the plugin; see its documentation.
+# [plugins.currency-convert]
+# target = "EUR"
 "#;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plugins_keep_their_own_sections() {
+        let (p, problems) = parse(
+            "[plugins.currency-convert]\ntarget = \"EUR\"\nround = 2\n\n[plugins]\nloose = 1\n",
+        );
+        assert_eq!(
+            p.plugin_json("currency-convert"),
+            r#"{"round":2,"target":"EUR"}"#
+        );
+        assert_eq!(p.plugin_json("other"), "{}");
+        // A plugin's section is a section; nothing else in it is reported.
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].message.contains("plugins.loose"));
+    }
 
     #[test]
     fn identity_reads_and_defaults() {

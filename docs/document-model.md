@@ -29,10 +29,12 @@ PageRef              { id: PageId, source: SourceId, index: u32, rotation: Rotat
                      one page of the virtual document, pointing at a page of a source.
                      PageId is a fresh, stable identity (never reused).
 
-DocState             { pages: Arc<Vec<PageRef>>,
-                       outline: Arc<Vec<OutlineNode>>,     // tree; targets are PageIds
-                       annots: im::HashMap<PageId, Arc<Vec<Annot>>>,   // M3
-                       ... }
+DocState             { pages: im::Vector<PageRef>,
+                       outline: im::Vector<OutlineNode>,   // tree; targets are PageIds
+                       annots: im::HashMap<PageId, im::Vector<Annot>>,  // sheaf's marks
+                       removed_comments: ...,   // other tools' comments deleted, by /NM
+                       text_layers: ...,        // unsaved OCR text, by page
+                       labels, header_footer }
                      a complete, immutable snapshot of what the user sees.
 
 Document             { sources: HashMap<SourceId, Arc<Source>>,
@@ -97,7 +99,15 @@ pub enum Edit {
     OutlineMove { id: OutlineId, parent: Option<OutlineId>, after: Option<OutlineId>, with_pages: bool },
     OutlineEdit { id: OutlineId, title: Option<String>, target: Option<Option<PageId>>, color: Option<Option<Color>> },
     OutlineDelete { id: OutlineId },
-    // M3: Annot* ...
+    // marks
+    AnnotAdd { page: PageId, annot: Annot },
+    AnnotUpdate { page: PageId, annot: Annot },
+    AnnotDelete { page: PageId, id: AnnotId },
+    CommentsDelete { page: PageId, names: Vec<String> },   // other tools' comments
+    ConnectorAdd { a: (PageId, Annot), b: (PageId, Annot) },
+    // OCR text, page labels, header and footer, rebasing pages onto a
+    // derived source (crop, watermark): see `Edit` in model.rs.
+    ...
 }
 
 impl Document {
@@ -135,8 +145,12 @@ for object serialization.
 **Rewrite** (M2 slice 3, first): load `sources[0]` in lopdf, rebuild the page
 tree from `state.pages` (copying page object subgraphs from other sources
 with renumbering), set `/Rotate` per page, rebuild `/Outlines`, write
-annotations (M3), save. Simple, always correct, O(file). Used for "Save As"
-and as the fallback.
+sheaf's marks (`annot::to_pdf_in`, each with its appearance and its JSON in
+`/SheafAnnot`), then cut whatever still points at a page that isn't kept
+(`kept::keep_only`: links, named destinations, the open action, form
+widgets, the structure tree) so pruning takes it out, and save. A copy
+never follows a reference to a page it isn't copying (`save::remap`).
+Simple, always correct, O(file). Used for "Save As" and as the fallback.
 
 **Incremental** (M2 slice 3, second): append to the original bytes a new
 section containing only changed/new objects, a new xref, and a trailer with
@@ -146,6 +160,9 @@ diffing `state` against the structure read from the source, not tracked
 during editing. lopdf does not write incremental updates, so this is a small
 writer of our own on top of lopdf's object serializer. Only possible when
 `sources[0]` is the file being saved to; otherwise fall back to rewrite.
+Also a rewrite when anything in the file was removed since it was saved (a
+page, a mark, a bookmark, OCR text replaced: `Snapshot::removes_content`),
+since an incremental save would leave it in the earlier revision.
 
 Either way the save runs on a background thread from a cloned snapshot. On
 completion the saved file is reopened as a fresh single source replacing all

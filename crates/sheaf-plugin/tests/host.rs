@@ -176,6 +176,7 @@ fn ctx(d: &Document) -> CallContext {
         ui: None,
         presets: Vec::new(),
         progress: None,
+        preferences: String::new(),
     }
 }
 
@@ -467,6 +468,7 @@ fn tax_form_bookmarks_example() {
         ui: None,
         presets: Vec::new(),
         progress: None,
+        preferences: String::new(),
     };
     let out = run(&p, "scan", None, ctx(&d)).unwrap();
     let b = &out.batches[0];
@@ -667,6 +669,7 @@ fn amount_crossref_bundled_plugin() {
         ui: Some(ui.clone()),
         presets: Vec::new(),
         progress: None,
+        preferences: String::new(),
     };
     let all: Vec<_> = (0..3).map(|i| d.page(i).unwrap().id).collect();
     *ui.answer.lock().unwrap() = Some(vec![
@@ -925,6 +928,7 @@ fn bookmark_from_pattern_bundled_plugin() {
             regex: r"Invoice (\d+)".into(),
         }],
         progress: None,
+        preferences: String::new(),
     };
     let all: Vec<_> = (0..3).map(|i| d.page(i).unwrap().id).collect();
     let answer = |source: usize, template: &str, placement: usize| {
@@ -1057,6 +1061,7 @@ fn subtotal_bundled_plugin() {
         ui: Some(ui.clone()),
         presets: Vec::new(),
         progress: None,
+        preferences: String::new(),
     };
     let region = |x: f32, y: f32, w: f32, h: f32| {
         Call::Event(DocEvent::Region {
@@ -1166,6 +1171,7 @@ fn currency_convert_bundled_plugin() {
         ui: Some(ui.clone()),
         presets: Vec::new(),
         progress: None,
+        preferences: String::new(),
     };
     let answer = |date: &str| {
         Some(vec![
@@ -1348,6 +1354,7 @@ fn duplicate_pages_bundled_plugin() {
         ui: Some(ui.clone()),
         presets: Vec::new(),
         progress: None,
+        preferences: String::new(),
     };
     let tolerant = || {
         Some(vec![FieldAnswer {
@@ -1442,4 +1449,90 @@ fn progress_reports_and_cancels() {
         other => panic!("expected a stop, got {other:?}"),
     }
     assert_eq!(p.status(), Status::Ready);
+}
+
+/// The 0.2 build of the test plugin (`fixtures/test-plugin-0.2`, built
+/// against SDK 0.2.1 before API 0.3), installed as it was.
+fn load_v02(name: &str) -> Plugin {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/test-plugin-0.2");
+    let dir = install(name, &src, &src.join("plugin.wasm"));
+    let manifest = Manifest::load(&dir).unwrap();
+    Runtime::new(Limits::default())
+        .unwrap()
+        .load(dir, manifest, LoadOptions::default())
+}
+
+#[test]
+fn a_plugin_built_for_02_still_loads_and_runs() {
+    let p = load_v02("v02");
+    assert_eq!(p.manifest().api.to_string(), "^0.2.1");
+    let d = doc(2);
+    let out = run(&p, "bookmark", None, ctx(&d)).unwrap();
+    assert_eq!(out.batches.len(), 1);
+    assert_eq!(out.batches[0].edits.len(), 2);
+    assert!(answer(&p, "settings", None).starts_with('{'));
+}
+
+#[test]
+fn api_03_sees_every_kind_and_its_preferences() {
+    use sheaf_doc::measure::{Measured, Scale};
+    use sheaf_doc::{Annot, AnnotId, AnnotKind, Pt};
+    let p = load("v03", Limits::default());
+    let mut d = doc(1);
+    let page = d.page(0).unwrap().id;
+    let mark = |kind| Annot {
+        id: AnnotId(0),
+        kind,
+        color: [0, 0, 255],
+        opacity: 1.0,
+        stroke: 1.0,
+        author: "Greg".into(),
+        contents: String::new(),
+        modified: String::new(),
+        created: String::new(),
+        fill: None,
+        dashed: true,
+        cloudy: false,
+        name: String::new(),
+    };
+    let pts = vec![
+        Pt { x: 0.0, y: 0.0 },
+        Pt { x: 9.0, y: 0.0 },
+        Pt { x: 9.0, y: 9.0 },
+    ];
+    for annot in [
+        mark(AnnotKind::Polygon {
+            points: pts.clone(),
+        }),
+        mark(AnnotKind::Measure {
+            what: Measured::Area,
+            points: pts,
+            scale: Box::new(Scale::default()),
+        }),
+    ] {
+        d.apply(Edit::AnnotAdd { page, annot }, "add").unwrap();
+    }
+    let out = run(&p, "marks", None, ctx(&d)).unwrap();
+    assert_eq!(
+        answer(&p, "store", Some("kinds")),
+        r#"Some("polygon:dashed,measure:dashed")"#
+    );
+    match &out.batches[0].edits[..] {
+        [Edit::AnnotAdd { annot, .. }] => {
+            assert!(matches!(annot.kind, AnnotKind::Polygon { .. }));
+            assert_eq!((annot.fill, annot.dashed), (Some([255, 0, 0]), true));
+            // The host leaves tokens for the app to fill in.
+            assert_eq!(annot.contents, "Checked by <<initials>>");
+        }
+        other => panic!("{other:?}"),
+    }
+    let c = CallContext {
+        preferences: r#"{"rate":2}"#.into(),
+        ..CallContext::default()
+    };
+    match run(&p, "prefs", None, c) {
+        Err(PluginError::Failed(m)) => assert_eq!(m, r#"{"rate":2}"#),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(answer(&p, "prefs", None), "{}");
 }

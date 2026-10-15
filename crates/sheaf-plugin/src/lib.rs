@@ -11,7 +11,7 @@
 //! permissions say so and the user allows it: no files, and HTTP only to
 //! the hosts named (no raw sockets).
 
-mod convert;
+mod api;
 pub mod manifest;
 pub mod progress;
 pub mod render;
@@ -28,7 +28,10 @@ pub use runtime::{
 };
 
 /// The version of `sheaf:plugin` this host provides.
-pub const API_VERSION: semver::Version = semver::Version::new(0, 2, 1);
+pub const API_VERSION: semver::Version = semver::Version::new(0, 3, 0);
+/// The one before, which it still serves (N−1): a plugin built against it
+/// keeps loading.
+pub const API_PREVIOUS: semver::Version = semver::Version::new(0, 2, 1);
 
 /// A plugin directory found on disk.
 pub struct Found {

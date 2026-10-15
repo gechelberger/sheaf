@@ -368,8 +368,10 @@ cargo run -p sheaf-app           # the GPUI window
 **Plugins.** sheaf runs WebAssembly plugins (the `plugins` feature, on by
 default; `--no-default-features` leaves out wasmtime too). The bundled
 plugins build for `wasm32-wasip2`, which `rust-toolchain.toml` installs;
-debug builds pick them up from `target/plugins`. Writing your own:
-[`docs/plugins.md`](docs/plugins.md).
+debug builds pick them up from `target/plugins`. The API is
+`sheaf:plugin` 0.3, which has every kind of mark and a plugin's own
+section of `settings.toml`; plugins built for 0.2 still load. Writing
+your own: [`docs/plugins.md`](docs/plugins.md).
 
 **OCR engines and build time.** Both engines are on by default. The first
 build compiles Tesseract 5 and Leptonica from source (CMake and a C++17
@@ -516,10 +518,14 @@ remembers for itself goes in a local state directory: `~/.local/state/sheaf`,
   - `[stamps]`: `size` (how tall a stamp goes down, in points; 40), and
     `date_format` and `time_format` for dynamic stamps (strftime codes;
     `%m/%d/%Y` and `%-I:%M %p`).
+  - `[plugins.<id>]`: a plugin's own settings, whatever it documents; only
+    that plugin reads them (as JSON, through API 0.3). A key its manifest
+    doesn't name is pointed out in Plugins → Manage Plugins….
 - `state.json` (state directory) — written by the app: window placement,
   dock layout (which panels sit where, tab order, sizes, open state), and
   each dialog's last choices, among them the OCR engine, `dpi`, language and
-  scope. Safe to delete; a copy that doesn't parse is set aside as
+  scope; recent stamps; the comment CSV's columns; the last measuring scale.
+  Safe to delete; a copy that doesn't parse is set aside as
   `state.json.bad`. Only the sheaf that owns the instance writes it.
 - `recent.json` (state directory) — File > Open Recent.
 - `patterns.json` — the Patterns panel's presets, seeded from the built-ins on
