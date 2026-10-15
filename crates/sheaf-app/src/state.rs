@@ -39,6 +39,8 @@ pub struct State {
     pub blanks: sheaf_ops::blank::BlankParams,
     /// Stamps placed lately, newest first (the Stamps panel's Recent).
     pub recent_stamps: Vec<sheaf_ops::stamps::StampRef>,
+    /// Set Status's last choices, for Set Status Again.
+    pub set_status: Option<crate::set_status::StatusSpec>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -364,6 +366,7 @@ mod tests {
                 ..Default::default()
             },
             recent_stamps: vec![sheaf_ops::stamps::StampRef::preset("Approved")],
+            set_status: Some(crate::set_status::StatusSpec::default()),
         }
     }
 

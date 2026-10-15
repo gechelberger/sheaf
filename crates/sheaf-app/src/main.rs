@@ -58,6 +58,7 @@ mod region;
 mod rulers;
 mod scan_dialog;
 mod script;
+mod set_status;
 mod split_dialog;
 mod stamp_preview;
 mod stamps_panel;
@@ -222,6 +223,9 @@ actions!(
         AddBackground,
         BookmarksFromPages,
         ColorBookmarksByLevel,
+        SetStatus,
+        SetStatusAgain,
+        ResetStatus,
         FindBlankPages,
         ToggleToolbar,
         CustomizeToolbar,

@@ -143,6 +143,7 @@ fn noun(kind: &AnnotKind) -> String {
         AnnotKind::TextStamp { text, .. } => {
             format!("stamp {}", text.lines().next().unwrap_or_default())
         }
+        AnnotKind::PageBorder { status, .. } => format!("a {status} border"),
         AnnotKind::Reply { .. } => "a reply".into(),
         AnnotKind::Status { .. } => "a status".into(),
     }

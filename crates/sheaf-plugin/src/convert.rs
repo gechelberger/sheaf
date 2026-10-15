@@ -200,7 +200,8 @@ pub fn annot_to_wit(a: &Annot) -> Option<w::Annot> {
         | AnnotKind::Reply { .. }
         | AnnotKind::Status { .. }
         | AnnotKind::PageStamp { .. }
-        | AnnotKind::TextStamp { .. } => return None,
+        | AnnotKind::TextStamp { .. }
+        | AnnotKind::PageBorder { .. } => return None,
     };
     Some(w::Annot {
         id: a.id.0,

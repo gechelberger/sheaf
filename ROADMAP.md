@@ -212,7 +212,7 @@ Slices: single instance ✅ → preferences and state ✅ → groundwork and
 bug fixes ✅ → edit history ✅ → editing marks ✅ → text selection ✅ → text
 markup ✅ →
 replies and status ✅ → comment filters ✅ → stamps ✅ → connector groups ✅ → Set
-Status → tape format → tape from page text → shapes → file attachments →
+Status ✅ → tape format → tape from page text → shapes → file attachments →
 summary and CSV → FDF/XFDF → measurement → plugin API 0.3 and docs.
 
 ### M10: Forms

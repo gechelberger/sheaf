@@ -359,6 +359,7 @@ pub struct Workspace {
         Entity<crate::bookmark_tools::BookmarkToolsDialog>,
         Subscription,
     )>,
+    set_status: Option<(Entity<crate::set_status::SetStatusDialog>, Subscription)>,
     blanks: Option<(Entity<crate::blanks_dialog::BlanksDialog>, Subscription)>,
     /// File > Print, while open.
     print: Option<(Entity<crate::print_dialog::PrintDialog>, Subscription)>,
@@ -479,6 +480,7 @@ impl Workspace {
             header_footer: None,
             watermark: None,
             bookmark_tool: None,
+            set_status: None,
             blanks: None,
             print: None,
             properties: None,
@@ -1391,6 +1393,48 @@ impl Workspace {
             },
         );
         self.bookmark_tool = Some((dialog, sub));
+        cx.notify();
+    }
+
+    /// Document > Set Status…: on the selected bookmark.
+    fn open_set_status(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.set_status.is_some() {
+            return;
+        }
+        let Some(doc) = self.doc().cloned() else {
+            return;
+        };
+        let Some((_, title, pages)) = doc.read(cx).status_bookmark() else {
+            doc.update(cx, |d, cx| d.set_notice("Select a bookmark first", cx));
+            return;
+        };
+        let spec = crate::state::get(cx).set_status.clone().unwrap_or_default();
+        let dialog =
+            cx.new(|cx| crate::set_status::SetStatusDialog::new(spec, title, pages, window, cx));
+        let sub = cx.subscribe_in(
+            &dialog,
+            window,
+            |ws, _, ev: &crate::set_status::SetStatusEvent, window, cx| {
+                use crate::set_status::SetStatusEvent;
+                ws.set_status = None;
+                ws.focus_active(window, cx);
+                if let Some(doc) = ws.doc().cloned() {
+                    match ev {
+                        SetStatusEvent::Set(spec) => {
+                            let spec = spec.clone();
+                            doc.update(cx, |d, cx| d.set_status(spec, cx));
+                        }
+                        SetStatusEvent::Reset { stamps } => {
+                            let stamps = *stamps;
+                            doc.update(cx, |d, cx| d.reset_status(stamps, cx));
+                        }
+                        SetStatusEvent::Dismiss => {}
+                    }
+                }
+                cx.notify();
+            },
+        );
+        self.set_status = Some((dialog, sub));
         cx.notify();
     }
 
@@ -2768,6 +2812,23 @@ impl Render for Workspace {
                 }),
             )
             .on_action(
+                cx.listener(|ws, _: &crate::SetStatus, window, cx| ws.open_set_status(window, cx)),
+            )
+            .on_action(cx.listener(|ws, _: &crate::SetStatusAgain, window, cx| {
+                let done = ws
+                    .doc()
+                    .cloned()
+                    .is_some_and(|d| d.update(cx, |d, cx| d.set_status_again(cx)));
+                if !done {
+                    ws.open_set_status(window, cx);
+                }
+            }))
+            .on_action(cx.listener(|ws, _: &crate::ResetStatus, _, cx| {
+                if let Some(d) = ws.doc().cloned() {
+                    d.update(cx, |d, cx| d.reset_status(false, cx));
+                }
+            }))
+            .on_action(
                 cx.listener(|ws, _: &crate::FindBlankPages, window, cx| ws.open_blanks(window, cx)),
             )
             .on_action(
@@ -2927,6 +2988,11 @@ impl Render for Workspace {
             )
             .children(
                 self.bookmark_tool
+                    .as_ref()
+                    .map(|(d, _)| deferred(d.clone()).with_priority(2)),
+            )
+            .children(
+                self.set_status
                     .as_ref()
                     .map(|(d, _)| deferred(d.clone()).with_priority(2)),
             )

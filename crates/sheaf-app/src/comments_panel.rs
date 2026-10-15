@@ -381,6 +381,7 @@ fn ours_type(kind: &AnnotKind) -> &'static str {
         AnnotKind::Reply { .. } => "Reply",
         AnnotKind::Status { .. } => "Status",
         AnnotKind::PageStamp { .. } | AnnotKind::TextStamp { .. } => "Stamp",
+        AnnotKind::PageBorder { .. } => "Page border",
     }
 }
 
@@ -409,6 +410,7 @@ pub(crate) fn kind_label(kind: &AnnotKind) -> String {
         AnnotKind::TextStamp { text, .. } => {
             format!("Stamp {}", text.lines().next().unwrap_or_default())
         }
+        AnnotKind::PageBorder { status, .. } => format!("{status} border"),
     }
 }
 

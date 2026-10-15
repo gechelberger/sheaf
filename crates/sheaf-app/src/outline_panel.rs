@@ -772,6 +772,18 @@ fn self_menu(pos: Point<Pixels>, cx: &mut Context<DocView>) -> AnyElement {
                         cx,
                         |v, _, cx| v.set_selected_destination(cx),
                     ))
+                    .child(item("menu-status", "Set Status…", cx, |_, w, cx| {
+                        w.dispatch_action(Box::new(crate::SetStatus), cx)
+                    }))
+                    .child(item(
+                        "menu-status-again",
+                        "Set Status Again",
+                        cx,
+                        |_, w, cx| w.dispatch_action(Box::new(crate::SetStatusAgain), cx),
+                    ))
+                    .child(item("menu-status-reset", "Reset Status", cx, |v, _, cx| {
+                        v.reset_status(false, cx)
+                    }))
                     .child(
                         div()
                             .px_3()

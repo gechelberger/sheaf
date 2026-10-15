@@ -210,7 +210,8 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 |---|---|
 | Create / rename / delete / nest bookmarks | ✅ |
 | Move bookmark **with its pages** | ✅ Shift+drag |
-| Colorize bookmarks | ✅ per bookmark; Document > Color Bookmarks by Level…; colors and bold/italic from the file (Acrobat's, PDFlyer's) are kept. PDFlyer colors by populated vs empty and, separately, by status; both 📋 ([Pending](ROADMAP.md#pdflyer-parity-gaps)) |
+| Colorize bookmarks | ✅ per bookmark; Document > Color Bookmarks by Level…; colors and bold/italic from the file (Acrobat's, PDFlyer's) are kept. PDFlyer colors by populated vs empty; that's 📋 ([Pending](ROADMAP.md#pdflyer-parity-gaps)) |
+| **Set Status** (PDFlyer) | ✅ Document > Set Status, or right-click a bookmark: colors and styles it, borders each of its pages, and stamps them with the status and your initials and date; Set Status Again repeats the last one, Reset Status takes it off (the stamps too, if you say so). One undo step each |
 | Bookmark from page range | ✅ Document > Bookmarks from Pages…: one per page, titled from a template (`Page <<label>>`), optionally under a new parent |
 | Bookmark pattern matches | ✅ Patterns panel > Bookmark matches: one per match, pointing at it |
 | Target sheets / auto-bookmark from scan separators | ❓ |

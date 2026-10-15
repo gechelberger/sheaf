@@ -193,6 +193,7 @@ impl DocView {
                 AnnotKind::TextStamp {
                     rect: centred(w, h),
                     text,
+                    status: false,
                 }
             }
             None => {

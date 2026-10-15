@@ -262,6 +262,14 @@ fn builtin_menus() -> Vec<(&'static str, Vec<Item>)> {
                 item("New &Bookmark", NewBookmark),
                 item("Bookmarks from &Pages…", BookmarksFromPages),
                 item("Color Bookmarks by Le&vel…", ColorBookmarksByLevel),
+                Item::Sub(
+                    "Set St&atus",
+                    vec![
+                        item("&Set Status…", SetStatus),
+                        item("Set Status &Again", SetStatusAgain),
+                        item("&Reset Status", ResetStatus),
+                    ],
+                ),
             ],
         ),
         menu(

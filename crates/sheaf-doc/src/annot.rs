@@ -182,6 +182,15 @@ pub enum AnnotKind {
     TextStamp {
         rect: Box2,
         text: String,
+        /// Placed by Set Status, so Reset Status can take it off.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        status: bool,
+    },
+    /// A border around a page, as Set Status draws it; `status` names the
+    /// status, so Reset Status finds it.
+    PageBorder {
+        rect: Box2,
+        status: String,
     },
 }
 
@@ -302,9 +311,14 @@ impl AnnotKind {
                 name: name.clone(),
                 text: text.clone(),
             },
-            AnnotKind::TextStamp { rect, text } => AnnotKind::TextStamp {
+            AnnotKind::TextStamp { rect, text, status } => AnnotKind::TextStamp {
                 rect: mb(rect),
                 text: text.clone(),
+                status: *status,
+            },
+            AnnotKind::PageBorder { rect, status } => AnnotKind::PageBorder {
+                rect: mb(rect),
+                status: status.clone(),
             },
             AnnotKind::Note { pos } => AnnotKind::Note { pos: mp(pos) },
             AnnotKind::FreeText { rect, size } => AnnotKind::FreeText {
@@ -411,6 +425,7 @@ impl AnnotKind {
             | AnnotKind::Insert { .. }
             | AnnotKind::Reply { .. }
             | AnnotKind::Status { .. }
+            | AnnotKind::PageBorder { .. }
             | AnnotKind::Note { .. }
             | AnnotKind::Connector { .. } => Handles::None,
         }
@@ -531,7 +546,8 @@ impl Annot {
             AnnotKind::Stamp { rect, .. }
             | AnnotKind::Connector { rect, .. }
             | AnnotKind::PageStamp { rect, .. }
-            | AnnotKind::TextStamp { rect, .. } => *rect,
+            | AnnotKind::TextStamp { rect, .. }
+            | AnnotKind::PageBorder { rect, .. } => *rect,
             AnnotKind::Line { a, b, .. } => Box2::from_corners(*a, *b),
             AnnotKind::Ink { paths } => paths
                 .iter()
@@ -563,6 +579,28 @@ impl Annot {
         let near = |a: Pt, b: Pt| segment_distance(p, a, b) <= tolerance + self.stroke / 2.0;
         match &self.kind {
             AnnotKind::Reply { .. } | AnnotKind::Status { .. } => false,
+            // On its edge, not anywhere on the page it goes round.
+            AnnotKind::PageBorder { rect, .. } => {
+                let [a, b, c, d] = [
+                    Pt {
+                        x: rect.x,
+                        y: rect.y,
+                    },
+                    Pt {
+                        x: rect.right(),
+                        y: rect.y,
+                    },
+                    Pt {
+                        x: rect.right(),
+                        y: rect.bottom(),
+                    },
+                    Pt {
+                        x: rect.x,
+                        y: rect.bottom(),
+                    },
+                ];
+                near(a, b) || near(b, c) || near(c, d) || near(d, a)
+            }
             AnnotKind::Line { a, b, .. } => near(*a, *b),
             AnnotKind::Ink { paths } => paths.iter().any(|path| match path.as_slice() {
                 [one] => near(*one, *one),
@@ -1452,7 +1490,22 @@ fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
                 ));
             }
         }
-        AnnotKind::TextStamp { rect, text } => {
+        AnnotKind::PageBorder { rect, status } => {
+            dict.set("Subtype", Object::Name(b"Square".to_vec()));
+            dict.set("C", color_arr);
+            dict.set("BS", border_style(a));
+            if a.contents.is_empty() {
+                dict.set("Contents", pdf_text_string(&format!("Status: {status}")));
+            }
+            content.push_str(&stroke_ops(a));
+            let [x0, y0, x1, y1] = geom.box_to_user(*rect);
+            content.push_str(&format!(
+                " {x0:.2} {y0:.2} {:.2} {:.2} re S",
+                x1 - x0,
+                y1 - y0
+            ));
+        }
+        AnnotKind::TextStamp { rect, text, .. } => {
             dict.set("Subtype", Object::Name(b"Stamp".to_vec()));
             if a.contents.is_empty() {
                 dict.set("Contents", pdf_text_string(text));

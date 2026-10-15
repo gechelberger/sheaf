@@ -183,6 +183,7 @@ fn check(rotate: i64) {
                     h: 60.0,
                 },
                 text: "APPROVED\nGE 10/14/2026".into(),
+                status: false,
             },
             BLUE,
         ),

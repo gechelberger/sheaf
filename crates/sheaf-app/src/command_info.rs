@@ -352,6 +352,21 @@ pub fn info(id: &str) -> Option<Info> {
             "Make a bookmark for each page of a range, titled from a template like \"Page <<label>>\".",
             &["outline", "page bookmarks", "index"],
         ),
+        "workspace::SetStatus" => (
+            "color-bookmarks",
+            "On the selected bookmark: color it, border its pages, and stamp them with a status and your initials (PDFlyer's Set Status).",
+            &["status", "reviewed", "sign off", "border"],
+        ),
+        "workspace::SetStatusAgain" => (
+            "color-bookmarks",
+            "Set the last status again, on the selected bookmark.",
+            &["status", "repeat"],
+        ),
+        "workspace::ResetStatus" => (
+            "color-bookmarks",
+            "Take the selected bookmark's status off: its color, style and page borders.",
+            &["status", "clear", "remove border"],
+        ),
         "workspace::ColorBookmarksByLevel" => (
             "color-bookmarks",
             "Color every bookmark by how deeply it's nested, as PDFlyer does.",

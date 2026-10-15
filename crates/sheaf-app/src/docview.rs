@@ -5234,7 +5234,13 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
             };
             out.push(el.into_any_element());
         }
-        AnnotKind::TextStamp { rect, text } => {
+        AnnotKind::PageBorder { rect, .. } => out.push(
+            place(*rect)
+                .border(px((a.stroke * k).max(1.0)))
+                .border_color(fill)
+                .into_any_element(),
+        ),
+        AnnotKind::TextStamp { rect, text, .. } => {
             let lw = sheaf_doc::annot::text_stamp_line(*rect);
             let mut el = place(*rect)
                 .border(px(lw * k))
