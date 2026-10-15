@@ -221,8 +221,8 @@ type Counts = BTreeMap<String, u32>;
 /// Every file's form, read as sheaf reads it when it opens (M10 slice 2),
 /// has the manifest's kind, field count, fields by type and fields with
 /// scripts. The manifest was made with pypdf, which counts a field listed
-/// twice twice, and lopdf misreads a few of the SafeDocs sample (some
-/// incremental updates, a lost catalog); so every curated form must read,
+/// twice twice, and lopdf misreads a few of the SafeDocs sample (a lost
+/// catalog, a dropped object); so every curated form must read,
 /// undamaged, as its row, and 99% of the sample. What differs is listed,
 /// and so are damaged trees, which sheaf doesn't read.
 #[test]

@@ -587,4 +587,4 @@ Dual-licensed under MIT or Apache-2.0, at your option. Third-party engines:
 PDFium (BSD-3), hayro (Apache-2.0/MIT), Tesseract and its glyphless `pdf.ttf`
 (Apache-2.0), Leptonica (BSD-2), ONNX Runtime (MIT), PaddleOCR models and
 `oar-ocr` (Apache-2.0); see `packaging/licenses/`. MuPDF is deliberately not
-used (AGPL).
+used (AGPL). lopdf (MIT) is vendored with a patch in `vendor/lopdf`.

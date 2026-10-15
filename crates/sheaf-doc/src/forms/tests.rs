@@ -6,7 +6,7 @@ use lopdf::{Document as Pdf, Object, ObjectId, Stream, dictionary};
 
 use super::check::{Finding, Report, check};
 use super::corpus::{Corpus, parse_manifest};
-use super::fixture::{Form, append_revision, every_kind, row};
+use super::fixture::{Form, append_revision, every_kind, hybrid_reference, hybrid_update, row};
 
 fn checked(bytes: &[u8]) -> Report {
     check(bytes, None).unwrap()
@@ -298,6 +298,26 @@ fn values_an_earlier_revision_holds() {
     });
     let report = checked(&filled);
     assert_findings(&report, &[Finding::NoAppearance(vec!["empty".into()])]);
+}
+
+#[test]
+fn a_hybrid_reference_update_is_a_revision() {
+    // Each revision is read whole: its table, then its /XRefStm, then
+    // the section before it the same way.
+    let first = hybrid_reference();
+    assert_findings(&checked(&first), &[]);
+    let report = checked(&hybrid_update(&first));
+    assert_eq!(
+        (report.revisions, report.fields, report.signature_fields),
+        (2, 3, 1)
+    );
+    assert_findings(
+        &report,
+        &[Finding::EarlierValues {
+            revision: 1,
+            names: vec!["name".into()],
+        }],
+    );
 }
 
 #[test]

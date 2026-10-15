@@ -50,8 +50,13 @@ fn rewrite_with(model: &Snapshot, clean: bool) -> Result<(Vec<u8>, Vec<String>)>
     Ok((finish(pdf)?, notes))
 }
 
-/// Prune, renumber, compress and serialize a rewritten document.
+/// Prune, renumber, compress and serialize a rewritten document. It's
+/// written as one section, so a `/Prev` or `/XRefStm` left in the trailer
+/// (lopdf keeps them when it rebuilds a damaged file's cross-references)
+/// would point into it at random.
 fn finish(mut pdf: Pdf) -> Result<Vec<u8>> {
+    pdf.trailer.remove(b"Prev");
+    pdf.trailer.remove(b"XRefStm");
     pdf.prune_objects();
     pdf.renumber_objects();
     pdf.compress();
@@ -2002,6 +2007,88 @@ mod tests {
     #[test]
     fn incremental_xref_stream() {
         incremental_case(true);
+    }
+
+    /// `path`'s bytes, written with a cross-reference table and a trailer.
+    fn classic(path: &Path) -> Vec<u8> {
+        let mut pdf = Pdf::load(path).unwrap();
+        pdf.reference_table.cross_reference_type = lopdf::xref::XrefType::CrossReferenceTable;
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        bytes
+    }
+
+    /// `bytes` with `keys` written into its trailer, as lopdf writes one.
+    fn with_trailer_keys(bytes: &[u8], keys: &str) -> Vec<u8> {
+        let open = b"trailer\n<<";
+        let at = bytes.windows(open.len()).rposition(|w| w == open).unwrap();
+        let at = at + open.len();
+        [&bytes[..at], keys.as_bytes(), &bytes[at..]].concat()
+    }
+
+    /// A one-page model of `path`, its page turned a quarter.
+    fn rotated(path: &Path) -> Document {
+        let mut i = info(path, 1);
+        i.bytes = std::fs::metadata(path).unwrap().len() as usize;
+        let mut model = Document::new(i, &[], Box::new(FixedCount(10)));
+        let page = model.state().pages[0].id;
+        let rotate = Edit::RotatePages {
+            ids: vec![page],
+            by: Rotation::R90,
+        };
+        model.apply(rotate, "rot").unwrap();
+        model
+    }
+
+    #[test]
+    fn a_stale_xrefstm_is_ignored() {
+        // lopdf 0.45 kept a one-section hybrid-reference file's /XRefStm
+        // when it rewrote it, pointing past the end of the new file.
+        let dir = tempdir();
+        let a = make_pdf(&dir, "a.pdf", "A", 1, &[]);
+        let bytes = classic(&a);
+        let table = Pdf::load_mem(&bytes).unwrap().xref_start;
+        let stale = format!("/XRefStm {}", bytes.len() + 5000);
+        std::fs::write(&a, with_trailer_keys(&bytes, &stale)).unwrap();
+        let original = std::fs::read(&a).unwrap();
+        let model = rotated(&a);
+
+        // The update chains to the table, and a rewrite leaves the key out.
+        let saved = crate::incremental::incremental(&model.snapshot()).unwrap();
+        let update = String::from_utf8_lossy(&saved[original.len()..]);
+        let prev = update.split("/Prev ").nth(1).unwrap();
+        let prev = prev.split(|c: char| !c.is_ascii_digit()).next().unwrap();
+        assert_eq!(prev.parse::<usize>().unwrap(), table);
+        assert_eq!(read_pages(&saved), [("A 0".into(), 90)]);
+        let rewritten = rewrite(&model.snapshot()).unwrap();
+        assert!(!rewritten.windows(8).any(|w| w == b"/XRefStm"));
+    }
+
+    #[test]
+    fn a_file_lopdf_rebuilds_is_rewritten() {
+        // Its startxref points past the end, so lopdf rebuilds its
+        // cross-references by scanning, and keeps its trailer's keys.
+        let dir = tempdir();
+        let a = make_pdf(&dir, "a.pdf", "A", 1, &[]);
+        let mut bytes = with_trailer_keys(&classic(&a), "/Prev 9 /XRefStm 9");
+        let end = bytes.windows(9).rposition(|w| w == b"startxref").unwrap();
+        bytes.truncate(end);
+        let past = bytes.len() + 5000;
+        bytes.extend_from_slice(format!("startxref\n{past}\n%%EOF\n").as_bytes());
+        std::fs::write(&a, &bytes).unwrap();
+        assert_eq!(Pdf::load_mem(&bytes).unwrap().xref_start, 0);
+        let model = rotated(&a);
+
+        // An update would have no section for /Prev to point at.
+        assert_eq!(
+            save_to_path(&model.snapshot(), &a).unwrap(),
+            Strategy::Rewrite
+        );
+        let saved = std::fs::read(&a).unwrap();
+        assert_ne!(Pdf::load_mem(&saved).unwrap().xref_start, 0);
+        assert_eq!(read_pages(&saved), [("A 0".into(), 90)]);
+        let has = |key: &[u8]| saved.windows(key.len()).any(|w| w == key);
+        assert!(!has(b"/Prev") && !has(b"/XRefStm"));
     }
 
     /// Put a mark of a kind no build knows on page 0 of `path`, as a newer

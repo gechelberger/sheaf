@@ -5,7 +5,10 @@
 //! A [`Form`] is a plain lopdf document plus the ids a test needs to
 //! break it on purpose. [`Form::bytes`] writes it, filling in each
 //! signature's `/ByteRange` around its `/Contents` as signing would (the
-//! contents are zeros: nothing is really signed).
+//! contents are zeros: nothing is really signed). lopdf can't write a
+//! hybrid-reference file, so [`hybrid_reference`] writes one by hand.
+
+use std::collections::BTreeMap;
 
 use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, StringFormat, dictionary};
@@ -621,6 +624,162 @@ pub fn append_revision(bytes: &[u8], ids: &[ObjectId], change: impl FnOnce(&mut 
     let mut out = Vec::new();
     doc.save_to(&mut out).expect("writing the update");
     out
+}
+
+/// A one-page form written as a hybrid-reference file (ISO 32000
+/// 7.5.8.4), in one section with no `/Prev`: the cross-reference table
+/// lists the catalog (1), the pages (2), the page (3) and an appearance
+/// (4), and the form's objects, the `/AcroForm` (5) and text fields `name`
+/// filled with "Ann Lee" (6) and `city` filled with "Hull" (7), are in an
+/// object stream that only the cross-reference stream at the trailer's
+/// `/XRefStm` lists.
+pub fn hybrid_reference() -> Vec<u8> {
+    let mut out = b"%PDF-1.5\n%\xe2\xe3\xcf\xd3\n".to_vec();
+    hybrid_section(
+        &mut out,
+        &[
+            (1, "<< /Type /Catalog /Pages 2 0 R /AcroForm 5 0 R >>"),
+            (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+            (3, &hybrid_page("6 0 R 7 0 R")),
+            (
+                4,
+                "<< /Type /XObject /Subtype /Form /BBox [0 0 200 20] /Length 0 >>\n\
+                 stream\n\nendstream",
+            ),
+        ],
+        &[],
+        &[
+            (5, "<< /Fields [6 0 R 7 0 R] >>"),
+            (6, &hybrid_text("name", "Ann Lee", 0)),
+            (7, &hybrid_text("city", "Hull", 1)),
+        ],
+        None,
+    );
+    out
+}
+
+/// [`hybrid_reference`]'s bytes, `first`, with an update appended that
+/// fills `name` with "Bo Ray" and adds a signature field `sig` (10,
+/// unsigned), as the update in the SafeDocs files lopdf 0.45 misread adds
+/// a signed one. The update's table lists the page, with the new widget.
+/// Its cross-reference stream lists a new catalog, which the first table
+/// lists too, and in a new object stream `name`, `sig` and a new
+/// `/AcroForm` (11). Its trailer's `/Prev` is the first section. `city`
+/// is only in the first section's object stream, so the update reads
+/// whole only through the first section's `/XRefStm` too.
+pub fn hybrid_update(first: &[u8]) -> Vec<u8> {
+    let tail = first.windows(9).rposition(|w| w == b"startxref").unwrap();
+    let prev = String::from_utf8_lossy(&first[tail + 9..]);
+    let prev = prev.split_whitespace().next().unwrap().parse().unwrap();
+    let mut out = first.to_vec();
+    hybrid_section(
+        &mut out,
+        &[(3, &hybrid_page("6 0 R 7 0 R 10 0 R"))],
+        &[(1, "<< /Type /Catalog /Pages 2 0 R /AcroForm 11 0 R >>")],
+        &[
+            (6, &hybrid_text("name", "Bo Ray", 0)),
+            (
+                10,
+                "<< /Type /Annot /Subtype /Widget /FT /Sig /T (sig) \
+                 /Rect [72 620 272 640] /F 4 /P 3 0 R >>",
+            ),
+            (11, "<< /Fields [6 0 R 7 0 R 10 0 R] >>"),
+        ],
+        Some(prev),
+    );
+    out
+}
+
+fn hybrid_page(annots: &str) -> String {
+    format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [{annots}] >>")
+}
+
+/// A text field `name` filled with `value`, its widget in [`row`] `i`.
+fn hybrid_text(name: &str, value: &str, i: usize) -> String {
+    let [x0, y0, x1, y1] = row(i);
+    format!(
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T ({name}) /V ({value}) /AP << /N 4 0 R >> \
+         /Rect [{x0} {y0} {x1} {y1}] /F 4 /P 3 0 R >>"
+    )
+}
+
+/// One section of a hybrid-reference file, appended to `out`: `listed`
+/// in its table, `hidden` only in its cross-reference stream, and
+/// `packed` into an object stream that only the cross-reference stream
+/// lists. The two streams take the next two object numbers.
+fn hybrid_section(
+    out: &mut Vec<u8>,
+    listed: &[(u32, &str)],
+    hidden: &[(u32, &str)],
+    packed: &[(u32, &str)],
+    prev: Option<usize>,
+) {
+    let all = listed.iter().chain(hidden).chain(packed);
+    let objstm = all.map(|&(id, _)| id).max().unwrap() + 1;
+    let xrefstm = objstm + 1;
+    let object = |out: &mut Vec<u8>, id: u32, body: &str| {
+        out.extend_from_slice(format!("{id} 0 obj\n{body}\nendobj\n").as_bytes());
+    };
+    let mut table = Vec::new();
+    for &(id, body) in listed {
+        table.push((id, out.len()));
+        object(out, id, body);
+    }
+    // The stream's entries, /W [1 4 2]: a type, then an offset and a
+    // generation, or an object stream and an index in it.
+    let mut entries = BTreeMap::new();
+    for &(id, body) in hidden {
+        entries.insert(id, (1u8, out.len() as u32, 0u16));
+        object(out, id, body);
+    }
+    let (mut head, mut objects) = (String::new(), String::new());
+    for (i, &(id, body)) in packed.iter().enumerate() {
+        head.push_str(&format!("{id} {} ", objects.len()));
+        objects.push_str(body);
+        objects.push('\n');
+        entries.insert(id, (2, objstm, i as u16));
+    }
+    entries.insert(objstm, (1, out.len() as u32, 0));
+    let n = packed.len();
+    let first = head.len();
+    let length = first + objects.len();
+    let header = format!("<< /Type /ObjStm /N {n} /First {first} /Length {length} >>");
+    object(
+        out,
+        objstm,
+        &format!("{header}\nstream\n{head}{objects}\nendstream"),
+    );
+
+    let at = out.len();
+    entries.insert(xrefstm, (1, at as u32, 0));
+    let mut data = Vec::new();
+    let mut index = String::new();
+    for (id, (kind, a, b)) in entries {
+        data.push(kind);
+        data.extend_from_slice(&a.to_be_bytes());
+        data.extend_from_slice(&b.to_be_bytes());
+        index.push_str(&format!("{id} 1 "));
+    }
+    let size = xrefstm + 1;
+    let dict = format!(
+        "/Type /XRef /Size {size} /W [1 4 2] /Index [{index}] /Length {}",
+        data.len()
+    );
+    out.extend_from_slice(format!("{xrefstm} 0 obj\n<< {dict} >>\nstream\n").as_bytes());
+    out.extend_from_slice(&data);
+    out.extend_from_slice(b"\nendstream\nendobj\n");
+
+    let xref = out.len();
+    out.extend_from_slice(b"xref\n");
+    if prev.is_none() {
+        out.extend_from_slice(b"0 1\n0000000000 65535 f \n");
+    }
+    for (id, offset) in table {
+        out.extend_from_slice(format!("{id} 1\n{offset:010} 00000 n \n").as_bytes());
+    }
+    let prev = prev.map(|p| format!(" /Prev {p}")).unwrap_or_default();
+    let trailer = format!("<< /Size {size} /Root 1 0 R /XRefStm {at}{prev} >>");
+    out.extend_from_slice(format!("trailer\n{trailer}\nstartxref\n{xref}\n%%EOF\n").as_bytes());
 }
 
 /// The references in an array under `key`.

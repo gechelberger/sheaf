@@ -1,20 +1,24 @@
 //! A form opens into the document model as the app opens it (M10 slice
 //! 2): its fields, and their widgets on the pages. A damaged field tree
 //! opens with no fields, and the file still opens. PDFium's form type
-//! agrees with the class sheaf reads.
+//! agrees with the class sheaf reads. A hybrid-reference file opens and
+//! saves as its newest revision.
 //!
 //! Needs libpdfium (`scripts/fetch-pdfium.sh`), like the app itself.
 
 use std::path::{Path, PathBuf};
 
 use lopdf::{Object, dictionary};
+use sheaf_core::Rotation;
+use sheaf_doc::Edit;
 use sheaf_doc::forms::FormClass;
-use sheaf_doc::forms::fixture::{Form, every_kind, row};
+use sheaf_doc::forms::fixture::{Form, every_kind, hybrid_reference, hybrid_update, row};
+use sheaf_doc::save::{Strategy, save_to_path};
 use sheaf_render::pdfium::PdfiumEngine;
 use sheaf_render::{FormType, Renderer};
 
-fn scratch() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("sheaf-forms-open-{}", std::process::id()));
+fn scratch(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("sheaf-forms-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -72,7 +76,7 @@ fn deep() -> Form {
 
 #[test]
 fn forms_open_into_the_model() {
-    let dir = scratch();
+    let dir = scratch("open");
     let path = write(&dir, "every-kind.pdf", &mut every_kind());
     let doc = sheaf_ops::open(&path, None).unwrap();
     let st = doc.state();
@@ -130,5 +134,44 @@ fn forms_open_into_the_model() {
         assert!(!facts.is_fillable());
         assert!(facts.to_string().ends_with("so not fillable"), "{facts}");
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_hybrid_reference_update_opens_and_saves_whole() {
+    // The update's catalog and fields are only in its /XRefStm, and
+    // `city` only in the first section's. A save that read either
+    // revision alone would drop some of them.
+    let dir = scratch("hybrid");
+    let path = dir.join("hybrid.pdf");
+    std::fs::write(&path, hybrid_update(&hybrid_reference())).unwrap();
+    let names = |path: &Path| -> Vec<String> {
+        let doc = sheaf_ops::open(path, None).unwrap();
+        doc.state()
+            .fields
+            .values()
+            .map(|f| f.name.clone())
+            .collect()
+    };
+    assert_eq!(names(&path), ["name", "city", "sig"]);
+
+    let mut doc = sheaf_ops::open(&path, None).unwrap();
+    let page = doc.state().pages[0].id;
+    let rotate = Edit::RotatePages {
+        ids: vec![page],
+        by: Rotation::R90,
+    };
+    doc.apply(rotate, "rotate").unwrap();
+    let copy = dir.join("copy.pdf");
+    assert_eq!(
+        save_to_path(&doc.snapshot(), &copy).unwrap(),
+        Strategy::Rewrite
+    );
+    assert_eq!(names(&copy), ["name", "city", "sig"]);
+    assert_eq!(
+        save_to_path(&doc.snapshot(), &path).unwrap(),
+        Strategy::Incremental
+    );
+    assert_eq!(names(&path), ["name", "city", "sig"]);
     let _ = std::fs::remove_dir_all(&dir);
 }

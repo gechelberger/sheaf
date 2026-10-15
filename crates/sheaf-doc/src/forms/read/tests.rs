@@ -1,6 +1,7 @@
 //! The form reader on forms built in code: every kind of field and what it
 //! inherits, its widgets on pages, the facts, and damaged trees, which
-//! read as not fillable. Then any tree at all, as a proptest.
+//! read as not fillable; and hybrid-reference files, built and from the
+//! corpus. Then any tree at all, as a proptest.
 
 use std::io::Write;
 use std::sync::Arc;
@@ -9,8 +10,9 @@ use lopdf::{Document as Pdf, Object, ObjectId, Stream, StringFormat, dictionary}
 use proptest::prelude::*;
 
 use super::*;
+use crate::forms::corpus::Corpus;
 use crate::forms::field::{annot_flags, flags};
-use crate::forms::fixture::{Form, every_kind, row};
+use crate::forms::fixture::{Form, every_kind, hybrid_reference, hybrid_update, row};
 
 /// The form as a file holds it, written and read back.
 fn read_back(f: &mut Form) -> FileForm {
@@ -735,6 +737,142 @@ fn layout_uses_at_most_a_thousand_of_max_len() {
     assert_eq!(form.fields[0].max_len, Some(1_000_000));
     assert_eq!(form.fields[0].layout_len(), Some(MAX_LAYOUT_LEN));
     assert_eq!(form.fields[1].max_len, Some(0));
+}
+
+#[test]
+fn hybrid_reference_files_read_their_newest_revision() {
+    let fields = |form: &FileForm| -> Vec<(String, FieldKind, Option<Value>)> {
+        form.fields
+            .iter()
+            .map(|f| (f.name.clone(), f.kind, f.value.clone()))
+            .collect()
+    };
+    // The form is in an object stream only /XRefStm lists, and the
+    // trailer has no /Prev.
+    let first = hybrid_reference();
+    let pdf = crate::file::load_pdf_mem(&first, None).unwrap();
+    let form = read(&pdf);
+    assert_eq!(
+        fields(&form),
+        [
+            ("name".into(), FieldKind::Text, text("Ann Lee")),
+            ("city".into(), FieldKind::Text, text("Hull")),
+        ]
+    );
+    assert!(!pdf.trailer.has(b"XRefStm"));
+
+    // The update's catalog is only in its /XRefStm, and the first table
+    // lists the old one. The field it changes is in both sections' object
+    // streams, and `city` only in the first section's.
+    let updated = hybrid_update(&first);
+    let pdf = crate::file::load_pdf_mem(&updated, None).unwrap();
+    let acroform = pdf.catalog().unwrap().get(b"AcroForm").unwrap();
+    assert_eq!(acroform.as_reference().unwrap(), (11, 0));
+    let form = read(&pdf);
+    assert_eq!(
+        fields(&form),
+        [
+            ("name".into(), FieldKind::Text, text("Bo Ray")),
+            ("city".into(), FieldKind::Text, text("Hull")),
+            ("sig".into(), FieldKind::Signature, None),
+        ]
+    );
+    assert_eq!(form.widgets[&0].len(), 3);
+    assert_eq!(form.facts.signature_fields, 1);
+}
+
+/// A crafted file can point thousands of sections' /XRefStm at one large
+/// cross-reference stream, by offsets that differ only in the white-space,
+/// comments and zeros before its header. lopdf reads it once
+/// (vendor/lopdf/SHEAF.md): read for each section, this file takes
+/// seconds to load, not milliseconds.
+#[test]
+fn a_cross_reference_stream_many_sections_share_is_read_once() {
+    let mut bytes = hybrid_reference();
+    let mut prev = crate::file::load_pdf_mem(&bytes, None).unwrap().xref_start;
+    // A million free entries, 7 MB unpacked.
+    let mut entries = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+    entries.write_all(&vec![0; 7_000_000]).unwrap();
+    let entries = entries.finish().unwrap();
+    let padding = [" ".repeat(300), "%\n".repeat(300), "0".repeat(100)].concat();
+    let at = bytes.len();
+    bytes.extend_from_slice(padding.as_bytes());
+    let header = bytes.len();
+    let dict = "/Type /XRef /Size 1000000 /W [1 4 2] /Filter /FlateDecode";
+    let head = format!("99 0 obj\n<< {dict} /Length {} >>\nstream\n", entries.len());
+    bytes.extend_from_slice(head.as_bytes());
+    bytes.extend_from_slice(&entries);
+    bytes.extend_from_slice(b"\nendstream\nendobj\n");
+    // Every offset in the padding reaches the stream, and so do both
+    // digits of its number.
+    for stream in at..header + 2 {
+        let section = bytes.len();
+        let trailer = format!("<< /Size 10 /Root 1 0 R /XRefStm {stream} /Prev {prev} >>");
+        bytes.extend_from_slice(format!("xref\n0 0\ntrailer\n{trailer}\n").as_bytes());
+        prev = section;
+    }
+    bytes.extend_from_slice(format!("startxref\n{prev}\n%%EOF\n").as_bytes());
+
+    let start = std::time::Instant::now();
+    let pdf = crate::file::load_pdf_mem(&bytes, None).unwrap();
+    let took = start.elapsed();
+    assert_eq!(read(&pdf).fields.len(), 2);
+    assert!(took.as_secs_f32() < 1.0, "{took:?}");
+}
+
+/// Every corpus file with a hybrid-reference section (a trailer with
+/// `/XRefStm`) has the manifest's fields by type, as pypdf read them.
+/// lopdf 0.45 read an earlier revision of 9 SafeDocs files, without the
+/// signature field their update added. As in `forms_corpus.rs`, since
+/// pypdf counts a field listed twice twice, every curated form must match
+/// and 99% of the SafeDocs sample; damaged trees, which sheaf doesn't
+/// read, are left out. Skips without the corpus.
+#[test]
+fn corpus_hybrid_reference_files_read_their_newest_revision() {
+    let Some(corpus) = Corpus::or_skip() else {
+        return;
+    };
+    let sample = |path: &str| path.starts_with("forms/safedocs/");
+    let (mut files, mut sampled) = (0, 0);
+    let mut differ = Vec::new();
+    // pypdf couldn't read the `unparsed` ones: their rows say nothing.
+    for entry in corpus.manifest().unwrap() {
+        if entry.kind == "unparsed" {
+            continue;
+        }
+        let bytes = std::fs::read(corpus.path(&entry)).unwrap();
+        if !bytes.windows(8).any(|w| w == b"/XRefStm") {
+            continue;
+        }
+        // lopdf can't read some damaged files at all (slice 1's note).
+        let Ok(pdf) = crate::file::load_pdf_mem(&bytes, None) else {
+            continue;
+        };
+        let facts = read(&pdf).facts;
+        if facts.damaged.is_some() {
+            continue;
+        }
+        files += 1;
+        if sample(&entry.path) {
+            sampled += 1;
+        }
+        let kinds: BTreeMap<String, u32> = facts
+            .kinds
+            .iter()
+            .filter(|(k, _)| **k != FieldKind::Unknown)
+            .map(|(k, n)| (k.short().into(), *n as u32))
+            .collect();
+        if (facts.fields as u32, &kinds) != (entry.fields, &entry.field_types) {
+            differ.push((
+                entry.path.clone(),
+                format!("{kinds:?}, not {:?}", entry.field_types),
+            ));
+        }
+    }
+    eprintln!("{files} files with /XRefStm read, {} differ", differ.len());
+    let curated: Vec<_> = differ.iter().filter(|(p, _)| !sample(p)).collect();
+    assert!(curated.is_empty(), "{curated:#?}");
+    assert!(differ.len() * 100 <= sampled, "{differ:#?}");
 }
 
 /// A node of a random field tree: its keys, with references by index

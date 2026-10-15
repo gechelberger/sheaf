@@ -35,7 +35,8 @@ pub fn incremental_section(snap: &Snapshot) -> Result<(usize, Vec<u8>)> {
 }
 
 /// The original bytes with the update appended, and where the original ends.
-/// `saving`: refuse to replace an OCR layer already in the file.
+/// `saving`: refuse to replace an OCR layer already in the file, or to
+/// append to a file whose cross-references lopdf rebuilt.
 fn build(snap: &Snapshot, saving: bool) -> Result<(usize, Vec<u8>)> {
     let primary_id = snap.primary;
     let info = snap.source(primary_id).context("primary source missing")?;
@@ -51,6 +52,11 @@ fn build(snap: &Snapshot, saving: bool) -> Result<(usize, Vec<u8>)> {
         bail!("incremental save of encrypted files is not supported yet");
     }
     let prev_startxref = pdf.xref_start;
+    if saving && prev_startxref == 0 {
+        // lopdf rebuilt a damaged file's cross-references by scanning it:
+        // there's no section for /Prev to point at. A rewrite writes new ones.
+        bail!("the file's cross-references are damaged; a full save writes new ones");
+    }
     let orig_max_id = pdf.max_id;
     let xref_type = pdf.reference_table.cross_reference_type;
 
