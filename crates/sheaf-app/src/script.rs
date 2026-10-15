@@ -11,6 +11,8 @@
 //!   button. `{"hover": [x, y]}` only moves.
 //! - `{"drag_page": [x1, y1, x2, y2], "page": 0, "shift": true}`: in page
 //!   points (the page as the file draws it), on page index `page`.
+//!   `{"hover_page": [x, y], "page": 0}` only moves there, as a pointer
+//!   does before it presses.
 //! - `{"form": {"field-id": value, ...}}`: fill the open plugin form and
 //!   submit it (choices by index, page ranges as text).
 //! - `{"wait": 500}`: milliseconds.
@@ -196,7 +198,23 @@ async fn run_step(
             .map(|v| v.as_f64().map(|f| f as f32))
             .collect()
     };
-    if let Some(c) = coords("hover") {
+    let page_point = |c: &[f32], cx: &mut AsyncApp| {
+        let page = step.get("page").and_then(Value::as_u64).unwrap_or(0) as usize;
+        handle
+            .update(cx, |ws, _, cx| {
+                let doc = ws.doc()?.clone();
+                doc.read(cx).window_point(page, c[0], c[1])
+            })
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "that page isn't laid out".to_string())
+    };
+    let hover_at = if let Some(c) = coords("hover_page") {
+        let p = page_point(&c, cx)?;
+        Some(vec![p.0, p.1])
+    } else {
+        coords("hover")
+    };
+    if let Some(c) = hover_at {
         cx.update_window(handle.into(), |_, window, cx| {
             window.dispatch_event(
                 PlatformInput::MouseMove(MouseMoveEvent {

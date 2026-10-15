@@ -64,6 +64,13 @@ impl DocView {
         }
         draft.points.push(p);
         let n = draft.points.len();
+        if let Some(what) = measure
+            && n > 1
+        {
+            let so_far = draft.points.clone();
+            self.measure_notice(what, &so_far, cx);
+            return;
+        }
         doc.notice = Some(match n {
             1 => "Click the next corner; double-click or Enter finishes, Backspace takes one off"
                 .into(),

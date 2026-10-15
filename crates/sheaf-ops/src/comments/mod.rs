@@ -680,15 +680,8 @@ pub fn kind_label(kind: &AnnotKind) -> String {
         AnnotKind::Polyline { .. } => "Polyline".into(),
         AnnotKind::Callout { .. } => "Callout".into(),
         AnnotKind::FileAttachment { name, .. } => format!("Attachment {name}"),
-        AnnotKind::Measure {
-            what,
-            points,
-            scale,
-        } => format!(
-            "{} {}",
-            what.label(),
-            sheaf_doc::measure::label(*what, points, scale)
-        ),
+        // Its value is what it says (`ours_body`).
+        AnnotKind::Measure { what, .. } => what.label().into(),
     }
 }
 
