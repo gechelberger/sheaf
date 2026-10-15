@@ -224,6 +224,12 @@ Started 2026-10-15, before M11 after all. The plan, with the decisions
 made while planning and at kickoff and the bugs found, is in
 [`todos/m10.md`](todos/m10.md).
 
+Paused after slice 5 (2026-10-15) for M10.5, the edit API; slices 6+
+resume on it. Done so far: the corpus and form check, the field model,
+and forms surviving page tools (crop, watermark, header/footer, delete,
+extract, insert, replace, combine, duplicate), with the save rules for
+hybrid XFA, usage rights and signed files.
+
 - Fill AcroForms: text, checkbox, radio, combo/list, with correct appearance
   stream generation so values look the same in every viewer.
 - Field calculations and format/validate/keystroke scripts. Run a
