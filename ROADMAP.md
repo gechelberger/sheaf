@@ -213,7 +213,9 @@ bug fixes ✅ → edit history ✅ → editing marks ✅ → text selection ✅ 
 markup ✅ →
 replies and status ✅ → comment filters ✅ → stamps ✅ → connector groups ✅ → Set
 Status ✅ → tape format ✅ → tape from page text ✅ → shapes ✅ → file attachments ✅ →
-summary and CSV ✅ → FDF/XFDF → measurement → plugin API 0.3 and docs.
+summary and CSV ✅ → FDF/XFDF → measurement → plugin API 0.3 and docs →
+deleting means deleted (added 2026-10-14 from M11 planning: deleted pages
+stayed in saved files; it must land before v0.5).
 
 ### M10: Forms
 
@@ -239,18 +241,36 @@ a subset to allow. Measure against a corpus of real IRS/state fillable forms.
 
 ### M11: Security & redaction
 
-- Redaction: mark areas or text, then apply with **true content removal**
-  (text, images, vector paths under the mark) and optional overlay text.
-- Pattern-driven redaction: Patterns panel hits become redaction marks (the
-  shared engine planned since M2).
-- Sanitize / remove hidden information: metadata, hidden layers, embedded
-  files, scripts, unreferenced objects, content outside the crop box.
-- Passwords and permissions: set, change, remove; AES-256.
-- Preserve encryption on save (today a save writes a plain file).
-- Certificate encryption ❓.
+Planned 2026-10-14; next after M9 (M10 is skipped for now, on purpose).
+The plan, with the decisions made while planning, the proposals for
+kickoff and the bugs found, is in [`todos/m11.md`](todos/m11.md).
 
-Slices: content-stream rewriter → apply redaction → pattern-driven marks →
-sanitize → passwords/permissions + encrypted save.
+- Redaction: mark areas, text or whole pages as standard `/Redact`
+  annotations, then export a copy with **true content removal** (text, OCR
+  text, images, line art and annotations under the marks), optional fill
+  and overlay text, a leak check and verification. Guard rails keep the
+  unredacted binder from being sent by mistake.
+- Pattern-driven redaction: Patterns panel hits (OCR text included) become
+  redaction marks (the shared engine planned since M2), with an option to
+  keep the last four digits.
+- Sanitize / remove hidden information: metadata, attachments, comments,
+  form fields, hidden layers, content outside the crop box, links, actions
+  and JavaScript, search indexes, thumbnails, sheaf's private data,
+  unreferenced objects. Export Clean Copy becomes one preset.
+- Passwords and permissions: set, change, remove; AES-256. Permissions are
+  shown and kept, not enforced.
+- Preserve encryption on save (today a save writes a plain file), with no
+  plaintext copies on disk.
+- Certificate encryption: moved to after M12 (decided 2026-10-14), which
+  builds the certificate stores it needs.
+
+Slices: encryption kept → Security dialog → content interpreter →
+redaction marks → apply: text and OCR → apply: images, line art,
+annotations → Export Redacted Copy → search and redact → remove hidden
+information → plugin API and docs.
+
+Deleted pages that stayed in saved files, found while planning, are fixed
+in M9 (deleting means deleted) rather than here.
 
 **Shared infrastructure:** the content-stream parser/rewriter in `sheaf-doc`
 built here is the base for M13 content editing and M14 optimize.
@@ -269,7 +289,13 @@ Slices: Fill & Sign → sign with PKCS#12 → verify panel → Windows store and
 PKCS#11 → timestamps + LTV → certify/lock.
 
 Incremental save (done in M2) is a prerequisite: signing must never rewrite
-earlier revisions.
+earlier revisions. Removing content forces a full rewrite (M9), so on a
+signed file a save after a removal has to ask first.
+
+Follow-up: certificate encryption ❓ (`/Adobe.PubSec`; moved from M11
+2026-10-14). It needs the certificate stores built here, and sheaf has
+to decrypt these files itself because PDFium only opens password
+encryption.
 
 ### M13: Content editing
 
@@ -366,7 +392,7 @@ Every remaining 📋 / ❓ row from the README feature tables, with its mileston
 | PDF/A conversion ❓ | M14 |
 | Set / remove passwords, permissions; preserve encryption | M11 |
 | Digital signatures | M12 |
-| Certificate encryption ❓ | M11 |
+| Certificate encryption ❓ | M12 follow-up |
 | Compare documents | M14 |
 | Optimize / reduce file size | M14 |
 | Preflight / accessibility checker ❓ | M14 |
