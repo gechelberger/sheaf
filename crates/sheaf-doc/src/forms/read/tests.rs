@@ -1056,3 +1056,49 @@ proptest! {
         }
     }
 }
+
+/// Every curated hybrid form's fields find their XFA fields by name, most
+/// have its tooltips, and a blank form's XFA copy holds nothing the
+/// AcroForm lacks (its check boxes' `0`s aren't values).
+#[test]
+fn corpus_hybrid_forms_bind_their_xfa() {
+    let Some(corpus) = Corpus::or_skip() else {
+        return;
+    };
+    let mut forms = 0;
+    for entry in corpus.manifest().unwrap() {
+        if entry.kind != "hybrid" || entry.path.starts_with("forms/safedocs/") {
+            continue;
+        }
+        let pdf = crate::file::load_pdf(&corpus.path(&entry), None).unwrap();
+        let form = read(&pdf);
+        let acroform = pdf
+            .catalog()
+            .unwrap()
+            .get(b"AcroForm")
+            .ok()
+            .and_then(|f| resolve(&pdf, f))
+            .and_then(|f| f.as_dict().ok())
+            .unwrap();
+        let xfa: HashSet<String> = crate::forms::xfa::read(&pdf, acroform)
+            .into_iter()
+            .map(|f| f.name)
+            .collect();
+        let unbound: Vec<&str> = form
+            .fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .filter(|n| !xfa.contains(*n))
+            .collect();
+        assert!(unbound.is_empty(), "{}: {unbound:?}", entry.path);
+        assert_eq!(form.facts.xfa_values, 0, "{}", entry.path);
+        let tooltips = form.fields.iter().filter(|f| f.tooltip.is_some()).count();
+        assert!(
+            tooltips * 2 > form.fields.len(),
+            "{}: {tooltips} tooltips",
+            entry.path
+        );
+        forms += 1;
+    }
+    println!("{forms} hybrid forms");
+}

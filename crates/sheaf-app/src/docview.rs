@@ -616,6 +616,12 @@ pub struct DocView {
     pub(crate) pending_edit_last: Option<PageId>,
     /// Recovery data found when opening, until the user has been asked.
     pending_recovery: Option<sheaf_doc::recovery::Recovery>,
+    /// A save that would break a signed file's signatures, until the user
+    /// has chosen how to save it (M10 proposal 7).
+    pending_signed: Option<(PathBuf, save::WouldBreakSignatures)>,
+    /// A save that would remove an XFA copy holding values sheaf doesn't
+    /// show, until the user has agreed (M10 proposal 6).
+    pending_xfa: Option<PathBuf>,
     autosave: Option<Task<()>>,
     /// When the edits since the last sidecar write began.
     autosave_since: Option<Instant>,
@@ -722,6 +728,8 @@ impl DocView {
             selftest_flatten: None,
             selftest_ocr: None,
             pending_recovery: None,
+            pending_signed: None,
+            pending_xfa: None,
             pending_edit_last: None,
             autosave: None,
             autosave_since: None,
@@ -1576,6 +1584,71 @@ impl DocView {
     /// file as the new primary source without disturbing undo history.
     /// Resolves to whether the save succeeded.
     pub fn save_to(&mut self, path: PathBuf, cx: &mut Context<Self>) -> Task<bool> {
+        if self.would_drop_xfa_values() {
+            // Asked next frame.
+            self.pending_xfa = Some(path);
+            cx.notify();
+            return Task::ready(false);
+        }
+        self.save_signed(path, save::Signed::Ask, cx)
+    }
+
+    /// Ask whether to rewrite a signed file, breaking its signatures, or
+    /// append to it, keeping what was removed in its earlier revision; then
+    /// save as chosen. An encrypted file can only be rewritten until M11.
+    fn ask_how_to_save_signed(
+        &mut self,
+        path: PathBuf,
+        signed: save::WouldBreakSignatures,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let n = signed.signatures;
+        let rewrite = format!(
+            "Rewrite (breaks {n} signature{})",
+            if n == 1 { "" } else { "s" }
+        );
+        let mut answers = vec![gpui::PromptButton::new(rewrite)];
+        if !signed.encrypted {
+            answers.push(gpui::PromptButton::ok(
+                "Append (earlier versions stay in the file)",
+            ));
+        }
+        answers.push(gpui::PromptButton::cancel("Cancel"));
+        let detail = if signed.encrypted {
+            "A full save breaks its signatures, and sheaf can't append to an encrypted file yet."
+        } else {
+            "A full save breaks its signatures. Appending keeps them, and keeps what you removed in the file's earlier version, where anyone can recover it."
+        };
+        let rx = sheaf_ui::prompts::ask(
+            window,
+            cx,
+            gpui::PromptLevel::Warning,
+            &format!("\"{}\" is signed", self.file_name()),
+            Some(detail),
+            &answers,
+        );
+        let encrypted = signed.encrypted;
+        cx.spawn(async move |this, cx| {
+            let how = match rx.await {
+                Ok(0) => save::Signed::Rewrite,
+                Ok(1) if !encrypted => save::Signed::Append,
+                _ => return,
+            };
+            this.update(cx, |v, cx| v.save_signed(path, how, cx).detach())
+                .ok();
+        })
+        .detach();
+    }
+
+    /// [`save_to`](Self::save_to), with a signed file treated as `signed`
+    /// says.
+    fn save_signed(
+        &mut self,
+        path: PathBuf,
+        signed: save::Signed,
+        cx: &mut Context<Self>,
+    ) -> Task<bool> {
         let State::Ready(doc) = &mut self.state else {
             return Task::ready(false);
         };
@@ -1596,7 +1669,8 @@ impl DocView {
                 .spawn({
                     let path = path.clone();
                     async move {
-                        let (strategy, notes) = save::save_to_path_noting(&snapshot, &path)?;
+                        let (strategy, notes) =
+                            save::save_to_path_noting(&snapshot, &path, signed)?;
                         let bytes = std::fs::metadata(&path)
                             .map(|m| m.len() as usize)
                             .unwrap_or(0);
@@ -1698,8 +1772,17 @@ impl DocView {
                         true
                     }
                     Err(e) => {
-                        doc.notice = Some(format!("Save failed: {e:#}"));
-                        log::error!("save: {e:#}");
+                        match e.downcast_ref::<save::WouldBreakSignatures>() {
+                            // Asked next frame.
+                            Some(signed) => {
+                                doc.notice = None;
+                                view.pending_signed = Some((path.clone(), signed.clone()));
+                            }
+                            None => {
+                                doc.notice = Some(format!("Save failed: {e:#}"));
+                                log::error!("save: {e:#}");
+                            }
+                        }
                         false
                     }
                 };
@@ -4458,6 +4541,12 @@ impl Render for DocView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(rec) = self.pending_recovery.take() {
             self.offer_recovery(rec, window, cx);
+        }
+        if let Some((path, signed)) = self.pending_signed.take() {
+            self.ask_how_to_save_signed(path, signed, window, cx);
+        }
+        if let Some(path) = self.pending_xfa.take() {
+            self.ask_to_drop_xfa_values(path, window, cx);
         }
         if let Some(page) = self.pending_edit_last.take() {
             self.start_annot_editor(page, window, cx);

@@ -136,15 +136,23 @@ pub fn saved_both_ways(doc: &Document, path: &Path, copy: &Path) -> Vec<(Strateg
 
 /// What each strategy writes for `doc`. A page shown from a copy counts
 /// as removed content, so saving in place rewrites (M9 bug 14), but the
-/// incremental writer still writes it: for crash recovery's sidecar.
+/// incremental writer still writes it: for crash recovery's sidecar. So
+/// does a changed form with an XFA copy or usage rights.
 pub fn written_both_ways(doc: &Document) -> Vec<(Strategy, Vec<u8>)> {
     let snap = doc.snapshot();
+    let incremental = sheaf_doc::incremental::incremental(&snap).unwrap_or_else(|e| {
+        // A changed form with an XFA copy or usage rights is saved in full
+        // (M10 slice 5); a recovery sidecar still appends, taking them out.
+        assert!(snap.form_changed, "{e:#}");
+        let (len, section) = sheaf_doc::incremental::incremental_section(&snap).unwrap();
+        let info = snap.source(snap.primary).unwrap();
+        let mut bytes = sheaf_doc::file::source_bytes(info).unwrap()[..len].to_vec();
+        bytes.extend(section);
+        bytes
+    });
     vec![
         (Strategy::Rewrite, sheaf_doc::save::rewrite(&snap).unwrap()),
-        (
-            Strategy::Incremental,
-            sheaf_doc::incremental::incremental(&snap).unwrap(),
-        ),
+        (Strategy::Incremental, incremental),
     ]
 }
 
@@ -196,34 +204,22 @@ pub fn corpus_form(path: &str) -> Option<Vec<u8>> {
 /// `bytes` with field `name`'s `/V` set to `value` (its appearance as it
 /// was), as a fill sheaf can't make yet (slice 9) would leave it.
 pub fn filled(bytes: &[u8], name: &str, value: &str) -> Vec<u8> {
-    let mut pdf = Pdf::load_mem(bytes).unwrap();
+    let pdf = Pdf::load_mem(bytes).unwrap();
     let field = sheaf_doc::forms::read(&pdf)
         .fields
         .into_iter()
         .find(|f| f.name == name)
         .unwrap_or_else(|| panic!("no field {name}"));
-    pdf.get_dictionary_mut(field.object)
-        .unwrap()
-        .set("V", Object::string_literal(value));
-    let mut out = Vec::new();
-    pdf.save_to(&mut out).unwrap();
-    out
+    // In an update, as Reader saves a fill: the original's bytes, and the
+    // usage rights' signature over them, stay sound.
+    sheaf_doc::forms::fixture::append_revision(bytes, &[field.object], |pdf| {
+        pdf.get_dictionary_mut(field.object)
+            .unwrap()
+            .set("V", Object::string_literal(value));
+    })
 }
 
-/// The findings left once slice 5's are set aside: a rewrite breaks
-/// usage rights and leaves the XFA copy until then (bugs 6 and 7).
-pub fn findings_before_slice_5(bytes: &[u8]) -> Vec<Finding> {
-    check(bytes, None)
-        .unwrap()
-        .findings
-        .into_iter()
-        .filter(|f| {
-            !matches!(
-                f,
-                Finding::StaleSignature { .. }
-                    | Finding::StaleSigFlags { .. }
-                    | Finding::XfaMismatch { .. }
-            )
-        })
-        .collect()
+/// What the form check finds in `bytes`.
+pub fn findings(bytes: &[u8]) -> Vec<Finding> {
+    check(bytes, None).unwrap().findings
 }

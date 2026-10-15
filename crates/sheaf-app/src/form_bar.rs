@@ -21,6 +21,10 @@ use crate::docview::{Doc, DocView, State};
 
 pub(crate) const XFA_ONLY: &str =
     "This is an XFA form. sheaf can't show or fill it; Adobe Acrobat or Reader can.";
+/// A hybrid form whose XFA copy holds values the AcroForm lacks (M10
+/// proposal 6).
+pub(crate) const XFA_VALUES: &str = "This form's XFA part holds values sheaf doesn't show; \
+     Adobe Acrobat or Reader shows them. Saving a change to the form removes that part.";
 
 /// What the view knows about the forms in a document's files.
 #[derive(Default)]
@@ -31,6 +35,9 @@ pub(crate) struct Forms {
     pub(crate) incoming: HashMap<SourceId, Arc<FormFacts>>,
     /// The bar was dismissed, for this window's session.
     pub(crate) bar_dismissed: bool,
+    /// The user agreed to a save removing an XFA copy that holds values
+    /// sheaf doesn't show, for this window's session.
+    pub(crate) xfa_values_dropped: bool,
 }
 
 /// What the bar says, if anything: from the primary file's form when it's
@@ -40,7 +47,12 @@ pub(crate) fn bar_message(facts: Option<&FormFacts>, form_type: FormType) -> Opt
         Some(f) => f.class == FormClass::XfaOnly,
         None => form_type == FormType::XfaFull,
     };
-    xfa_only.then_some(XFA_ONLY)
+    if xfa_only {
+        return Some(XFA_ONLY);
+    }
+    facts
+        .is_some_and(|f| f.class == FormClass::Hybrid && f.xfa_values > 0)
+        .then_some(XFA_VALUES)
 }
 
 /// The notice for a form whose field tree can't be read.
@@ -66,6 +78,10 @@ impl Doc {
 
     /// What the bar says now, unless it was dismissed.
     pub(crate) fn form_bar(&self) -> Option<&'static str> {
+        // Saved without it: nothing left to say.
+        if self.forms.xfa_values_dropped && !self.model.is_dirty() {
+            return None;
+        }
         if self.forms.bar_dismissed {
             return None;
         }
@@ -75,6 +91,58 @@ impl Doc {
 }
 
 impl DocView {
+    /// Whether a save of the form as it is would remove an XFA copy that
+    /// holds values sheaf doesn't show, and the user hasn't agreed to that
+    /// this session.
+    pub(crate) fn would_drop_xfa_values(&self) -> bool {
+        let State::Ready(doc) = &self.state else {
+            return false;
+        };
+        !doc.forms.xfa_values_dropped
+            && doc
+                .forms
+                .primary
+                .as_ref()
+                .is_some_and(|f| f.xfa && f.xfa_values > 0)
+            && doc.model.form_changed()
+    }
+
+    /// Ask before a save removes the XFA copy's values; save to `path` if
+    /// the user agrees.
+    pub(crate) fn ask_to_drop_xfa_values(
+        &mut self,
+        path: std::path::PathBuf,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
+        let rx = sheaf_ui::prompts::ask(
+            window,
+            cx,
+            gpui::PromptLevel::Warning,
+            "Remove the form's XFA part?",
+            Some(
+                "It holds values sheaf doesn't show, which Adobe Acrobat or Reader shows. \
+                 Saving the form as it is now removes it, and them.",
+            ),
+            &[
+                gpui::PromptButton::new("Save and Remove It"),
+                gpui::PromptButton::cancel("Cancel"),
+            ],
+        );
+        cx.spawn(async move |this, cx| {
+            if let Ok(0) = rx.await {
+                this.update(cx, |v, cx| {
+                    if let State::Ready(doc) = &mut v.state {
+                        doc.forms.xfa_values_dropped = true;
+                    }
+                    v.save_to(path, cx).detach();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
     /// The bar above the pages about the document's form.
     pub(crate) fn render_form_bar(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let State::Ready(doc) = &self.state else {
@@ -142,6 +210,26 @@ mod tests {
         let facts = sheaf_doc::forms::read(&every_kind().pdf).facts;
         assert_eq!(bar_message(Some(&facts), FormType::AcroForm), None);
         assert_eq!(damaged_notice(&facts), None);
+    }
+
+    #[test]
+    fn xfa_values_the_acroform_lacks_get_the_bar() {
+        // A hybrid form filled in its XFA copy only (M10 proposal 6).
+        let mut f = every_kind();
+        let name = f.text("name", 0, row(8));
+        f.fill(name, "Ann");
+        f.xfa();
+        f.dict(name).remove(b"V");
+        let facts = sheaf_doc::forms::read(&f.pdf).facts;
+        assert_eq!(facts.xfa_values, 1);
+        assert_eq!(
+            bar_message(Some(&facts), FormType::XfaForeground),
+            Some(XFA_VALUES)
+        );
+        // Filled in both: no bar.
+        f.fill(name, "Ann");
+        let facts = sheaf_doc::forms::read(&f.pdf).facts;
+        assert_eq!(bar_message(Some(&facts), FormType::XfaForeground), None);
     }
 
     #[test]

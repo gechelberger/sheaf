@@ -23,21 +23,43 @@ use crate::text_layer;
 /// the earlier revision (M9 bug 14). Whether anything else was removed is
 /// `save::save_to_path`'s to check (`Snapshot::removes_content`).
 pub fn incremental(snap: &Snapshot) -> Result<Vec<u8>> {
-    Ok(build(snap, true)?.1)
+    Ok(build(snap, Mode::Save)?.1)
+}
+
+/// The update a signed file gets when the reader would rather append than
+/// break its signatures (M10 proposal 7): what it takes out (a removed
+/// page, a changed form's XFA copy and usage rights, a page's old OCR
+/// text) stays in the earlier revision.
+pub fn append(snap: &Snapshot) -> Result<Vec<u8>> {
+    Ok(build(snap, Mode::Append)?.1)
 }
 
 /// Just the update section, with the length of the original it appends
 /// to. Empty when there's nothing to write. Used for crash recovery.
 pub fn incremental_section(snap: &Snapshot) -> Result<(usize, Vec<u8>)> {
-    let (original_len, mut full) = build(snap, false)?;
+    let (original_len, mut full) = build(snap, Mode::Sidecar)?;
     let section = full.split_off(original_len);
     Ok((original_len, section))
 }
 
+/// What an update is for, and so what it refuses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// A save, which a full one replaces when it refuses: what an update
+    /// can't take out of the file (a page's OCR text replaced, a changed
+    /// form's XFA copy and usage rights) or point back at (cross-references
+    /// lopdf rebuilt).
+    Save,
+    /// An append chosen over breaking a file's signatures: what it takes
+    /// out stays in the earlier revision. Damaged cross-references still
+    /// refuse.
+    Append,
+    /// A recovery sidecar, which is never the file itself.
+    Sidecar,
+}
+
 /// The original bytes with the update appended, and where the original ends.
-/// `saving`: refuse to replace an OCR layer already in the file, or to
-/// append to a file whose cross-references lopdf rebuilt.
-fn build(snap: &Snapshot, saving: bool) -> Result<(usize, Vec<u8>)> {
+fn build(snap: &Snapshot, mode: Mode) -> Result<(usize, Vec<u8>)> {
     let primary_id = snap.primary;
     let info = snap.source(primary_id).context("primary source missing")?;
     let original = crate::file::source_bytes(info)?;
@@ -52,7 +74,7 @@ fn build(snap: &Snapshot, saving: bool) -> Result<(usize, Vec<u8>)> {
         bail!("incremental save of encrypted files is not supported yet");
     }
     let prev_startxref = pdf.xref_start;
-    if saving && prev_startxref == 0 {
+    if mode != Mode::Sidecar && prev_startxref == 0 {
         // lopdf rebuilt a damaged file's cross-references by scanning it:
         // there's no section for /Prev to point at. A rewrite writes new ones.
         bail!("the file's cross-references are damaged; a full save writes new ones");
@@ -242,7 +264,7 @@ fn build(snap: &Snapshot, saving: bool) -> Result<(usize, Vec<u8>)> {
                 }
             }
             if let Some(layer) = snap.state.text_layers.get(&pref.id) {
-                if saving && text_layer::has_layer(&pdf, &dict) {
+                if mode == Mode::Save && text_layer::has_layer(&pdf, &dict) {
                     bail!(
                         "a page's OCR text is replaced: a full save takes the old out of the file"
                     );
@@ -296,7 +318,7 @@ fn build(snap: &Snapshot, saving: bool) -> Result<(usize, Vec<u8>)> {
                     }
                 }
                 if let Some(layer) = layer {
-                    if saving && text_layer::has_layer(&pdf, &dict) {
+                    if mode == Mode::Save && text_layer::has_layer(&pdf, &dict) {
                         bail!(
                             "a page's OCR text is replaced: a full save takes the old out of the file"
                         );
@@ -399,6 +421,19 @@ fn build(snap: &Snapshot, saving: bool) -> Result<(usize, Vec<u8>)> {
         &mut copy_maps,
         &on_pages,
     )?;
+    let mut touched = touched;
+    // A changed form's XFA copy and usage rights describe the file as it
+    // was: a save takes them out by a full rewrite, so the earlier revision
+    // doesn't keep them; a recovery sidecar takes them out here.
+    if snap.form_changed {
+        let (xfa, rights) = crate::forms::rules::has(&pdf);
+        if xfa || rights {
+            if mode == Mode::Save {
+                bail!("the form changed: a full save takes out its XFA copy and usage rights");
+            }
+            touched.extend(crate::forms::rules::take_out(&mut pdf, true).0);
+        }
+    }
     for id in touched {
         if id == catalog_id {
             catalog = pdf.get_dictionary(catalog_id)?.clone();

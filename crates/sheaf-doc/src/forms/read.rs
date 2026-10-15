@@ -97,6 +97,9 @@ pub struct FormFacts {
     pub version_checks: usize,
     /// `/AcroForm /XFA`, and the catalog's `/NeedsRendering`.
     pub xfa: bool,
+    /// Fields whose value a static XFA copy holds and the AcroForm doesn't
+    /// (proposal 6): sheaf shows the AcroForm's, so these aren't shown.
+    pub xfa_values: usize,
     pub dynamic: bool,
     pub need_appearances: bool,
     /// `/AcroForm /SigFlags`.
@@ -345,10 +348,49 @@ pub fn read(pdf: &Pdf) -> FileForm {
             ..Default::default()
         };
     }
+    let mut fields = fields;
+    // A static XFA copy: the values it holds that the AcroForm lacks, and
+    // its tooltips where the AcroForm has none.
+    if facts.xfa
+        && !facts.dynamic
+        && let Some(form) = form
+    {
+        let xfa = super::xfa::Lookup::new(super::xfa::read(pdf, form));
+        for f in &mut fields {
+            let Some(x) = xfa.get(&f.name) else {
+                continue;
+            };
+            if x.value.as_deref().is_some_and(|v| lacks(f, v)) {
+                facts.xfa_values += 1;
+            }
+            if f.tooltip.is_none() {
+                f.tooltip = x.tooltip.clone();
+            }
+        }
+    }
     FileForm {
         facts,
         fields,
         widgets,
+    }
+}
+
+/// Whether field `f` lacks `value`, which its XFA copy holds: text it
+/// doesn't have, or a box checked there and not here. A check box's XFA
+/// value is its state's number: `0` is off.
+fn lacks(f: &Field, value: &str) -> bool {
+    match f.kind {
+        FieldKind::CheckBox | FieldKind::Radio => {
+            !matches!(value, "0" | "Off" | "off")
+                && !matches!(&f.value, Some(Value::State(s)) if &**s != "Off")
+        }
+        FieldKind::Text | FieldKind::Combo | FieldKind::List => match &f.value {
+            None => true,
+            Some(Value::Text(t)) => t.is_empty(),
+            Some(Value::Items(items)) => items.is_empty(),
+            Some(_) => false,
+        },
+        _ => false,
     }
 }
 

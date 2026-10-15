@@ -690,7 +690,7 @@ fn corpus_the_1040_and_two_schedules_combine_with_unique_names() {
         .fold((0, 0), |a, b| (a.0 + b.0, a.1 + b.1));
     let report = check(&bytes, None).unwrap();
     assert_eq!((report.fields, report.widgets), want);
-    assert_eq!(findings_before_slice_5(&bytes), vec![]);
+    assert_eq!(findings(&bytes), vec![]);
 }
 
 #[test]
@@ -704,7 +704,7 @@ fn corpus_a_form_combined_with_itself_is_two_forms() {
     let (fields, widgets) = counts(&f1040);
     let report = check(&bytes, None).unwrap();
     assert_eq!((report.fields, report.widgets), (2 * fields, 2 * widgets));
-    assert_eq!(findings_before_slice_5(&bytes), vec![]);
+    assert_eq!(findings(&bytes), vec![]);
 }
 
 #[test]
@@ -725,7 +725,7 @@ fn corpus_scripted_forms_combined_have_scripts_off() {
         .fold((0, 0), |a, b| (a.0 + b.0, a.1 + b.1));
     let report = check(&bytes, None).unwrap();
     assert_eq!((report.fields, report.widgets), want);
-    assert_eq!(findings_before_slice_5(&bytes), vec![]);
+    assert_eq!(findings(&bytes), vec![]);
 }
 
 #[test]
@@ -744,6 +744,6 @@ fn corpus_a_duplicated_page_is_a_form_of_its_own() {
         let report = check(&bytes, None).unwrap();
         assert_eq!(report.widgets, widgets + on_first, "{what}");
         assert!(report.fields > fields, "{what}");
-        assert_eq!(findings_before_slice_5(&bytes), vec![], "{what}");
+        assert_eq!(findings(&bytes), vec![], "{what}");
     }
 }

@@ -514,6 +514,9 @@ pub struct EditOutcome {
     /// field, since their names clashed (M10 proposal 5): its name, and the
     /// file they came from.
     pub forms_renamed: Vec<(String, SourceId)>,
+    /// Files whose signed fields came in with their pages: the signatures
+    /// don't cover this file (M10 proposal 7).
+    pub signatures_in: Vec<SourceId>,
 }
 
 /// A version's place in the history tree. Ids aren't reused.
@@ -620,6 +623,10 @@ pub struct Snapshot {
     /// `Document::removes_content`): only a full rewrite takes it out of
     /// the file.
     pub removes_content: bool,
+    /// The form differs from the primary file's (see
+    /// `Document::form_changed`): a save takes out what described it as
+    /// it was, its XFA copy and usage rights (M10 proposals 6 and 7).
+    pub form_changed: bool,
 }
 
 impl Snapshot {
@@ -868,6 +875,15 @@ impl Document {
             }
             parts.push(part);
         }
+        for sid in &out.signatures_in {
+            let file = self
+                .sources
+                .get(sid)
+                .and_then(|s| s.path.file_name())
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            parts.push(format!("the signature from {file} is no longer valid here"));
+        }
         if !mixed_before && self.scripts_mixed() {
             parts.push("scripts are off: fields from more than one form have them".into());
         }
@@ -1104,7 +1120,32 @@ impl Document {
             annots_dirty: self.annots_dirty_pages(),
             fields_dirty: self.fields_dirty(),
             removes_content: self.removes_content(),
+            form_changed: self.form_changed(),
         }
+    }
+
+    /// Whether the form differs from the primary file's: a field added,
+    /// removed or changed, or widgets of a page not as they were (it's
+    /// gone, or shows another file's page now). Then a save takes out what
+    /// described the form as it was: its XFA copy and Reader's usage rights
+    /// (M10 proposals 6 and 7).
+    pub fn form_changed(&self) -> bool {
+        if !self.fields_dirty().is_empty() {
+            return true;
+        }
+        let Some(saved) = self
+            .saved
+            .and_then(|v| self.versions.get(&v))
+            .and_then(|v| v.state.as_ref())
+        else {
+            return false;
+        };
+        let now = &self.state().widgets;
+        !saved.widgets.ptr_eq(now)
+            && saved
+                .widgets
+                .iter()
+                .any(|(page, list)| now.get(page) != Some(list))
     }
 
     /// Whether something in the primary file is gone from the document: a
@@ -1369,6 +1410,7 @@ impl Document {
             total.bookmarks_removed += out.bookmarks_removed;
             total.bookmarks_added += out.bookmarks_added;
             total.forms_renamed.extend(out.forms_renamed);
+            total.signatures_in.extend(out.signatures_in);
         }
         if state != *self.state() {
             self.push(state, label.into(), steps, None);
@@ -2199,6 +2241,9 @@ impl Document {
                 if let Some(under) = self.take_in_fields(&mut st, source, &shown) {
                     out.forms_renamed.push((under, source));
                 }
+                if signed_from(&st, source) {
+                    out.signatures_in.push(source);
+                }
             }
             Edit::DuplicatePages { ids } => {
                 let set: HashSet<PageId> = ids.into_iter().collect();
@@ -2317,6 +2362,9 @@ impl Document {
                 shown.sort();
                 if let Some(under) = self.take_in_fields(&mut st, source, &shown) {
                     out.forms_renamed.push((under, source));
+                }
+                if signed_from(&st, source) {
+                    out.signatures_in.push(source);
                 }
             }
             Edit::OutlineInsert {
@@ -2758,6 +2806,14 @@ fn fresh_annot_id(rng: &mut fastrand::Rng, st: &DocState, taken: &mut HashSet<An
             return id;
         }
     }
+}
+
+/// Whether `st` has signed fields from `source` (another file's: they're
+/// kept, and their signatures don't cover this one).
+fn signed_from(st: &DocState, source: SourceId) -> bool {
+    st.fields
+        .values()
+        .any(|f| f.source == source && f.value == Some(crate::forms::Value::Signed))
 }
 
 /// The copy of `source`'s form fields brought in next take: one past the

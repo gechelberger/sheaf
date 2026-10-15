@@ -111,7 +111,7 @@ pub fn build(
     progress.set_total(Some(items.len() as u64), Unit::Items);
     let mut doc: Option<Document> = None;
     let mut report = CombineReport::default();
-    let mut renamed = Vec::new();
+    let (mut renamed, mut signed) = (Vec::new(), Vec::new());
     for (n, item) in items.iter().enumerate() {
         progress.check()?;
         let name = item
@@ -168,7 +168,7 @@ pub fn build(
             Some(d) => {
                 let sid = d.add_source(info);
                 d.set_source_form(sid, form);
-                let ids = insert_runs(d, sid, &wanted, &mut renamed)?;
+                let ids = insert_runs(d, sid, &wanted, &mut renamed, &mut signed)?;
                 for &(index, id) in &ids {
                     for annot in marks.get(&index).into_iter().flatten() {
                         d.apply(
@@ -195,8 +195,10 @@ pub fn build(
         progress.set(n as u64 + 1);
     }
     let doc = doc.expect("at least one item");
+    signed.dedup();
     let forms = sheaf_doc::EditOutcome {
         forms_renamed: renamed,
+        signatures_in: signed,
         ..Default::default()
     };
     report.notice = doc.form_notice(&forms, false, false);
@@ -205,12 +207,13 @@ pub fn build(
 
 /// Insert `wanted` pages of `sid` at the end, a contiguous run at a time,
 /// and return each one's id by its index in the file. The forms renamed
-/// go in `renamed`.
+/// go in `renamed`, and files whose signed fields came in in `signed`.
 fn insert_runs(
     d: &mut Document,
     sid: SourceId,
     wanted: &[u32],
     renamed: &mut Vec<(String, SourceId)>,
+    signed: &mut Vec<SourceId>,
 ) -> Result<Vec<(u32, PageId)>> {
     let mut out = Vec::with_capacity(wanted.len());
     let mut i = 0;
@@ -232,6 +235,7 @@ fn insert_runs(
             "Combine",
         )?;
         renamed.extend(done.forms_renamed);
+        signed.extend(done.signatures_in);
         let pages = &d.state().pages;
         out.extend(
             (before..pages.len())

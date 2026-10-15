@@ -285,7 +285,8 @@ impl Form {
     /// An `/XFA` copy that names the fields as they are now, as LiveCycle
     /// Designer would for a static form: a template with a subform per
     /// parent field and a field per terminal one (an exclusion group for a
-    /// radio group), and datasets with their values. Field names should
+    /// radio group), each with a tooltip ("Tip for name"), and datasets
+    /// with their values. Field names should
     /// carry Designer's `[0]` indexes (`form1[0].name[0]`).
     pub fn xfa(&mut self) {
         let mut template = String::new();
@@ -564,14 +565,17 @@ impl Form {
             _ => String::new(),
         };
         let flags = d.get(b"Ff").and_then(|f| f.as_i64()).unwrap_or(0);
+        // A tooltip, as the IRS forms' XFA copies have where the AcroForm
+        // has none.
+        let assist = format!("<assist><toolTip>Tip for {bare}</toolTip></assist>");
         if flags & RADIO != 0 {
-            template.push_str(&format!(r#"<exclGroup name="{bare}">"#));
+            template.push_str(&format!(r#"<exclGroup name="{bare}">{assist}"#));
             for i in 0..kids.len() {
                 template.push_str(&format!(r#"<field name="item{i}"/>"#));
             }
             template.push_str("</exclGroup>");
         } else {
-            template.push_str(&format!(r#"<field name="{bare}"/>"#));
+            template.push_str(&format!(r#"<field name="{bare}">{assist}</field>"#));
         }
         let value = quick_xml::escape::escape(value);
         data.push_str(&format!("<{bare}>{value}</{bare}>"));

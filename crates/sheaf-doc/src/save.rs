@@ -133,6 +133,8 @@ fn subset(model: &Snapshot, ids: &[PageId], outline: bool) -> Option<Snapshot> {
         annots_dirty: HashSet::new(),
         fields_dirty: HashSet::new(),
         removes_content: false,
+        // Fields on pages left out go.
+        form_changed: model.form_changed || model.state.widgets.keys().any(|p| !keep.contains(p)),
     })
 }
 
@@ -697,10 +699,12 @@ fn build_rewrite(model: &Snapshot, clean: bool) -> Result<(Pdf, Vec<String>)> {
     // Nothing reaches a page that isn't kept (bug 14), so pruning takes it
     // out of the file.
     let kept: HashSet<ObjectId> = page_obj.values().copied().collect();
-    let notes = crate::kept::keep_only(&mut pdf, &kept);
+    let mut notes = crate::kept::keep_only(&mut pdf, &kept);
     for n in &notes {
         log::warn!("{n}");
     }
+    // A rewrite breaks usage rights; a changed form's XFA copy goes.
+    notes.extend(crate::forms::rules::take_out(&mut pdf, model.form_changed).1);
     Ok((pdf, notes))
 }
 
@@ -853,19 +857,50 @@ pub enum Strategy {
 
 /// Save `model` to `path`, incrementally when that's its own primary file
 /// (and the file on disk is still what we opened), otherwise by rewrite.
-/// An incremental failure falls back to a rewrite.
+/// An incremental failure falls back to a rewrite. A signed file is
+/// rewritten too: the app asks first ([`Signed::Ask`]).
 pub fn save_to_path(model: &Snapshot, path: &Path) -> Result<Strategy> {
-    Ok(save_to_path_noting(model, path)?.0)
+    Ok(save_to_path_noting(model, path, Signed::Rewrite)?.0)
+}
+
+/// How a save treats a file with signed fields or a certification (M10
+/// proposal 7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Signed {
+    /// A save that would rewrite it fails with [`WouldBreakSignatures`],
+    /// for the reader to choose.
+    Ask,
+    /// Rewrite it, breaking its signatures.
+    Rewrite,
+    /// Append to it, even what a full save takes out (a removed page, a
+    /// changed form's XFA copy): that stays in the earlier revision, and
+    /// the signatures stay sound.
+    Append,
+}
+
+/// A save would rewrite a signed or certified file.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+#[error("a full save would break the file's {signatures} signature(s)")]
+pub struct WouldBreakSignatures {
+    /// Signed fields (a certification is one).
+    pub signatures: usize,
+    /// It's encrypted, so it can't be appended to yet (M11).
+    pub encrypted: bool,
 }
 
 /// [`save_to_path`], and what the reader should be told about the saved
-/// file (see `kept::keep_only`).
+/// file (see `kept::keep_only`, `forms::rules`).
 ///
 /// When something in the file was removed since it was saved (a page, a
 /// mark, a bookmark: `Snapshot::removes_content`), it's a full rewrite:
 /// an incremental save would keep the removed content in the earlier
-/// revision (M9 bug 14).
-pub fn save_to_path_noting(model: &Snapshot, path: &Path) -> Result<(Strategy, Vec<String>)> {
+/// revision (M9 bug 14). A rewrite of a signed or certified file is
+/// `signed`'s to decide.
+pub fn save_to_path_noting(
+    model: &Snapshot,
+    path: &Path,
+    signed: Signed,
+) -> Result<(Strategy, Vec<String>)> {
     let primary = model
         .source(model.primary)
         .context("primary source missing")?;
@@ -874,6 +909,17 @@ pub fn save_to_path_noting(model: &Snapshot, path: &Path) -> Result<(Strategy, V
         || std::fs::metadata(&primary.path)
             .map(|m| m.len() as usize == primary.bytes)
             .unwrap_or(false);
+    if signed == Signed::Append {
+        if same_file && !unchanged {
+            bail!(
+                "{} changed on disk since it was opened: sheaf can't append to it",
+                path.display()
+            );
+        }
+        let bytes = crate::incremental::append(model)?;
+        write_atomic(path, &bytes)?;
+        return Ok((Strategy::Incremental, Vec::new()));
+    }
     if same_file && unchanged && !model.removes_content {
         match crate::incremental::incremental(model) {
             Ok(bytes) => {
@@ -883,9 +929,26 @@ pub fn save_to_path_noting(model: &Snapshot, path: &Path) -> Result<(Strategy, V
             Err(e) => log::warn!("incremental save failed, rewriting instead: {e:#}"),
         }
     }
+    if signed == Signed::Ask
+        && let Some(e) = signatures_broken(primary)?
+    {
+        return Err(e.into());
+    }
     let (bytes, notes) = rewrite_with(model, false)?;
     write_atomic(path, &bytes)?;
     Ok((Strategy::Rewrite, notes))
+}
+
+/// What a rewrite of `info` would break: its signed fields and its
+/// certification. None when it has neither.
+fn signatures_broken(info: &SourceInfo) -> Result<Option<WouldBreakSignatures>> {
+    let pdf = crate::file::load_source(info)?;
+    let facts = crate::forms::read(&pdf).facts;
+    let signatures = facts.signed.max(usize::from(facts.certified));
+    Ok((signatures > 0).then(|| WouldBreakSignatures {
+        signatures,
+        encrypted: pdf.encryption_state.is_some() || info.password.is_some(),
+    }))
 }
 
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {

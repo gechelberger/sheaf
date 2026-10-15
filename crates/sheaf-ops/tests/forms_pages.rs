@@ -592,7 +592,7 @@ fn corpus_ca_540_leaks_no_removed_value() {
     let pages: Vec<PageId> = doc.state().pages.iter().map(|p| p.id).collect();
     let extracted = sheaf_doc::save::extract_bytes(&doc.snapshot(), &[pages[5]]).unwrap();
     assert!(!holds(&extracted, b"LEAKVALUE123"), "extracted");
-    assert_eq!(findings_before_slice_5(&extracted), vec![], "extracted");
+    assert_eq!(findings(&extracted), vec![], "extracted");
 
     doc.apply(
         Edit::DeletePages {
@@ -604,7 +604,7 @@ fn corpus_ca_540_leaks_no_removed_value() {
     for (strategy, bytes) in saved_both_ways(&doc, &path, &dir.join("rewritten.pdf")) {
         let what = format!("{strategy:?}");
         assert!(!holds(&bytes, b"LEAKVALUE123"), "{what}");
-        assert_eq!(findings_before_slice_5(&bytes), vec![], "{what}");
+        assert_eq!(findings(&bytes), vec![], "{what}");
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -626,7 +626,9 @@ fn corpus_cropped_forms_keep_their_fields() {
         let input = std::fs::read(&path).unwrap();
         let before = check(&input, None).unwrap();
         // The fill has no appearance yet (slice 9 makes them).
-        let expected = findings_before_slice_5(&input);
+        let expected = vec![sheaf_doc::forms::Finding::NoAppearance(vec![
+            field.to_string(),
+        ])];
         let mut doc = sheaf_ops::open(&path, None).unwrap();
         let page = doc.state().pages[0].id;
         let margins = Margins {
@@ -659,7 +661,7 @@ fn corpus_cropped_forms_keep_their_fields() {
                 (before.fields, before.widgets),
                 "{what}"
             );
-            assert_eq!(findings_before_slice_5(&bytes), expected, "{what}");
+            assert_eq!(findings(&bytes), expected, "{what}");
             assert_eq!(values(&bytes)[field], "Filled In", "{what}");
         }
         let _ = std::fs::remove_dir_all(&dir);

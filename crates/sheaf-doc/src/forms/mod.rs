@@ -15,6 +15,8 @@ pub mod field;
 pub mod fixture;
 pub(crate) mod merge;
 pub mod read;
+pub mod rules;
+pub mod xfa;
 
 #[cfg(test)]
 mod tests;
