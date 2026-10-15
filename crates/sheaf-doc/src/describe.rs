@@ -229,6 +229,7 @@ mod tests {
                 bytes: 0,
                 password: None,
                 data: None,
+                derived: None,
             },
             &[],
             Box::new(FixedCount(10)),

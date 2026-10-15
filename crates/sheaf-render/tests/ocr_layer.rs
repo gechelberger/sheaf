@@ -99,6 +99,7 @@ fn check(rotate: i64, upright: Rotation) {
             bytes: 0,
             password: None,
             data: None,
+            derived: None,
         },
         &[],
         Box::new(FixedCount(10)),

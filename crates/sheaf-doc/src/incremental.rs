@@ -61,9 +61,10 @@ fn build(snap: &Snapshot, saving: bool) -> Result<(usize, Vec<u8>)> {
     let xref_type = pdf.reference_table.cross_reference_type;
 
     let primary = LoadedSource::from_pdf(&pdf)?;
+    let origins = crate::save::origins(snap);
     let mut others: std::collections::HashMap<_, LoadedSource> = std::collections::HashMap::new();
     for (&sid, sinfo) in &snap.sources {
-        if sid != primary_id && snap.state.pages.iter().any(|p| p.source == sid) {
+        if sid != primary_id && crate::save::needed(snap, &origins, sid) {
             let other = crate::file::load_source(sinfo)?;
             others.insert(sid, LoadedSource::from_pdf_owned(other)?);
         }
@@ -91,21 +92,67 @@ fn build(snap: &Snapshot, saving: bool) -> Result<(usize, Vec<u8>)> {
         let mut used = std::collections::HashSet::new();
         // Pages from other files get their ids first, so links among them
         // follow and links to their other pages don't copy those (bug 14).
+        // A derived copy's page is a use of the page it was made from.
         for pref in &snap.state.pages {
-            if pref.source != primary_id
+            let (source, index) = origins
+                .get(&pref.id)
+                .copied()
+                .unwrap_or((pref.source, pref.index));
+            if source != primary_id
                 && let Some(&p) = others
-                    .get(&pref.source)
-                    .and_then(|s| s.pages.get(pref.index as usize))
+                    .get(&source)
+                    .and_then(|s| s.pages.get(index as usize))
             {
-                crate::save::reserve_pages(
-                    [p],
-                    &mut pdf,
-                    copy_maps.entry(pref.source).or_default(),
-                );
+                crate::save::reserve_pages([p], &mut pdf, copy_maps.entry(source).or_default());
             }
         }
         for pref in &snap.state.pages {
-            let (src_page, inherited, mut dict) = if pref.source == primary_id {
+            // A derived copy's page is written as the page it was made
+            // from: its object, annotations and form fields, with the
+            // copy's content (M10 bug 1).
+            let origin = origins.get(&pref.id).copied();
+            let source = origin.map_or(pref.source, |(s, _)| s);
+            let (src_page, inherited, mut dict) = if let Some((_, index)) = origin {
+                let shown = others.get(&pref.source).context("unknown source")?;
+                let id = *shown
+                    .pages
+                    .get(pref.index as usize)
+                    .context("page index out of range")?;
+                let map = copy_maps.entry(pref.source).or_default();
+                let mut dict =
+                    crate::save::copy_derived_page(shown.pdf.as_ref().unwrap(), id, &mut pdf, map)?;
+                let (src_page, annots) = if source == primary_id {
+                    let page = *primary
+                        .pages
+                        .get(index as usize)
+                        .context("page index out of range")?;
+                    (page, pdf.get_dictionary(page)?.get(b"Annots").ok().cloned())
+                } else {
+                    let from = others.get(&source).context("unknown source")?;
+                    let page = *from
+                        .pages
+                        .get(index as usize)
+                        .context("page index out of range")?;
+                    let from = from.pdf.as_ref().unwrap();
+                    let map = copy_maps.entry(source).or_default();
+                    let annots = match from.get_dictionary(page)?.get(b"Annots") {
+                        Ok(a) => Some(crate::save::remap(from, a, &mut pdf, map)?),
+                        Err(_) => None,
+                    };
+                    (page, annots)
+                };
+                if let Some(a) = annots {
+                    dict.set("Annots", a);
+                }
+                if source != primary_id {
+                    crate::kept::drop_dead_links(&pdf, &mut dict);
+                }
+                (
+                    src_page,
+                    shown.inherited.get(&id).cloned().unwrap_or_default(),
+                    dict,
+                )
+            } else if pref.source == primary_id {
                 let id = *primary
                     .pages
                     .get(pref.index as usize)
@@ -174,12 +221,12 @@ fn build(snap: &Snapshot, saving: bool) -> Result<(usize, Vec<u8>)> {
             apply_rotation(&mut dict, pref.rotation.degrees());
             dict.set("Parent", pages_id);
             dict.set("Type", Object::Name(b"Page".to_vec()));
-            let first = used.insert((pref.source, src_page));
-            let id = if pref.source == primary_id && first {
+            let first = used.insert((source, src_page));
+            let id = if source == primary_id && first {
                 src_page
-            } else if pref.source != primary_id && first {
+            } else if source != primary_id && first {
                 // Its id was reserved above; a second use is a copy.
-                copy_maps[&pref.source][&src_page]
+                copy_maps[&source][&src_page]
             } else {
                 pdf.new_object_id()
             };

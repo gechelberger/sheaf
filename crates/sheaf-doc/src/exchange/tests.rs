@@ -212,6 +212,7 @@ fn opened(path: &std::path::Path) -> (Document, Vec<(SourceId, ForeignAnnot)>) {
             bytes: std::fs::metadata(path).unwrap().len() as usize,
             password: None,
             data: None,
+            derived: None,
         },
         &[],
         Box::new(FixedCount(10)),

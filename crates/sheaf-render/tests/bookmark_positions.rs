@@ -87,6 +87,7 @@ fn positions_round_trip_through_pdfium() {
             bytes: 0,
             password: None,
             data: None,
+            derived: None,
         },
         &[
             item("Upright", 0, xyz(36.0, 100.0)),

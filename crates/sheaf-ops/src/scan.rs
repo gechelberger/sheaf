@@ -314,6 +314,7 @@ fn add_text(
             .unwrap_or(0),
         password: None,
         data: None,
+        derived: None,
     };
     let mut doc = Document::new(info, &[], sheaf_doc::history::default_policy());
     let ids: Vec<_> = doc.state().pages.iter().map(|p| p.id).collect();

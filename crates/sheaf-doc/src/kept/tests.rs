@@ -109,6 +109,7 @@ fn opened(path: &Path, n: u32) -> Document {
             bytes: std::fs::metadata(path).unwrap().len() as usize,
             password: None,
             data: None,
+            derived: None,
         },
         &[],
         Box::new(FixedCount(10)),
@@ -215,6 +216,47 @@ fn a_deleted_page_leaves_the_file_whatever_points_at_it() {
     }
 }
 
+/// Whether the file holds `text` anywhere: in its bytes, or a stream's.
+fn holds(bytes: &[u8], text: &str) -> bool {
+    bytes.windows(text.len()).any(|w| w == text.as_bytes()) || says(bytes, text)
+}
+
+#[test]
+fn a_reply_keeps_no_comment_of_a_deleted_page() {
+    // A note on page 2, and a reply to it on page 1: a reply's /IRT is the
+    // one way left to reach the note once its page goes.
+    for by_chooser in [true, false] {
+        let dir = tempdir();
+        let path = file(&dir, "a.pdf", "A", 2, |pdf, p| {
+            let note = pdf.add_object(dictionary! {
+                "Type" => "Annot", "Subtype" => "Text", "P" => p[1],
+                "Rect" => vec![72.into(), 72.into(), 96.into(), 96.into()],
+                "Contents" => Object::string_literal("SHEAFLEAK note"),
+            });
+            pdf.get_dictionary_mut(p[1])
+                .unwrap()
+                .set("Annots", vec![note.into()]);
+            let reply = pdf.add_object(dictionary! {
+                "Type" => "Annot", "Subtype" => "Text", "P" => p[0], "IRT" => note,
+                "Rect" => vec![72.into(), 72.into(), 96.into(), 96.into()],
+                "Contents" => Object::string_literal("a reply"),
+            });
+            pdf.get_dictionary_mut(p[0])
+                .unwrap()
+                .set("Annots", vec![reply.into()]);
+        });
+        let mut model = opened(&path, 2);
+        let second = model.page(1).unwrap().id;
+        model
+            .apply(Edit::DeletePages { ids: vec![second] }, "del")
+            .unwrap();
+        let bytes = saved(&model, &path, by_chooser);
+        assert!(!holds(&bytes, "SHEAFLEAK"), "chooser {by_chooser}");
+        assert!(holds(&bytes, "a reply"), "chooser {by_chooser}");
+        assert_eq!(page_annots(&bytes, 0), 1);
+    }
+}
+
 #[test]
 fn inserting_one_page_brings_only_that_page() {
     for incremental in [true, false] {
@@ -236,6 +278,7 @@ fn inserting_one_page_brings_only_that_page() {
             bytes: 0,
             password: None,
             data: None,
+            derived: None,
         });
         // B's first and third pages: the link between them stays, the one
         // to its second goes, and the second isn't in the file.
@@ -505,6 +548,7 @@ fn a_deleted_mark_is_gone_from_the_saved_bytes() {
         bytes: saved.len(),
         password: None,
         data: None,
+        derived: None,
     });
     let id = model.state().annots_on(p0).unwrap()[0].id;
     model
@@ -593,6 +637,7 @@ fn replacing_saved_ocr_text_takes_the_old_out() {
         bytes: saved.len(),
         password: None,
         data: None,
+        derived: None,
     });
     // Recognized again: the old text would stay in the earlier revision,
     // so it's a full save.

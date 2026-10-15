@@ -852,6 +852,7 @@ impl DocView {
             bytes,
             password: self.password.clone(),
             data: Some(sheaf_doc::SourceData(handle.data())),
+            derived: None,
         };
         let mut model = Document::new(source, &[], sheaf_doc::history::default_policy());
         model.set_author(crate::prefs::get(cx).identity.name());
@@ -1616,6 +1617,7 @@ impl DocView {
                             bytes,
                             password: None,
                             data: Some(sheaf_doc::SourceData(handle.data())),
+                            derived: None,
                         };
                         let sid = doc.model.rebase_to_saved(saved);
                         // Our marks are now in the file; keep PDFium from drawing them.
@@ -2620,6 +2622,7 @@ impl DocView {
                     bytes,
                     password: None,
                     data: Some(sheaf_doc::SourceData(handle.data())),
+                    derived: None,
                 });
                 doc.handles.insert(sid, handle);
                 let mut flat: Vec<FlatOutlineItem> = if bookmarks {

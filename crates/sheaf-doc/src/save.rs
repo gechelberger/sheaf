@@ -377,19 +377,20 @@ fn build_rewrite(model: &Snapshot, clean: bool) -> Result<(Pdf, Vec<String>)> {
     let primary_id = model.primary;
     let primary_info = model.source(primary_id).context("primary source missing")?;
     let mut pdf = crate::file::load_source(primary_info)?;
+    let state = &model.state;
+    let origins = origins(model);
 
     // Source page object ids and their inherited attributes, resolved against
     // the *original* trees before anything is re-parented.
     let mut sources: HashMap<SourceId, LoadedSource> = HashMap::new();
     sources.insert(primary_id, LoadedSource::from_pdf(&pdf)?);
     for (&sid, info) in &model.sources {
-        if sid != primary_id && model.state.pages.iter().any(|p| p.source == sid) {
+        if sid != primary_id && needed(model, &origins, sid) {
             let other = crate::file::load_source(info)?;
             sources.insert(sid, LoadedSource::from_pdf_owned(other)?);
         }
     }
 
-    let state = &model.state;
     let pages_id = pdf.new_object_id();
     let mut kids: Vec<Object> = Vec::with_capacity(state.pages.len());
     let mut page_obj: HashMap<PageId, ObjectId> = HashMap::new();
@@ -402,14 +403,19 @@ fn build_rewrite(model: &Snapshot, clean: bool) -> Result<(Pdf, Vec<String>)> {
     let mut ocr_objects = None;
     let mut stamp_objects = None;
     // Pages from other files get their ids first, so links among them
-    // follow (bug 14); the first use of each fills its id.
+    // follow (bug 14); the first use of each fills its id. A derived
+    // copy's page is a use of the page it was made from.
     for pref in &state.pages {
-        if pref.source != primary_id
+        let (source, index) = origins
+            .get(&pref.id)
+            .copied()
+            .unwrap_or((pref.source, pref.index));
+        if source != primary_id
             && let Some(&p) = sources
-                .get(&pref.source)
-                .and_then(|s| s.pages.get(pref.index as usize))
+                .get(&source)
+                .and_then(|s| s.pages.get(index as usize))
         {
-            reserve_pages([p], &mut pdf, copy_maps.entry(pref.source).or_default());
+            reserve_pages([p], &mut pdf, copy_maps.entry(source).or_default());
         }
     }
     let mut filled: HashSet<(SourceId, ObjectId)> = HashSet::new();
@@ -426,11 +432,23 @@ fn build_rewrite(model: &Snapshot, clean: bool) -> Result<(Pdf, Vec<String>)> {
 
     for pref in &state.pages {
         let src = sources.get(&pref.source).context("unknown source")?;
-        let src_page = *src
+        let shown_page = *src
             .pages
             .get(pref.index as usize)
             .context("source page index out of range")?;
-        let inherited = src.inherited.get(&src_page).cloned().unwrap_or_default();
+        let inherited = src.inherited.get(&shown_page).cloned().unwrap_or_default();
+        // A derived copy's page is written as the page it was made from:
+        // its object, annotations and form fields, with the copy's content
+        // (M10 bug 1).
+        let origin = origins.get(&pref.id).copied();
+        let source = origin.map_or(pref.source, |(s, _)| s);
+        let src_page = match origin {
+            Some((s, i)) => *sources
+                .get(&s)
+                .and_then(|o| o.pages.get(i as usize))
+                .context("a derived page's original is missing")?,
+            None => shown_page,
+        };
 
         let mut dict: Dictionary = if pref.source == primary_id {
             match originals.get(&src_page) {
@@ -447,8 +465,36 @@ fn build_rewrite(model: &Snapshot, clean: bool) -> Result<(Pdf, Vec<String>)> {
                 .pdf
                 .as_ref()
                 .expect("non-primary sources keep their pdf");
-            copy_page_dict(src_pdf, src_page, &mut pdf, map)?
+            if origin.is_some() {
+                copy_derived_page(src_pdf, shown_page, &mut pdf, map)?
+            } else {
+                copy_page_dict(src_pdf, shown_page, &mut pdf, map)?
+            }
         };
+        if origin.is_some() {
+            let annots = if source == primary_id {
+                if let std::collections::hash_map::Entry::Vacant(e) = originals.entry(src_page) {
+                    e.insert(pdf.get_dictionary(src_page)?.clone());
+                }
+                originals[&src_page].get(b"Annots").ok().cloned()
+            } else {
+                let from = sources[&source]
+                    .pdf
+                    .as_ref()
+                    .expect("non-primary sources keep their pdf");
+                let map = copy_maps.entry(source).or_default();
+                match from.get_dictionary(src_page)?.get(b"Annots") {
+                    Ok(a) => Some(remap(from, a, &mut pdf, map)?),
+                    Err(_) => None,
+                }
+            };
+            match annots {
+                Some(a) => dict.set("Annots", a),
+                None => {
+                    dict.remove(b"Annots");
+                }
+            }
+        }
         for (k, v) in &inherited {
             if !dict.has(k) {
                 dict.set(k.clone(), v.clone());
@@ -546,11 +592,11 @@ fn build_rewrite(model: &Snapshot, clean: bool) -> Result<(Pdf, Vec<String>)> {
 
         // A page object may appear only once in the tree; duplicates get a
         // fresh object sharing the same content and resources by reference.
-        let id = if pref.source == primary_id && used.insert(src_page) {
+        let id = if source == primary_id && used.insert(src_page) {
             *pdf.get_object_mut(src_page)? = Object::Dictionary(dict);
             src_page
-        } else if pref.source != primary_id && filled.insert((pref.source, src_page)) {
-            let id = copy_maps[&pref.source][&src_page];
+        } else if source != primary_id && filled.insert((source, src_page)) {
+            let id = copy_maps[&source][&src_page];
             pdf.objects.insert(id, Object::Dictionary(dict));
             id
         } else {
@@ -635,7 +681,10 @@ pub fn cropped_copy(src: &SourceInfo, pages: &[(u32, [f32; 4])]) -> Result<Vec<u
 /// then passed to `fix` (with the new PDF, the page's dictionary, its
 /// geometry, and its position in `pages`) to change its content. sheaf's
 /// own marks are left out, since the model keeps them; other
-/// annotations, links and fields come along.
+/// annotations, links and fields come along, and the form the fields are
+/// in, so the page shows them (see [`copy_form`]). A save writes the page
+/// it was made from instead, with the copy's content
+/// (`SourceInfo::derived`).
 pub fn derived_copy(
     src: &SourceInfo,
     pages: &[(u32, Option<[f32; 4]>)],
@@ -697,13 +746,67 @@ pub fn derived_copy(
         pages_id,
         Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => kids, "Count" => count }),
     );
-    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    let mut catalog = dictionary! { "Type" => "Catalog", "Pages" => pages_id };
+    if let Some(form) = copy_form(&from, &mut pdf, &mut map)? {
+        catalog.set("AcroForm", pdf.add_object(form));
+    }
+    let catalog = pdf.add_object(catalog);
     pdf.trailer.set("Root", catalog);
-    // Links to pages that weren't copied lead nowhere: they go.
+    // Links to pages that weren't copied lead nowhere, and widgets there
+    // leave their fields: they go, and so does what only they reached.
     crate::kept::keep_only(&mut pdf, &kept);
+    pdf.prune_objects();
     let mut out = Vec::new();
     pdf.save_to(&mut out)?;
     Ok(out)
+}
+
+/// The form of `from`, as far as the pages copied into `pdf` reach it
+/// (their widgets' fields, copied with them through `map`): the roots
+/// among `/Fields` and `/CO` that were copied, and `/DR`, `/DA`, `/Q` and
+/// `NeedAppearances`. PDFium draws widgets only in a document with a form
+/// (M10 bug 1). None when no field was copied. The XFA copy, usage rights
+/// and `/SigFlags` describe the whole file, so they stay behind.
+fn copy_form(
+    from: &Pdf,
+    pdf: &mut Pdf,
+    map: &mut HashMap<ObjectId, ObjectId>,
+) -> Result<Option<Dictionary>> {
+    let Some(form) = from
+        .catalog()
+        .ok()
+        .and_then(|c| c.get(b"AcroForm").ok())
+        .and_then(|f| from.dereference(f).ok())
+        .and_then(|(_, f)| f.as_dict().ok())
+    else {
+        return Ok(None);
+    };
+    let copied = |key: &[u8]| -> Vec<Object> {
+        form.get(key)
+            .ok()
+            .and_then(|a| from.dereference(a).ok())
+            .and_then(|(_, a)| a.as_array().ok())
+            .into_iter()
+            .flatten()
+            .filter_map(|f| map.get(&f.as_reference().ok()?).copied())
+            .map(Object::Reference)
+            .collect()
+    };
+    let fields = copied(b"Fields");
+    if fields.is_empty() {
+        return Ok(None);
+    }
+    let co = copied(b"CO");
+    let mut out = dictionary! { "Fields" => fields };
+    if !co.is_empty() {
+        out.set("CO", co);
+    }
+    for key in [b"DR".as_slice(), b"DA", b"Q", b"NeedAppearances"] {
+        if let Ok(v) = form.get(key) {
+            out.set(key.to_vec(), remap(from, v, pdf, map)?);
+        }
+    }
+    Ok(Some(out))
 }
 
 /// Which strategy a save used.
@@ -833,6 +936,64 @@ pub(crate) fn is_identity(model: &Snapshot, primary: &LoadedSource) -> bool {
             .iter()
             .enumerate()
             .all(|(i, p)| p.source == model.primary && p.index as usize == i)
+}
+
+/// The page a derived copy's page was made from (see
+/// `SourceInfo::derived`), through copies of copies; None for a page that
+/// isn't a copy.
+pub(crate) fn origin(model: &Snapshot, source: SourceId, index: u32) -> Option<(SourceId, u32)> {
+    let mut at = None;
+    let (mut source, mut index) = (source, index);
+    // A chain longer than there are sources would be a loop.
+    for _ in 0..model.sources.len() {
+        let Some(derived) = model.source(source).and_then(|s| s.derived.as_ref()) else {
+            break;
+        };
+        let Some(&i) = derived.pages.get(index as usize) else {
+            break;
+        };
+        (source, index) = (derived.from, i);
+        at = Some((source, index));
+    }
+    at
+}
+
+/// [`origin`] for each page of the document that's a derived copy's.
+pub(crate) fn origins(model: &Snapshot) -> HashMap<PageId, (SourceId, u32)> {
+    model
+        .state
+        .pages
+        .iter()
+        .filter_map(|p| Some((p.id, origin(model, p.source, p.index)?)))
+        .collect()
+}
+
+/// Whether a save reads source `sid`: a page shows it, or was made from
+/// one of its pages.
+pub(crate) fn needed(
+    model: &Snapshot,
+    origins: &HashMap<PageId, (SourceId, u32)>,
+    sid: SourceId,
+) -> bool {
+    model.state.pages.iter().any(|p| p.source == sid) || origins.values().any(|o| o.0 == sid)
+}
+
+/// A derived copy's page from `src` in `dst`, but for `/Annots`: those are
+/// the page it was made from's (see [`origin`]), as is its object.
+pub(crate) fn copy_derived_page(
+    src: &Pdf,
+    page: ObjectId,
+    dst: &mut Pdf,
+    map: &mut HashMap<ObjectId, ObjectId>,
+) -> Result<Dictionary> {
+    let mut out = Dictionary::new();
+    for (k, v) in src.get_dictionary(page)?.iter() {
+        if k == b"Parent" || k == b"Annots" {
+            continue;
+        }
+        out.set(k.clone(), remap(src, v, dst, map)?);
+    }
+    Ok(out)
 }
 
 /// Clone a page dictionary from `src` into `dst`, deep-copying everything it
@@ -1518,6 +1679,7 @@ mod tests {
             bytes: 0,
             password: None,
             data: None,
+            derived: None,
         }
     }
 
@@ -2297,6 +2459,7 @@ mod tests {
         SourceInfo {
             bytes: bytes.len(),
             data: Some(crate::model::SourceData(std::sync::Arc::new(bytes))),
+            derived: None,
             ..info(path, n)
         }
     }

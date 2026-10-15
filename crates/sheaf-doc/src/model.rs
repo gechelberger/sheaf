@@ -46,6 +46,19 @@ pub struct SourceInfo {
     /// them, the path is read (a cached file sheaf made, which never
     /// changes; or a headless run).
     pub data: Option<SourceData>,
+    /// For a copy sheaf made of another source's pages (cropped,
+    /// watermarked, a header/footer stripped): which pages. A save writes
+    /// each as the page it was made from, with its annotations and form
+    /// fields, and the copy's content (M10 bug 1).
+    pub derived: Option<Derived>,
+}
+
+/// Where a derived source's pages come from: its page `k` is a copy of page
+/// `pages[k]` of `from`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Derived {
+    pub from: SourceId,
+    pub pages: Vec<u32>,
 }
 
 /// A file's bytes, shared (an `Arc`, cheap to clone).
@@ -2551,6 +2564,7 @@ mod tests {
             bytes: 1000,
             password: None,
             data: None,
+            derived: None,
         }
     }
 

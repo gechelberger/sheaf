@@ -65,6 +65,7 @@ pub fn describe(path: &Path, password: Option<&str>) -> Result<(SourceInfo, Vec<
             .unwrap_or(0),
         password: password.map(str::to_string),
         data: None,
+        derived: None,
     };
     let mut outline: Vec<FlatOutlineItem> = engine
         .outline()
