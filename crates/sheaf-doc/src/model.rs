@@ -2982,6 +2982,7 @@ mod tests {
             created: String::new(),
             fill: None,
             dashed: false,
+            cloudy: false,
         };
         assert_eq!(d.state().next_connector_label(), "1");
         d.apply(
@@ -3064,6 +3065,7 @@ mod tests {
             created: String::new(),
             fill: None,
             dashed: false,
+            cloudy: false,
         }
     }
 
@@ -3260,6 +3262,7 @@ mod tests {
             created: String::new(),
             fill: None,
             dashed: false,
+            cloudy: false,
         };
         d.apply(
             Edit::AnnotAdd {
@@ -3751,6 +3754,7 @@ mod tests {
             created: String::new(),
             fill: None,
             dashed: false,
+            cloudy: false,
         };
         let edits = vec![
             Edit::MovePages {

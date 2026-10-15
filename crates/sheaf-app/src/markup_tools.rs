@@ -37,6 +37,12 @@ pub enum Tool {
     Tick,
     /// A stamp from the Stamps panel.
     Stamp,
+    Polygon,
+    Polyline,
+    /// A polygon with a cloudy border.
+    Cloud,
+    /// A text box with a leader line.
+    Callout,
     /// PDFlyer connector: two clicks place a linked pair of markers.
     Connector,
 }
@@ -59,6 +65,10 @@ impl Tool {
             Tool::Ink => "Pencil",
             Tool::Tick => "Tick",
             Tool::Stamp => "Stamp",
+            Tool::Polygon => "Polygon",
+            Tool::Polyline => "Polyline",
+            Tool::Cloud => "Cloud",
+            Tool::Callout => "Callout",
             Tool::Connector => "Connector",
         }
     }
@@ -101,11 +111,15 @@ impl Tool {
             Tool::Ink => Box::new(ToolInk),
             Tool::Tick => Box::new(ToolTick),
             Tool::Stamp => Box::new(ToolStamp),
+            Tool::Polygon => Box::new(ToolPolygon),
+            Tool::Polyline => Box::new(ToolPolyline),
+            Tool::Cloud => Box::new(ToolCloud),
+            Tool::Callout => Box::new(ToolCallout),
             Tool::Connector => Box::new(ToolConnector),
         }
     }
 
-    pub const ALL: [Tool; 16] = [
+    pub const ALL: [Tool; 20] = [
         Tool::Select,
         Tool::Note,
         Tool::Highlight,
@@ -118,6 +132,10 @@ impl Tool {
         Tool::Ellipse,
         Tool::Line,
         Tool::Arrow,
+        Tool::Polyline,
+        Tool::Polygon,
+        Tool::Cloud,
+        Tool::Callout,
         Tool::Ink,
         Tool::Tick,
         Tool::Stamp,
@@ -163,6 +181,9 @@ pub enum Spot {
     Box { fx: f32, fy: f32 },
     /// A line's end: 0 is `a`, 1 is `b`.
     End(u8),
+    /// A polygon's or polyline's vertex; a callout's point (0) or knee
+    /// (1).
+    Vertex(usize),
 }
 
 #[derive(Debug, Clone)]
@@ -180,31 +201,52 @@ pub fn handle_spots(a: &Annot) -> Vec<(Spot, Pt)> {
             AnnotKind::Line { a: pa, b: pb, .. } => vec![(Spot::End(0), *pa), (Spot::End(1), *pb)],
             _ => Vec::new(),
         },
-        Handles::Box => {
-            let b = a.bounds();
-            [
-                (0.0, 0.0),
-                (0.5, 0.0),
-                (1.0, 0.0),
-                (1.0, 0.5),
-                (1.0, 1.0),
-                (0.5, 1.0),
-                (0.0, 1.0),
-                (0.0, 0.5),
-            ]
-            .into_iter()
-            .map(|(fx, fy)| {
-                (
-                    Spot::Box { fx, fy },
-                    Pt {
-                        x: b.x + fx * b.w,
-                        y: b.y + fy * b.h,
-                    },
-                )
-            })
-            .collect()
-        }
+        Handles::Vertices => match &a.kind {
+            AnnotKind::Polygon { points } | AnnotKind::Polyline { points } => points
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (Spot::Vertex(i), *p))
+                .collect(),
+            _ => Vec::new(),
+        },
+        Handles::Callout => match &a.kind {
+            AnnotKind::Callout {
+                rect, knee, point, ..
+            } => {
+                let mut spots = box_spots(*rect);
+                spots.push((Spot::Vertex(0), *point));
+                spots.push((Spot::Vertex(1), *knee));
+                spots
+            }
+            _ => Vec::new(),
+        },
+        Handles::Box => box_spots(a.bounds()),
     }
+}
+
+/// A box's eight handles.
+fn box_spots(b: Box2) -> Vec<(Spot, Pt)> {
+    [
+        (0.0, 0.0),
+        (0.5, 0.0),
+        (1.0, 0.0),
+        (1.0, 0.5),
+        (1.0, 1.0),
+        (0.5, 1.0),
+        (0.0, 1.0),
+        (0.0, 0.5),
+    ]
+    .into_iter()
+    .map(|(fx, fy)| {
+        (
+            Spot::Box { fx, fy },
+            Pt {
+                x: b.x + fx * b.w,
+                y: b.y + fy * b.h,
+            },
+        )
+    })
+    .collect()
 }
 
 /// `r.orig` with its handle dragged to `p`.
@@ -212,7 +254,11 @@ pub fn reshaped(r: &Resize, p: Pt, shift: bool) -> Annot {
     let mut out = r.orig.clone();
     match r.spot {
         Spot::Box { fx, fy } => {
-            let b = r.orig.bounds();
+            // A callout's box handles size its box, not the leader.
+            let b = match &r.orig.kind {
+                AnnotKind::Callout { rect, .. } => *rect,
+                _ => r.orig.bounds(),
+            };
             // The corner or side opposite the handle stays put.
             let anchor = Pt {
                 x: if fx == 0.0 { b.right() } else { b.x },
@@ -249,8 +295,33 @@ pub fn reshaped(r: &Resize, p: Pt, shift: bool) -> Annot {
                 w: x1 - x0,
                 h: y1 - y0,
             };
-            out.kind = r.orig.kind.resized(b, to);
+            out.kind = match &r.orig.kind {
+                AnnotKind::Callout {
+                    knee, point, size, ..
+                } => AnnotKind::Callout {
+                    rect: to,
+                    knee: *knee,
+                    point: *point,
+                    size: *size,
+                },
+                kind => kind.resized(b, to),
+            };
         }
+        Spot::Vertex(i) => match &mut out.kind {
+            AnnotKind::Polygon { points } | AnnotKind::Polyline { points } => {
+                if let Some(v) = points.get_mut(i) {
+                    *v = p;
+                }
+            }
+            AnnotKind::Callout { point, knee, .. } => {
+                if i == 0 {
+                    *point = p;
+                } else {
+                    *knee = p;
+                }
+            }
+            _ => {}
+        },
         Spot::End(end) => {
             if let AnnotKind::Line { a, b, .. } = &mut out.kind {
                 let fixed = if end == 0 { *b } else { *a };
@@ -620,6 +691,9 @@ impl DocView {
                 self.add_annot(page_id, a, "Tickmark", cx);
             }
             Tool::Stamp => self.place_stamp(page_id, p, cx),
+            Tool::Polygon | Tool::Polyline | Tool::Cloud => {
+                self.add_vertex(page, page_id, p, ev.click_count, cx)
+            }
             Tool::Connector => self.place_connector(page_id, p, cx),
             _ => {
                 doc.drag = Some(Drag {
@@ -657,6 +731,7 @@ impl DocView {
             if let Some(page_id) = page_id {
                 self.hover_page(page_id, p, 4.0 / k.max(0.01), cx);
             }
+            self.shape_hover(page, p, cx);
             return;
         }
         if ev.pressed_button != Some(MouseButton::Left) {
@@ -758,6 +833,8 @@ impl DocView {
         let too_small = rect.w < 3.0 && rect.h < 3.0;
         match tool {
             Tool::Select | Tool::TextEdit => {}
+            Tool::Callout => self.place_callout(page_id, a, b, cx),
+            Tool::Polygon | Tool::Polyline | Tool::Cloud => {}
             Tool::Highlight | Tool::Underline | Tool::StrikeOut | Tool::Squiggly => {
                 if too_small {
                     return;
@@ -1130,6 +1207,17 @@ impl DocView {
                 })
             }
             Tool::Note | Tool::Tick | Tool::Stamp | Tool::Connector => None,
+            Tool::Polygon | Tool::Polyline | Tool::Cloud => None,
+            Tool::Callout => {
+                let (pa, pb) = (rotate_pt(a, src, rot), rotate_pt(b, src, rot));
+                Some(stroke_canvas(
+                    vec![vec![(pa.x * k, pa.y * k), (pb.x * k, pb.y * k)]],
+                    c,
+                    1.5 * k,
+                    src.rotated(rot),
+                    k,
+                ))
+            }
         }
     }
 }
@@ -1409,6 +1497,8 @@ impl DocView {
         let lines = marks
             .iter()
             .any(|a| matches!(a.kind, AnnotKind::Line { .. }));
+        let cloudable = marks.iter().any(|a| a.kind.cloudable());
+        let cloudy = last.cloudy;
         let text_size = marks.iter().find_map(|a| a.kind.text_size());
         let label = |s: &'static str| div().text_color(theme::TEXT_MUTED).child(s);
         let chip = |id: (&'static str, usize), text: String, on: bool| {
@@ -1599,6 +1689,26 @@ impl DocView {
                             }),
                         ))
                 })
+                .when(cloudable, |d| {
+                    d.child(
+                        chip(("prop-cloud", 0), "Cloudy".into(), cloudy).on_click(cx.listener(
+                            move |v, _, _, cx| {
+                                v.restyle(
+                                    if cloudy {
+                                        "Plain border"
+                                    } else {
+                                        "Cloudy border"
+                                    },
+                                    |a| {
+                                        a.cloudy = !cloudy;
+                                        a.kind.cloudable()
+                                    },
+                                    cx,
+                                )
+                            },
+                        )),
+                    )
+                })
                 .when(lines, |d| {
                     d.child(div().w(px(8.0)))
                         .child(label("Arrows"))
@@ -1634,6 +1744,7 @@ mod tests {
             created: String::new(),
             fill: None,
             dashed: false,
+            cloudy: false,
         }
     }
 
@@ -1709,5 +1820,62 @@ mod tests {
             panic!()
         };
         assert!(b.y.abs() < 1e-3 && (b.x - 100.5).abs() < 0.1, "{b:?}");
+    }
+
+    #[test]
+    fn vertex_and_callout_handles_move_their_own_part() {
+        let poly = mark(AnnotKind::Polygon {
+            points: vec![
+                Pt { x: 0.0, y: 0.0 },
+                Pt { x: 10.0, y: 0.0 },
+                Pt { x: 5.0, y: 10.0 },
+            ],
+        });
+        assert_eq!(handle_spots(&poly).len(), 3);
+        let moved = reshaped(
+            &Resize {
+                spot: Spot::Vertex(2),
+                orig: poly,
+            },
+            Pt { x: 5.0, y: 20.0 },
+            false,
+        );
+        let AnnotKind::Polygon { points } = moved.kind else {
+            panic!()
+        };
+        assert_eq!(points[2], Pt { x: 5.0, y: 20.0 });
+
+        let callout = mark(AnnotKind::Callout {
+            rect: Box2 {
+                x: 100.0,
+                y: 100.0,
+                w: 100.0,
+                h: 30.0,
+            },
+            knee: Pt { x: 80.0, y: 115.0 },
+            point: Pt { x: 40.0, y: 160.0 },
+            size: 12.0,
+        });
+        // Eight on the box, then the point and the knee.
+        assert_eq!(handle_spots(&callout).len(), 10);
+        let wider = reshaped(
+            &Resize {
+                spot: Spot::Box { fx: 1.0, fy: 0.5 },
+                orig: callout,
+            },
+            Pt { x: 250.0, y: 0.0 },
+            false,
+        );
+        let AnnotKind::Callout {
+            rect, knee, point, ..
+        } = wider.kind
+        else {
+            panic!()
+        };
+        assert_eq!((rect.x, rect.w), (100.0, 150.0));
+        assert_eq!(
+            (knee, point),
+            (Pt { x: 80.0, y: 115.0 }, Pt { x: 40.0, y: 160.0 })
+        );
     }
 }

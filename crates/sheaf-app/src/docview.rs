@@ -179,6 +179,8 @@ pub(crate) struct Doc {
     /// Pages whose characters the engine is reading.
     pub(crate) chars_loading: HashSet<PageId>,
     pub(crate) annot_editor: Option<AnnotEditor>,
+    /// A polygon, polyline or cloud being drawn (see shapes.rs).
+    pub(crate) poly: Option<crate::shapes::PolyDraft>,
     /// "Pages with" or "without" a group of marks (see groups.rs).
     pub(crate) group_list: Option<crate::groups::GroupList>,
     /// The right-click menu on a mark, where it was opened.
@@ -881,6 +883,7 @@ impl DocView {
             page_chars: HashMap::new(),
             chars_loading: HashSet::new(),
             annot_editor: None,
+            poly: None,
             group_list: None,
             mark_menu: None,
             foreign_annots: Vec::new(),
@@ -1815,6 +1818,7 @@ impl DocView {
             created: sheaf_doc::pdf_date_now(),
             fill: None,
             dashed: false,
+            cloudy: false,
         }
     }
 
@@ -4107,7 +4111,11 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
             .annots_on(ed.page)
             .and_then(|l| l.iter().find(|a| a.id == ed.id))
     {
-        let b = a.bounds();
+        // Under the mark (a callout's: under its box).
+        let b = match &a.kind {
+            AnnotKind::Callout { rect, .. } => *rect,
+            _ => a.bounds(),
+        };
         let r = rotate_rect(
             Rect {
                 x: b.x,
@@ -4139,6 +4147,11 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
     if let Some(preview) = DocView::drag_preview(doc, ov.tool, ov.tool_color, pl.index, src, rot, k)
     {
         page_div = page_div.child(preview);
+    }
+    let [r, g, b] = ov.tool_color;
+    let tool_rgb = rgb(((r as u32) << 16) | ((g as u32) << 8) | b as u32);
+    if let Some(draft) = crate::shapes::draft_preview(doc, tool_rgb, pl.index, src, rot, k) {
+        page_div = page_div.child(draft);
     }
     page_div
 }
@@ -4537,7 +4550,8 @@ impl Render for DocView {
                     // Likewise an export or a split.
                 } else if v.cancel_plugin_run(cx) {
                     // And a plugin command that reports progress.
-                } else if v.cancel_tape_placing(cx) || v.close_group_list(cx) {
+                } else if v.cancel_tape_placing(cx) || v.cancel_shape(cx) || v.close_group_list(cx)
+                {
                     // Esc with a tape half-placed drops it; then the pages
                     // list closes.
                 } else if v.clear_text_sel(cx) {
@@ -4555,7 +4569,29 @@ impl Render for DocView {
                     v.leave_presentation(window, cx);
                 }
             }))
-            .on_action(cx.listener(|v, _: &SearchNext, _, cx| v.search_step(1, cx)))
+            .on_action(cx.listener(|v, _: &SearchNext, _, cx| {
+                // Enter finishes a shape being drawn, else finds the next.
+                if !v.finish_shape(cx) {
+                    v.search_step(1, cx)
+                }
+            }))
+            .on_action(cx.listener(|v, _: &crate::UndoVertex, _, cx| {
+                v.undo_vertex(cx);
+            }))
+            .on_action(
+                cx.listener(|v, _: &crate::ToolPolygon, _, cx| v.set_tool(Tool::Polygon, cx)),
+            )
+            .on_action(
+                cx.listener(|v, _: &crate::ToolPolyline, _, cx| v.set_tool(Tool::Polyline, cx)),
+            )
+            .on_action(cx.listener(|v, _: &crate::ToolCloud, _, cx| v.set_tool(Tool::Cloud, cx)))
+            .on_action(
+                cx.listener(|v, _: &crate::ToolCallout, _, cx| v.set_tool(Tool::Callout, cx)),
+            )
+            .on_action(
+                cx.listener(|v, _: &crate::CycleDrawingTools, _, cx| v.cycle_drawing_tools(cx)),
+            )
+            .on_action(cx.listener(|v, _: &crate::CycleTextTools, _, cx| v.cycle_text_tools(cx)))
             .on_action(cx.listener(|v, _: &SearchPrev, _, cx| v.search_step(-1, cx)))
             .on_action(
                 cx.listener(|v, _: &RotatePageCw, _, cx| v.rotate_current(Rotation::R90, cx)),
@@ -5000,6 +5036,79 @@ fn header_footer_elements(doc: &Doc, pl: &PagePlan, k: f32) -> Vec<AnyElement> {
 /// GPUI elements for one annotation, positioned in page-local logical px.
 /// `src` is the source page size, `rot` the page's extra rotation, `k` logical
 /// px per point.
+/// A polygon's or polyline's outline (a cloud's scallops when it's
+/// cloudy), filled when it's closed and has a fill.
+fn outline_elements(
+    a: &Annot,
+    closed: bool,
+    src: PageSize,
+    rot: Rotation,
+    k: f32,
+    stroke: gpui::Rgba,
+    alpha: u32,
+) -> Vec<AnyElement> {
+    let px_of = |p: Pt| {
+        let q = rotate_pt(p, src, rot);
+        (q.x * k, q.y * k)
+    };
+    let mut path: Vec<(f32, f32)> = if closed && a.cloudy {
+        let outline = sheaf_doc::annot::outline_of(&a.kind).unwrap_or_default();
+        let curves =
+            sheaf_doc::annot::cloud_curves(&outline, sheaf_doc::annot::cloud_step(a.stroke));
+        let mut pts = Vec::new();
+        for [p0, c1, c2, p1] in curves {
+            for i in 0..8 {
+                let t = i as f32 / 8.0;
+                let u = 1.0 - t;
+                pts.push(px_of(Pt {
+                    x: u * u * u * p0.x
+                        + 3.0 * u * u * t * c1.x
+                        + 3.0 * u * t * t * c2.x
+                        + t * t * t * p1.x,
+                    y: u * u * u * p0.y
+                        + 3.0 * u * u * t * c1.y
+                        + 3.0 * u * t * t * c2.y
+                        + t * t * t * p1.y,
+                }));
+            }
+        }
+        pts
+    } else {
+        match &a.kind {
+            AnnotKind::Polygon { points } | AnnotKind::Polyline { points } => {
+                points.iter().map(|p| px_of(*p)).collect()
+            }
+            other => sheaf_doc::annot::outline_of(other)
+                .unwrap_or_default()
+                .into_iter()
+                .map(px_of)
+                .collect(),
+        }
+    };
+    if closed && let Some(&first) = path.first() {
+        path.push(first);
+    }
+    let mut out = Vec::new();
+    if closed && let Some(f) = a.fill {
+        let u = ((f[0] as u32) << 16) | ((f[1] as u32) << 8) | f[2] as u32;
+        out.push(crate::markup_tools::fill_canvas(
+            vec![path.clone()],
+            rgba((u << 8) | alpha),
+            src.rotated(rot),
+            k,
+        ));
+    }
+    out.push(stroke_canvas_dashed(
+        vec![path],
+        stroke,
+        a.stroke * k,
+        a.dashed.then_some(k),
+        src.rotated(rot),
+        k,
+    ));
+    out
+}
+
 /// A text edit's caret, drawn as the file draws it.
 fn caret_element(at: Box2, color: gpui::Rgba, src: PageSize, rot: Rotation, k: f32) -> AnyElement {
     let tri = sheaf_doc::annot::caret_points(at)
@@ -5067,6 +5176,51 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
         AnnotKind::FreeText { rect, size } => {
             out.push(
                 place(*rect)
+                    .p(px(2.0 * k))
+                    .overflow_hidden()
+                    .text_color(color)
+                    .text_size(px(*size * k))
+                    .line_height(px(*size * 1.2 * k))
+                    .child(a.contents.clone())
+                    .into_any_element(),
+            );
+        }
+        AnnotKind::Square { .. } | AnnotKind::Ellipse { .. } | AnnotKind::Polygon { .. }
+            if a.cloudy =>
+        {
+            out.extend(outline_elements(a, true, src, rot, k, fill, alpha));
+        }
+        AnnotKind::Polygon { .. } | AnnotKind::Polyline { .. } => {
+            let closed = matches!(a.kind, AnnotKind::Polygon { .. });
+            out.extend(outline_elements(a, closed, src, rot, k, fill, alpha));
+        }
+        AnnotKind::Callout {
+            rect,
+            knee,
+            point,
+            size,
+        } => {
+            let px_of = |p: Pt| {
+                let q = rotate_pt(p, src, rot);
+                (q.x * k, q.y * k)
+            };
+            let end = sheaf_doc::annot::callout_end(*rect, *knee);
+            let (e, kn, pt) = (px_of(end), px_of(*knee), px_of(*point));
+            out.push(stroke_canvas(
+                vec![
+                    vec![e, kn, pt],
+                    arrow_head(kn, pt, (6.0 + a.stroke * 2.0) * k),
+                ],
+                fill,
+                a.stroke * k,
+                src.rotated(rot),
+                k,
+            ));
+            out.push(
+                place(*rect)
+                    .bg(theme::PAGE)
+                    .border(px((a.stroke * k).max(1.0)))
+                    .border_color(fill)
                     .p(px(2.0 * k))
                     .overflow_hidden()
                     .text_color(color)

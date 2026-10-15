@@ -1914,6 +1914,7 @@ mod tests {
                 created: String::new(),
                 fill: None,
                 dashed: false,
+                cloudy: false,
             };
             model
                 .apply(
@@ -2107,6 +2108,7 @@ mod tests {
             created: "D:20261014000000".into(),
             fill: None,
             dashed: false,
+            cloudy: false,
         }
     }
 
@@ -2644,6 +2646,7 @@ mod tests {
             created: "D:20261014000000".into(),
             fill: None,
             dashed: false,
+            cloudy: false,
         };
         let replace = mk(
             AnnotKind::Replace {
@@ -2800,6 +2803,7 @@ mod tests {
             created: String::new(),
             fill: None,
             dashed: false,
+            cloudy: false,
         };
         model
             .apply(
@@ -2945,6 +2949,7 @@ mod tests {
             created: String::new(),
             fill: None,
             dashed: false,
+            cloudy: false,
         };
         for pg in [p0, p1, p2] {
             model
@@ -3064,6 +3069,7 @@ mod tests {
             created: String::new(),
             fill: None,
             dashed: false,
+            cloudy: false,
         };
         model
             .apply(
@@ -3204,6 +3210,7 @@ mod tests {
                         created: String::new(),
                         fill: None,
                         dashed: false,
+                        cloudy: false,
                     },
                 },
                 "tick",
@@ -3232,6 +3239,7 @@ mod tests {
             created: String::new(),
             fill: None,
             dashed: false,
+            cloudy: false,
         };
         model
             .apply(
@@ -3494,6 +3502,7 @@ mod tests {
                             created: String::new(),
                             fill: None,
                             dashed: false,
+                            cloudy: false,
                         },
                     },
                     "a",
@@ -3736,6 +3745,7 @@ mod tests {
                         created: String::new(),
                         fill: None,
                         dashed: false,
+                        cloudy: false,
                     },
                 },
                 "a",
@@ -3809,6 +3819,7 @@ mod tests {
                         created: String::new(),
                         fill: None,
                         dashed: false,
+                        cloudy: false,
                     },
                 },
                 "sq",
@@ -4185,6 +4196,7 @@ mod tests {
                         created: String::new(),
                         fill: None,
                         dashed: false,
+                        cloudy: false,
                     },
                 },
                 "sq",

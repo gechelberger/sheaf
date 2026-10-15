@@ -201,7 +201,10 @@ pub fn annot_to_wit(a: &Annot) -> Option<w::Annot> {
         | AnnotKind::Status { .. }
         | AnnotKind::PageStamp { .. }
         | AnnotKind::TextStamp { .. }
-        | AnnotKind::PageBorder { .. } => return None,
+        | AnnotKind::PageBorder { .. }
+        | AnnotKind::Polygon { .. }
+        | AnnotKind::Polyline { .. }
+        | AnnotKind::Callout { .. } => return None,
     };
     Some(w::Annot {
         id: a.id.0,
@@ -277,6 +280,7 @@ pub fn annot_from_wit(a: w::Annot) -> Annot {
         created: sheaf_doc::pdf_date_now(),
         fill: None,
         dashed: false,
+        cloudy: false,
     }
 }
 
@@ -478,6 +482,7 @@ mod tests {
             created: "D:20260101000000".into(),
             fill: None,
             dashed: false,
+            cloudy: false,
         };
         let back = annot_from_wit(annot_to_wit(&a).unwrap());
         assert_eq!(

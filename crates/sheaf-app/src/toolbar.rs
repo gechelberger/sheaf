@@ -368,7 +368,12 @@ pub fn default_layout() -> Vec<Entry> {
     // Squiggly is in the menu and Shift+U's cycle, not on the bar.
     let mut items: Vec<Entry> = crate::markup_tools::Tool::ALL
         .iter()
-        .filter(|t| **t != crate::markup_tools::Tool::Squiggly)
+        .filter(|t| {
+            !matches!(
+                t,
+                crate::markup_tools::Tool::Squiggly | crate::markup_tools::Tool::Polyline
+            )
+        })
         .map(|t| Entry::item(t.action().name()))
         .collect();
     items.extend([

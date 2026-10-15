@@ -478,6 +478,41 @@ pub fn info(id: &str) -> Option<Info> {
         "tools::ToolLine" => ("line", "Drag to draw a straight line.", &[]),
         "tools::ToolArrow" => ("arrow", "Drag to draw an arrow.", &[]),
         "tools::ToolInk" => ("pencil", "Draw freehand.", &["ink", "pen", "draw"]),
+        "tools::ToolPolygon" => (
+            "polygon",
+            "Click each corner of a closed shape; double-click or Enter finishes, Backspace takes one off.",
+            &["shape", "vertices"],
+        ),
+        "tools::ToolPolyline" => (
+            "polyline",
+            "Click each point of an open line; double-click or Enter finishes.",
+            &["shape", "path", "vertices"],
+        ),
+        "tools::ToolCloud" => (
+            "cloud",
+            "Click each corner of a shape with a cloudy border, to call attention to an area.",
+            &["revision cloud", "shape"],
+        ),
+        "tools::ToolCallout" => (
+            "callout",
+            "Press where it points and drag to where its text goes, then type.",
+            &["leader", "text box", "label"],
+        ),
+        "tools::CycleDrawingTools" => (
+            "rectangle",
+            "Switch to the next drawing tool: rectangle, ellipse, line, arrow, polyline, polygon, cloud, pencil.",
+            &["cycle", "shapes"],
+        ),
+        "tools::CycleTextTools" => (
+            "text",
+            "Switch between the text box and the callout.",
+            &["cycle"],
+        ),
+        "tools::UndoVertex" => (
+            "undo",
+            "Take the last corner off the shape being drawn.",
+            &["backspace"],
+        ),
         "tools::ToolTick" => (
             "tick",
             "Click to stamp the selected tickmark.",

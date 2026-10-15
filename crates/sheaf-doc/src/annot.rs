@@ -197,6 +197,23 @@ pub enum AnnotKind {
         rect: Box2,
         status: String,
     },
+    /// A closed shape through `points`.
+    Polygon {
+        points: Vec<Pt>,
+    },
+    /// An open line through `points`.
+    Polyline {
+        points: Vec<Pt>,
+    },
+    /// A text box (`contents`, `size` points) with a leader line from
+    /// its edge through `knee` to an arrowhead at `point`: Acrobat's
+    /// callout.
+    Callout {
+        rect: Box2,
+        knee: Pt,
+        point: Pt,
+        size: f32,
+    },
 }
 
 /// What Previous/Next walks through: connectors by label, tickmarks by
@@ -325,6 +342,23 @@ impl AnnotKind {
                 rect: mb(rect),
                 status: status.clone(),
             },
+            AnnotKind::Polygon { points } => AnnotKind::Polygon {
+                points: points.iter().map(mp).collect(),
+            },
+            AnnotKind::Polyline { points } => AnnotKind::Polyline {
+                points: points.iter().map(mp).collect(),
+            },
+            AnnotKind::Callout {
+                rect,
+                knee,
+                point,
+                size: s,
+            } => AnnotKind::Callout {
+                rect: mb(rect),
+                knee: mp(knee),
+                point: mp(point),
+                size: *s,
+            },
             AnnotKind::Note { pos } => AnnotKind::Note { pos: mp(pos) },
             AnnotKind::FreeText { rect, size } => AnnotKind::FreeText {
                 rect: mb(rect),
@@ -427,6 +461,8 @@ impl AnnotKind {
     pub fn handles(&self) -> Handles {
         match self {
             AnnotKind::Line { .. } => Handles::Ends,
+            AnnotKind::Polygon { .. } | AnnotKind::Polyline { .. } => Handles::Vertices,
+            AnnotKind::Callout { .. } => Handles::Callout,
             AnnotKind::FreeText { .. }
             | AnnotKind::Square { .. }
             | AnnotKind::Ellipse { .. }
@@ -451,7 +487,15 @@ impl AnnotKind {
 
     /// Whether it has an inside to fill.
     pub fn fillable(&self) -> bool {
-        matches!(self, AnnotKind::Square { .. } | AnnotKind::Ellipse { .. })
+        matches!(
+            self,
+            AnnotKind::Square { .. } | AnnotKind::Ellipse { .. } | AnnotKind::Polygon { .. }
+        )
+    }
+
+    /// Whether it can have a cloudy border.
+    pub fn cloudable(&self) -> bool {
+        self.fillable()
     }
 
     /// Whether it's drawn with a stroke (width and dashes apply).
@@ -462,20 +506,28 @@ impl AnnotKind {
                 | AnnotKind::Ellipse { .. }
                 | AnnotKind::Line { .. }
                 | AnnotKind::Ink { .. }
+                | AnnotKind::Polygon { .. }
+                | AnnotKind::Polyline { .. }
+                | AnnotKind::Callout { .. }
         )
     }
 
     /// The text size, for kinds whose text the user sizes.
     pub fn text_size(&self) -> Option<f32> {
         match self {
-            AnnotKind::FreeText { size, .. } | AnnotKind::Tape { size, .. } => Some(*size),
+            AnnotKind::FreeText { size, .. }
+            | AnnotKind::Tape { size, .. }
+            | AnnotKind::Callout { size, .. } => Some(*size),
             _ => None,
         }
     }
 
     pub fn with_text_size(&self, to: f32) -> AnnotKind {
         let mut k = self.clone();
-        if let AnnotKind::FreeText { size, .. } | AnnotKind::Tape { size, .. } = &mut k {
+        if let AnnotKind::FreeText { size, .. }
+        | AnnotKind::Tape { size, .. }
+        | AnnotKind::Callout { size, .. } = &mut k
+        {
             *size = to.clamp(4.0, 144.0);
         }
         k
@@ -488,6 +540,185 @@ pub enum Handles {
     None,
     Ends,
     Box,
+    /// One on each vertex.
+    Vertices,
+    /// The text box's, the knee and the point.
+    Callout,
+}
+
+/// Whether `p` is inside the polygon `pts` (even-odd).
+fn inside(pts: &[Pt], p: Pt) -> bool {
+    let mut odd = false;
+    let n = pts.len();
+    for i in 0..n {
+        let (a, b) = (pts[i], pts[(i + n - 1) % n]);
+        if (a.y > p.y) != (b.y > p.y) && p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x {
+            odd = !odd;
+        }
+    }
+    odd
+}
+
+/// Where a callout's leader meets its box: the box's edge nearest the
+/// knee.
+pub fn callout_end(rect: Box2, knee: Pt) -> Pt {
+    let x = knee.x.clamp(rect.x, rect.right());
+    let y = knee.y.clamp(rect.y, rect.bottom());
+    if (x, y) != (knee.x, knee.y) {
+        return Pt { x, y };
+    }
+    // The knee is inside: out to the nearest side.
+    let sides = [
+        (knee.x - rect.x, Pt { x: rect.x, y }),
+        (rect.right() - knee.x, Pt { x: rect.right(), y }),
+        (knee.y - rect.y, Pt { x, y: rect.y }),
+        (
+            rect.bottom() - knee.y,
+            Pt {
+                x,
+                y: rect.bottom(),
+            },
+        ),
+    ];
+    sides
+        .into_iter()
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, p)| p)
+        .unwrap_or(knee)
+}
+
+/// A closed outline as points: a rectangle's corners, an ellipse in 32
+/// steps, a polygon's vertices. For a cloudy border.
+pub fn outline_of(kind: &AnnotKind) -> Option<Vec<Pt>> {
+    match kind {
+        AnnotKind::Square { rect } => Some(vec![
+            Pt {
+                x: rect.x,
+                y: rect.y,
+            },
+            Pt {
+                x: rect.right(),
+                y: rect.y,
+            },
+            Pt {
+                x: rect.right(),
+                y: rect.bottom(),
+            },
+            Pt {
+                x: rect.x,
+                y: rect.bottom(),
+            },
+        ]),
+        AnnotKind::Ellipse { rect } => {
+            let (cx, cy, rx, ry) = (
+                rect.x + rect.w / 2.0,
+                rect.y + rect.h / 2.0,
+                rect.w / 2.0,
+                rect.h / 2.0,
+            );
+            Some(
+                (0..32)
+                    .map(|i| {
+                        let t = i as f32 / 32.0 * std::f32::consts::TAU;
+                        Pt {
+                            x: cx + rx * t.cos(),
+                            y: cy + ry * t.sin(),
+                        }
+                    })
+                    .collect(),
+            )
+        }
+        AnnotKind::Polygon { points } if points.len() >= 3 => Some(points.clone()),
+        _ => None,
+    }
+}
+
+/// A cloudy border around the closed outline `pts`: scallops about
+/// `step` points long bulging outward, each a cubic (from, c1, c2, to), in
+/// the same space as `pts`.
+pub fn cloud_curves(pts: &[Pt], step: f32) -> Vec<[Pt; 4]> {
+    let n = pts.len();
+    if n < 3 {
+        return Vec::new();
+    }
+    // Which side is out: the outline's turning, from its signed area.
+    let area: f32 = (0..n)
+        .map(|i| {
+            let (a, b) = (pts[i], pts[(i + 1) % n]);
+            a.x * b.y - b.x * a.y
+        })
+        .sum();
+    let out = if area > 0.0 { 1.0 } else { -1.0 };
+    let mut curves = Vec::new();
+    for i in 0..n {
+        let (a, b) = (pts[i], pts[(i + 1) % n]);
+        let len = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
+        if len < 0.01 {
+            continue;
+        }
+        let k = (len / step).round().max(1.0) as usize;
+        for j in 0..k {
+            let t0 = j as f32 / k as f32;
+            let t1 = (j + 1) as f32 / k as f32;
+            let p = Pt {
+                x: a.x + (b.x - a.x) * t0,
+                y: a.y + (b.y - a.y) * t0,
+            };
+            let q = Pt {
+                x: a.x + (b.x - a.x) * t1,
+                y: a.y + (b.y - a.y) * t1,
+            };
+            let seg = len / k as f32;
+            let (nx, ny) = (out * (q.y - p.y) / seg, out * -(q.x - p.x) / seg);
+            let h = seg * 0.55;
+            curves.push([
+                p,
+                Pt {
+                    x: p.x + nx * h,
+                    y: p.y + ny * h,
+                },
+                Pt {
+                    x: q.x + nx * h,
+                    y: q.y + ny * h,
+                },
+                q,
+            ]);
+        }
+    }
+    curves
+}
+
+/// `/BE` for a cloudy border.
+fn cloudy_style() -> Dictionary {
+    dictionary! { "S" => Object::Name(b"C".to_vec()), "I" => 1 }
+}
+
+/// The path of a mark's cloudy border, in user space through `up`.
+fn cloud_ops(kind: &AnnotKind, width: f32, up: &dyn Fn(Pt) -> Pt) -> String {
+    let Some(outline) = outline_of(kind) else {
+        return String::new();
+    };
+    let mut out = String::new();
+    for (i, [a, c1, c2, b]) in cloud_curves(&outline, cloud_step(width))
+        .into_iter()
+        .enumerate()
+    {
+        let [a, c1, c2, b] = [a, c1, c2, b].map(up);
+        if i == 0 {
+            out.push_str(&format!(" {:.2} {:.2} m", a.x, a.y));
+        }
+        out.push_str(&format!(
+            " {:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c",
+            c1.x, c1.y, c2.x, c2.y, b.x, b.y
+        ));
+    }
+    out.push_str(" h");
+    out
+}
+
+/// How long a cloud's scallops are for a mark of stroke `width`.
+pub fn cloud_step(width: f32) -> f32 {
+    (9.0 + width * 3.0).min(30.0)
 }
 
 /// Distance from `p` to the segment `a`–`b`.
@@ -529,6 +760,10 @@ pub struct Annot {
     /// A dashed stroke (`/BS /S /D`), for kinds with one.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dashed: bool,
+    /// A cloudy border (`/BE /S /C`): scallops along the outline of a
+    /// rectangle, ellipse or polygon.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cloudy: bool,
 }
 
 impl Annot {
@@ -551,6 +786,20 @@ impl Annot {
             AnnotKind::Insert { at } => *at,
             // Not on the page: they're in their parent's thread.
             AnnotKind::Reply { .. } | AnnotKind::Status { .. } => union(&[]),
+            AnnotKind::Polygon { points } | AnnotKind::Polyline { points } => union(
+                &points
+                    .iter()
+                    .map(|p| Box2 {
+                        x: p.x,
+                        y: p.y,
+                        w: 0.0,
+                        h: 0.0,
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            AnnotKind::Callout {
+                rect, knee, point, ..
+            } => union(&[*rect, Box2::from_corners(*knee, *point)]),
             AnnotKind::Note { pos } => Box2 {
                 x: pos.x,
                 y: pos.y,
@@ -620,6 +869,16 @@ impl Annot {
                 near(a, b) || near(b, c) || near(c, d) || near(d, a)
             }
             AnnotKind::Line { a, b, .. } => near(*a, *b),
+            AnnotKind::Polyline { points } => points.windows(2).any(|w| near(w[0], w[1])),
+            // On an edge, or inside when filled.
+            AnnotKind::Polygon { points } => {
+                let n = points.len();
+                (0..n).any(|i| near(points[i], points[(i + 1) % n]))
+                    || (self.fill.is_some() && inside(points, p))
+            }
+            AnnotKind::Callout {
+                rect, knee, point, ..
+            } => rect.contains(p) || near(*point, *knee) || near(*knee, callout_end(*rect, *knee)),
             AnnotKind::Ink { paths } => paths.iter().any(|path| match path.as_slice() {
                 [one] => near(*one, *one),
                 pts => pts.windows(2).any(|w| near(w[0], w[1])),
@@ -1350,7 +1609,10 @@ fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
                 content.push_str(&format!(" {}", color_ops(f, true)));
             }
             let b = geom.box_to_user(*rect);
-            if square {
+            if a.cloudy {
+                dict.set("BE", cloudy_style());
+                content.push_str(&cloud_ops(&a.kind, a.stroke, &up));
+            } else if square {
                 let [x0, y0, x1, y1] = b;
                 content.push_str(&format!(
                     " {x0:.2} {y0:.2} {:.2} {:.2} re",
@@ -1361,6 +1623,115 @@ fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
                 content.push_str(&ellipse_path(b));
             }
             content.push_str(if a.fill.is_some() { " B" } else { " S" });
+        }
+        AnnotKind::Polygon { points } | AnnotKind::Polyline { points } => {
+            let closed = matches!(a.kind, AnnotKind::Polygon { .. });
+            let subtype: &[u8] = if closed { b"Polygon" } else { b"PolyLine" };
+            dict.set("Subtype", Object::Name(subtype.to_vec()));
+            dict.set("C", color_arr);
+            dict.set("BS", border_style(a));
+            dict.set(
+                "Vertices",
+                Object::Array(
+                    points
+                        .iter()
+                        .flat_map(|p| {
+                            let u = up(*p);
+                            [Object::Real(u.x), Object::Real(u.y)]
+                        })
+                        .collect(),
+                ),
+            );
+            content.push_str(&stroke_ops(a));
+            let filled = closed && a.fill.is_some();
+            if let (true, Some(f)) = (closed, a.fill) {
+                dict.set(
+                    "IC",
+                    Object::Array(f.iter().map(|v| Object::Real(*v as f32 / 255.0)).collect()),
+                );
+                content.push_str(&format!(" {}", color_ops(f, true)));
+            }
+            if closed && a.cloudy {
+                dict.set("BE", cloudy_style());
+                content.push_str(&cloud_ops(&a.kind, a.stroke, &up));
+            } else {
+                for (i, p) in points.iter().enumerate() {
+                    let u = up(*p);
+                    let op = if i == 0 { "m" } else { "l" };
+                    content.push_str(&format!(" {:.2} {:.2} {op}", u.x, u.y));
+                }
+                if closed {
+                    content.push_str(" h");
+                }
+            }
+            content.push_str(if filled { " B" } else { " S" });
+        }
+        AnnotKind::Callout {
+            rect,
+            knee,
+            point,
+            size,
+        } => {
+            dict.set("Subtype", Object::Name(b"FreeText".to_vec()));
+            dict.set("IT", Object::Name(b"FreeTextCallout".to_vec()));
+            dict.set(
+                "DA",
+                pdf_text_string(&format!("{HELV} {size} Tf {}", color_ops(c, true))),
+            );
+            dict.set("C", Object::Array(vec![]));
+            dict.set("BS", border_style(a));
+            let end = callout_end(*rect, *knee);
+            let (up_point, up_knee, up_end) = (up(*point), up(*knee), up(end));
+            dict.set(
+                "CL",
+                Object::Array(
+                    [up_point, up_knee, up_end]
+                        .iter()
+                        .flat_map(|p| [Object::Real(p.x), Object::Real(p.y)])
+                        .collect(),
+                ),
+            );
+            dict.set("LE", Object::Name(b"OpenArrow".to_vec()));
+            // The box inside /Rect, for viewers that lay the text out.
+            let [bx0, by0, bx1, by1] = geom.box_to_user(*rect);
+            dict.set(
+                "RD",
+                Object::Array(
+                    [bx0 - llx, by0 - lly, urx - bx1, ury - by1]
+                        .iter()
+                        .map(|v| Object::Real(v.max(0.0)))
+                        .collect(),
+                ),
+            );
+            content.push_str(&stroke_ops(a));
+            content.push_str(&format!(
+                " 1 g {bx0:.2} {by0:.2} {:.2} {:.2} re B",
+                bx1 - bx0,
+                by1 - by0
+            ));
+            content.push_str(&format!(
+                " {:.2} {:.2} m {:.2} {:.2} l {:.2} {:.2} l S",
+                up_end.x, up_end.y, up_knee.x, up_knee.y, up_point.x, up_point.y
+            ));
+            content.push_str(&arrowhead(up_knee, up_point, a.stroke));
+            let lines = wrap_lines(&a.contents, *size, rect.w - 4.0);
+            content.push_str(&format!(
+                " BT {HELV} {size} Tf {} {:.2} TL",
+                color_ops(c, true),
+                size * 1.2
+            ));
+            for (i, line) in lines.iter().enumerate() {
+                let origin = Pt {
+                    x: rect.x + 2.0,
+                    y: rect.y + 2.0 + size * (1.0 + 1.2 * i as f32),
+                };
+                content.push_str(&format!(
+                    " {} {} Tj",
+                    text_matrix(origin),
+                    content_literal(line)
+                ));
+            }
+            content.push_str(" ET");
         }
         AnnotKind::Connector { rect, label, .. } => {
             // A Link so other viewers jump too; the writer fills in /Dest once
@@ -2011,6 +2382,7 @@ mod tests {
             created: "D:20261010000000".into(),
             fill: None,
             dashed: false,
+            cloudy: false,
         };
         let mut pdf = lopdf::Document::with_version("1.7");
         let Written { main: dict, .. } = to_pdf(&a, &geom(0), &mut pdf);
@@ -2059,6 +2431,7 @@ mod tests {
             created: String::new(),
             fill: None,
             dashed: false,
+            cloudy: false,
         }
     }
 
@@ -2218,5 +2591,69 @@ mod tests {
             }),
             Some(Group::Tickmark("✓".into()))
         );
+    }
+
+    #[test]
+    fn clouds_bulge_outward_whichever_way_round() {
+        let square = outline_of(&AnnotKind::Square {
+            rect: bx(100.0, 100.0, 100.0, 100.0),
+        })
+        .unwrap();
+        for pts in [square.clone(), square.iter().rev().copied().collect()] {
+            let curves = cloud_curves(&pts, 20.0);
+            assert_eq!(curves.len(), 20);
+            // Every control point is outside the square.
+            for [_, c1, c2, _] in curves {
+                for c in [c1, c2] {
+                    let inside = c.x > 100.0 && c.x < 200.0 && c.y > 100.0 && c.y < 200.0;
+                    assert!(!inside, "{c:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn polygons_and_callouts_write_their_keys() {
+        let mut pdf = lopdf::Document::with_version("1.7");
+        let mut poly = mark(AnnotKind::Polygon {
+            points: vec![
+                Pt { x: 10.0, y: 10.0 },
+                Pt { x: 110.0, y: 10.0 },
+                Pt { x: 60.0, y: 90.0 },
+            ],
+        });
+        poly.cloudy = true;
+        poly.fill = Some([255, 255, 0]);
+        let main = to_pdf(&poly, &geom(0), &mut pdf).main;
+        assert_eq!(main.get(b"Subtype").unwrap().as_name().unwrap(), b"Polygon");
+        assert_eq!(main.get(b"Vertices").unwrap().as_array().unwrap().len(), 6);
+        let be = main.get(b"BE").unwrap().as_dict().unwrap();
+        assert_eq!(be.get(b"S").unwrap().as_name().unwrap(), b"C");
+        assert!(
+            poly.hit(Pt { x: 60.0, y: 40.0 }, 2.0),
+            "filled: inside counts"
+        );
+
+        let callout = mark(AnnotKind::Callout {
+            rect: bx(200.0, 100.0, 120.0, 40.0),
+            knee: Pt { x: 180.0, y: 160.0 },
+            point: Pt { x: 150.0, y: 200.0 },
+            size: 12.0,
+        });
+        let main = to_pdf(&callout, &geom(0), &mut pdf).main;
+        assert_eq!(
+            main.get(b"IT").unwrap().as_name().unwrap(),
+            b"FreeTextCallout"
+        );
+        let cl = main.get(b"CL").unwrap().as_array().unwrap();
+        assert_eq!(cl.len(), 6);
+        // The leader starts at the point (user space: 792 - 200).
+        assert_eq!(cl[1].as_float().unwrap(), 592.0);
+        // It meets the box at its left side, level with the knee.
+        assert_eq!(
+            callout_end(bx(200.0, 100.0, 120.0, 40.0), Pt { x: 180.0, y: 120.0 }),
+            Pt { x: 200.0, y: 120.0 }
+        );
+        assert!(callout.hit(Pt { x: 165.0, y: 180.0 }, 3.0), "on the leader");
     }
 }

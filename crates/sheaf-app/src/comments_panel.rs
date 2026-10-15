@@ -382,6 +382,9 @@ fn ours_type(kind: &AnnotKind) -> &'static str {
         AnnotKind::Status { .. } => "Status",
         AnnotKind::PageStamp { .. } | AnnotKind::TextStamp { .. } => "Stamp",
         AnnotKind::PageBorder { .. } => "Page border",
+        AnnotKind::Polygon { .. } => "Polygon",
+        AnnotKind::Polyline { .. } => "Polyline",
+        AnnotKind::Callout { .. } => "Callout",
     }
 }
 
@@ -411,6 +414,9 @@ pub(crate) fn kind_label(kind: &AnnotKind) -> String {
             format!("Stamp {}", text.lines().next().unwrap_or_default())
         }
         AnnotKind::PageBorder { status, .. } => format!("{status} border"),
+        AnnotKind::Polygon { .. } => "Polygon".into(),
+        AnnotKind::Polyline { .. } => "Polyline".into(),
+        AnnotKind::Callout { .. } => "Callout".into(),
     }
 }
 
@@ -2075,6 +2081,7 @@ mod tests {
             created: String::new(),
             fill: None,
             dashed: false,
+            cloudy: false,
         };
         let replace = |contents| {
             mk(
@@ -2246,6 +2253,7 @@ mod tests {
                 created: String::new(),
                 fill: None,
                 dashed: false,
+                cloudy: false,
             });
         }
         d.set_initial_annots(ours).unwrap();

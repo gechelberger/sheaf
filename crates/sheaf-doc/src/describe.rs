@@ -144,6 +144,9 @@ fn noun(kind: &AnnotKind) -> String {
             format!("stamp {}", text.lines().next().unwrap_or_default())
         }
         AnnotKind::PageBorder { status, .. } => format!("a {status} border"),
+        AnnotKind::Polygon { .. } => "a polygon".into(),
+        AnnotKind::Polyline { .. } => "a polyline".into(),
+        AnnotKind::Callout { .. } => "a callout".into(),
         AnnotKind::Reply { .. } => "a reply".into(),
         AnnotKind::Status { .. } => "a status".into(),
     }

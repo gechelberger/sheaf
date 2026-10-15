@@ -221,7 +221,7 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 |---|---|
 | Sticky notes, highlight, underline, strikethrough | ✅ also squiggly. Drag across text (or select it, then press the tool's key: U highlights); Shift+U cycles highlight, underline, strikethrough, squiggly |
 | Text edits: replace or insert text (Acrobat's) | ✅ Text Edits (E): drag across text and type the replacement, or click between characters and type what to insert. Written as Acrobat writes them (a Caret, with the StrikeOut grouped under it); the Comments panel reads Replace “x” with “y” |
-| Free text, shapes (rect, ellipse, line, arrow, polygon) | ✅ polygon 📋 |
+| Free text, shapes (rect, ellipse, line, arrow, polygon) | ✅ also polyline, cloud (Q: a cloudy polygon; any rectangle, ellipse or polygon can be made cloudy) and callout (a text box with a leader; Shift+X from the text box). Polygons: click each corner, double-click or Enter finishes, Backspace takes one off. Shift+D cycles the drawing tools. Every handle drags: corners, vertices, a callout's box, knee and point |
 | Ink / freehand | ✅ |
 | Edit placed marks: move, resize, restyle | ✅ Drag to move (Ctrl+drag under any tool), handles to resize (Shift keeps the shape, or snaps a line to 45°), Shift+click to select several. A properties bar sets color, fill, opacity, line width, dashes, arrowheads at either end and text size; each change is one undo step |
 | Copy and paste marks | ✅ Ctrl+C, Ctrl+V (offset), Ctrl+Alt+V (in place), across documents too |

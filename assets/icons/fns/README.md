@@ -27,6 +27,10 @@ an image element does not inherit the parent element's color.
 | [ellipse](ellipse/icon.svg) | Ellipse | `ToolEllipse` |
 | [line](line/icon.svg) | Line | `ToolLine` |
 | [arrow](arrow/icon.svg) | Arrow | `ToolArrow` |
+| [polygon](polygon/icon.svg) | Polygon | `ToolPolygon` |
+| [polyline](polyline/icon.svg) | Polyline | `ToolPolyline` |
+| [cloud](cloud/icon.svg) | Cloud | `ToolCloud` |
+| [callout](callout/icon.svg) | Callout | `ToolCallout` |
 | [pencil](pencil/icon.svg) | Pencil | `ToolInk` |
 | [tick](tick/icon.svg) | Tickmark | `ToolTick` |
 | [stamp](stamp/icon.svg) | Stamp | `ToolStamp` |

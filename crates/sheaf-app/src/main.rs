@@ -59,6 +59,7 @@ mod rulers;
 mod scan_dialog;
 mod script;
 mod set_status;
+mod shapes;
 mod split_dialog;
 mod stamp_preview;
 mod stamps_panel;
@@ -155,6 +156,13 @@ actions!(
         ToolInk,
         ToolTick,
         ToolStamp,
+        ToolPolygon,
+        ToolPolyline,
+        ToolCloud,
+        ToolCallout,
+        CycleDrawingTools,
+        CycleTextTools,
+        UndoVertex,
         ToolConnector,
         NextConnectorLabel,
         GroupNext,
@@ -503,6 +511,11 @@ fn main() {
             KeyBinding::new("n", ToolInk, doc_keys),
             KeyBinding::new("k", ToolTick, doc_keys),
             KeyBinding::new("j", ToolStamp, doc_keys),
+            KeyBinding::new("q", ToolCloud, doc_keys),
+            KeyBinding::new("x", ToolFreeText, doc_keys),
+            KeyBinding::new("shift-x", CycleTextTools, doc_keys),
+            KeyBinding::new("shift-d", CycleDrawingTools, doc_keys),
+            KeyBinding::new("backspace", UndoVertex, doc_keys),
             KeyBinding::new("shift-i", NextConnectorLabel, doc_keys),
             KeyBinding::new("]", GroupNext, doc_keys),
             KeyBinding::new("[", GroupPrev, doc_keys),

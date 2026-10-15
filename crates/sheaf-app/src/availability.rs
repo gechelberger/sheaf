@@ -320,6 +320,13 @@ pub fn builtin(id: &str) -> Builtin {
         "tools::ToolTick" => (DOC, None, Some(|f| f.tool == Some(Tool::Tick))),
         "tools::ToolConnector" => (DOC, None, Some(|f| f.tool == Some(Tool::Connector))),
         "tools::ToolStamp" => (DOC, None, Some(|f| f.tool == Some(Tool::Stamp))),
+        "tools::ToolPolygon" => (DOC, None, Some(|f| f.tool == Some(Tool::Polygon))),
+        "tools::ToolPolyline" => (DOC, None, Some(|f| f.tool == Some(Tool::Polyline))),
+        "tools::ToolCloud" => (DOC, None, Some(|f| f.tool == Some(Tool::Cloud))),
+        "tools::ToolCallout" => (DOC, None, Some(|f| f.tool == Some(Tool::Callout))),
+        "tools::CycleDrawingTools" | "tools::CycleTextTools" | "tools::UndoVertex" => {
+            (DOC, None, None)
+        }
         "tools::NextConnectorLabel" => (DOC, None, None),
         "tools::GroupNext"
         | "tools::GroupPrev"

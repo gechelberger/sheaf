@@ -1030,6 +1030,7 @@ fn keep_unseen(edits: &mut [sheaf_doc::Edit], st: &sheaf_doc::DocState) {
         };
         annot.fill = was.fill;
         annot.dashed = was.dashed;
+        annot.cloudy = was.cloudy;
         annot.created = was.created.clone();
         if let (
             sheaf_doc::AnnotKind::Line { arrow_start, .. },
@@ -1648,6 +1649,7 @@ mod tests {
             created: "D:0".into(),
             fill: None,
             dashed: true,
+            cloudy: false,
         };
         d.apply(Edit::AnnotAdd { page, annot: line }, "Line")
             .unwrap();

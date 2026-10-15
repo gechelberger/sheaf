@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use lopdf::{Document as Pdf, Object, Stream, dictionary};
 use sheaf_core::{PageIndex, PageSize, Rotation};
 use sheaf_doc::annot::caret_box;
-use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, Document, Edit, FixedCount, SourceInfo};
+use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, Document, Edit, FixedCount, Pt, SourceInfo};
 use sheaf_image::raster::PixelFormat;
 use sheaf_render::pdfium::PdfiumEngine;
 use sheaf_render::{Job, Renderer};
@@ -66,6 +66,7 @@ fn mark(kind: AnnotKind, color: [u8; 3]) -> Annot {
         created: String::new(),
         fill: None,
         dashed: false,
+        cloudy: false,
     }
 }
 
@@ -482,5 +483,97 @@ fn tapes_draw_turned_and_from_old_text() {
     assert!(beside.iter().all(|c| *c > 245), "beside {beside:?}");
     // The old one: its text drawn too.
     assert!(inked(300.0, 100.0, 410.0, 160.0) > 50);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn clouds_and_callouts_draw() {
+    let dir = tempdir();
+    let src = dir.join("src.pdf");
+    blank_pdf(&src, 0);
+    let mut model = Document::new(
+        SourceInfo {
+            path: src.clone(),
+            page_count: 1,
+            first_page: PageSize {
+                width: 612.0,
+                height: 792.0,
+            },
+            page_sizes: None,
+            bytes: 0,
+            password: None,
+            data: None,
+        },
+        &[],
+        Box::new(FixedCount(10)),
+    );
+    let page = model.page(0).unwrap().id;
+    let mut cloud = mark(
+        AnnotKind::Square {
+            rect: Box2 {
+                x: 100.0,
+                y: 100.0,
+                w: 200.0,
+                h: 100.0,
+            },
+        },
+        RED,
+    );
+    cloud.cloudy = true;
+    cloud.stroke = 2.0;
+    let callout = mark(
+        AnnotKind::Callout {
+            rect: Box2 {
+                x: 350.0,
+                y: 300.0,
+                w: 150.0,
+                h: 36.0,
+            },
+            knee: Pt { x: 330.0, y: 318.0 },
+            point: Pt { x: 250.0, y: 400.0 },
+            size: 12.0,
+        },
+        BLUE,
+    );
+    for a in [cloud, callout] {
+        model
+            .apply(Edit::AnnotAdd { page, annot: a }, "mark")
+            .unwrap();
+    }
+    let out = dir.join("shapes.pdf");
+    sheaf_doc::save::rewrite_to_path(&model.snapshot(), &out).unwrap();
+    let engine = PdfiumEngine::open(&out, None).unwrap();
+    let r = engine
+        .render(
+            PageIndex(0),
+            Job::Page {
+                width: 612,
+                rotation: Rotation::R0,
+            },
+            PixelFormat::Rgba,
+        )
+        .unwrap();
+    let px = |x: u32, y: u32| {
+        let i = ((y * r.width + x) * 4) as usize;
+        [r.data[i], r.data[i + 1], r.data[i + 2]]
+    };
+    let count = |x0: u32, y0: u32, x1: u32, y1: u32, f: &dyn Fn([u8; 3]) -> bool| {
+        (y0..y1)
+            .flat_map(|y| (x0..x1).map(move |x| (x, y)))
+            .filter(|&(x, y)| f(px(x, y)))
+            .count()
+    };
+    let red = |c: [u8; 3]| c[0] > 180 && c[1] < 100;
+    // Thin lines antialias: clearly bluer than red is blue enough.
+    let blue = |c: [u8; 3]| c[2] > 180 && c[2] as i32 - c[0] as i32 > 60;
+    // The cloud's scallops bulge outside the square, above its top edge.
+    assert!(count(100, 80, 300, 99, &red) > 20, "scallops above the box");
+    // Inside, well away from the edge, the page shows.
+    assert_eq!(count(150, 130, 250, 170, &red), 0);
+    // The callout's box edge, and its leader down to the point.
+    let edge = count(348, 300, 353, 336, &blue);
+    let leader = count(255, 320, 335, 395, &blue);
+    assert!(edge > 10, "box's left edge: {edge}");
+    assert!(leader > 10, "leader: {leader}");
     let _ = std::fs::remove_dir_all(&dir);
 }
