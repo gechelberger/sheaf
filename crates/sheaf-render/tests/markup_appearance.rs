@@ -210,3 +210,74 @@ fn text_markup_draws_where_it_should() {
 fn text_markup_draws_where_it_should_on_a_turned_page() {
     check(90);
 }
+
+#[test]
+fn another_tools_comment_hides_and_shows_by_slot() {
+    let dir = tempdir();
+    let path = dir.join("square.pdf");
+    let mut pdf = Pdf::with_version("1.5");
+    let pages_id = pdf.new_object_id();
+    let content = pdf.add_object(Stream::new(dictionary! {}, Vec::new()));
+    // A filled square, its look drawn by its appearance stream.
+    let ap = pdf.add_object(Stream::new(
+        dictionary! {
+            "Type" => "XObject", "Subtype" => "Form",
+            "BBox" => vec![100.into(), 100.into(), 200.into(), 200.into()],
+        },
+        b"1 0 0 rg 100 100 100 100 re f".to_vec(),
+    ));
+    let link = pdf.add_object(dictionary! {
+        "Type" => "Annot", "Subtype" => "Link",
+        "Rect" => vec![0.into(), 0.into(), 10.into(), 10.into()],
+    });
+    let square = pdf.add_object(dictionary! {
+        "Type" => "Annot", "Subtype" => "Square",
+        "Rect" => vec![100.into(), 100.into(), 200.into(), 200.into()],
+        "AP" => dictionary! { "N" => ap },
+    });
+    let page = pdf.add_object(dictionary! {
+        "Type" => "Page", "Parent" => pages_id, "Contents" => content,
+        "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        "Annots" => vec![Object::Reference(link), Object::Reference(square)],
+    });
+    pdf.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages", "Kids" => vec![Object::Reference(page)], "Count" => 1,
+        }),
+    );
+    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    pdf.trailer.set("Root", catalog);
+    pdf.save(&path).unwrap();
+
+    let engine = PdfiumEngine::open(&path, None).unwrap();
+    let red_at_center = |e: &PdfiumEngine| {
+        let r = e
+            .render(
+                PageIndex(0),
+                Job::Page {
+                    width: 612,
+                    rotation: Rotation::R0,
+                },
+                PixelFormat::Rgba,
+            )
+            .unwrap();
+        // (150, 150) in user space is 642 down from the top.
+        let i = ((642 * r.width + 150) * 4) as usize;
+        r.data[i] > 200 && r.data[i + 1] < 80
+    };
+    assert!(red_at_center(&engine));
+    // Slot 1: the link is slot 0.
+    assert_eq!(
+        engine
+            .set_annots_hidden(PageIndex(0), &[(1, true)])
+            .unwrap(),
+        1
+    );
+    assert!(!red_at_center(&engine));
+    engine
+        .set_annots_hidden(PageIndex(0), &[(1, false)])
+        .unwrap();
+    assert!(red_at_center(&engine));
+    let _ = std::fs::remove_dir_all(&dir);
+}

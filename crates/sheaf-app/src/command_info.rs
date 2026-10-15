@@ -113,6 +113,11 @@ pub fn info(id: &str) -> Option<Info> {
             "Paste copied annotations onto the current page, a little offset.",
             &["clipboard"],
         ),
+        "docview::ToggleComments" => (
+            "comments",
+            "Show or hide every comment on the page; the Comments panel still lists them.",
+            &["hide comments", "annotations", "markup"],
+        ),
         "comments::ReplyToComment" => (
             "reply",
             "Reply to the comment selected in the Comments panel.",

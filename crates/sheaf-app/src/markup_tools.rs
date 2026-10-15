@@ -445,10 +445,17 @@ impl DocView {
         let State::Ready(doc) = &self.state else {
             return None;
         };
-        doc.model
-            .state()
-            .annots_on(page_id)
-            .and_then(|list| list.iter().rev().find(|a| a.hit(p, tolerance)).cloned())
+        // A mark the comment filter hides can't be clicked.
+        if doc.comments_hidden {
+            return None;
+        }
+        doc.model.state().annots_on(page_id).and_then(|list| {
+            list.iter()
+                .rev()
+                .filter(|a| !doc.hidden_marks.contains(&a.id))
+                .find(|a| a.hit(p, tolerance))
+                .cloned()
+        })
     }
 
     /// The handle of the selected mark under `p`, when one mark is selected

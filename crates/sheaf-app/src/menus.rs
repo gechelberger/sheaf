@@ -202,6 +202,7 @@ fn builtin_menus() -> Vec<(&'static str, Vec<Item>)> {
                 item("R&ulers", ToggleRulers),
                 item("&Grid", ToggleGrid),
                 item("Clear Guid&es", ClearGuides),
+                item("Show Co&mments", ToggleComments),
                 sep(),
                 Item::Sub(
                     "Panel&s",

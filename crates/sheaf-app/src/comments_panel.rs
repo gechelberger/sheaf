@@ -8,10 +8,11 @@
 //! statuses (review states and checkmarks), ours (`AnnotKind::Reply`,
 //! `AnnotKind::Status`) and other tools' (`ForeignAnnot::parent`) alike.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 
 use gpui::{
-    AnchoredPositionMode, AnyElement, Context, Entity, FocusHandle, Focusable, Pixels, Point,
+    AnchoredPositionMode, AnyElement, App, Context, Entity, FocusHandle, Focusable, Pixels, Point,
     Subscription, Window, anchored, deferred, div, prelude::*, px,
 };
 use sheaf_core::PageSize;
@@ -55,6 +56,16 @@ pub struct Comments {
     pub reply: Option<ReplyBox>,
     /// The right-click menu: on which comment, and where.
     pub menu: Option<(Item, Point<Pixels>)>,
+    /// The Filter or Sort popover, and where.
+    pub popover: Option<(Popover, Point<Pixels>)>,
+    /// The filter's page range, as typed.
+    pub pages: Entity<TextInput>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Popover {
+    Filter,
+    Sort,
 }
 
 /// The box a reply is written in, under what it replies to.
@@ -73,16 +84,132 @@ pub struct ReplyBox {
 
 /// A comment in the list: one of our marks, or another tool's (an index
 /// into `Doc::foreign_annots`).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Item {
     Ours(PageId, AnnotId),
     Foreign(usize),
 }
 
-#[derive(Clone, Copy)]
+/// What the panel shows, and the page with it. Each set lists what's
+/// hidden, so everything shows until something is turned off.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CommentFilter {
+    pub types: BTreeSet<String>,
+    pub authors: BTreeSet<String>,
+    /// Review states, "None" included.
+    pub statuses: BTreeSet<String>,
+    pub colors: BTreeSet<[u8; 3]>,
+    /// Only checked (true) or only unchecked (false) ones.
+    pub checked: Option<bool>,
+    /// Display pages, from 0, inclusive.
+    pub pages: Option<(usize, usize)>,
+    /// PDFlyer's Stamp Summary or Note Summary.
+    pub summary: Option<Summary>,
+    pub sort: Sort,
+}
+
+impl CommentFilter {
+    /// Whether it hides anything.
+    pub fn is_active(&self) -> bool {
+        !self.types.is_empty()
+            || !self.authors.is_empty()
+            || !self.statuses.is_empty()
+            || !self.colors.is_empty()
+            || self.checked.is_some()
+            || self.pages.is_some()
+            || self.summary.is_some()
+    }
+}
+
+/// PDFlyer's summaries, as filter presets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Summary {
+    /// Tickmarks, stamps and connectors.
+    Stamps,
+    /// Notes and calculator tapes.
+    Notes,
+}
+
+impl Summary {
+    fn types(self) -> &'static [&'static str] {
+        match self {
+            Summary::Stamps => &["Tickmark", "Stamp", "Connector"],
+            Summary::Notes => &["Note", "Calculator tape"],
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Summary::Stamps => "Stamp Summary",
+            Summary::Notes => "Note Summary",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Sort {
+    #[default]
+    Page,
+    Author,
+    Date,
+    Type,
+    Color,
+}
+
+impl Sort {
+    pub const ALL: [Sort; 5] = [
+        Sort::Page,
+        Sort::Author,
+        Sort::Date,
+        Sort::Type,
+        Sort::Color,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Sort::Page => "Page",
+            Sort::Author => "Author",
+            Sort::Date => "Date",
+            Sort::Type => "Type",
+            Sort::Color => "Color",
+        }
+    }
+}
+
+/// The panel's rows and what goes with them, made in one pass over the
+/// document and kept until something changes (`ViewKey`).
+#[derive(Default)]
+pub struct CommentView {
+    rows: Vec<Row>,
+    /// Each thread's status, by its comment.
+    statuses: HashMap<Item, (Option<String>, bool)>,
+    /// Comments listed (threads), and threads the filter hides.
+    count: usize,
+    filtered: usize,
+    /// What there is to filter by.
+    pub types: BTreeSet<String>,
+    pub authors: BTreeSet<String>,
+    pub colors: BTreeSet<[u8; 3]>,
+    /// Comments the filter (or a deletion) hides on the page.
+    pub hidden_ours: HashSet<AnnotId>,
+    pub hidden_foreign: HashSet<usize>,
+}
+
+/// When the view must be made again: the document's version, the
+/// third-party list's, the filter, the search text and the reply box.
+pub(crate) type ViewKey = (
+    u64,
+    u64,
+    CommentFilter,
+    String,
+    Option<(Item, Option<AnnotId>)>,
+);
+
+#[derive(Clone)]
 enum Row {
     Header {
-        index: usize,
+        label: String,
+        swatch: Option<[u8; 3]>,
         count: usize,
     },
     /// A comment, or (`depth` > 0) a reply in a thread. `root` is the
@@ -119,6 +246,9 @@ struct Node {
     author: String,
     /// What the filter looks in.
     text: String,
+    /// Its type for the filter and sort (`ours_type`, `subtype_label`).
+    kind: String,
+    color: Option<[u8; 3]>,
 }
 
 /// A page's comments as threads: the top-level ones in order, and the
@@ -155,6 +285,102 @@ fn thread_status(nodes: &[Node], thread: &[usize]) -> (Option<String>, bool) {
         }
     }
     (review, marked)
+}
+
+/// Every comment on the page `pref`: our marks, then the other tools'
+/// that are on it (`foreign`, indexes into `Doc::foreign_annots`), less
+/// those deleted in sheaf and their threads, which come back second.
+fn nodes_on(
+    st: &sheaf_doc::DocState,
+    foreign_all: &[(sheaf_doc::SourceId, ForeignAnnot)],
+    pref: &sheaf_doc::PageRef,
+    foreign: &[usize],
+) -> (Vec<Node>, Vec<usize>) {
+    let page = pref.id;
+    let mut nodes = Vec::new();
+    for a in st.annots_on(page).into_iter().flatten() {
+        nodes.push(Node {
+            item: Item::Ours(page, a.id),
+            name: a.name(),
+            parent: a.thread_parent().map(str::to_string),
+            grouped: false,
+            date: if a.created.is_empty() {
+                a.modified.clone()
+            } else {
+                a.created.clone()
+            },
+            state: match &a.kind {
+                AnnotKind::Status { model, state, .. } => Some((model.clone(), state.clone())),
+                _ => None,
+            },
+            author: a.author.clone(),
+            text: format!("{} {}", ours_text(a), kind_label(&a.kind)),
+            kind: ours_type(&a.kind).to_string(),
+            color: Some(a.color),
+        });
+    }
+    let theirs: Vec<(usize, &ForeignAnnot)> = foreign
+        .iter()
+        .filter_map(|&i| foreign_all.get(i).map(|(_, f)| (i, f)))
+        .collect();
+    let gone = match st.removed_comments.get(&page) {
+        Some(removed) => sheaf_doc::file::removed_with_threads(
+            theirs
+                .iter()
+                .map(|(_, f)| (f.name.as_str(), f.parent.as_deref())),
+            removed,
+        ),
+        None => HashSet::new(),
+    };
+    let mut deleted = Vec::new();
+    for (i, f) in theirs {
+        if gone.contains(&f.name) {
+            deleted.push(i);
+            continue;
+        }
+        nodes.push(Node {
+            item: Item::Foreign(i),
+            name: f.name.clone(),
+            parent: f.parent.clone(),
+            grouped: f.grouped,
+            date: if f.created.is_empty() {
+                f.modified.clone()
+            } else {
+                f.created.clone()
+            },
+            state: f.state.clone(),
+            author: f.author.clone(),
+            text: format!("{} {}", foreign_text(f), subtype_label(&f.subtype)),
+            kind: subtype_label(&f.subtype).to_string(),
+            color: f.color,
+        });
+    }
+    (nodes, deleted)
+}
+
+/// A mark's type for the filter and sort: coarser than its label (every
+/// tickmark is a "Tickmark").
+fn ours_type(kind: &AnnotKind) -> &'static str {
+    match kind {
+        AnnotKind::Highlight { .. } => "Highlight",
+        AnnotKind::Underline { .. } => "Underline",
+        AnnotKind::StrikeOut { .. } => "Strikethrough",
+        AnnotKind::Squiggly { .. } => "Squiggly",
+        AnnotKind::Replace { .. } => "Replace text",
+        AnnotKind::Insert { .. } => "Insert text",
+        AnnotKind::Note { .. } => "Note",
+        AnnotKind::FreeText { .. } => "Text",
+        AnnotKind::Square { .. } => "Rectangle",
+        AnnotKind::Ellipse { .. } => "Ellipse",
+        AnnotKind::Line { arrow: true, .. } => "Arrow",
+        AnnotKind::Line { .. } => "Line",
+        AnnotKind::Ink { .. } => "Pencil",
+        AnnotKind::Stamp { .. } => "Tickmark",
+        AnnotKind::Connector { .. } => "Connector",
+        AnnotKind::Tape { .. } => "Calculator tape",
+        AnnotKind::Reply { .. } => "Reply",
+        AnnotKind::Status { .. } => "Status",
+    }
 }
 
 /// Short label for one of our marks.
@@ -220,6 +446,7 @@ impl DocView {
             }
             cx.notify();
         });
+        let pages = cx.new(|cx| TextInput::new("All pages", cx));
         self.comments = Some(Comments {
             filter,
             _sub: sub,
@@ -227,6 +454,8 @@ impl DocView {
             focus: cx.focus_handle(),
             reply: None,
             menu: None,
+            popover: None,
+            pages,
         });
     }
 
@@ -490,49 +719,24 @@ impl DocView {
         let State::Ready(doc) = &self.state else {
             return Vec::new();
         };
-        let st = doc.model.state();
-        let mut nodes = Vec::new();
-        for a in st.annots_on(page).into_iter().flatten() {
-            nodes.push(Node {
-                item: Item::Ours(page, a.id),
-                name: a.name(),
-                parent: a.thread_parent().map(str::to_string),
-                grouped: false,
-                date: if a.created.is_empty() {
-                    a.modified.clone()
-                } else {
-                    a.created.clone()
-                },
-                state: match &a.kind {
-                    AnnotKind::Status { model, state, .. } => Some((model.clone(), state.clone())),
-                    _ => None,
-                },
-                author: a.author.clone(),
-                text: format!("{} {}", ours_text(a), kind_label(&a.kind)),
-            });
-        }
-        let Some(pref) = st.pages.iter().find(|p| p.id == page) else {
-            return nodes;
+        let Some(pref) = doc
+            .model
+            .state()
+            .pages
+            .iter()
+            .find(|p| p.id == page)
+            .copied()
+        else {
+            return Vec::new();
         };
-        for (i, (source, f)) in doc.foreign_annots.iter().enumerate() {
-            if *source == pref.source && f.page == pref.index {
-                nodes.push(Node {
-                    item: Item::Foreign(i),
-                    name: f.name.clone(),
-                    parent: f.parent.clone(),
-                    grouped: f.grouped,
-                    date: if f.created.is_empty() {
-                        f.modified.clone()
-                    } else {
-                        f.created.clone()
-                    },
-                    state: f.state.clone(),
-                    author: f.author.clone(),
-                    text: format!("{} {}", foreign_text(f), subtype_label(&f.subtype)),
-                });
-            }
-        }
-        nodes
+        let foreign: Vec<usize> = doc
+            .foreign_annots
+            .iter()
+            .enumerate()
+            .filter(|(_, (source, f))| *source == pref.source && f.page == pref.index)
+            .map(|(i, _)| i)
+            .collect();
+        nodes_on(doc.model.state(), &doc.foreign_annots, &pref, &foreign).0
     }
 
     /// F2 / double-click: edit the selected mark's text in place (a
@@ -556,8 +760,12 @@ impl DocView {
         }
     }
 
-    /// Delete: one of our marks, or a reply or status of the user's own.
+    /// Delete: one of our marks, a reply or status of the user's own, or
+    /// another tool's comment.
     fn delete_selected_comment(&mut self, cx: &mut Context<Self>) {
+        if self.delete_selected_foreign(cx) {
+            return;
+        }
         let me = crate::prefs::get(cx).identity.name();
         if let Some(Item::Ours(page, id)) = self.selected_item()
             && let Some(a) = self.ours(page, id)
@@ -576,53 +784,179 @@ impl DocView {
         self.delete_selected_annot(cx);
     }
 
-    /// Rows in display-page order, filtered, in threads.
-    fn comment_rows(&self, needle: &str) -> Vec<Row> {
-        let State::Ready(doc) = &self.state else {
-            return Vec::new();
-        };
+    /// The search text in the panel's box.
+    fn comment_needle(&self, cx: &App) -> String {
+        self.comments
+            .as_ref()
+            .map(|cm| cm.filter.read(cx).text().trim().to_lowercase())
+            .unwrap_or_default()
+    }
+
+    /// The panel's rows and the rest (see `CommentView`), made again only
+    /// when something they depend on changed. Also keeps what the page
+    /// hides in step: our marks here, other tools' in the engines.
+    pub(crate) fn comment_view(&mut self, cx: &mut Context<Self>) -> Arc<CommentView> {
+        let needle = self.comment_needle(cx);
         let reply = self
             .comments
             .as_ref()
             .and_then(|cm| cm.reply.as_ref())
             .map(|r| (r.to, r.editing));
-        let matches = |n: &Node| {
-            needle.is_empty()
-                || n.text.to_lowercase().contains(needle)
-                || n.author.to_lowercase().contains(needle)
+        // The page range as typed, into the filter.
+        let typed = self
+            .comments
+            .as_ref()
+            .map(|cm| parse_pages(cm.pages.read(cx).text()));
+        if let (Some(range), State::Ready(doc)) = (typed, &mut self.state)
+            && doc.comment_filter.pages != range
+        {
+            doc.comment_filter.pages = range;
+        }
+        let State::Ready(doc) = &self.state else {
+            return Arc::default();
         };
-        let mut rows = Vec::new();
-        for (index, pref) in doc.model.state().pages.iter().enumerate() {
-            let nodes = self.page_nodes(pref.id);
-            if nodes.is_empty() {
-                continue;
-            }
-            let (roots, children) = threads(&nodes);
-            let mut page_rows = Vec::new();
-            let mut count = 0;
-            for &r in &roots {
-                // A thread shows when anything in it matches.
-                let mut thread = vec![r];
-                let mut i = 0;
-                while i < thread.len() {
-                    if let Some(kids) = children.get(&nodes[thread[i]].name) {
-                        thread.extend(kids);
-                    }
-                    i += 1;
-                }
-                if !thread.iter().any(|&n| matches(&nodes[n])) {
-                    continue;
-                }
-                count += 1;
-                let root = nodes[r].item;
-                push_thread(&nodes, &children, r, root, 0, reply, &mut page_rows);
-            }
-            if !page_rows.is_empty() {
-                rows.push(Row::Header { index, count });
-                rows.extend(page_rows);
+        let key: ViewKey = (
+            doc.version,
+            doc.foreign_generation,
+            doc.comment_filter.clone(),
+            needle.clone(),
+            reply,
+        );
+        if let Some((k, view)) = &doc.comment_view
+            && *k == key
+        {
+            return view.clone();
+        }
+        let view = Arc::new(build_view(
+            doc.model.state(),
+            &doc.foreign_annots,
+            &doc.comment_filter,
+            &needle,
+            reply,
+        ));
+        if let State::Ready(doc) = &mut self.state {
+            doc.hidden_marks = view.hidden_ours.clone();
+            doc.comment_view = Some((key, view.clone()));
+        }
+        self.sync_foreign_visibility(cx);
+        view
+    }
+
+    /// Hide on screen the other tools' comments that should be (filtered
+    /// out, deleted, or all with View > Hide Comments), and show again the
+    /// ones sheaf hid that shouldn't be any more. Never touches one the
+    /// file hides itself.
+    pub(crate) fn sync_foreign_visibility(&mut self, cx: &mut Context<Self>) {
+        let State::Ready(doc) = &mut self.state else {
+            return;
+        };
+        let hidden_by_view = doc
+            .comment_view
+            .as_ref()
+            .map(|(_, v)| v.hidden_foreign.clone())
+            .unwrap_or_default();
+        let want: HashSet<(sheaf_doc::SourceId, u32, usize)> = doc
+            .foreign_annots
+            .iter()
+            .enumerate()
+            .filter(|(i, (_, f))| !f.hidden && (doc.comments_hidden || hidden_by_view.contains(i)))
+            .map(|(_, (source, f))| (*source, f.page, f.slot))
+            .collect();
+        let hide: Vec<_> = want.difference(&doc.foreign_hidden).copied().collect();
+        let show: Vec<_> = doc.foreign_hidden.difference(&want).copied().collect();
+        if hide.is_empty() && show.is_empty() {
+            return;
+        }
+        let mut by_source: HashMap<sheaf_doc::SourceId, HashMap<u32, Vec<(usize, bool)>>> =
+            HashMap::new();
+        for (on, set) in [(true, &hide), (false, &show)] {
+            for &(source, page, slot) in set {
+                by_source
+                    .entry(source)
+                    .or_default()
+                    .entry(page)
+                    .or_default()
+                    .push((slot, on));
             }
         }
-        rows
+        doc.foreign_hidden = want;
+        for (source, pages) in by_source {
+            let Some(handle) = doc.handles.get(&source) else {
+                continue;
+            };
+            let rx = handle.set_annots_hidden(pages.into_iter().collect());
+            cx.spawn(async move |this, cx| {
+                let _ = rx.await;
+                this.update(cx, |v, cx| {
+                    if let State::Ready(doc) = &mut v.state {
+                        doc.invalidate_tiles();
+                    }
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
+    }
+
+    fn set_comment_filter(&mut self, f: impl FnOnce(&mut CommentFilter), cx: &mut Context<Self>) {
+        if let State::Ready(doc) = &mut self.state {
+            f(&mut doc.comment_filter);
+        }
+        cx.notify();
+    }
+
+    /// Show All: no filter, and comments shown on the page.
+    fn show_all_comments(&mut self, cx: &mut Context<Self>) {
+        if let State::Ready(doc) = &mut self.state {
+            let sort = doc.comment_filter.sort;
+            doc.comment_filter = CommentFilter {
+                sort,
+                ..Default::default()
+            };
+            doc.comments_hidden = false;
+        }
+        if let Some(cm) = &mut self.comments {
+            cm.pages.update(cx, |t, cx| t.set_text(String::new(), cx));
+        }
+        cx.notify();
+    }
+
+    /// View > Hide Comments / Show Comments.
+    pub(crate) fn toggle_comments_shown(&mut self, cx: &mut Context<Self>) {
+        if let State::Ready(doc) = &mut self.state {
+            doc.comments_hidden = !doc.comments_hidden;
+            doc.notice = Some(if doc.comments_hidden {
+                "Comments hidden (View > Show Comments)".into()
+            } else {
+                "Comments shown".into()
+            });
+        }
+        self.sync_foreign_visibility(cx);
+        cx.notify();
+    }
+
+    /// Delete the selected third-party comment (and its thread), as one
+    /// undo step. False when none is selected.
+    pub(crate) fn delete_selected_foreign(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(Item::Foreign(ix)) = self.selected_item() else {
+            return false;
+        };
+        let Some((page, name)) = self.item_page_and_name(Item::Foreign(ix)) else {
+            return false;
+        };
+        if let State::Ready(doc) = &mut self.state {
+            doc.selected_foreign = None;
+        }
+        self.apply(
+            sheaf_doc::Edit::CommentsDelete {
+                page,
+                names: vec![name],
+            },
+            "Delete comment",
+            cx,
+        );
+        true
     }
 
     /// The Comments panel.
@@ -632,35 +966,23 @@ impl DocView {
             let focus = self.comments.as_ref().unwrap().focus.clone();
             window.focus(&focus, cx);
         }
-        let needle = self
-            .comments
-            .as_ref()
-            .unwrap()
-            .filter
-            .read(cx)
-            .text()
-            .trim()
-            .to_lowercase();
-        let rows = self.comment_rows(&needle);
+        let needle = self.comment_needle(cx);
+        let view = self.comment_view(cx);
+        let rows = &view.rows;
         let me = crate::prefs::get(cx).identity.name();
-        // Each comment's thread status, for its title.
-        let statuses: HashMap<usize, (Option<String>, bool)> = rows
-            .iter()
-            .enumerate()
-            .filter_map(|(i, r)| match r {
-                Row::Comment { item, depth: 0, .. } => Some((i, self.status_of(*item))),
-                _ => None,
-            })
-            .collect();
         let State::Ready(doc) = &self.state else {
             return div().p_2().text_sm().child("…").into_any_element();
         };
         let cm = self.comments.as_ref().unwrap();
         let filter = cm.filter.clone();
+        let pages_input = cm.pages.clone();
         let focus = cm.focus.clone();
         let reply_input = cm.reply.as_ref().map(|r| r.input.clone());
         let menu = cm.menu;
+        let popover = cm.popover;
         let st = doc.model.state();
+        let cf = doc.comment_filter.clone();
+        let comments_hidden = doc.comments_hidden;
 
         let bounds = cm.scroll.bounds();
         // Variable-height rows: headers are short, and a comment's text
@@ -728,26 +1050,31 @@ impl DocView {
             Item::Ours(page, id) => selected.contains(&(page, id)),
             Item::Foreign(ix) => selected_foreign == Some(ix),
         };
+        // A summary shows when each was applied.
+        let applied = cf.summary.is_some();
         let mut els: Vec<AnyElement> = Vec::new();
-        let count: usize = rows
-            .iter()
-            .map(|r| match r {
-                Row::Header { count, .. } => *count,
-                _ => 0,
-            })
-            .sum();
         for i in layout.visible(&cm.scroll) {
-            match rows[i] {
-                Row::Header { index, count } => els.push(
+            match rows[i].clone() {
+                Row::Header {
+                    label,
+                    swatch,
+                    count,
+                } => els.push(
                     layout
                         .place(i)
                         .flex()
                         .items_center()
+                        .gap_1()
                         .px_2()
                         .text_xs()
                         .text_color(theme::TEXT_MUTED)
                         .bg(theme::LIST_HEADER)
-                        .child(format!("Page {}  ·  {count}", index + 1))
+                        .when_some(swatch, |d, c| {
+                            d.child(div().w(px(10.0)).h(px(10.0)).rounded_sm().bg(gpui::rgb(
+                                ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | c[2] as u32,
+                            )))
+                        })
+                        .child(format!("{label}  ·  {count}"))
                         .into_any_element(),
                 ),
                 Row::ReplyBox { depth } => {
@@ -840,7 +1167,7 @@ impl DocView {
                     );
                 }
                 Row::Comment { item, root, depth } => {
-                    let (title, snippet, date, deletable, editable) = match item {
+                    let (title, snippet, modified, created, deletable, editable) = match item {
                         Item::Ours(page, id) => {
                             let Some(a) = ours_of(page, id) else {
                                 continue;
@@ -851,6 +1178,7 @@ impl DocView {
                                 format!("{}  ·  {}", kind_label(&a.kind), a.author),
                                 ours_text(&a),
                                 a.modified.clone(),
+                                a.created.clone(),
                                 !reply || mine,
                                 !reply || mine,
                             )
@@ -873,14 +1201,16 @@ impl DocView {
                                 format!("{label}  ·  {author}"),
                                 foreign_text(f),
                                 f.modified.clone(),
-                                false,
+                                f.created.clone(),
+                                // Their comments, not their replies.
+                                depth == 0,
                                 false,
                             )
                         }
                     };
                     // A comment's title carries its thread's status.
-                    let title = match statuses.get(&i) {
-                        Some((review, marked)) => {
+                    let title = match (depth, view.statuses.get(&item)) {
+                        (0, Some((review, marked))) => {
                             let mut t = title;
                             if let Some(r) = review {
                                 t.push_str(&format!("  ·  {r}"));
@@ -890,7 +1220,12 @@ impl DocView {
                             }
                             t
                         }
-                        None => title,
+                        _ => title,
+                    };
+                    let date = if applied && !created.is_empty() {
+                        created
+                    } else {
+                        modified
                     };
                     let row_id = match item {
                         Item::Ours(_, id) => ("ours", id.0 as usize),
@@ -921,10 +1256,14 @@ impl DocView {
                             cx.notify();
                         }),
                     );
-                    if deletable && let Item::Ours(page, id) = item {
+                    if deletable {
+                        let del_id = match item {
+                            Item::Ours(_, id) => ("del", id.0 as usize),
+                            Item::Foreign(ix) => ("del-foreign", ix),
+                        };
                         row = row.child(
                             div()
-                                .id(("del", id.0 as usize))
+                                .id(del_id)
                                 .absolute()
                                 .top(px(4.0))
                                 .right(px(6.0))
@@ -934,9 +1273,7 @@ impl DocView {
                                 .text_color(theme::TEXT_MUTED)
                                 .hover(|s| s.bg(theme::DANGER_HOVER).text_color(theme::TEXT_BRIGHT))
                                 .on_click(cx.listener(move |v, _, _, cx| {
-                                    if let State::Ready(doc) = &mut v.state {
-                                        doc.select_mark(Some((page, id)));
-                                    }
+                                    v.pick_item(item, item, cx);
                                     v.delete_selected_comment(cx);
                                     cx.stop_propagation();
                                 }))
@@ -948,12 +1285,81 @@ impl DocView {
             }
         }
 
-        let status = match (count, needle.is_empty()) {
+        let mut status = match (view.count, needle.is_empty()) {
             (0, true) => "No comments".to_string(),
             (n, true) => format!("{n} comment{}", if n == 1 { "" } else { "s" }),
             (n, false) => format!("{n} matching"),
         };
+        if view.filtered > 0 {
+            status.push_str(&format!("  ·  {} hidden by the filter", view.filtered));
+        }
+        if comments_hidden {
+            status.push_str("  ·  hidden on the page");
+        }
         let menu = menu.map(|(item, pos)| self.comment_menu(item, pos, cx));
+        let popover = popover.map(|(which, pos)| match which {
+            Popover::Filter => self.filter_menu(&view, &cf, pages_input.clone(), pos, cx),
+            Popover::Sort => self.sort_menu(cf.sort, pos, cx),
+        });
+        let chip = |id: &'static str, label: String, on: bool| {
+            div()
+                .id(id)
+                .px_2()
+                .py(px(1.0))
+                .rounded_sm()
+                .cursor_pointer()
+                .bg(if on { theme::ACCENT } else { theme::CONTROL })
+                .hover(|s| s.bg(theme::CONTROL_HOVER))
+                .child(label)
+        };
+        let filter_on = cf.is_active();
+        let controls = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_1()
+            .text_xs()
+            .child(
+                chip("cf-filter", "Filter ▾".into(), filter_on).on_click(cx.listener(
+                    |v, ev: &gpui::ClickEvent, _, cx| {
+                        if let Some(cm) = &mut v.comments {
+                            cm.popover = Some((Popover::Filter, ev.position()));
+                        }
+                        cx.notify();
+                    },
+                )),
+            )
+            .child(
+                chip("cf-sort", format!("Sort: {} ▾", cf.sort.label()), false).on_click(
+                    cx.listener(|v, ev: &gpui::ClickEvent, _, cx| {
+                        if let Some(cm) = &mut v.comments {
+                            cm.popover = Some((Popover::Sort, ev.position()));
+                        }
+                        cx.notify();
+                    }),
+                ),
+            )
+            .children([Summary::Stamps, Summary::Notes].map(|sm| {
+                let on = cf.summary == Some(sm);
+                chip(
+                    if sm == Summary::Stamps {
+                        "cf-stamps"
+                    } else {
+                        "cf-notes"
+                    },
+                    sm.label().into(),
+                    on,
+                )
+                .on_click(cx.listener(move |v, _, _, cx| {
+                    v.set_comment_filter(|f| f.summary = if on { None } else { Some(sm) }, cx)
+                }))
+            }))
+            .when(filter_on || comments_hidden, |d| {
+                d.child(
+                    chip("cf-all", "Show All".into(), false)
+                        .on_click(cx.listener(|v, _, _, cx| v.show_all_comments(cx))),
+                )
+            });
         div()
             .id("comments")
             .key_context(KEY_CONTEXT)
@@ -986,6 +1392,7 @@ impl DocView {
                     .border_b_1()
                     .border_color(theme::DIVIDER)
                     .child(filter)
+                    .child(controls)
                     .child(div().text_xs().text_color(theme::TEXT_MUTED).child(status)),
             )
             .child(
@@ -998,7 +1405,191 @@ impl DocView {
                     .child(layout.body().children(els)),
             )
             .children(menu)
+            .children(popover)
             .into_any_element()
+    }
+
+    /// The Filter popover: a chip per type, author, status and color
+    /// there is (on: shown), checked or not, and a page range.
+    fn filter_menu(
+        &self,
+        view: &CommentView,
+        cf: &CommentFilter,
+        pages: Entity<TextInput>,
+        pos: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let section = |label: &'static str| {
+            div()
+                .pt_2()
+                .pb_1()
+                .text_xs()
+                .text_color(theme::TEXT_MUTED)
+                .child(label)
+        };
+        let chip = |id: (&'static str, usize), label: String, on: bool| {
+            div()
+                .id(id)
+                .px_2()
+                .py(px(1.0))
+                .rounded_sm()
+                .cursor_pointer()
+                .text_xs()
+                .bg(if on { theme::SELECTED } else { theme::CONTROL })
+                .text_color(if on {
+                    theme::TEXT_BRIGHT
+                } else {
+                    theme::TEXT_DIM
+                })
+                .hover(|s| s.bg(theme::CONTROL_HOVER))
+                .child(label)
+        };
+        let wrap = || div().flex().flex_wrap().gap_1();
+        let types = view.types.iter().enumerate().map(|(i, t)| {
+            let t = t.clone();
+            chip(("cf-type", i), t.clone(), !cf.types.contains(&t)).on_click(cx.listener(
+                move |v, _, _, cx| {
+                    let t = t.clone();
+                    v.set_comment_filter(|f| toggle(&mut f.types, t), cx)
+                },
+            ))
+        });
+        let authors = view.authors.iter().enumerate().map(|(i, a)| {
+            let a = a.clone();
+            chip(("cf-author", i), a.clone(), !cf.authors.contains(&a)).on_click(cx.listener(
+                move |v, _, _, cx| {
+                    let a = a.clone();
+                    v.set_comment_filter(|f| toggle(&mut f.authors, a), cx)
+                },
+            ))
+        });
+        let statuses = REVIEW_STATES.iter().enumerate().map(|(i, s)| {
+            chip(("cf-status", i), s.to_string(), !cf.statuses.contains(*s)).on_click(cx.listener(
+                move |v, _, _, cx| {
+                    v.set_comment_filter(|f| toggle(&mut f.statuses, s.to_string()), cx)
+                },
+            ))
+        });
+        let checked = [
+            (None, "Any"),
+            (Some(true), "Checked"),
+            (Some(false), "Unchecked"),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, (want, label))| {
+            chip(("cf-checked", i), label.into(), cf.checked == want).on_click(
+                cx.listener(move |v, _, _, cx| v.set_comment_filter(|f| f.checked = want, cx)),
+            )
+        });
+        let colors = view.colors.iter().enumerate().map(|(i, &c)| {
+            let on = !cf.colors.contains(&c);
+            div()
+                .id(("cf-color", i))
+                .w(px(16.0))
+                .h(px(16.0))
+                .rounded_sm()
+                .cursor_pointer()
+                .bg(gpui::rgb(
+                    ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | c[2] as u32,
+                ))
+                .border_2()
+                .border_color(if on { theme::FOCUS_RING } else { theme::SUNKEN })
+                .when(!on, |d| d.opacity(0.35))
+                .on_click(cx.listener(move |v, _, _, cx| {
+                    v.set_comment_filter(|f| toggle(&mut f.colors, c), cx)
+                }))
+        });
+        let body = div()
+            .id("filter-menu")
+            .occlude()
+            .on_mouse_down_out(cx.listener(|v, _, _, cx| {
+                if let Some(cm) = &mut v.comments {
+                    cm.popover = None;
+                }
+                cx.notify();
+            }))
+            .w(px(280.0))
+            .max_h(px(480.0))
+            .overflow_y_scroll()
+            .p_2()
+            .rounded_md()
+            .bg(theme::POPOVER)
+            .border_1()
+            .border_color(theme::DIVIDER)
+            .shadow_lg()
+            .flex()
+            .flex_col()
+            .child(section("Type"))
+            .child(wrap().children(types))
+            .child(section("Author"))
+            .child(wrap().children(authors))
+            .child(section("Status"))
+            .child(wrap().children(statuses))
+            .child(section("Checkmark"))
+            .child(wrap().children(checked))
+            .when(!view.colors.is_empty(), |d| {
+                d.child(section("Color")).child(wrap().children(colors))
+            })
+            .child(section("Pages (e.g. 3-10)"))
+            .child(pages);
+        deferred(
+            anchored()
+                .position(pos)
+                .position_mode(AnchoredPositionMode::Window)
+                .child(body),
+        )
+        .into_any_element()
+    }
+
+    fn sort_menu(&self, sort: Sort, pos: Point<Pixels>, cx: &mut Context<Self>) -> AnyElement {
+        let items = Sort::ALL.iter().enumerate().map(|(i, &s)| {
+            div()
+                .id(("sort", i))
+                .px_3()
+                .py_1()
+                .text_sm()
+                .cursor_pointer()
+                .hover(|st| st.bg(theme::HOVER))
+                .child(format!(
+                    "{} {}",
+                    if s == sort { "•" } else { "  " },
+                    s.label()
+                ))
+                .on_click(cx.listener(move |v, _, _, cx| {
+                    if let Some(cm) = &mut v.comments {
+                        cm.popover = None;
+                    }
+                    v.set_comment_filter(|f| f.sort = s, cx)
+                }))
+        });
+        deferred(
+            anchored()
+                .position(pos)
+                .position_mode(AnchoredPositionMode::Window)
+                .child(
+                    div()
+                        .id("sort-menu")
+                        .occlude()
+                        .on_mouse_down_out(cx.listener(|v, _, _, cx| {
+                            if let Some(cm) = &mut v.comments {
+                                cm.popover = None;
+                            }
+                            cx.notify();
+                        }))
+                        .min_w(px(140.0))
+                        .py_1()
+                        .rounded_md()
+                        .bg(theme::POPOVER)
+                        .border_1()
+                        .border_color(theme::DIVIDER)
+                        .shadow_lg()
+                        .flex()
+                        .flex_col()
+                        .children(items),
+                ),
+        )
+        .into_any_element()
     }
 
     /// The right-click menu on a comment: reply, status, checkmark.
@@ -1118,6 +1709,192 @@ fn push_thread(
         rows.push(Row::ReplyBox {
             depth: (depth + 1).min(3),
         });
+    }
+}
+
+/// Make the panel's view of `doc` (see `CommentView`).
+fn build_view(
+    st: &sheaf_doc::DocState,
+    foreign_all: &[(sheaf_doc::SourceId, ForeignAnnot)],
+    cf: &CommentFilter,
+    needle: &str,
+    reply: Option<(Item, Option<AnnotId>)>,
+) -> CommentView {
+    let mut foreign_on: HashMap<(sheaf_doc::SourceId, u32), Vec<usize>> = HashMap::new();
+    for (i, (source, f)) in foreign_all.iter().enumerate() {
+        foreign_on.entry((*source, f.page)).or_default().push(i);
+    }
+    let mut view = CommentView::default();
+    // Each thread shown: what it sorts by, its page, its rows.
+    let mut kept: Vec<(GroupKey, usize, Vec<Row>)> = Vec::new();
+    for (index, pref) in st.pages.iter().enumerate() {
+        let foreign = foreign_on
+            .get(&(pref.source, pref.index))
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let (nodes, deleted) = nodes_on(st, foreign_all, pref, foreign);
+        view.hidden_foreign.extend(deleted);
+        if nodes.is_empty() {
+            continue;
+        }
+        let (roots, children) = threads(&nodes);
+        for &r in &roots {
+            let root = &nodes[r];
+            let mut thread = vec![r];
+            let mut i = 0;
+            while i < thread.len() {
+                if let Some(kids) = children.get(&nodes[thread[i]].name) {
+                    thread.extend(kids);
+                }
+                i += 1;
+            }
+            view.types.insert(root.kind.clone());
+            view.authors.insert(author_label(root));
+            view.colors.extend(root.color);
+            let status = thread_status(&nodes, children.get(&root.name).map_or(&[][..], |v| v));
+            view.statuses.insert(root.item, status.clone());
+            if !passes(cf, root, &status, index) {
+                // Hidden here and on the page, thread and all.
+                view.filtered += 1;
+                for &n in &thread {
+                    match nodes[n].item {
+                        Item::Ours(_, id) => {
+                            view.hidden_ours.insert(id);
+                        }
+                        Item::Foreign(i) => {
+                            view.hidden_foreign.insert(i);
+                        }
+                    }
+                }
+                continue;
+            }
+            let matches = |n: &Node| {
+                needle.is_empty()
+                    || n.text.to_lowercase().contains(needle)
+                    || n.author.to_lowercase().contains(needle)
+            };
+            if !thread.iter().any(|&n| matches(&nodes[n])) {
+                continue;
+            }
+            view.count += 1;
+            let mut rows = Vec::new();
+            push_thread(&nodes, &children, r, root.item, 0, reply, &mut rows);
+            kept.push((group_key(cf.sort, root, index), index, rows));
+        }
+    }
+    kept.sort_by(|a, b| a.0.order.cmp(&b.0.order).then(a.1.cmp(&b.1)));
+    let mut i = 0;
+    while i < kept.len() {
+        let j = i + kept[i..]
+            .iter()
+            .take_while(|k| k.0.order == kept[i].0.order)
+            .count();
+        view.rows.push(Row::Header {
+            label: kept[i].0.label.clone(),
+            swatch: kept[i].0.swatch,
+            count: j - i,
+        });
+        for k in &mut kept[i..j] {
+            view.rows.append(&mut k.2);
+        }
+        i = j;
+    }
+    view
+}
+
+/// What a thread is grouped and sorted under.
+struct GroupKey {
+    order: String,
+    label: String,
+    swatch: Option<[u8; 3]>,
+}
+
+fn group_key(sort: Sort, n: &Node, page: usize) -> GroupKey {
+    let simple = |order: String, label: String| GroupKey {
+        order,
+        label,
+        swatch: None,
+    };
+    match sort {
+        Sort::Page => simple(format!("{page:08}"), format!("Page {}", page + 1)),
+        Sort::Author => {
+            let a = author_label(n);
+            simple(a.to_lowercase(), a)
+        }
+        Sort::Date => {
+            let day = fmt_pdf_date(&n.date).chars().take(10).collect::<String>();
+            let label = if day.is_empty() {
+                "No date".into()
+            } else {
+                day
+            };
+            simple(n.date.chars().take(10).collect(), label)
+        }
+        Sort::Type => simple(n.kind.to_lowercase(), n.kind.clone()),
+        Sort::Color => match n.color {
+            Some(c) => GroupKey {
+                order: format!("{:02x}{:02x}{:02x}", c[0], c[1], c[2]),
+                label: crate::markup_tools::COLORS
+                    .iter()
+                    .find(|(k, _)| *k == c)
+                    .map(|(_, name)| name.to_string())
+                    .unwrap_or_else(|| format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2])),
+                swatch: Some(c),
+            },
+            None => simple("~".into(), "No color".into()),
+        },
+    }
+}
+
+fn author_label(n: &Node) -> String {
+    if n.author.is_empty() {
+        "(no author)".into()
+    } else {
+        n.author.clone()
+    }
+}
+
+/// Whether the filter shows a thread whose comment is `n`, with thread
+/// status `status`, on display page `page`.
+fn passes(cf: &CommentFilter, n: &Node, status: &(Option<String>, bool), page: usize) -> bool {
+    if let Some(sm) = cf.summary
+        && !sm.types().contains(&n.kind.as_str())
+    {
+        return false;
+    }
+    if cf.types.contains(&n.kind) || cf.authors.contains(&author_label(n)) {
+        return false;
+    }
+    if cf.statuses.contains(status.0.as_deref().unwrap_or("None")) {
+        return false;
+    }
+    if n.color.is_some_and(|c| cf.colors.contains(&c)) {
+        return false;
+    }
+    if cf.checked.is_some_and(|want| status.1 != want) {
+        return false;
+    }
+    !cf.pages.is_some_and(|(a, b)| page < a || page > b)
+}
+
+/// "3-10" → pages 3 to 10 (from 0: 2 to 9); "5" → page 5; blank or
+/// unreadable → all pages.
+fn parse_pages(text: &str) -> Option<(usize, usize)> {
+    let t = text.trim();
+    let num = |s: &str| s.trim().parse::<usize>().ok().filter(|n| *n > 0);
+    let (a, b) = match t.split_once(['-', '–']) {
+        Some((a, b)) => (num(a)?, num(b)?),
+        None => {
+            let n = num(t)?;
+            (n, n)
+        }
+    };
+    Some((a.min(b) - 1, a.max(b) - 1))
+}
+
+fn toggle<T: Ord>(set: &mut BTreeSet<T>, v: T) {
+    if !set.remove(&v) {
+        set.insert(v);
     }
 }
 
@@ -1320,6 +2097,8 @@ mod tests {
             state: None,
             author: "Pat".into(),
             text: String::new(),
+            kind: "Note".into(),
+            color: None,
         }
     }
 
@@ -1368,5 +2147,166 @@ mod tests {
         ];
         let (_, children) = threads(&nodes);
         assert_eq!(thread_status(&nodes, &children["a"]), (None, false));
+    }
+
+    #[test]
+    fn page_ranges_read_as_typed() {
+        assert_eq!(parse_pages("3-10"), Some((2, 9)));
+        assert_eq!(parse_pages(" 10 – 3 "), Some((2, 9)));
+        assert_eq!(parse_pages("5"), Some((4, 4)));
+        assert_eq!(parse_pages(""), None);
+        assert_eq!(parse_pages("0"), None);
+        assert_eq!(parse_pages("x-2"), None);
+    }
+
+    #[test]
+    fn the_filter_hides_by_each_facet() {
+        let mut n = node(0, "a", None, "D:1");
+        n.kind = "Tickmark".into();
+        n.color = Some([255, 0, 0]);
+        let open = (None, false);
+        let mut cf = CommentFilter::default();
+        assert!(passes(&cf, &n, &open, 0));
+        cf.summary = Some(Summary::Notes);
+        assert!(!passes(&cf, &n, &open, 0));
+        cf.summary = Some(Summary::Stamps);
+        assert!(passes(&cf, &n, &open, 0));
+        cf.colors.insert([255, 0, 0]);
+        assert!(!passes(&cf, &n, &open, 0));
+        cf.colors.clear();
+        cf.authors.insert("Pat".into());
+        assert!(!passes(&cf, &n, &open, 0));
+        cf.authors.clear();
+        cf.statuses.insert("None".into());
+        assert!(!passes(&cf, &n, &open, 0));
+        assert!(passes(&cf, &n, &(Some("Accepted".into()), false), 0));
+        cf.statuses.clear();
+        cf.checked = Some(true);
+        assert!(!passes(&cf, &n, &open, 0));
+        assert!(passes(&cf, &n, &(None, true), 0));
+        cf.checked = None;
+        cf.pages = Some((3, 5));
+        assert!(!passes(&cf, &n, &open, 2) && passes(&cf, &n, &open, 4));
+    }
+
+    /// The case Acrobat crawled on (acrobat.md §3.2): 1,000 comments over
+    /// 900 pages, filtered and sorted.
+    #[test]
+    fn a_thousand_comments_make_a_view_quickly() {
+        use sheaf_doc::{Box2, Document, FixedCount, Pt, SourceId, SourceInfo};
+        let mut d = Document::new(
+            SourceInfo {
+                path: "big.pdf".into(),
+                page_count: 900,
+                first_page: PageSize {
+                    width: 612.0,
+                    height: 792.0,
+                },
+                page_sizes: None,
+                bytes: 0,
+                password: None,
+                data: None,
+            },
+            &[],
+            Box::new(FixedCount(10)),
+        );
+        let authors = ["Pat", "Greg", "Lee"];
+        let mut ours: HashMap<u32, Vec<Annot>> = HashMap::new();
+        for i in 0..600u32 {
+            ours.entry(i * 3 % 900).or_default().push(Annot {
+                id: AnnotId(i as u64 + 1),
+                kind: if i % 2 == 0 {
+                    AnnotKind::Note {
+                        pos: Pt { x: 10.0, y: 10.0 },
+                    }
+                } else {
+                    AnnotKind::Stamp {
+                        rect: Box2 {
+                            x: 10.0,
+                            y: 10.0,
+                            w: 20.0,
+                            h: 20.0,
+                        },
+                        glyph: "✓".into(),
+                    }
+                },
+                color: [255, 0, 0],
+                opacity: 1.0,
+                stroke: 1.0,
+                author: authors[i as usize % 3].into(),
+                contents: format!("comment {i}"),
+                modified: format!("D:2026101{}000000", i % 10),
+                created: String::new(),
+                fill: None,
+                dashed: false,
+            });
+        }
+        d.set_initial_annots(ours).unwrap();
+        let source = d.state().pages[0].source;
+        let foreign: Vec<(SourceId, ForeignAnnot)> = (0..400u32)
+            .map(|i| {
+                (
+                    source,
+                    ForeignAnnot {
+                        page: i * 2 % 900,
+                        subtype: "Text".into(),
+                        author: authors[i as usize % 3].into(),
+                        contents: format!("theirs {i}"),
+                        modified: "D:20261001000000".into(),
+                        rect: Box2 {
+                            x: 0.0,
+                            y: 0.0,
+                            w: 10.0,
+                            h: 10.0,
+                        },
+                        name: format!("t{i}"),
+                        parent: None,
+                        grouped: false,
+                        state: None,
+                        created: String::new(),
+                        slot: 0,
+                        hidden: false,
+                        color: Some([0, 0, 255]),
+                    },
+                )
+            })
+            .collect();
+        let started = std::time::Instant::now();
+        let all = build_view(d.state(), &foreign, &CommentFilter::default(), "", None);
+        assert_eq!(all.count, 1000);
+        let mut cf = CommentFilter {
+            sort: Sort::Author,
+            ..Default::default()
+        };
+        cf.authors.insert("Lee".into());
+        let some = build_view(d.state(), &foreign, &cf, "comment", None);
+        let elapsed = started.elapsed();
+        // Lee's are hidden on the page too; the rest are grouped by author.
+        assert_eq!(some.filtered, 200 + 133);
+        assert!(some.hidden_ours.len() == 200 && some.hidden_foreign.len() == 133);
+        let headers: Vec<String> = some
+            .rows
+            .iter()
+            .filter_map(|r| match r {
+                Row::Header { label, .. } => Some(label.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(headers, ["Greg", "Pat"]);
+        let summary = build_view(
+            d.state(),
+            &foreign,
+            &CommentFilter {
+                summary: Some(Summary::Stamps),
+                ..Default::default()
+            },
+            "",
+            None,
+        );
+        assert_eq!(summary.count, 300);
+        assert!(
+            elapsed < std::time::Duration::from_millis(250),
+            "two views took {elapsed:?}"
+        );
     }
 }

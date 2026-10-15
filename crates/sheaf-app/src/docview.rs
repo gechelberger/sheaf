@@ -47,8 +47,8 @@ use crate::{
     LineUp, NewBookmark, NextPage, NextPane, PasteMarks, PasteMarksInPlace, PrevPage, Redo,
     RotatePageCcw, RotatePageCw, RotateViewCcw, RotateViewCw, Save, SaveAs, ScreenDown, ScreenUp,
     SearchNext, SearchPrev, SelectAllPages, SinglePage, SinglePageContinuous, SplitView,
-    ToggleCheckmark, ToggleCoverPage, ToolArrow, ToolConnector, ToolEllipse, ToolFreeText,
-    ToolHighlight, ToolInk, ToolLine, ToolNote, ToolSelect, ToolSquare, ToolSquiggly,
+    ToggleCheckmark, ToggleComments, ToggleCoverPage, ToolArrow, ToolConnector, ToolEllipse,
+    ToolFreeText, ToolHighlight, ToolInk, ToolLine, ToolNote, ToolSelect, ToolSquare, ToolSquiggly,
     ToolStrikeOut, ToolTextEdit, ToolTick, ToolUnderline, TwoUp, TwoUpContinuous, Undo, ZoomActual,
     ZoomFitPage, ZoomFitWidth, ZoomIn, ZoomOut,
 };
@@ -153,6 +153,22 @@ pub(crate) struct Doc {
     /// The marks selected, in the order picked. The last is the one the
     /// handles and the text editor are on ([`Doc::selected_annot`]).
     pub(crate) selected_marks: Vec<(PageId, AnnotId)>,
+    /// What the Comments panel shows (and so the page): filter and sort.
+    pub(crate) comment_filter: crate::comments_panel::CommentFilter,
+    /// View > Hide Comments.
+    pub(crate) comments_hidden: bool,
+    /// The panel's view, and what it was made from.
+    pub(crate) comment_view: Option<(
+        crate::comments_panel::ViewKey,
+        Arc<crate::comments_panel::CommentView>,
+    )>,
+    /// Our marks the comment filter hides on the page.
+    pub(crate) hidden_marks: HashSet<AnnotId>,
+    /// Other tools' comments sheaf has hidden in the engines: (source, page
+    /// in it, slot in its /Annots).
+    pub(crate) foreign_hidden: HashSet<(SourceId, u32, usize)>,
+    /// Bumped when `foreign_annots` changes.
+    pub(crate) foreign_generation: u64,
     /// Text selected with the Select tool (see text_select.rs).
     pub(crate) text_sel: Option<crate::text_select::TextSel>,
     pub(crate) text_drag: Option<crate::text_select::TextDrag>,
@@ -268,6 +284,7 @@ impl Doc {
         }
         self.foreign_annots
             .extend(incoming.foreign.into_iter().map(|f| (source, f)));
+        self.foreign_generation += 1;
     }
     pub(crate) fn primary(&self) -> &RenderHandle {
         &self.handles[&self.model.primary()]
@@ -839,6 +856,12 @@ impl DocView {
             outline_rows: Vec::new(),
             drag: None,
             selected_marks: Vec::new(),
+            comment_filter: Default::default(),
+            comments_hidden: false,
+            comment_view: None,
+            hidden_marks: HashSet::new(),
+            foreign_hidden: HashSet::new(),
+            foreign_generation: 0,
             text_sel: None,
             text_drag: None,
             page_chars: HashMap::new(),
@@ -1566,6 +1589,9 @@ impl DocView {
                         // The saved file's third-party comments, at their
                         // new page numbers.
                         doc.foreign_annots.clear();
+                        doc.foreign_generation += 1;
+                        // A new engine: nothing of theirs is hidden in it.
+                        doc.foreign_hidden.retain(|(s, _, _)| *s != sid);
                         reread_foreign(sid, path.clone(), cx);
                         if !pages.is_empty() {
                             let rx = handle.hide_annots(pages);
@@ -1689,6 +1715,7 @@ impl DocView {
                 }
                 let primary = doc.model.primary();
                 doc.foreign_annots = foreign.into_iter().map(|f| (primary, f)).collect();
+                doc.foreign_generation += 1;
                 if !facts.outline_styles.is_empty() {
                     if doc.outline_loaded {
                         if let Err(e) = doc.model.set_initial_outline_styles(&facts.outline_styles)
@@ -3401,6 +3428,7 @@ fn reread_foreign(source: SourceId, path: PathBuf, cx: &mut Context<DocView>) {
                 doc.foreign_annots.retain(|(s, _)| *s != source);
                 doc.foreign_annots
                     .extend(foreign.into_iter().map(|f| (source, f)));
+                doc.foreign_generation += 1;
                 cx.notify();
             }
         })
@@ -3988,9 +4016,12 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
     }
     // A header/footer not yet saved into the file, drawn as it will be.
     page_div = page_div.children(header_footer_elements(doc, pl, k));
-    // Our markup, drawn over the page in the displayed orientation.
-    if let Some(list) = doc.model.state().annots_on(pl.pref.id) {
-        for a in list.iter() {
+    // Our markup, drawn over the page in the displayed orientation, less
+    // what the comment filter or View > Hide Comments hides.
+    if let Some(list) = doc.model.state().annots_on(pl.pref.id)
+        && !doc.comments_hidden
+    {
+        for a in list.iter().filter(|a| !doc.hidden_marks.contains(&a.id)) {
             page_div = page_div.children(annot_elements(a, src, rot, k));
         }
     }
@@ -3999,7 +4030,12 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
     let selected: Vec<sheaf_doc::Annot> = doc
         .selected_mark_list()
         .into_iter()
-        .filter(|(pid, a)| *pid == pl.pref.id && a.thread_parent().is_none())
+        .filter(|(pid, a)| {
+            *pid == pl.pref.id
+                && a.thread_parent().is_none()
+                && !doc.comments_hidden
+                && !doc.hidden_marks.contains(&a.id)
+        })
         .map(|(_, a)| a)
         .collect();
     for a in &selected {
@@ -4336,6 +4372,9 @@ impl Render for DocView {
         if let Some(page) = self.pending_edit_last.take() {
             self.start_annot_editor(page, window, cx);
         }
+        // What the comment filter hides on the page, kept current whether
+        // or not the panel is open (cached; cheap when nothing changed).
+        self.comment_view(cx);
         if std::mem::take(&mut self.pending_focus) {
             window.focus(&self.focus_handle, cx);
         }
@@ -4505,10 +4544,11 @@ impl Render for DocView {
                 cx.listener(|v, _: &RotatePageCcw, _, cx| v.rotate_current(Rotation::R270, cx)),
             )
             .on_action(cx.listener(|v, _: &DeletePage, _, cx| {
-                if !v.delete_selected_annot(cx) {
+                if !v.delete_selected_annot(cx) && !v.delete_selected_foreign(cx) {
                     v.delete_current(cx)
                 }
             }))
+            .on_action(cx.listener(|v, _: &ToggleComments, _, cx| v.toggle_comments_shown(cx)))
             .on_action(cx.listener(|v, _: &CopySelection, _, cx| {
                 if !v.copy_text(cx) {
                     v.copy_marks(cx);

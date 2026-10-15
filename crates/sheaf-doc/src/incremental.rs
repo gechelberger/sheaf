@@ -113,15 +113,20 @@ fn build(snap: &Snapshot) -> Result<(usize, Vec<u8>)> {
                 .ok()
                 .and_then(|o| o.as_i64().ok())
                 .unwrap_or(0) as i32;
-            if let Some(list) = snap.state.annots.get(&pref.id) {
-                let geom = geom_of(&dict, original_rot);
-                let w = write_page_annots(&mut pdf, &mut dict, list.iter(), &geom);
-                connectors.extend(w.connectors);
-                for id in w.touched {
-                    changed.insert(id, pdf.get_object(id)?.clone());
+            match (
+                snap.state.annots.get(&pref.id),
+                snap.state.removed_comments.get(&pref.id),
+            ) {
+                (None, None) => strip_sheaf_annots(&pdf, &mut dict),
+                (list, removed) => {
+                    let geom = geom_of(&dict, original_rot);
+                    let marks = list.into_iter().flatten();
+                    let w = write_page_annots(&mut pdf, &mut dict, marks, removed, &geom);
+                    connectors.extend(w.connectors);
+                    for id in w.touched {
+                        changed.insert(id, pdf.get_object(id)?.clone());
+                    }
                 }
-            } else {
-                strip_sheaf_annots(&pdf, &mut dict);
             }
             if let Some(layer) = snap.state.text_layers.get(&pref.id) {
                 let geom = geom_of(&dict, original_rot);
@@ -175,15 +180,19 @@ fn build(snap: &Snapshot) -> Result<(usize, Vec<u8>)> {
                 }
                 if snap.annots_dirty.contains(&pref.id) {
                     let geom = crate::file::page_geom(&pdf, id);
-                    match snap.state.annots.get(&pref.id) {
-                        Some(list) => {
-                            let w = write_page_annots(&mut pdf, &mut dict, list.iter(), &geom);
+                    match (
+                        snap.state.annots.get(&pref.id),
+                        snap.state.removed_comments.get(&pref.id),
+                    ) {
+                        (None, None) => strip_sheaf_annots(&pdf, &mut dict),
+                        (list, removed) => {
+                            let marks = list.into_iter().flatten();
+                            let w = write_page_annots(&mut pdf, &mut dict, marks, removed, &geom);
                             connectors.extend(w.connectors);
                             for id in w.touched {
                                 changed.insert(id, pdf.get_object(id)?.clone());
                             }
                         }
-                        None => strip_sheaf_annots(&pdf, &mut dict),
                     }
                 }
                 apply_rotation(&mut dict, pref.rotation.degrees());

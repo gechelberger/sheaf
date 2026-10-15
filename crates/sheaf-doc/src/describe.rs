@@ -91,6 +91,14 @@ pub fn describe(edit: &Edit, before: Option<&DocState>) -> String {
                 .unwrap_or_else(|| "a mark".into());
             format!("Delete {kind}{}", on_page(*page, before))
         }
+        Edit::CommentsDelete { page, names } => format!(
+            "Delete {}{}",
+            match names.len() {
+                1 => "a comment".to_string(),
+                n => format!("{n} comments"),
+            },
+            on_page(*page, before)
+        ),
         Edit::ConnectorAdd { a, .. } => match &a.1.kind {
             AnnotKind::Connector { label, .. } => format!("Add connector pair {label}"),
             _ => "Add a connector pair".into(),

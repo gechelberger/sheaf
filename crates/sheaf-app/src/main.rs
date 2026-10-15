@@ -128,6 +128,7 @@ actions!(
         ToggleRulers,
         ToggleGrid,
         ClearGuides,
+        ToggleComments,
         GoToPage
     ]
 );

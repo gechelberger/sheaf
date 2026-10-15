@@ -110,6 +110,8 @@ impl DocView {
                             drop(handle.hide_annots(pages));
                         }
                         doc.handles.insert(sid, handle);
+                        // A new engine: hide in it what was hidden before.
+                        doc.foreign_hidden.retain(|(s, _, _)| *s != sid);
                         doc.invalidate_tiles();
                         let off = doc.layers_hidden.len();
                         doc.notice = Some(match off {
@@ -120,6 +122,7 @@ impl DocView {
                     }
                     Err(e) => doc.notice = Some(format!("Couldn't update layers: {e:#}")),
                 }
+                v.sync_foreign_visibility(cx);
                 cx.notify();
             })
             .ok();

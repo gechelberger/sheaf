@@ -107,6 +107,11 @@ fn subset(model: &Snapshot, ids: &[PageId], outline: bool) -> Option<Snapshot> {
                 None
             },
             header_footer: model.state.header_footer.clone(),
+            removed_comments: {
+                let mut r = model.state.removed_comments.clone();
+                r.retain(|id, _| keep.contains(id));
+                r
+            },
         },
         primary: model.primary,
         sources: model.sources.clone(),
@@ -430,12 +435,20 @@ fn build_rewrite(model: &Snapshot, clean: bool) -> Result<Pdf> {
             .unwrap_or(0);
         if clean {
             strip_markup_annots(&pdf, &mut dict);
-        } else if let Some(list) = state.annots.get(&pref.id) {
-            let geom = geom_of(&dict, original as i32);
-            connectors
-                .extend(write_page_annots(&mut pdf, &mut dict, list.iter(), &geom).connectors);
         } else {
-            strip_sheaf_annots(&pdf, &mut dict);
+            match (
+                state.annots.get(&pref.id),
+                state.removed_comments.get(&pref.id),
+            ) {
+                (None, None) => strip_sheaf_annots(&pdf, &mut dict),
+                (list, removed) => {
+                    let geom = geom_of(&dict, original as i32);
+                    let marks = list.into_iter().flatten();
+                    connectors.extend(
+                        write_page_annots(&mut pdf, &mut dict, marks, removed, &geom).connectors,
+                    );
+                }
+            }
         }
         if let Some(layer) = state.text_layers.get(&pref.id) {
             let geom = geom_of(&dict, original as i32);
@@ -1042,6 +1055,7 @@ pub(crate) fn write_page_annots<'a>(
     pdf: &mut Pdf,
     page: &mut Dictionary,
     annots: impl Iterator<Item = &'a Annot>,
+    removed: Option<&im::OrdSet<String>>,
     geom: &PageGeom,
 ) -> PageAnnotsWritten {
     // Our marks as the file has them now, by object, so other tools'
@@ -1067,6 +1081,36 @@ pub(crate) fn write_page_annots<'a>(
         .and_then(|a| pdf.dereference(a).ok())
         .and_then(|(_, o)| o.as_array().ok().cloned())
         .unwrap_or_default();
+    // Other tools' comments deleted in sheaf go, with their threads, and
+    // so do their replies to our marks that are gone.
+    let annots: Vec<&Annot> = annots.collect();
+    let writing: std::collections::HashSet<String> = annots.iter().map(|a| a.name()).collect();
+    let mut removed = removed.cloned().unwrap_or_default();
+    removed.extend(before.values().filter(|n| !writing.contains(*n)).cloned());
+    if !removed.is_empty() {
+        let comments: Vec<(String, Option<String>)> = list
+            .iter()
+            .map(|e| {
+                let d = e
+                    .as_reference()
+                    .ok()
+                    .and_then(|id| pdf.get_dictionary(id).ok());
+                let name = d.map(crate::file::thread_name).unwrap_or_default();
+                let parent = d
+                    .and_then(|d| d.get(b"IRT").ok())
+                    .and_then(|o| pdf.dereference(o).ok())
+                    .and_then(|(_, o)| o.as_dict().ok())
+                    .map(crate::file::thread_name);
+                (name, parent)
+            })
+            .collect();
+        let gone = crate::file::removed_with_threads(
+            comments.iter().map(|(n, p)| (n.as_str(), p.as_deref())),
+            &removed,
+        );
+        let mut kept = comments.iter().map(|(n, _)| !gone.contains(n));
+        list.retain(|_| kept.next().unwrap_or(true));
+    }
     let theirs: Vec<ObjectId> = list.iter().filter_map(|e| e.as_reference().ok()).collect();
     // Every comment on the page by name: its object and its /Rect.
     let rect_of = |pdf: &Pdf, d: &Dictionary| {
@@ -1082,8 +1126,9 @@ pub(crate) fn write_page_annots<'a>(
             named.insert(crate::file::thread_name(d), (id, rect_of(pdf, d)));
         }
     }
-    let (threads, marks): (Vec<&Annot>, Vec<&Annot>) =
-        annots.partition(|a| a.thread_parent().is_some());
+    let (threads, marks): (Vec<&Annot>, Vec<&Annot>) = annots
+        .into_iter()
+        .partition(|a| a.thread_parent().is_some());
     let mut connectors = Vec::new();
     for a in marks {
         let written = to_pdf(a, geom, pdf);
@@ -2280,6 +2325,76 @@ mod tests {
             assert_eq!(
                 reply.parent.as_deref(),
                 Some(ours[0].name().as_str()),
+                "incremental {incremental}"
+            );
+        }
+    }
+
+    #[test]
+    fn deleted_comments_and_their_threads_stay_out_of_the_file() {
+        let dir = tempdir();
+        let (path, ours) = file_with_their_comments(&dir);
+        let found = crate::file::read_annots(&path, None).unwrap();
+        let unnamed = found
+            .foreign
+            .iter()
+            .find(|f| f.contents == "No name")
+            .unwrap();
+        let contents = |bytes: &[u8]| -> Vec<String> {
+            page_annots(bytes)
+                .iter()
+                .map(|(_, d)| {
+                    d.get(b"Contents")
+                        .map(crate::file::pdf_text)
+                        .unwrap_or_default()
+                })
+                .collect()
+        };
+        for incremental in [true, false] {
+            let bytes = std::fs::read(&path).unwrap();
+            let mut model = opened(&path, bytes.len());
+            model.set_initial_annots(found.sheaf.clone()).unwrap();
+            let p0 = model.page(0).unwrap().id;
+            // Theirs, by name.
+            model
+                .apply(
+                    Edit::CommentsDelete {
+                        page: p0,
+                        names: vec![unnamed.name.clone()],
+                    },
+                    "delete theirs",
+                )
+                .unwrap();
+            assert!(model.snapshot().annots_dirty.contains(&p0));
+            // Ours: Acrobat's reply to it goes too.
+            model
+                .apply(
+                    Edit::AnnotDelete {
+                        page: p0,
+                        id: ours[0].id,
+                    },
+                    "delete ours",
+                )
+                .unwrap();
+            let save = |m: &Document| {
+                if incremental {
+                    crate::incremental::incremental(&m.snapshot()).unwrap()
+                } else {
+                    rewrite(&m.snapshot()).unwrap()
+                }
+            };
+            assert!(
+                contents(&save(&model)).is_empty(),
+                "incremental {incremental}"
+            );
+            // Undone, they're all written again.
+            model.undo().unwrap();
+            model.undo().unwrap();
+            let mut back = contents(&save(&model));
+            back.sort();
+            assert_eq!(
+                back,
+                ["Agreed", "No name", "ours"],
                 "incremental {incremental}"
             );
         }

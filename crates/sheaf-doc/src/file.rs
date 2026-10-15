@@ -138,6 +138,36 @@ pub struct ForeignAnnot {
     pub state: Option<(String, String)>,
     /// `/CreationDate`, or empty.
     pub created: String,
+    /// Its position in the page's `/Annots`, which is how PDFium counts
+    /// them too, so sheaf can hide it on screen.
+    pub slot: usize,
+    /// The file hides it (`/F` bit 2): sheaf never shows it.
+    pub hidden: bool,
+    /// `/C`, when it's RGB.
+    pub color: Option<[u8; 3]>,
+}
+
+/// The names deleting `removed` takes off a page: those, and every
+/// comment in their threads. `comments` is each comment's name and its
+/// parent's.
+pub fn removed_with_threads<'a>(
+    comments: impl Iterator<Item = (&'a str, Option<&'a str>)> + Clone,
+    removed: &im::OrdSet<String>,
+) -> std::collections::HashSet<String> {
+    let mut gone: std::collections::HashSet<String> = removed.iter().cloned().collect();
+    loop {
+        let more: Vec<String> = comments
+            .clone()
+            .filter(|(name, parent)| {
+                !gone.contains(*name) && parent.is_some_and(|p| gone.contains(p))
+            })
+            .map(|(name, _)| name.to_string())
+            .collect();
+        if more.is_empty() {
+            return gone;
+        }
+        gone.extend(more);
+    }
 }
 
 /// A name for an annotation without `/NM`, from what it says: the same
@@ -446,7 +476,7 @@ fn annots_in(pdf: &lopdf::Document) -> AnnotsInFile {
             continue;
         };
         let mut geom: Option<PageGeom> = None;
-        for entry in list {
+        for (slot, entry) in list.iter().enumerate() {
             let Ok((_, obj)) = pdf.dereference(entry) else {
                 continue;
             };
@@ -516,6 +546,24 @@ fn annots_in(pdf: &lopdf::Document) -> AnnotsInFile {
                     .is_some_and(|n| n == b"Group"),
                 state,
                 created: text(b"CreationDate"),
+                slot,
+                hidden: dict
+                    .get(b"F")
+                    .ok()
+                    .and_then(|f| f.as_i64().ok())
+                    .is_some_and(|f| f & 2 != 0),
+                color: dict
+                    .get(b"C")
+                    .ok()
+                    .and_then(|c| pdf.dereference(c).ok())
+                    .and_then(|(_, c)| c.as_array().ok())
+                    .filter(|c| c.len() == 3)
+                    .map(|c| {
+                        let v = |i: usize| {
+                            (c[i].as_float().unwrap_or(0.0).clamp(0.0, 1.0) * 255.0).round() as u8
+                        };
+                        [v(0), v(1), v(2)]
+                    }),
             });
         }
     }

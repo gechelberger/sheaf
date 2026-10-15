@@ -149,6 +149,10 @@ pub struct DocState {
     pub labels: Option<Vector<crate::labels::LabelSpec>>,
     /// The header/footer (with Bates numbers) sheaf draws on pages.
     pub header_footer: Option<Arc<crate::stamps::HeaderFooter>>,
+    /// Other tools' comments deleted in sheaf, by page and name
+    /// (`ForeignAnnot::name`). A save leaves them, and their own replies,
+    /// out of the file.
+    pub removed_comments: im::HashMap<PageId, im::OrdSet<String>>,
 }
 
 impl DocState {
@@ -371,6 +375,12 @@ pub enum Edit {
         page: PageId,
         id: AnnotId,
     },
+    /// Delete other tools' comments from a page, by name; a save leaves
+    /// them out. Our replies and statuses in their threads go too.
+    CommentsDelete {
+        page: PageId,
+        names: Vec<String>,
+    },
     /// Add both ends of a connector pair in one step. Ids are assigned by the
     /// document and each end's `partner` is pointed at the other.
     ConnectorAdd {
@@ -576,6 +586,7 @@ pub struct Document {
     /// Outline as it exists in the primary file on disk.
     saved_outline: Vector<OutlineNode>,
     saved_labels: Option<Vector<crate::labels::LabelSpec>>,
+    saved_removed: im::HashMap<PageId, im::OrdSet<String>>,
     /// The header/footer already drawn into the primary file's pages.
     baked_header_footer: Option<Arc<crate::stamps::HeaderFooter>>,
     /// Markup as it exists in the primary file on disk.
@@ -608,6 +619,7 @@ impl Document {
             next_job: 1,
             saved_outline: Vector::new(),
             saved_labels: None,
+            saved_removed: im::HashMap::new(),
             baked_header_footer: None,
             saved_annots: im::HashMap::new(),
         };
@@ -639,6 +651,7 @@ impl Document {
                     outline,
                     annots: im::HashMap::new(),
                     text_layers: im::HashMap::new(),
+                    removed_comments: im::HashMap::new(),
                     labels: None,
                     header_footer: None,
                 }),
@@ -778,6 +791,13 @@ impl Document {
                 dirty.insert(*pid);
             }
         }
+        // Other tools' comments deleted (or brought back) since.
+        let removed = &self.state().removed_comments;
+        for pid in removed.keys().chain(self.saved_removed.keys()) {
+            if removed.get(pid) != self.saved_removed.get(pid) {
+                dirty.insert(*pid);
+            }
+        }
         dirty
     }
 
@@ -878,6 +898,7 @@ impl Document {
         let st = self.state().clone();
         self.saved_outline = st.outline;
         self.saved_annots = st.annots;
+        self.saved_removed = st.removed_comments;
         self.saved_labels = st.labels;
         self.baked_header_footer = st.header_footer;
         self.saved = Some(self.cursor);
@@ -1593,6 +1614,7 @@ impl Document {
                 for id in &set {
                     st.annots.remove(id);
                     st.text_layers.remove(id);
+                    st.removed_comments.remove(id);
                 }
                 let (outline, removed) = cascade_delete(&st.outline, &set);
                 st.outline = outline;
@@ -1828,6 +1850,7 @@ impl Document {
                                 text_layers: st.text_layers.clone(),
                                 labels: st.labels.clone(),
                                 header_footer: st.header_footer.clone(),
+                                removed_comments: st.removed_comments.clone(),
                             };
                             let prev_node = flat[..my_pos]
                                 .iter()
@@ -1951,6 +1974,30 @@ impl Document {
                         st.annots.remove(&ppage);
                     } else {
                         st.annots.insert(ppage, plist);
+                    }
+                }
+            }
+            Edit::CommentsDelete { page, names } => {
+                if st.index_of(page).is_none() {
+                    bail!("page not found");
+                }
+                let mut set = st.removed_comments.get(&page).cloned().unwrap_or_default();
+                set.extend(names.iter().cloned());
+                st.removed_comments.insert(page, set);
+                // Our replies and statuses to them, and to those.
+                if let Some(mut list) = st.annots.get(&page).cloned() {
+                    let mut gone = names;
+                    while let Some(name) = gone.pop() {
+                        let (thread, rest): (Vector<Annot>, Vector<Annot>) = list
+                            .into_iter()
+                            .partition(|a| a.thread_parent() == Some(name.as_str()));
+                        gone.extend(thread.iter().map(Annot::name));
+                        list = rest;
+                    }
+                    if list.is_empty() {
+                        st.annots.remove(&page);
+                    } else {
+                        st.annots.insert(page, list);
                     }
                 }
             }

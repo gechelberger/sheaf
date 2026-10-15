@@ -114,6 +114,10 @@ pub trait Renderer {
     /// `names`: marks the app draws itself. Returns how many. Only those:
     /// a mark this build can't read (`sheaf:` too) is still drawn here.
     fn hide_annots(&self, page: PageIndex, names: &[String]) -> Result<usize>;
+    /// Hide or show annotations by their position in the page's
+    /// `/Annots`: (slot, hidden). For other tools' comments, which sheaf
+    /// leaves PDFium to draw.
+    fn set_annots_hidden(&self, page: PageIndex, slots: &[(usize, bool)]) -> Result<usize>;
     /// Glyph boxes (merged per line) of text intersecting `rect`, in the
     /// page's displayed space. Used to turn a drag into a text highlight.
     fn text_boxes_in_rect(&self, page: PageIndex, rect: Rect) -> Result<Vec<Rect>>;
@@ -607,6 +611,20 @@ pub mod pdfium {
             Ok(rects)
         }
 
+        fn set_annots_hidden(&self, page: PageIndex, slots: &[(usize, bool)]) -> Result<usize> {
+            let mut p = self.doc.pages().get(page.0 as i32)?;
+            let annots = p.annotations_mut();
+            let mut n = 0;
+            for &(slot, hidden) in slots {
+                if let Ok(mut a) = annots.get(slot)
+                    && a.set_is_hidden(hidden).is_ok()
+                {
+                    n += 1;
+                }
+            }
+            Ok(n)
+        }
+
         fn hide_annots(&self, page: PageIndex, names: &[String]) -> Result<usize> {
             let mut p = self.doc.pages().get(page.0 as i32)?;
             let annots = p.annotations_mut();
@@ -864,6 +882,10 @@ enum Msg {
         pages: Vec<(u32, Vec<String>)>,
         reply: oneshot::Sender<Result<usize>>,
     },
+    SetHidden {
+        pages: Vec<(u32, Vec<(usize, bool)>)>,
+        reply: oneshot::Sender<Result<usize>>,
+    },
     Search {
         matcher: Matcher,
         tx: futures::channel::mpsc::UnboundedSender<SearchEvent>,
@@ -956,6 +978,17 @@ impl RenderHandle {
     pub fn hide_annots(&self, pages: Vec<(u32, Vec<String>)>) -> oneshot::Receiver<Result<usize>> {
         let (tx, rx) = oneshot::channel();
         self.send(Msg::HideAnnots { pages, reply: tx });
+        rx
+    }
+
+    /// Hide or show annotations by their slot in each page's `/Annots`
+    /// (see [`Renderer::set_annots_hidden`]). Resolves with the count set.
+    pub fn set_annots_hidden(
+        &self,
+        pages: Vec<(u32, Vec<(usize, bool)>)>,
+    ) -> oneshot::Receiver<Result<usize>> {
+        let (tx, rx) = oneshot::channel();
+        self.send(Msg::SetHidden { pages, reply: tx });
         rx
     }
 
@@ -1169,6 +1202,20 @@ fn worker_loop(engine: impl Renderer, rx: mpsc::Receiver<Msg>) {
                 }
                 Msg::PageSize { page, reply } => {
                     let _ = reply.send(engine.page_size(PageIndex(page)));
+                }
+                Msg::SetHidden { pages, reply } => {
+                    let mut n = 0;
+                    let mut err = None;
+                    for (p, slots) in pages {
+                        match engine.set_annots_hidden(PageIndex(p), &slots) {
+                            Ok(k) => n += k,
+                            Err(e) => err = Some(e),
+                        }
+                    }
+                    let _ = reply.send(match err {
+                        Some(e) => Err(e),
+                        None => Ok(n),
+                    });
                 }
                 Msg::HideAnnots { pages, reply } => {
                     let mut n = 0;

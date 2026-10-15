@@ -58,6 +58,8 @@ pub struct Facts {
     pub marks: bool,
     /// Text selected on a page (Copy takes that first).
     pub text: bool,
+    /// Comments are shown on the page (View > Show Comments).
+    pub comments_shown: bool,
     pub pages: bool,
     pub region: bool,
     pub can_undo: bool,
@@ -116,6 +118,7 @@ impl Facts {
         f.selection = !doc.selected_marks.is_empty() || doc.selected_foreign.is_some();
         f.marks = !doc.selected_marks.is_empty();
         f.text = doc.text_sel.is_some_and(|s| !s.is_empty());
+        f.comments_shown = !doc.comments_hidden;
         f.pages = !doc.selection.is_empty();
         f.region = view.region.is_some();
         f.can_undo = doc.model.can_undo();
@@ -257,6 +260,7 @@ pub fn builtin(id: &str) -> Builtin {
         | "docview::PasteMarks"
         | "docview::PasteMarksInPlace" => (DOC, None, None),
         "docview::CopySelection" => (DOC, Some(|f| f.marks || f.text), None),
+        "docview::ToggleComments" => (DOC, None, Some(|f| f.comments_shown)),
         "comments::ReplyToComment" | "comments::ToggleCheckmark" => {
             (DOC, Some(|f| f.selection), None)
         }
