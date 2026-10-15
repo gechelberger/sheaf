@@ -17,5 +17,5 @@ regex.workspace = true
 
 [dev-dependencies]
 env_logger.workspace = true
-sheaf-doc.workspace = true
+sheaf-doc = { workspace = true, features = ["fixtures"] }
 lopdf.workspace = true

@@ -1,0 +1,603 @@
+//! Forms built in code, for tests (M10 proposal 21: no PDF is committed
+//! to sheaf): fields of each type with their widgets, `/DR`, an `/XFA`
+//! copy, usage rights and signatures, a structure tree, and revisions.
+//!
+//! A [`Form`] is a plain lopdf document plus the ids a test needs to
+//! break it on purpose. [`Form::bytes`] writes it, filling in each
+//! signature's `/ByteRange` around its `/Contents` as signing would (the
+//! contents are zeros: nothing is really signed).
+
+use lopdf::content::{Content, Operation};
+use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, StringFormat, dictionary};
+
+/// A rectangle in page space: left, bottom, right, top.
+pub type Rect = [f32; 4];
+
+/// `/Ff` bits.
+pub const RADIO: i64 = 1 << 15;
+pub const NO_TOGGLE_TO_OFF: i64 = 1 << 14;
+pub const PUSH_BUTTON: i64 = 1 << 16;
+pub const COMBO: i64 = 1 << 17;
+
+/// What a signature's `/ByteRange` says until [`Form::bytes`] fills it in.
+const RANGE_PLACEHOLDER: &[u8] = b"[0 9999999999 9999999999 9999999999]";
+/// Bytes of zeros in a signature's `/Contents`.
+const CONTENTS_LEN: usize = 512;
+
+pub struct Form {
+    pub pdf: Pdf,
+    pub catalog: ObjectId,
+    pub pages: Vec<ObjectId>,
+    /// The `/AcroForm` dictionary, an object of its own.
+    pub acroform: ObjectId,
+    /// `/DR`'s Helvetica, which appearances use as `/Helv`.
+    pub helv: ObjectId,
+    /// Signature dictionaries, filled in by `bytes`.
+    signatures: Vec<ObjectId>,
+}
+
+impl Form {
+    /// `pages` Letter pages, each saying "Page n", and an empty form whose
+    /// `/DR` has Helvetica (`/Helv`) and ZapfDingbats (`/ZaDb`).
+    pub fn new(pages: usize) -> Form {
+        let mut pdf = Pdf::with_version("1.7");
+        let pages_id = pdf.new_object_id();
+        let helv = pdf.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+            "Encoding" => "WinAnsiEncoding",
+        });
+        let zadb = pdf.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "ZapfDingbats",
+        });
+        let mut ids = Vec::new();
+        for i in 0..pages {
+            let content = Content {
+                operations: vec![
+                    Operation::new("BT", vec![]),
+                    Operation::new("Tf", vec!["F1".into(), 18.into()]),
+                    Operation::new("Td", vec![72.into(), 740.into()]),
+                    Operation::new(
+                        "Tj",
+                        vec![Object::string_literal(format!("Page {}", i + 1))],
+                    ),
+                    Operation::new("ET", vec![]),
+                ],
+            };
+            let c = pdf.add_object(Stream::new(dictionary! {}, content.encode().unwrap()));
+            ids.push(pdf.add_object(dictionary! {
+                "Type" => "Page", "Parent" => pages_id, "Contents" => c,
+                "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+                "Resources" => dictionary! { "Font" => dictionary! { "F1" => helv } },
+            }));
+        }
+        pdf.objects.insert(
+            pages_id,
+            dictionary! {
+                "Type" => "Pages", "Count" => pages as i64,
+                "Kids" => ids.iter().map(|&i| Object::Reference(i)).collect::<Vec<_>>(),
+            }
+            .into(),
+        );
+        let acroform = pdf.add_object(dictionary! {
+            "Fields" => Vec::<Object>::new(),
+            "DR" => dictionary! { "Font" => dictionary! { "Helv" => helv, "ZaDb" => zadb } },
+            "DA" => Object::string_literal("/Helv 0 Tf 0 g"),
+        });
+        let catalog = pdf.add_object(dictionary! {
+            "Type" => "Catalog", "Pages" => pages_id, "AcroForm" => acroform,
+        });
+        pdf.trailer.set("Root", catalog);
+        Form {
+            pdf,
+            catalog,
+            pages: ids,
+            acroform,
+            helv,
+            signatures: Vec::new(),
+        }
+    }
+
+    /// An object's dictionary, to change.
+    pub fn dict(&mut self, id: ObjectId) -> &mut Dictionary {
+        self.pdf.get_dictionary_mut(id).expect("a dictionary")
+    }
+
+    /// A text field, its own widget, at `rect` on page `page` (from 0).
+    pub fn text(&mut self, name: &str, page: usize, rect: Rect) -> ObjectId {
+        let id = self.widget(page, rect);
+        let d = self.dict(id);
+        d.set("FT", "Tx");
+        d.set("T", Object::string_literal(name));
+        d.set("DA", Object::string_literal("/Helv 10 Tf 0 g"));
+        self.add_field(id);
+        id
+    }
+
+    /// A check box, on (state `/Yes`) or off, with both appearances.
+    pub fn check_box(&mut self, name: &str, page: usize, rect: Rect, on: bool) -> ObjectId {
+        let id = self.widget(page, rect);
+        let ap = self.states(rect, "Yes");
+        let state = if on { "Yes" } else { "Off" };
+        let d = self.dict(id);
+        d.set("FT", "Btn");
+        d.set("T", Object::string_literal(name));
+        d.set("DA", Object::string_literal("/ZaDb 0 Tf 0 g"));
+        d.set("AP", ap);
+        d.set("V", Object::Name(state.into()));
+        d.set("AS", Object::Name(state.into()));
+        self.add_field(id);
+        id
+    }
+
+    /// A radio group: a button per rect on page `page`, in states "0",
+    /// "1"…, with `chosen` on. Returns the field; its widgets are its
+    /// `/Kids`.
+    pub fn radio(
+        &mut self,
+        name: &str,
+        page: usize,
+        rects: &[Rect],
+        chosen: Option<usize>,
+    ) -> ObjectId {
+        let value = chosen.map_or("Off".to_string(), |i| i.to_string());
+        let field = self.pdf.add_object(dictionary! {
+            "FT" => "Btn", "T" => Object::string_literal(name),
+            "Ff" => RADIO | NO_TOGGLE_TO_OFF,
+            "DA" => Object::string_literal("/ZaDb 0 Tf 0 g"),
+            "V" => Object::Name(value.into_bytes()),
+        });
+        let mut kids = Vec::new();
+        for (i, &rect) in rects.iter().enumerate() {
+            let w = self.widget(page, rect);
+            let ap = self.states(rect, &i.to_string());
+            let state = if chosen == Some(i) {
+                i.to_string()
+            } else {
+                "Off".into()
+            };
+            let d = self.dict(w);
+            d.set("Parent", field);
+            d.set("AP", ap);
+            d.set("AS", Object::Name(state.into_bytes()));
+            kids.push(Object::Reference(w));
+        }
+        self.dict(field).set("Kids", kids);
+        self.add_field(field);
+        field
+    }
+
+    /// A combo box (or, with `combo` false, a list box) of `options`.
+    pub fn choice(
+        &mut self,
+        name: &str,
+        page: usize,
+        rect: Rect,
+        options: &[&str],
+        combo: bool,
+    ) -> ObjectId {
+        let id = self.widget(page, rect);
+        let d = self.dict(id);
+        d.set("FT", "Ch");
+        d.set("T", Object::string_literal(name));
+        d.set("DA", Object::string_literal("/Helv 10 Tf 0 g"));
+        let options: Vec<Object> = options.iter().map(|o| Object::string_literal(*o)).collect();
+        d.set("Opt", options);
+        if combo {
+            d.set("Ff", COMBO);
+        }
+        self.add_field(id);
+        id
+    }
+
+    /// A push button that says `caption`.
+    pub fn push_button(&mut self, name: &str, page: usize, rect: Rect, caption: &str) -> ObjectId {
+        let id = self.widget(page, rect);
+        let ap = self.text_appearance(rect, caption);
+        let d = self.dict(id);
+        d.set("FT", "Btn");
+        d.set("Ff", PUSH_BUTTON);
+        d.set("T", Object::string_literal(name));
+        d.set("DA", Object::string_literal("/Helv 10 Tf 0 g"));
+        d.set(
+            "MK",
+            dictionary! { "CA" => Object::string_literal(caption) },
+        );
+        d.set("AP", dictionary! { "N" => ap });
+        self.add_field(id);
+        id
+    }
+
+    /// An unsigned signature field (an empty appearance).
+    pub fn signature(&mut self, name: &str, page: usize, rect: Rect) -> ObjectId {
+        let id = self.widget(page, rect);
+        let ap = self.appearance(rect, Vec::new());
+        let d = self.dict(id);
+        d.set("FT", "Sig");
+        d.set("T", Object::string_literal(name));
+        d.set("AP", dictionary! { "N" => ap });
+        self.add_field(id);
+        id
+    }
+
+    /// Fill a text or choice field: `/V`, and on each widget an appearance
+    /// that draws it.
+    pub fn fill(&mut self, field: ObjectId, value: &str) {
+        self.dict(field).set("V", Object::string_literal(value));
+        for w in self.widgets_of(field) {
+            let rect = self.rect_of(w);
+            let ap = self.text_appearance(rect, value);
+            self.dict(w).set("AP", dictionary! { "N" => ap });
+        }
+    }
+
+    /// `/Fields`.
+    pub fn fields(&self) -> Vec<ObjectId> {
+        refs(self.pdf.get_dictionary(self.acroform).ok(), b"Fields")
+    }
+
+    pub fn set_fields(&mut self, fields: &[ObjectId]) {
+        let fields: Vec<Object> = fields.iter().map(|&f| Object::Reference(f)).collect();
+        self.dict(self.acroform).set("Fields", fields);
+    }
+
+    /// Page `page`'s `/Annots`.
+    pub fn annots(&self, page: usize) -> Vec<ObjectId> {
+        refs(self.pdf.get_dictionary(self.pages[page]).ok(), b"Annots")
+    }
+
+    pub fn set_annots(&mut self, page: usize, annots: &[ObjectId]) {
+        let annots: Vec<Object> = annots.iter().map(|&a| Object::Reference(a)).collect();
+        self.dict(self.pages[page]).set("Annots", annots);
+    }
+
+    /// The widgets of `field`: its kids, or itself.
+    pub fn widgets_of(&self, field: ObjectId) -> Vec<ObjectId> {
+        let d = self.pdf.get_dictionary(field).expect("a field");
+        match d.get(b"Kids").and_then(|k| k.as_array()) {
+            Ok(kids) => kids.iter().filter_map(|k| k.as_reference().ok()).collect(),
+            Err(_) => vec![field],
+        }
+    }
+
+    /// Put `fields` under a new field `name` (no `/T` clash checks): they
+    /// leave `/Fields`, and it joins.
+    pub fn group(&mut self, name: &str, fields: &[ObjectId]) -> ObjectId {
+        let kids: Vec<Object> = fields.iter().map(|&f| Object::Reference(f)).collect();
+        let parent = self.pdf.add_object(dictionary! {
+            "T" => Object::string_literal(name), "Kids" => kids,
+        });
+        for &f in fields {
+            self.dict(f).set("Parent", parent);
+        }
+        let left: Vec<ObjectId> = self
+            .fields()
+            .into_iter()
+            .filter(|f| !fields.contains(f))
+            .chain([parent])
+            .collect();
+        self.set_fields(&left);
+        parent
+    }
+
+    /// An `/XFA` copy that names the fields as they are now, as LiveCycle
+    /// Designer would for a static form: a template with a subform per
+    /// parent field and a field per terminal one (an exclusion group for a
+    /// radio group), and datasets with their values. Field names should
+    /// carry Designer's `[0]` indexes (`form1[0].name[0]`).
+    pub fn xfa(&mut self) {
+        let mut template = String::new();
+        let mut data = String::new();
+        for f in self.fields() {
+            self.xfa_node(f, &mut template, &mut data);
+        }
+        let packet = |pdf: &mut Pdf, xml: String| {
+            Object::Reference(pdf.add_object(Stream::new(dictionary! {}, xml.into_bytes())))
+        };
+        let preamble = packet(
+            &mut self.pdf,
+            r#"<xdp:xdp xmlns:xdp="http://ns.adobe.com/xdp/">"#.into(),
+        );
+        let template = packet(
+            &mut self.pdf,
+            format!(
+                r#"<template xmlns="http://www.xfa.org/schema/xfa-template/3.3/">{template}</template>"#
+            ),
+        );
+        let datasets = packet(
+            &mut self.pdf,
+            format!(
+                r#"<xfa:datasets xmlns:xfa="http://www.xfa.org/schema/xfa-data/1.0/"><xfa:data>{data}</xfa:data></xfa:datasets>"#
+            ),
+        );
+        let postamble = packet(&mut self.pdf, "</xdp:xdp>".into());
+        let xfa = vec![
+            Object::string_literal("preamble"),
+            preamble,
+            Object::string_literal("template"),
+            template,
+            Object::string_literal("datasets"),
+            datasets,
+            Object::string_literal("postamble"),
+            postamble,
+        ];
+        self.dict(self.acroform).set("XFA", xfa);
+    }
+
+    /// A dynamic XFA form: the XFA copy as [`Form::xfa`] makes it, then no
+    /// AcroForm fields or widgets, and `/NeedsRendering`.
+    pub fn xfa_only(&mut self) {
+        self.xfa();
+        self.set_fields(&[]);
+        for page in 0..self.pages.len() {
+            self.set_annots(page, &[]);
+        }
+        self.dict(self.catalog).set("NeedsRendering", true);
+        self.pdf.prune_objects();
+    }
+
+    /// Reader usage rights: `/Perms /UR3`, a signature over the whole
+    /// file, and `/SigFlags 2`.
+    pub fn usage_rights(&mut self) {
+        let sig = self.signature_dict(dictionary! {
+            "Type" => "SigRef", "TransformMethod" => "UR3",
+            "TransformParams" => dictionary! {
+                "Type" => "TransformParams", "V" => "2.2",
+                "Form" => vec![Object::Name(b"FillIn".to_vec())],
+                "Document" => vec![Object::Name(b"FullSave".to_vec())],
+            },
+        });
+        self.dict(self.catalog)
+            .set("Perms", dictionary! { "UR3" => sig });
+        self.dict(self.acroform).set("SigFlags", 2);
+    }
+
+    /// Sign signature field `field`: a `/V` over the whole file, and
+    /// `/SigFlags 3`.
+    pub fn sign(&mut self, field: ObjectId) {
+        let sig = self.signature_dict(dictionary! {});
+        self.dict(field).set("V", sig);
+        self.dict(self.acroform).set("SigFlags", 3);
+    }
+
+    /// Certify with signature field `field`: [`Form::sign`], with a
+    /// DocMDP reference that allows filling, and `/Perms /DocMDP`.
+    pub fn certify(&mut self, field: ObjectId) {
+        let sig = self.signature_dict(dictionary! {
+            "Type" => "SigRef", "TransformMethod" => "DocMDP",
+            "TransformParams" => dictionary! { "Type" => "TransformParams", "P" => 2, "V" => "1.2" },
+        });
+        self.dict(field).set("V", sig);
+        self.dict(self.catalog)
+            .set("Perms", dictionary! { "DocMDP" => sig });
+        self.dict(self.acroform).set("SigFlags", 3);
+    }
+
+    /// A structure tree, as Acrobat tags a form: a `/Form` element per
+    /// widget, with an object reference to it, in a parent tree; and
+    /// `/Tabs /S` on every page.
+    pub fn tag(&mut self) {
+        let root = self.pdf.new_object_id();
+        let document = self.pdf.new_object_id();
+        let mut elements = Vec::new();
+        let mut nums = Vec::new();
+        for (i, page) in self.pages.clone().into_iter().enumerate() {
+            self.dict(page).set("Tabs", "S");
+            for w in self.annots(i) {
+                let key = nums.len() as i64 / 2;
+                let element = self.pdf.add_object(dictionary! {
+                    "Type" => "StructElem", "S" => "Form", "P" => document, "Pg" => page,
+                    "K" => dictionary! { "Type" => "OBJR", "Obj" => w, "Pg" => page },
+                });
+                self.dict(w).set("StructParent", key);
+                elements.push(Object::Reference(element));
+                nums.push(Object::Integer(key));
+                nums.push(Object::Reference(element));
+            }
+        }
+        let next = nums.len() as i64 / 2;
+        self.pdf.objects.insert(
+            document,
+            dictionary! { "Type" => "StructElem", "S" => "Document", "P" => root, "K" => elements }
+                .into(),
+        );
+        self.pdf.objects.insert(
+            root,
+            dictionary! {
+                "Type" => "StructTreeRoot", "K" => document,
+                "ParentTree" => dictionary! { "Nums" => nums },
+                "ParentTreeNextKey" => next,
+            }
+            .into(),
+        );
+        let catalog = self.dict(self.catalog);
+        catalog.set("StructTreeRoot", root);
+        catalog.set("MarkInfo", dictionary! { "Marked" => true });
+    }
+
+    /// The file. Each signature's `/ByteRange` covers it all but the
+    /// signature's `/Contents`.
+    pub fn bytes(&mut self) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.pdf.save_to(&mut out).expect("writing the fixture");
+        let mut from = 0;
+        for _ in &self.signatures {
+            let at =
+                from + find(&out[from..], RANGE_PLACEHOLDER).expect("a signature's /ByteRange");
+            let contents = at + find(&out[at..], b"/Contents").expect("its /Contents");
+            let lt = contents + find(&out[contents..], b"<").expect("a hex string");
+            let gt = lt + find(&out[lt..], b">").expect("its end");
+            let range = format!("[0 {:010} {:010} {:010}]", lt, gt + 1, out.len() - (gt + 1));
+            out[at..at + RANGE_PLACEHOLDER.len()].copy_from_slice(range.as_bytes());
+            from = gt;
+        }
+        out
+    }
+
+    fn widget(&mut self, page: usize, rect: Rect) -> ObjectId {
+        let r: Vec<Object> = rect.iter().map(|&v| Object::Real(v)).collect();
+        let id = self.pdf.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "Widget", "Rect" => r, "F" => 4,
+            "P" => self.pages[page],
+        });
+        let mut annots = self.annots(page);
+        annots.push(id);
+        self.set_annots(page, &annots);
+        id
+    }
+
+    fn add_field(&mut self, id: ObjectId) {
+        let mut fields = self.fields();
+        fields.push(id);
+        self.set_fields(&fields);
+    }
+
+    fn rect_of(&self, w: ObjectId) -> Rect {
+        let r: Vec<f32> = self
+            .pdf
+            .get_dictionary(w)
+            .ok()
+            .and_then(|d| d.get(b"Rect").ok())
+            .and_then(|r| r.as_array().ok())
+            .map(|r| r.iter().filter_map(|v| v.as_float().ok()).collect())
+            .unwrap_or_default();
+        [r[0], r[1], r[2], r[3]]
+    }
+
+    /// A form XObject the size of `rect` drawing `content`, with `/DR`'s
+    /// Helvetica as `/Helv`.
+    fn appearance(&mut self, rect: Rect, content: Vec<u8>) -> ObjectId {
+        let (w, h) = (rect[2] - rect[0], rect[3] - rect[1]);
+        self.pdf.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject", "Subtype" => "Form",
+                "BBox" => vec![0.into(), 0.into(), Object::Real(w), Object::Real(h)],
+                "Resources" => dictionary! { "Font" => dictionary! { "Helv" => self.helv } },
+            },
+            content,
+        ))
+    }
+
+    /// An appearance that draws `text` in 10 pt Helvetica, as Acrobat
+    /// marks a text field's.
+    fn text_appearance(&mut self, rect: Rect, text: &str) -> ObjectId {
+        let h = rect[3] - rect[1];
+        let content = Content {
+            operations: vec![
+                Operation::new("BMC", vec![Object::Name(b"Tx".to_vec())]),
+                Operation::new("BT", vec![]),
+                Operation::new("Tf", vec!["Helv".into(), 10.into()]),
+                Operation::new("g", vec![0.into()]),
+                Operation::new("Td", vec![2.into(), Object::Real((h - 7.0) / 2.0)]),
+                Operation::new("Tj", vec![Object::string_literal(text)]),
+                Operation::new("ET", vec![]),
+                Operation::new("EMC", vec![]),
+            ],
+        };
+        self.appearance(rect, content.encode().unwrap())
+    }
+
+    /// `/N` and `/D` for a button: `on` draws a filled square, `/Off`
+    /// nothing.
+    fn states(&mut self, rect: Rect, on: &str) -> Dictionary {
+        let (w, h) = (rect[2] - rect[0], rect[3] - rect[1]);
+        let mark = format!("0 g 2 2 {} {} re f", w - 4.0, h - 4.0).into_bytes();
+        let on_ap = self.appearance(rect, mark);
+        let off_ap = self.appearance(rect, Vec::new());
+        let states = dictionary! { on => on_ap, "Off" => off_ap };
+        dictionary! { "N" => states.clone(), "D" => states }
+    }
+
+    /// A signature dictionary with placeholder `/ByteRange` and
+    /// `/Contents`, and `reference` (a `/SigRef`) if it isn't empty.
+    fn signature_dict(&mut self, reference: Dictionary) -> ObjectId {
+        let mut sig = dictionary! {
+            "Type" => "Sig", "Filter" => "Adobe.PPKLite", "SubFilter" => "adbe.pkcs7.detached",
+            "ByteRange" => vec![0.into(), 9_999_999_999i64.into(), 9_999_999_999i64.into(), 9_999_999_999i64.into()],
+            "Contents" => Object::String(vec![0; CONTENTS_LEN], StringFormat::Hexadecimal),
+            "M" => Object::string_literal("D:20261015120000Z"),
+        };
+        if !reference.is_empty() {
+            sig.set("Reference", vec![Object::Dictionary(reference)]);
+        }
+        let id = self.pdf.add_object(sig);
+        self.signatures.push(id);
+        id
+    }
+
+    /// One field's part of the XFA template and data.
+    fn xfa_node(&self, id: ObjectId, template: &mut String, data: &mut String) {
+        let Ok(d) = self.pdf.get_dictionary(id) else {
+            return;
+        };
+        let name = d.get(b"T").map(crate::file::pdf_text).unwrap_or_default();
+        let bare = name.split('[').next().unwrap_or_default().to_string();
+        // Designer's names are XML names: they name the data's elements.
+        assert!(
+            bare.starts_with(|c: char| c.is_alphabetic() || c == '_')
+                && bare
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '_' || c == '-'),
+            "not a name Designer would give a field: {name:?}"
+        );
+        let kids = refs(Some(d), b"Kids");
+        let field_kids: Vec<ObjectId> = kids
+            .iter()
+            .copied()
+            .filter(|&k| self.pdf.get_dictionary(k).is_ok_and(|k| k.has(b"T")))
+            .collect();
+        if !field_kids.is_empty() {
+            template.push_str(&format!(r#"<subform name="{bare}">"#));
+            data.push_str(&format!("<{bare}>"));
+            for k in field_kids {
+                self.xfa_node(k, template, data);
+            }
+            template.push_str("</subform>");
+            data.push_str(&format!("</{bare}>"));
+            return;
+        }
+        let value = match d.get(b"V") {
+            Ok(Object::Name(n)) if n != b"Off" => String::from_utf8_lossy(n).into_owned(),
+            Ok(v @ Object::String(..)) => crate::file::pdf_text(v),
+            _ => String::new(),
+        };
+        let flags = d.get(b"Ff").and_then(|f| f.as_i64()).unwrap_or(0);
+        if flags & RADIO != 0 {
+            template.push_str(&format!(r#"<exclGroup name="{bare}">"#));
+            for i in 0..kids.len() {
+                template.push_str(&format!(r#"<field name="item{i}"/>"#));
+            }
+            template.push_str("</exclGroup>");
+        } else {
+            template.push_str(&format!(r#"<field name="{bare}"/>"#));
+        }
+        let value = quick_xml::escape::escape(value);
+        data.push_str(&format!("<{bare}>{value}</{bare}>"));
+    }
+}
+
+/// `bytes` with an incremental update appended: `change` edits a copy of
+/// each object in `ids` (and anything it adds) in the new revision.
+pub fn append_revision(bytes: &[u8], ids: &[ObjectId], change: impl FnOnce(&mut Pdf)) -> Vec<u8> {
+    let prev = Pdf::load_mem(bytes).expect("the previous revision");
+    let mut doc = lopdf::IncrementalDocument::create_from(bytes.to_vec(), prev);
+    for &id in ids {
+        doc.opt_clone_object_to_new_document(id)
+            .expect("an object in the previous revision");
+    }
+    change(&mut doc.new_document);
+    let mut out = Vec::new();
+    doc.save_to(&mut out).expect("writing the update");
+    out
+}
+
+/// The references in an array under `key`.
+fn refs(d: Option<&Dictionary>, key: &[u8]) -> Vec<ObjectId> {
+    d.and_then(|d| d.get(key).ok())
+        .and_then(|a| a.as_array().ok())
+        .map(|a| a.iter().filter_map(|o| o.as_reference().ok()).collect())
+        .unwrap_or_default()
+}
+
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}

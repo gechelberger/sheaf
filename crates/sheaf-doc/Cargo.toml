@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Forms built in code and the lookup for Greg's corpus of real ones
+# (`forms::fixture`, `forms::corpus`), for other crates' tests.
+fixtures = []
+
 [dependencies]
 # Random mark ids, so copies of a file never hand out the same one.
 fastrand = "2"

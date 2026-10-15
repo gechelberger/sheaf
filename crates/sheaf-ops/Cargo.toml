@@ -26,3 +26,4 @@ image = { workspace = true, features = ["jpeg"] }
 
 [dev-dependencies]
 fastrand = "2"
+sheaf-doc = { workspace = true, features = ["fixtures"] }

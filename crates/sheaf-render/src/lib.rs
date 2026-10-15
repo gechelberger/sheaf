@@ -298,6 +298,60 @@ pub mod pdfium {
         }
     }
 
+    /// Page `page` of the file in `bytes`, `width` pixels wide, RGBA, as a
+    /// viewer that draws only appearance streams shows it: each
+    /// annotation's normal appearance (the state its `/AS` names), and
+    /// nothing made from a field's value or `NeedAppearances`. The page
+    /// view draws widgets with `FPDF_FFLDraw`, which makes an appearance
+    /// from `/V` where there's none (M10 bug 10), so tests that check what
+    /// other viewers show use this.
+    ///
+    /// PDFium's own flatten draws the appearances into a private copy of
+    /// the page. (With form drawing just turned off, PDFium draws no
+    /// widgets at all.) Where a check box or radio button has no `/AS`,
+    /// the flatten would draw its first state; here it draws none (poppler
+    /// draws its Off state, pdf.js the state of the field's value).
+    pub fn render_appearances(
+        bytes: &[u8],
+        password: Option<&str>,
+        page: PageIndex,
+        width: u32,
+    ) -> Result<Raster> {
+        let doc = pdfium()?
+            .load_pdf_from_byte_vec(bytes.to_vec(), password)
+            .context("pdfium loading")?;
+        let mut p = doc.pages().get(page.0 as i32)?;
+        // pdfium-render flattens what would print; make that what shows.
+        for mut a in p.annotations_mut().iter() {
+            let no_state = a.as_form_field().is_some_and(|f| {
+                let button = matches!(
+                    f.field_type(),
+                    PdfFormFieldType::Checkbox | PdfFormFieldType::RadioButton
+                );
+                button && f.appearance_stream().is_none()
+            });
+            let shown = !a.is_hidden() && !a.is_printable_but_not_viewable() && !no_state;
+            a.set_is_printed(shown)?;
+        }
+        p.flatten()?;
+        let w = width.max(1);
+        let h = ((w as f32) * p.height().value / p.width().value.max(1.0))
+            .round()
+            .max(1.0) as u32;
+        let cfg = PdfRenderConfig::new()
+            .set_fixed_size(w as i32, h as i32)
+            .set_format(PdfBitmapFormat::BGRA)
+            .set_reverse_byte_order(false)
+            .render_form_data(false);
+        let bmp = p.render_with_config(&cfg)?;
+        Ok(Raster {
+            width: bmp.width() as u32,
+            height: bmp.height() as u32,
+            format: PixelFormat::Rgba,
+            data: bmp.as_rgba_bytes(),
+        })
+    }
+
     impl Renderer for PdfiumEngine {
         fn page_count(&self) -> u32 {
             self.doc.pages().len() as u32

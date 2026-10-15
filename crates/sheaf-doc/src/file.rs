@@ -243,13 +243,18 @@ pub fn load_source(info: &crate::SourceInfo) -> Result<lopdf::Document> {
     let Some(data) = &info.data else {
         return load_pdf(&info.path, info.password.as_deref());
     };
-    let path = info.path.display();
-    let mut pdf = lopdf::Document::load_mem(&data.0).with_context(|| format!("loading {path}"))?;
+    load_pdf_mem(&data.0, info.password.as_deref())
+        .with_context(|| format!("loading {}", info.path.display()))
+}
+
+/// [`load_pdf`] for a file in memory.
+pub fn load_pdf_mem(bytes: &[u8], password: Option<&str>) -> Result<lopdf::Document> {
+    let mut pdf = lopdf::Document::load_mem(bytes)?;
     if pdf.is_encrypted() {
-        let options = lopdf::LoadOptions::with_password(info.password.as_deref().unwrap_or(""));
-        pdf = lopdf::Document::load_mem_with_options(&data.0, options)
+        let options = lopdf::LoadOptions::with_password(password.unwrap_or(""));
+        pdf = lopdf::Document::load_mem_with_options(bytes, options)
             .map_err(|e| anyhow::anyhow!("{e}"))
-            .with_context(|| format!("decrypting {path}"))?;
+            .context("decrypting")?;
         pdf.trailer.remove(b"Encrypt");
         pdf.encryption_state = None;
     }

@@ -10,6 +10,7 @@ pub mod attachments;
 pub mod describe;
 pub mod exchange;
 pub mod file;
+pub mod forms;
 pub mod generated;
 pub mod history;
 pub mod images;

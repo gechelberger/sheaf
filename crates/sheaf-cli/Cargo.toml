@@ -30,4 +30,5 @@ ctrlc = "3"
 
 [dev-dependencies]
 lopdf.workspace = true
+sheaf-doc = { workspace = true, features = ["fixtures"] }
 image = { workspace = true, features = ["jpeg"] }
