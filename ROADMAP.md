@@ -252,8 +252,8 @@ kickoff and the bugs found, is in [`todos/m11.md`](todos/m11.md).
   and overlay text, a leak check and verification. Guard rails keep the
   unredacted binder from being sent by mistake.
 - Pattern-driven redaction: Patterns panel hits (OCR text included) become
-  redaction marks (the shared engine planned since M2), with an option to
-  keep the last four digits.
+  redaction marks (the shared engine planned since M2), covering whole words
+  or chosen characters (Acrobat's partial-word marks).
 - Sanitize / remove hidden information: metadata, attachments, comments,
   form fields, hidden layers, content outside the crop box, links, actions
   and JavaScript, search indexes, thumbnails, sheaf's private data,
