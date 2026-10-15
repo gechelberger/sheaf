@@ -19,6 +19,11 @@
 //! Place puts the tape on the next page clicked; a placed tape's Edit Tape
 //! (double-click it, or its right-click menu) brings it back here, and
 //! Place then updates it where it is.
+//!
+//! Pick (a sheaf extension; PDFlyer's numbers are typed): while it's on, a
+//! click on a number on the page adds it, read from the page's text (or
+//! its unsaved OCR), and Shift+drag over a region adds every number in it.
+//! Each can get a tickmark beside it.
 
 use gpui::{
     AnyElement, Context, Entity, Focusable, KeyDownEvent, Subscription, Window, div, prelude::*, px,
@@ -52,6 +57,10 @@ pub struct CalcTape {
     pub placing: bool,
     /// The placed tape this one came from: Place updates it.
     pub editing: Option<(PageId, AnnotId)>,
+    /// Clicks on the page pick numbers.
+    pub picking: bool,
+    /// The tickmark put beside each picked number, if any.
+    pub tick: Option<String>,
     pub scroll: gpui::ScrollHandle,
 }
 
@@ -115,6 +124,8 @@ impl DocView {
             writing: None,
             placing: false,
             editing: None,
+            picking: false,
+            tick: None,
             scroll: gpui::ScrollHandle::new(),
         });
     }
@@ -456,6 +467,110 @@ impl DocView {
         true
     }
 
+    /// Pick on: a click on a page enters the number under it. True when
+    /// the click was taken.
+    pub(crate) fn pick_number_at(
+        &mut self,
+        page: PageId,
+        p: Pt,
+        tolerance: f32,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.calc.as_ref().is_some_and(|c| c.picking) {
+            return false;
+        }
+        self.with_chars(page, cx, move |v, chars, cx| {
+            let hit = chars.and_then(|c| {
+                let at = c.boundary_at(p, tolerance)?;
+                c.words()
+                    .into_iter()
+                    .find(|(_, (a, b), _)| *a <= at && at <= *b)
+            });
+            match hit.and_then(|(w, _, r)| Some((sheaf_doc::tape::number_in(&w)?, r))) {
+                Some((value, r)) => v.picked(page, vec![(value, r)], cx),
+                None => v.set_notice("No number there", cx),
+            }
+        });
+        true
+    }
+
+    /// Pick on, Shift+drag: every number in the region.
+    pub(crate) fn pick_numbers_in(&mut self, page: PageId, rect: Box2, cx: &mut Context<Self>) {
+        self.with_chars(page, cx, move |v, chars, cx| {
+            let found: Vec<(f64, Box2)> = chars
+                .map(|c| {
+                    c.words()
+                        .into_iter()
+                        .filter(|(_, _, r)| {
+                            rect.contains(Pt {
+                                x: r.x + r.w / 2.0,
+                                y: r.y + r.h / 2.0,
+                            })
+                        })
+                        .filter_map(|(w, _, r)| Some((sheaf_doc::tape::number_in(&w)?, r)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if found.is_empty() {
+                v.set_notice("No numbers there", cx);
+            } else {
+                v.picked(page, found, cx);
+            }
+        });
+    }
+
+    /// Numbers picked on `page`: onto the tape, each with the tickmark
+    /// beside it when there's one (as one undo step).
+    fn picked(&mut self, page: PageId, numbers: Vec<(f64, Box2)>, cx: &mut Context<Self>) {
+        self.ensure_calc(cx);
+        let calc = self.calc.as_mut().unwrap();
+        for (value, _) in &numbers {
+            calc.tape.lines.push(Line::new(Row::Entry {
+                value: *value,
+                op: Op::Add,
+            }));
+        }
+        calc.tape.retotal();
+        let tick = calc.tick.clone();
+        let decimals = calc.decimals;
+        let n = numbers.len();
+        let sum: f64 = numbers.iter().map(|(v, _)| v).sum();
+        if let Some(glyph) = tick {
+            let edits: Vec<Edit> = numbers
+                .iter()
+                .map(|(_, r)| {
+                    let h = (r.h * 1.2).max(10.0);
+                    let w = crate::contrib::mark_width(&glyph, h);
+                    let a = self.new_annot(
+                        AnnotKind::Stamp {
+                            rect: Box2 {
+                                x: r.right() + 2.0,
+                                y: r.y + r.h / 2.0 - h / 2.0,
+                                w,
+                                h,
+                            },
+                            glyph: glyph.clone(),
+                        },
+                        self.tool_color,
+                        cx,
+                    );
+                    Edit::AnnotAdd { page, annot: a }
+                })
+                .collect();
+            self.apply_batch(edits, &format!("Tick {n} picked"), cx);
+        }
+        self.set_notice(
+            &if n == 1 {
+                format!("Picked {}", fmt_amount(sum, decimals))
+            } else {
+                format!("Picked {n} numbers: {}", fmt_amount(sum, decimals))
+            },
+            cx,
+        );
+        self.scroll_tape_to_end();
+        cx.notify();
+    }
+
     /// Edit Tape: a placed tape back in the calculator.
     pub(crate) fn edit_tape(&mut self, page: PageId, id: AnnotId, cx: &mut Context<Self>) {
         let annot = match &self.state {
@@ -637,6 +752,72 @@ impl DocView {
         .when(placing, |d| d.bg(theme::ACCENT))
         .on_click(cx.listener(|v, _, _, cx| v.calc_place_requested(cx)));
         let writing = calc.writing.as_ref().map(|(_, i, _)| i.clone());
+        // Pick, and the tickmark picked numbers get.
+        let (picking, tick) = (calc.picking, calc.tick.clone());
+        let marks: Vec<String> = cx
+            .global::<crate::contrib::Contributions>()
+            .toolbar_marks()
+            .into_iter()
+            .take(6)
+            .collect();
+        let chip = |id: (&'static str, usize), label: String, on: bool| {
+            div()
+                .id(id)
+                .px_2()
+                .h(px(22.0))
+                .flex()
+                .items_center()
+                .rounded_sm()
+                .cursor_pointer()
+                .text_xs()
+                .bg(if on { theme::ACCENT } else { theme::CONTROL })
+                .hover(|s| s.bg(theme::CONTROL_HOVER))
+                .child(label)
+        };
+        let pick_row = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_1()
+            .child(
+                chip(("pick", 0), "Pick from page".into(), picking).on_click(cx.listener(
+                    |v, _, _, cx| {
+                        if let Some(c) = &mut v.calc {
+                            c.picking = !c.picking;
+                        }
+                        let msg = if v.calc.as_ref().is_some_and(|c| c.picking) {
+                            "Click a number to add it; Shift+drag adds all in a box"
+                        } else {
+                            "Picking off"
+                        };
+                        v.set_notice(msg, cx);
+                    },
+                )),
+            )
+            .when(picking, |d| {
+                d.child(div().text_xs().text_color(theme::TEXT_MUTED).child("tick"))
+                    .child(
+                        chip(("pick-tick", 0), "none".into(), tick.is_none()).on_click(
+                            cx.listener(|v, _, _, cx| {
+                                if let Some(c) = &mut v.calc {
+                                    c.tick = None;
+                                }
+                                cx.notify();
+                            }),
+                        ),
+                    )
+                    .children(marks.into_iter().enumerate().map(|(i, m)| {
+                        let on = tick.as_deref() == Some(m.as_str());
+                        chip(("pick-tick", i + 1), m.clone(), on).on_click(cx.listener(
+                            move |v, _, _, cx| {
+                                if let Some(c) = &mut v.calc {
+                                    c.tick = Some(m.clone());
+                                }
+                                cx.notify();
+                            },
+                        ))
+                    }))
+            });
 
         // Tape rows: number, amount (or title), symbol, note.
         let numbers = calc.tape.numbers();
@@ -774,6 +955,7 @@ impl DocView {
             .child(group(memory))
             .child(group(edits))
             .child(div().flex().child(place))
+            .child(pick_row)
             .children(writing.map(|w| {
                 div()
                     .on_key_down(cx.listener(|v, ev: &KeyDownEvent, _, cx| {

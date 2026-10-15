@@ -496,6 +496,10 @@ impl DocView {
         if self.place_tape_at(page_id, p, cx) {
             return;
         }
+        // Picking numbers into the calculator takes the click too.
+        if self.pick_number_at(page_id, p, tolerance, cx) {
+            return;
+        }
         // The Select tool grabs marks and their handles; with Ctrl, any
         // tool moves a mark (PDFlyer's way of moving a stamp without
         // leaving the stamp tool).

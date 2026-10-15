@@ -87,8 +87,13 @@ impl DocView {
         }
         r.dragging = false;
         let tiny = r.rect().w < 2.0 && r.rect().h < 2.0;
+        let (page, rect) = (r.page, r.rect());
         if tiny {
             self.clear_region(cx);
+        } else if self.calc.as_ref().is_some_and(|c| c.picking) {
+            // Picking: the region is the numbers it covers.
+            self.clear_region(cx);
+            self.pick_numbers_in(page, rect, cx);
         }
         true
     }

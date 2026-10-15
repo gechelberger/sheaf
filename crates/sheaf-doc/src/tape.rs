@@ -306,6 +306,30 @@ pub fn parse_amount(s: &str) -> Option<f64> {
     Some(if neg { -v } else { v })
 }
 
+/// The amount a word on a page reads as, if it's one: a workpaper amount
+/// (`$`, commas, parentheses for negatives) with the punctuation of the
+/// sentence around it dropped. Dates and other words aren't amounts.
+pub fn number_in(word: &str) -> Option<f64> {
+    let keep = |c: char| c.is_ascii_digit() || "$(),.-+".contains(c);
+    let w = word.trim_matches(|c: char| !keep(c));
+    // A sentence's comma or full stop after it, or an unmatched bracket.
+    let w = w.trim_end_matches([',', '.', ';', ':']);
+    let w = if w.ends_with(')') && !w.contains('(') {
+        w.trim_end_matches(')')
+    } else {
+        w
+    };
+    let w = if w.starts_with('(') && !w.contains(')') {
+        w.trim_start_matches('(')
+    } else {
+        w
+    };
+    if !w.chars().any(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    parse_amount(w)
+}
+
 /// How a placed tape looks (PDFlyer's options).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -427,5 +451,16 @@ mod tests {
         assert_eq!(fmt_amount(-0.001, 2), "0.00");
         assert_eq!(fmt_amount(0.12345, 4), "0.1235");
         assert_eq!(parse_amount("(84.50)"), Some(-84.5));
+    }
+
+    #[test]
+    fn words_on_a_page_read_as_amounts() {
+        assert_eq!(number_in("$1,234.50"), Some(1234.5));
+        assert_eq!(number_in("(84.50)"), Some(-84.5));
+        assert_eq!(number_in("1,234.50,"), Some(1234.5));
+        assert_eq!(number_in("total:"), None);
+        assert_eq!(number_in("10/14/2026"), None);
+        assert_eq!(number_in("(see"), None);
+        assert_eq!(number_in("2026."), Some(2026.0));
     }
 }

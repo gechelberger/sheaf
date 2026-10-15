@@ -310,6 +310,26 @@ impl PageChars {
         (a, b)
     }
 
+    /// The words (runs of characters that aren't whitespace), each with
+    /// its boundaries and box.
+    pub fn words(&self) -> Vec<(String, (usize, usize), Box2)> {
+        let mut out = Vec::new();
+        let mut at = 0;
+        while at < self.len() {
+            if self.glyphs[at].ch.is_whitespace() {
+                at += 1;
+                continue;
+            }
+            // `at` starts a word here, so it runs on from it.
+            let (a, b) = self.word_at(at);
+            if let Some(r) = self.rects(a, b).into_iter().reduce(Box2::union) {
+                out.push((self.text(a, b), (a, b), r));
+            }
+            at = b.max(at + 1);
+        }
+        out
+    }
+
     /// The characters between two boundaries, in either order.
     pub fn text(&self, a: usize, b: usize) -> String {
         let (a, b) = (a.min(b).min(self.len()), a.max(b).min(self.len()));
@@ -458,6 +478,20 @@ mod tests {
         let e = c.caret_at(6).unwrap();
         assert_eq!(e.x + e.w / 2.0, 100.0);
         assert!(e.y > 120.0);
+    }
+
+    #[test]
+    fn words_come_with_their_boxes() {
+        let c = sample();
+        let words: Vec<(String, f32)> = c.words().into_iter().map(|(w, _, r)| (w, r.x)).collect();
+        assert_eq!(
+            words,
+            [
+                ("ab".into(), 100.0),
+                ("cd".into(), 130.0),
+                ("ef".into(), 100.0)
+            ]
+        );
     }
 
     #[test]
