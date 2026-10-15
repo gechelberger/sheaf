@@ -180,7 +180,11 @@ impl Guest for TestPlugin {
                             AnnotKind::Highlight(_) => "highlight",
                             _ => "other",
                         };
-                        if a.dashed { format!("{k}:dashed") } else { k.to_string() }
+                        if a.dashed {
+                            format!("{k}:dashed")
+                        } else {
+                            k.to_string()
+                        }
                     })
                     .collect();
                 let mut poly = sheaf_plugin_api::annot(AnnotKind::Polygon(vec![
@@ -191,7 +195,13 @@ impl Guest for TestPlugin {
                 poly.fill = Some(Rgb { r: 255, g: 0, b: 0 });
                 poly.dashed = true;
                 poly.contents = "Checked by <<initials>>".into();
-                edits::submit("Add polygon", &[Edit::AnnotAdd(PageAnnot { page: p, annot: poly })]);
+                edits::submit(
+                    "Add polygon",
+                    &[Edit::AnnotAdd(PageAnnot {
+                        page: p,
+                        annot: poly,
+                    })],
+                );
                 storage::set("kinds", &kinds.join(","))
             }
             "events" => Err(storage::get("events").unwrap_or_default()),
