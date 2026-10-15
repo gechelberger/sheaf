@@ -22,6 +22,7 @@ pub struct Prefs {
     pub identity: Identity,
     pub ocr: OcrPrefs,
     pub stamps: StampPrefs,
+    pub forms: FormPrefs,
     /// `[plugins.<id>]`: each plugin's own section, which only that plugin
     /// reads (API 0.3's `storage.preferences`). Whatever it holds is the
     /// plugin's business; its manifest can name the keys it knows.
@@ -66,6 +67,48 @@ impl StampPrefs {
 
     pub fn time_format(&self) -> &str {
         self.time_format.as_deref().unwrap_or(Self::TIME)
+    }
+}
+
+/// `[forms]`: firm-wide choices for fillable forms (M10 proposal 24).
+/// Turning scripts off for one document lasts the session, and nothing is
+/// kept by a client file's path.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FormPrefs {
+    /// Run forms' scripts, in their sandbox.
+    pub scripts: Option<bool>,
+    /// Recalculate after each change.
+    pub auto_calculate: Option<bool>,
+    /// Move to the next field when one is full.
+    pub auto_advance: Option<bool>,
+    /// Highlight Fields' colors: every field, and required ones.
+    pub highlight: Option<[u8; 3]>,
+    pub required: Option<[u8; 3]>,
+}
+
+impl FormPrefs {
+    /// Acrobat's: a light blue, and red.
+    pub const HIGHLIGHT: [u8; 3] = [0xCC, 0xD7, 0xFF];
+    pub const REQUIRED: [u8; 3] = [0xFF, 0x00, 0x00];
+
+    pub fn scripts(&self) -> bool {
+        self.scripts.unwrap_or(true)
+    }
+
+    pub fn auto_calculate(&self) -> bool {
+        self.auto_calculate.unwrap_or(true)
+    }
+
+    pub fn auto_advance(&self) -> bool {
+        self.auto_advance.unwrap_or(false)
+    }
+
+    pub fn highlight(&self) -> [u8; 3] {
+        self.highlight.unwrap_or(Self::HIGHLIGHT)
+    }
+
+    pub fn required(&self) -> [u8; 3] {
+        self.required.unwrap_or(Self::REQUIRED)
     }
 }
 
@@ -218,6 +261,13 @@ pub fn parse(text: &str) -> (Prefs, Vec<Problem>) {
             date_format: r.get("stamps.date_format"),
             time_format: r.get("stamps.time_format"),
         },
+        forms: FormPrefs {
+            scripts: r.get("forms.scripts"),
+            auto_calculate: r.get("forms.auto_calculate"),
+            auto_advance: r.get("forms.auto_advance"),
+            highlight: r.color("forms.highlight"),
+            required: r.color("forms.required"),
+        },
         plugins: r.plugins(),
     };
     (prefs, r.finish())
@@ -258,6 +308,24 @@ impl<'a> Reader<'a> {
                 None
             }
         }
+    }
+
+    /// A color written `"#RRGGBB"`, or `None` if it's absent or isn't one.
+    fn color(&mut self, key: &'static str) -> Option<[u8; 3]> {
+        let text: String = self.get(key)?;
+        let hex = text.strip_prefix('#').filter(|h| h.len() == 6);
+        let rgb = hex.and_then(|h| {
+            let part = |i: usize| u8::from_str_radix(h.get(i..i + 2)?, 16).ok();
+            Some([part(0)?, part(2)?, part(4)?])
+        });
+        if rgb.is_none() {
+            self.problems.push(Problem {
+                line: self.lines.get(key).copied(),
+                message: format!("{key}: {text:?} isn't a color written like \"#CCD7FF\""),
+                whole_file: false,
+            });
+        }
+        rgb
     }
 
     /// `[plugins.<id>]` sections, whatever they hold.
@@ -363,7 +431,7 @@ fn unquote(s: &str) -> String {
 
 /// What Edit > Open Settings File writes when there's no file yet: every
 /// setting, commented out and explained.
-pub const TEMPLATE: &str = r#"# sheaf settings
+pub const TEMPLATE: &str = r##"# sheaf settings
 #
 # sheaf reads this file but never changes it, so edit it by hand. A line
 # starting with # is a comment: remove the # in front of a setting to use
@@ -408,11 +476,28 @@ pub const TEMPLATE: &str = r#"# sheaf settings
 # date_format = "%m/%d/%Y"
 # time_format = "%-I:%M %p"
 
+[forms]
+# Scripts in fillable forms format amounts, check what's typed and add up
+# totals. sheaf runs them in a sandbox that can't reach your files or the
+# network. Set false to turn them off for every form.
+# scripts = true
+
+# Recalculate a form's totals after each change.
+# auto_calculate = true
+
+# Move to the next field when one is full, and spread a paste across a
+# row of one-character boxes.
+# auto_advance = false
+
+# Highlight Fields' colors (Shift+L): every field, and required ones.
+# highlight = "#CCD7FF"
+# required = "#FF0000"
+
 # A plugin's own settings, which only it reads: a section named after
 # its id. What goes in it is up to the plugin; see its documentation.
 # [plugins.currency-convert]
 # target = "EUR"
-"#;
+"##;
 
 #[cfg(test)]
 mod tests {
@@ -517,6 +602,32 @@ mod tests {
         // What the file doesn't set stays as chosen.
         assert_eq!(config.dpi, 200);
         assert_eq!(config.oar.det, Some(PathBuf::from("/mine/det.onnx")));
+    }
+
+    #[test]
+    fn forms_settings_read_and_default() {
+        let (p, problems) = parse("");
+        assert!(problems.is_empty());
+        let f = &p.forms;
+        assert!(f.scripts() && f.auto_calculate() && !f.auto_advance());
+        assert_eq!(
+            (f.highlight(), f.required()),
+            (FormPrefs::HIGHLIGHT, FormPrefs::REQUIRED)
+        );
+        let text = "[forms]\nscripts = false\nauto_advance = true\nhighlight = \"#ffeE00\"\n";
+        let (p, problems) = parse(text);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert!(!p.forms.scripts() && p.forms.auto_advance());
+        assert_eq!(p.forms.highlight(), [0xFF, 0xEE, 0x00]);
+        // A color that isn't one loses only itself.
+        let (p, problems) = parse("[forms]\nrequired = \"red\"\nscripts = false\n");
+        assert!(!p.forms.scripts());
+        assert_eq!(p.forms.required(), FormPrefs::REQUIRED);
+        assert_eq!(problems.len(), 1);
+        assert_eq!(problems[0].line, Some(2));
+        assert!(problems[0].message.contains("#CCD7FF"), "{}", problems[0]);
+        let (_, problems) = parse("[forms]\nhighlight = \"#12345\"\n");
+        assert_eq!(problems.len(), 1);
     }
 
     #[test]

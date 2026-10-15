@@ -55,6 +55,8 @@ unicode-segmentation.workspace = true
 # examples/gen_icons.rs only; both are already in the tree via GPUI.
 resvg = { version = "0.46", default-features = false }
 image = { workspace = true, features = ["ico"] }
+# Forms built in code (M10).
+sheaf-doc = { workspace = true, features = ["fixtures"] }
 
 [target.'cfg(windows)'.build-dependencies]
 embed-resource = "3"

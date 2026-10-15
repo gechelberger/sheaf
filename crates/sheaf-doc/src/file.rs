@@ -243,13 +243,18 @@ pub fn load_source(info: &crate::SourceInfo) -> Result<lopdf::Document> {
     let Some(data) = &info.data else {
         return load_pdf(&info.path, info.password.as_deref());
     };
-    let path = info.path.display();
-    let mut pdf = lopdf::Document::load_mem(&data.0).with_context(|| format!("loading {path}"))?;
+    load_pdf_mem(&data.0, info.password.as_deref())
+        .with_context(|| format!("loading {}", info.path.display()))
+}
+
+/// [`load_pdf`] for a file in memory.
+pub fn load_pdf_mem(bytes: &[u8], password: Option<&str>) -> Result<lopdf::Document> {
+    let mut pdf = lopdf::Document::load_mem(bytes)?;
     if pdf.is_encrypted() {
-        let options = lopdf::LoadOptions::with_password(info.password.as_deref().unwrap_or(""));
-        pdf = lopdf::Document::load_mem_with_options(&data.0, options)
+        let options = lopdf::LoadOptions::with_password(password.unwrap_or(""));
+        pdf = lopdf::Document::load_mem_with_options(bytes, options)
             .map_err(|e| anyhow::anyhow!("{e}"))
-            .with_context(|| format!("decrypting {path}"))?;
+            .context("decrypting")?;
         pdf.trailer.remove(b"Encrypt");
         pdf.encryption_state = None;
     }
@@ -293,6 +298,8 @@ pub struct FileFacts {
     /// Each bookmark's color and style, in pre-order; empty when none has
     /// either (see [`outline_styles`]).
     pub outline_styles: Vec<OutlineStyle>,
+    /// The form: its fields and widgets, and what sheaf shows about it.
+    pub form: crate::forms::FileForm,
 }
 
 /// A bookmark's `/C` and `/F`, which PDFium's outline doesn't carry.
@@ -391,6 +398,7 @@ pub fn facts_in(pdf: &lopdf::Document) -> FileFacts {
         collection: crate::portfolio::collection(pdf),
         layers: crate::layers::layers_in(pdf),
         outline_styles: outline_styles(pdf),
+        form: crate::forms::read(pdf),
     }
 }
 
@@ -536,9 +544,15 @@ pub fn read_annots(path: impl AsRef<Path>, password: Option<&str>) -> Result<Ann
 
 /// Decode a PDF text string: UTF-16BE with BOM, else PDFDoc/Latin-1.
 pub fn pdf_text(o: &lopdf::Object) -> String {
-    let Ok(bytes) = o.as_str() else {
-        return String::new();
-    };
+    match o.as_str() {
+        Ok(bytes) => pdf_text_bytes(bytes),
+        Err(_) => String::new(),
+    }
+}
+
+/// [`pdf_text`] for a string's bytes (or a stream's, which hold text the
+/// same way).
+pub fn pdf_text_bytes(bytes: &[u8]) -> String {
     if bytes.starts_with(&[0xFE, 0xFF]) {
         let units: Vec<u16> = bytes[2..]
             .chunks(2)

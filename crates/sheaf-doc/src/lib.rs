@@ -10,6 +10,7 @@ pub mod attachments;
 pub mod describe;
 pub mod exchange;
 pub mod file;
+pub mod forms;
 pub mod generated;
 pub mod history;
 pub mod images;
@@ -36,9 +37,9 @@ pub use sheaf_core::{DestView, PageFrame};
 pub use annot::{Annot, AnnotId, AnnotKind, Box2, PageGeom, Pt, default_author, pdf_date_now};
 pub use history::{AllOf, FixedCount, HistoryPolicy, HistoryStats, MemoryBudget};
 pub use model::{
-    DocState, Document, Edit, EditOutcome, FlatOutlineItem, JobId, NewOutlineItem, OutlineId,
-    OutlineNode, PageId, PageRef, Rebase, Saved, Snapshot, SourceData, SourceId, SourceInfo, Step,
-    TextStyle, VersionId, VersionView,
+    Derived, DocState, Document, Edit, EditOutcome, FlatOutlineItem, JobId, NewOutlineItem,
+    OutlineId, OutlineNode, PageId, PageRef, Rebase, Saved, Snapshot, SourceData, SourceId,
+    SourceInfo, Step, TextStyle, VersionId, VersionView,
 };
 pub use page_chars::{Glyph, PageChars};
 pub use text_layer::{OcrWord, TextHit, TextLayer};

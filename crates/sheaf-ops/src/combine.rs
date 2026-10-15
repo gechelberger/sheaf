@@ -72,6 +72,9 @@ pub struct CombineReport {
     pub pages: usize,
     pub files: usize,
     pub bookmarks: usize,
+    /// About the forms combined: fields put under a new parent since their
+    /// names were taken, and scripts turned off (M10 proposal 5).
+    pub notice: Option<String>,
 }
 
 /// Whether `path` is a PDF (by its first bytes, else its extension).
@@ -108,6 +111,7 @@ pub fn build(
     progress.set_total(Some(items.len() as u64), Unit::Items);
     let mut doc: Option<Document> = None;
     let mut report = CombineReport::default();
+    let (mut renamed, mut signed) = (Vec::new(), Vec::new());
     for (n, item) in items.iter().enumerate() {
         progress.check()?;
         let name = item
@@ -129,9 +133,10 @@ pub fn build(
                 .collect(),
             _ => (0..info.page_count).collect(),
         };
-        let marks = if is_pdf(&item.path) {
+        // Its marks, and its form (M10 slice 4).
+        let (marks, form) = if is_pdf(&item.path) {
             sheaf_doc::file::read_open(&file, item.password.as_deref())
-                .map(|(a, _)| a.sheaf)
+                .map(|(a, facts)| (a.sheaf, facts.form))
                 .unwrap_or_default()
         } else {
             Default::default()
@@ -142,6 +147,9 @@ pub fn build(
                 let mut d = Document::new(info, &[], sheaf_doc::history::default_policy());
                 if !marks.is_empty() {
                     d.set_initial_annots(marks.clone())?;
+                }
+                if !form.fields.is_empty() || !form.widgets.is_empty() {
+                    d.set_initial_fields(&form)?;
                 }
                 let all: Vec<PageId> = d.state().pages.iter().map(|p| p.id).collect();
                 let drop: Vec<PageId> = all
@@ -159,7 +167,8 @@ pub fn build(
             }
             Some(d) => {
                 let sid = d.add_source(info);
-                let ids = insert_runs(d, sid, &wanted)?;
+                d.set_source_form(sid, form);
+                let ids = insert_runs(d, sid, &wanted, &mut renamed, &mut signed)?;
                 for &(index, id) in &ids {
                     for annot in marks.get(&index).into_iter().flatten() {
                         d.apply(
@@ -185,12 +194,27 @@ pub fn build(
         report.files += 1;
         progress.set(n as u64 + 1);
     }
-    Ok((doc.expect("at least one item"), report))
+    let doc = doc.expect("at least one item");
+    signed.dedup();
+    let forms = sheaf_doc::EditOutcome {
+        forms_renamed: renamed,
+        signatures_in: signed,
+        ..Default::default()
+    };
+    report.notice = doc.form_notice(&forms, false, false);
+    Ok((doc, report))
 }
 
 /// Insert `wanted` pages of `sid` at the end, a contiguous run at a time,
-/// and return each one's id by its index in the file.
-fn insert_runs(d: &mut Document, sid: SourceId, wanted: &[u32]) -> Result<Vec<(u32, PageId)>> {
+/// and return each one's id by its index in the file. The forms renamed
+/// go in `renamed`, and files whose signed fields came in in `signed`.
+fn insert_runs(
+    d: &mut Document,
+    sid: SourceId,
+    wanted: &[u32],
+    renamed: &mut Vec<(String, SourceId)>,
+    signed: &mut Vec<SourceId>,
+) -> Result<Vec<(u32, PageId)>> {
     let mut out = Vec::with_capacity(wanted.len());
     let mut i = 0;
     while i < wanted.len() {
@@ -199,7 +223,7 @@ fn insert_runs(d: &mut Document, sid: SourceId, wanted: &[u32]) -> Result<Vec<(u
             j += 1;
         }
         let before = d.state().pages.len();
-        d.apply(
+        let done = d.apply(
             Edit::InsertPages {
                 source: sid,
                 range: wanted[i]..wanted[j - 1] + 1,
@@ -210,6 +234,8 @@ fn insert_runs(d: &mut Document, sid: SourceId, wanted: &[u32]) -> Result<Vec<(u
             },
             "Combine",
         )?;
+        renamed.extend(done.forms_renamed);
+        signed.extend(done.signatures_in);
         let pages = &d.state().pages;
         out.extend(
             (before..pages.len())

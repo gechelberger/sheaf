@@ -11,7 +11,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sheaf_core::{PageIndex, PageSize, Rotation};
 use sheaf_doc::annot::Pt;
-use sheaf_doc::{PageId, Snapshot, SourceId, SourceInfo};
+use sheaf_doc::{Derived, PageId, Snapshot, SourceId, SourceInfo};
 use sheaf_image::raster::{PixelFormat, content_bounds};
 use sheaf_progress::{Progress, Unit};
 use sheaf_render::pdfium::PdfiumEngine;
@@ -157,6 +157,10 @@ pub fn plan(
                 bytes: bytes.len(),
                 password: None,
                 data: None,
+                derived: Some(Derived {
+                    from: sid,
+                    pages: boxes.iter().map(|&(i, _)| i).collect(),
+                }),
             },
             pages: planned,
         });

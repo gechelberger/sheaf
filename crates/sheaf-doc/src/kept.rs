@@ -14,9 +14,9 @@ use lopdf::{Document as Pdf, Object, ObjectId};
 
 use crate::save::is_page_node;
 
-/// Make `pdf` reach no page but `kept` and its page tree (the catalog's
-/// `/Pages`). References that a copy couldn't follow (null, see
-/// `save::remap`) count as gone too. Returns what a reader should be told:
+/// Make `pdf` reach no page but `kept`, its page tree (the catalog's
+/// `/Pages`) and its form's page templates. References that a copy
+/// couldn't follow (null, see `save::remap`) count as gone too. Returns what a reader should be told:
 /// structure dropped rather than pruned.
 pub(crate) fn keep_only(pdf: &mut Pdf, kept: &HashSet<ObjectId>) -> Vec<String> {
     let Some(catalog_id) = pdf
@@ -32,7 +32,33 @@ pub(crate) fn keep_only(pdf: &mut Pdf, kept: &HashSet<ObjectId>) -> Vec<String> 
         .ok()
         .and_then(|c| c.get(b"Pages").ok())
         .and_then(|p| p.as_reference().ok());
-    let gone = Gone { kept, tree };
+    // A form's page templates (`/Names /Templates`) are pages outside the
+    // tree that scripts spawn pages from: they stay, widgets and all.
+    let mut templates = Vec::new();
+    if let Some(t) = pdf
+        .get_dictionary(catalog_id)
+        .ok()
+        .and_then(|c| c.get(b"Names").ok())
+        .and_then(|n| deref(pdf, n))
+        .and_then(|n| n.as_dict().ok())
+        .and_then(|n| n.get(b"Templates").ok())
+        .cloned()
+    {
+        tree_refs(pdf, &t, b"Names", &mut templates, 0);
+    }
+    let with_templates: HashSet<ObjectId>;
+    let kept = if templates.is_empty() {
+        kept
+    } else {
+        with_templates = kept.iter().copied().chain(templates).collect();
+        &with_templates
+    };
+    let mut gone = Gone {
+        kept,
+        tree,
+        dropped: HashSet::new(),
+    };
+    gone.dropped = dropped_annots(pdf, &gone);
     let mut notes = Vec::new();
 
     let names = clean_named_dests(pdf, catalog_id, &gone);
@@ -61,6 +87,8 @@ pub(crate) fn keep_only(pdf: &mut Pdf, kept: &HashSet<ObjectId>) -> Vec<String> 
 struct Gone<'a> {
     kept: &'a HashSet<ObjectId>,
     tree: Option<ObjectId>,
+    /// Annotations of pages that aren't kept (see [`dropped_annots`]).
+    dropped: HashSet<ObjectId>,
 }
 
 impl Gone<'_> {
@@ -77,6 +105,18 @@ impl Gone<'_> {
             Object::Null => true,
             _ => false,
         }
+    }
+
+    /// Whether an object reference's `/Obj` is gone: a page that isn't
+    /// kept, or an annotation of one.
+    fn object(&self, pdf: &Pdf, o: &Object) -> bool {
+        self.target(pdf, o) || o.as_reference().is_ok_and(|id| self.dropped.contains(&id))
+    }
+
+    /// Whether a reference to `id` goes: it's a page that isn't kept, or
+    /// an annotation of one.
+    fn cut(&self, pdf: &Pdf, id: ObjectId) -> bool {
+        self.page(pdf, id) || self.dropped.contains(&id)
     }
 
     /// Whether a destination (an array, a dictionary with `/D`, or a
@@ -102,6 +142,19 @@ impl Gone<'_> {
             _ => false,
         }
     }
+}
+
+/// `holder`'s `key`, moved into an object of its own when it's a direct
+/// dictionary, so the walks that change a tree in place (`clean_tree`,
+/// `null_removed_in_tree`) reach its root.
+fn indirect(pdf: &mut Pdf, holder: ObjectId, key: &[u8]) -> Option<Object> {
+    let value = pdf.get_dictionary(holder).ok()?.get(key).ok()?.clone();
+    if !matches!(value, Object::Dictionary(_)) {
+        return Some(value);
+    }
+    let id = pdf.add_object(value);
+    pdf.get_dictionary_mut(holder).ok()?.set(key.to_vec(), id);
+    Some(Object::Reference(id))
 }
 
 /// An object, through a reference.
@@ -144,13 +197,8 @@ fn clean_named_dests(pdf: &mut Pdf, catalog_id: ObjectId, gone: &Gone) -> HashMa
             }
         }
     }
-    if let Some(tree) = catalog
-        .get(b"Names")
-        .ok()
-        .and_then(|n| deref(pdf, n))
-        .and_then(|n| n.as_dict().ok())
-        .and_then(|n| n.get(b"Dests").ok())
-        .cloned()
+    if let Some(Object::Reference(names)) = indirect(pdf, catalog_id, b"Names")
+        && let Some(tree) = indirect(pdf, names, b"Dests")
     {
         clean_tree(
             pdf,
@@ -328,6 +376,39 @@ fn annots_of(pdf: &Pdf, page: ObjectId) -> Vec<Object> {
         .unwrap_or_default()
 }
 
+/// Annotations of pages that aren't kept: in such a page's `/Annots`, or
+/// naming one as `/P` (or null, where a copy dropped it), and on no kept
+/// page. Nothing may reach them once those pages go (M10 bug 5): a
+/// widget's value would stay in the file.
+fn dropped_annots(pdf: &Pdf, gone: &Gone) -> HashSet<ObjectId> {
+    let on_kept: HashSet<ObjectId> = gone
+        .kept
+        .iter()
+        .flat_map(|&p| annots_of(pdf, p))
+        .filter_map(|a| a.as_reference().ok())
+        .collect();
+    let mut out = HashSet::new();
+    for (&id, o) in &pdf.objects {
+        let Object::Dictionary(d) = o else {
+            continue;
+        };
+        if gone.page(pdf, id) {
+            out.extend(
+                annots_of(pdf, id)
+                    .iter()
+                    .filter_map(|a| a.as_reference().ok()),
+            );
+        } else if d.has(b"Subtype")
+            && d.has(b"Rect")
+            && d.get(b"P").is_ok_and(|p| gone.target(pdf, p))
+        {
+            out.insert(id);
+        }
+    }
+    out.retain(|id| !on_kept.contains(id));
+    out
+}
+
 /// Links on kept pages to pages that aren't kept go: they'd lead nowhere.
 fn clean_links(pdf: &mut Pdf, gone: &Gone, names: &HashMap<Vec<u8>, Object>) {
     for page in kept_pages(pdf, gone) {
@@ -404,7 +485,8 @@ fn clean_open_action(
 }
 
 /// Widgets on pages that aren't kept leave their fields; fields left with
-/// no widgets go.
+/// no widgets go, direct objects too (M10 bug 10), and so does a form left
+/// with no fields.
 fn clean_fields(pdf: &mut Pdf, catalog_id: ObjectId, kept: &HashSet<ObjectId>) {
     let Some(form) = pdf
         .get_dictionary(catalog_id)
@@ -436,15 +518,24 @@ fn clean_fields(pdf: &mut Pdf, catalog_id: ObjectId, kept: &HashSet<ObjectId>) {
     else {
         return;
     };
-    let mut removed = HashSet::new();
+    let mut cleaning = Cleaning {
+        on_kept,
+        removed: HashSet::new(),
+        seen: HashMap::new(),
+    };
     let left: Vec<Object> = fields
-        .into_iter()
-        .filter(|f| match f.as_reference() {
-            Ok(id) => keep_field(pdf, id, &on_kept, &mut removed, 0),
-            Err(_) => true,
-        })
+        .iter()
+        .filter_map(|f| cleaning.keep(pdf, f, 0))
         .collect();
-    if removed.is_empty() {
+    if cleaning.removed.is_empty() && left == fields {
+        return;
+    }
+    // A form with no fields left: Acrobat would offer to fill nothing, and
+    // an XFA copy beside it would describe fields that are gone.
+    if left.is_empty() {
+        if let Ok(c) = pdf.get_dictionary_mut(catalog_id) {
+            c.remove(b"AcroForm");
+        }
         return;
     }
     form_dict.set("Fields", Object::Array(left));
@@ -458,7 +549,10 @@ fn clean_fields(pdf: &mut Pdf, catalog_id: ObjectId, kept: &HashSet<ObjectId>) {
     {
         let co: Vec<Object> = co
             .into_iter()
-            .filter(|f| !f.as_reference().is_ok_and(|id| removed.contains(&id)))
+            .filter(|f| {
+                !f.as_reference()
+                    .is_ok_and(|id| cleaning.removed.contains(&id))
+            })
             .collect();
         form_dict.set("CO", Object::Array(co));
     }
@@ -474,55 +568,98 @@ fn clean_fields(pdf: &mut Pdf, catalog_id: ObjectId, kept: &HashSet<ObjectId>) {
     }
 }
 
-/// Whether field (or widget) `id` stays: a widget if it's on a kept page,
-/// a field if any of its widgets stay (or it never had any). Removed ones
-/// go into `removed`.
-fn keep_field(
+/// `roots`, fields in `pdf`, with what isn't on a page taken out of their
+/// trees as [`clean_fields`] does it: widgets that aren't among
+/// `on_pages` (the annotations on the pages written), and fields left with
+/// no widgets. What's left of them, and the fields and widgets that went.
+pub(crate) fn prune_fields(
     pdf: &mut Pdf,
-    id: ObjectId,
-    on_kept: &HashSet<ObjectId>,
-    removed: &mut HashSet<ObjectId>,
-    depth: u32,
-) -> bool {
-    let Ok(dict) = pdf.get_dictionary(id).cloned() else {
-        return false;
+    roots: &[Object],
+    on_pages: HashSet<ObjectId>,
+) -> (Vec<Object>, HashSet<ObjectId>) {
+    let mut cleaning = Cleaning {
+        on_kept: on_pages,
+        removed: HashSet::new(),
+        seen: HashMap::new(),
     };
-    if depth > 32 {
-        return true;
-    }
-    let widget = dict
-        .get(b"Subtype")
-        .ok()
-        .and_then(|s| s.as_name().ok())
-        .is_some_and(|s| s == b"Widget");
-    let kids = dict
-        .get(b"Kids")
-        .ok()
-        .and_then(|k| deref(pdf, k))
-        .and_then(|k| k.as_array().ok())
-        .cloned();
-    let keep = match kids {
-        Some(kids) if !kids.is_empty() => {
-            let left: Vec<Object> = kids
-                .into_iter()
-                .filter(|k| match k.as_reference() {
-                    Ok(kid) => keep_field(pdf, kid, on_kept, removed, depth + 1),
-                    Err(_) => true,
-                })
-                .collect();
-            let any = !left.is_empty();
-            if let Ok(d) = pdf.get_dictionary_mut(id) {
-                d.set("Kids", Object::Array(left));
+    let left = roots
+        .iter()
+        .filter_map(|r| cleaning.keep(pdf, r, 0))
+        .collect();
+    (left, cleaning.removed)
+}
+
+/// [`clean_fields`]'s walk of the field tree.
+struct Cleaning {
+    /// Annotations on kept pages.
+    on_kept: HashSet<ObjectId>,
+    /// Fields and widgets that go.
+    removed: HashSet<ObjectId>,
+    /// Whether each field or widget reached stays, so one listed twice
+    /// (or a `/Kids` array many share) is looked through once.
+    seen: HashMap<ObjectId, bool>,
+}
+
+impl Cleaning {
+    /// What stays of field (or widget) `node`, a reference or a direct
+    /// dictionary: a widget if it's on a kept page (a direct one can't
+    /// be), a field if any of its widgets stay (or it never had any), with
+    /// its `/Kids` pruned. None when it goes.
+    fn keep(&mut self, pdf: &mut Pdf, node: &Object, depth: u32) -> Option<Object> {
+        let (id, mut dict) = match node {
+            Object::Reference(id) => {
+                if let Some(&keep) = self.seen.get(id) {
+                    return keep.then(|| node.clone());
+                }
+                (Some(*id), pdf.get_dictionary(*id).ok()?.clone())
             }
-            any
+            Object::Dictionary(d) => (None, d.clone()),
+            // Not a field: left as it is.
+            _ => return Some(node.clone()),
+        };
+        if depth > 32 {
+            return Some(node.clone());
         }
-        _ if widget => on_kept.contains(&id),
-        _ => true,
-    };
-    if !keep {
-        removed.insert(id);
+        if let Some(id) = id {
+            // Until it's known, a field its own descendants reach stays.
+            self.seen.insert(id, true);
+        }
+        let widget = dict
+            .get(b"Subtype")
+            .ok()
+            .and_then(|s| s.as_name().ok())
+            .is_some_and(|s| s == b"Widget");
+        let kids = dict
+            .get(b"Kids")
+            .ok()
+            .and_then(|k| deref(pdf, k))
+            .and_then(|k| k.as_array().ok())
+            .cloned();
+        let keep = match kids {
+            Some(kids) if !kids.is_empty() => {
+                let left: Vec<Object> = kids
+                    .iter()
+                    .filter_map(|k| self.keep(pdf, k, depth + 1))
+                    .collect();
+                let any = !left.is_empty();
+                dict.set("Kids", Object::Array(left));
+                any
+            }
+            _ if widget => id.is_some_and(|id| self.on_kept.contains(&id)),
+            _ => true,
+        };
+        match id {
+            Some(id) => {
+                pdf.objects.insert(id, Object::Dictionary(dict));
+                self.seen.insert(id, keep);
+                if !keep {
+                    self.removed.insert(id);
+                }
+                keep.then(|| node.clone())
+            }
+            None => keep.then_some(Object::Dictionary(dict)),
+        }
     }
-    keep
 }
 
 /// Prune the structure tree of what's on pages that aren't kept. False
@@ -550,17 +687,49 @@ fn prune_structure(pdf: &mut Pdf, catalog_id: ObjectId, gone: &Gone) -> bool {
     let Some(pruned) = pruned else {
         return false;
     };
+    // Elements the parent tree (or the ID tree) reaches and the tree from
+    // /K doesn't, pruned the same way, from the highest element above them
+    // the walk hasn't seen. Acrobat tags some forms with a second /Form
+    // element for each widget, with no /P; the I-9's parent tree points
+    // into a second tree the root doesn't hold. Either would keep a removed
+    // page's widgets in the file, values and all (M10 bug 5).
+    let mut orphans = Vec::new();
+    for (tree, key) in [
+        (b"ParentTree".as_slice(), b"Nums".as_slice()),
+        (b"IDTree", b"Names"),
+    ] {
+        if let Ok(t) = pdf.get_dictionary(root).and_then(|r| r.get(tree)) {
+            tree_refs(pdf, t, key, &mut orphans, 0);
+        }
+    }
+    for id in orphans {
+        if seen.contains(&id) {
+            continue;
+        }
+        let top = topmost(pdf, id, &seen);
+        if prune_kids(
+            pdf,
+            &Object::Reference(top),
+            None,
+            gone,
+            &mut removed,
+            &mut seen,
+            0,
+        )
+        .is_none()
+        {
+            return false;
+        }
+    }
     if removed.is_empty() {
         return true;
     }
     if let Ok(r) = pdf.get_dictionary_mut(root) {
         r.set("K", pruned);
     }
-    let root_dict = pdf.get_dictionary(root).cloned().unwrap_or_default();
     // The parent tree: each page's marked content (an array of elements)
     // or an object's element. Entries for what's gone go.
-    if let Ok(pt) = root_dict.get(b"ParentTree") {
-        let pt = pt.clone();
+    if let Some(pt) = indirect(pdf, root, b"ParentTree") {
         // An entry for an object's element, or a page's whose elements
         // are all gone.
         let dead = |pdf: &Pdf, v: &Object| {
@@ -581,8 +750,7 @@ fn prune_structure(pdf: &mut Pdf, catalog_id: ObjectId, gone: &Gone) -> bool {
         // aren't: those become null.
         null_removed_in_tree(pdf, &pt, &removed, 0);
     }
-    if let Ok(ids) = root_dict.get(b"IDTree") {
-        let ids = ids.clone();
+    if let Some(ids) = indirect(pdf, root, b"IDTree") {
         clean_tree(
             pdf,
             &ids,
@@ -633,7 +801,7 @@ fn prune_kids(
         // Marked content (MCR) or an object (OBJR) on a page of its own.
         Object::Dictionary(d) => {
             let dead = on_gone(pdf, d.get(b"Pg").ok(), page)
-                || d.get(b"Obj").ok().is_some_and(|o| gone.target(pdf, o));
+                || d.get(b"Obj").ok().is_some_and(|o| gone.object(pdf, o));
             Some(if dead { Object::Null } else { k.clone() })
         }
         Object::Reference(id) => {
@@ -647,7 +815,7 @@ fn prune_kids(
                 .is_some_and(|t| t == b"MCR" || t == b"OBJR");
             if is_ref {
                 let dead = on_gone(pdf, d.get(b"Pg").ok(), page)
-                    || d.get(b"Obj").ok().is_some_and(|o| gone.target(pdf, o));
+                    || d.get(b"Obj").ok().is_some_and(|o| gone.object(pdf, o));
                 return Some(if dead { Object::Null } else { k.clone() });
             }
             if !seen.insert(*id) {
@@ -668,6 +836,11 @@ fn prune_kids(
             let left = prune_kids(pdf, &kids, page, gone, removed, seen, depth + 1)?;
             if had && is_empty(&left) {
                 removed.insert(*id);
+                // Whatever still lists it (a tree the root doesn't hold)
+                // reaches nothing through it.
+                if let Ok(e) = pdf.get_dictionary_mut(*id) {
+                    e.remove(b"K");
+                }
                 return Some(Object::Null);
             }
             if let Ok(e) = pdf.get_dictionary_mut(*id) {
@@ -689,6 +862,66 @@ fn is_empty(o: &Object) -> bool {
         Object::Array(a) => a.iter().all(is_empty),
         Object::Null => true,
         _ => false,
+    }
+}
+
+/// The highest structure element above `id` by `/P` that the walk hasn't
+/// seen: `id`, or an ancestor that no element the walk saw holds.
+fn topmost(pdf: &Pdf, id: ObjectId, seen: &HashSet<ObjectId>) -> ObjectId {
+    let mut at = id;
+    let mut path = HashSet::from([id]);
+    for _ in 0..64 {
+        let Some(up) = pdf
+            .get_dictionary(at)
+            .ok()
+            .and_then(|d| d.get(b"P").ok())
+            .and_then(|p| p.as_reference().ok())
+        else {
+            break;
+        };
+        // The tree's root has no /S.
+        let element = pdf.get_dictionary(up).is_ok_and(|d| d.has(b"S"));
+        if !element || seen.contains(&up) || !path.insert(up) {
+            break;
+        }
+        at = up;
+    }
+    at
+}
+
+/// The references among a number tree's values (`key` `Nums`) or a name
+/// tree's (`Names`), and in the arrays among them.
+fn tree_refs(pdf: &Pdf, node: &Object, key: &[u8], out: &mut Vec<ObjectId>, depth: u32) {
+    let Some(dict) = deref(pdf, node).and_then(|n| n.as_dict().ok()) else {
+        return;
+    };
+    if depth > 32 {
+        return;
+    }
+    if let Some(pairs) = dict
+        .get(key)
+        .ok()
+        .and_then(|n| deref(pdf, n))
+        .and_then(|n| n.as_array().ok())
+    {
+        for v in pairs.iter().skip(1).step_by(2) {
+            match deref(pdf, v) {
+                Some(Object::Array(a)) => {
+                    out.extend(a.iter().filter_map(|o| o.as_reference().ok()))
+                }
+                _ => out.extend(v.as_reference().ok()),
+            }
+        }
+    }
+    if let Some(kids) = dict
+        .get(b"Kids")
+        .ok()
+        .and_then(|k| deref(pdf, k))
+        .and_then(|k| k.as_array().ok())
+    {
+        for kid in kids {
+            tree_refs(pdf, kid, key, out, depth + 1);
+        }
     }
 }
 
@@ -830,8 +1063,9 @@ fn drop_threads(pdf: &mut Pdf, catalog_id: ObjectId, gone: &Gone) -> bool {
     true
 }
 
-/// Whatever still points at a page that isn't kept, anywhere the file
-/// reaches, points at nothing (null) instead.
+/// Whatever still points at a page that isn't kept, or at one of its
+/// annotations, anywhere the file reaches, points at nothing (null)
+/// instead.
 fn sweep(pdf: &mut Pdf, gone: &Gone) {
     let mut queue: VecDeque<ObjectId> = VecDeque::new();
     refs(&Object::Dictionary(pdf.trailer.clone()), &mut |id| {
@@ -839,17 +1073,17 @@ fn sweep(pdf: &mut Pdf, gone: &Gone) {
     });
     let mut seen = HashSet::new();
     while let Some(id) = queue.pop_front() {
-        if !seen.insert(id) || gone.page(pdf, id) {
+        if !seen.insert(id) || gone.cut(pdf, id) {
             continue;
         }
         let Some(obj) = pdf.objects.get(&id) else {
             continue;
         };
         let mut hits = false;
-        refs(obj, &mut |r| hits |= gone.page(pdf, r));
+        refs(obj, &mut |r| hits |= gone.cut(pdf, r));
         if hits {
             let mut obj = obj.clone();
-            cut(&mut obj, &|r| gone.page(pdf, r));
+            cut(&mut obj, &|r| gone.cut(pdf, r));
             pdf.objects.insert(id, obj);
         }
         if let Some(obj) = pdf.objects.get(&id) {

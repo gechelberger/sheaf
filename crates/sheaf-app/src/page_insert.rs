@@ -187,11 +187,14 @@ impl DocView {
                     bytes,
                     password: None,
                     data: Some(sheaf_doc::SourceData(handle.data())),
+                    derived: None,
                 });
                 let sizes_rx = handle.page_sizes();
                 doc.handles.insert(sid, handle);
                 let n = ids.len();
                 let label = format!("Replace {n} page{}", if n == 1 { "" } else { "s" });
+                let mixed = doc.model.scripts_mixed();
+                doc.model.set_source_form(sid, incoming.form.clone());
                 match doc.model.apply(
                     Edit::ReplacePages {
                         ids,
@@ -204,15 +207,16 @@ impl DocView {
                     Ok(out) => {
                         doc.take_in(sid, incoming);
                         doc.touched();
-                        v.after_model_change(label, out, cx);
-                        v.set_notice(
-                            format!(
-                                "Replaced {n} page{} with {} from {name}",
-                                if n == 1 { "" } else { "s" },
-                                range.len()
-                            ),
-                            cx,
+                        let mut notice = format!(
+                            "Replaced {n} page{} with {} from {name}",
+                            if n == 1 { "" } else { "s" },
+                            range.len()
                         );
+                        if let Some(form) = doc.model.form_notice(&out, false, mixed) {
+                            notice = format!("{notice}. {form}");
+                        }
+                        v.after_model_change(label, out, cx);
+                        v.set_notice(notice, cx);
                     }
                     Err(e) => v.set_notice(format!("Replace failed: {e:#}"), cx),
                 }

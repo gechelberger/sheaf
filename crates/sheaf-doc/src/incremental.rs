@@ -23,20 +23,43 @@ use crate::text_layer;
 /// the earlier revision (M9 bug 14). Whether anything else was removed is
 /// `save::save_to_path`'s to check (`Snapshot::removes_content`).
 pub fn incremental(snap: &Snapshot) -> Result<Vec<u8>> {
-    Ok(build(snap, true)?.1)
+    Ok(build(snap, Mode::Save)?.1)
+}
+
+/// The update a signed file gets when the reader would rather append than
+/// break its signatures (M10 proposal 7): what it takes out (a removed
+/// page, a changed form's XFA copy and usage rights, a page's old OCR
+/// text) stays in the earlier revision.
+pub fn append(snap: &Snapshot) -> Result<Vec<u8>> {
+    Ok(build(snap, Mode::Append)?.1)
 }
 
 /// Just the update section, with the length of the original it appends
 /// to. Empty when there's nothing to write. Used for crash recovery.
 pub fn incremental_section(snap: &Snapshot) -> Result<(usize, Vec<u8>)> {
-    let (original_len, mut full) = build(snap, false)?;
+    let (original_len, mut full) = build(snap, Mode::Sidecar)?;
     let section = full.split_off(original_len);
     Ok((original_len, section))
 }
 
+/// What an update is for, and so what it refuses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// A save, which a full one replaces when it refuses: what an update
+    /// can't take out of the file (a page's OCR text replaced, a changed
+    /// form's XFA copy and usage rights) or point back at (cross-references
+    /// lopdf rebuilt).
+    Save,
+    /// An append chosen over breaking a file's signatures: what it takes
+    /// out stays in the earlier revision. Damaged cross-references still
+    /// refuse.
+    Append,
+    /// A recovery sidecar, which is never the file itself.
+    Sidecar,
+}
+
 /// The original bytes with the update appended, and where the original ends.
-/// `saving`: refuse to replace an OCR layer already in the file.
-fn build(snap: &Snapshot, saving: bool) -> Result<(usize, Vec<u8>)> {
+fn build(snap: &Snapshot, mode: Mode) -> Result<(usize, Vec<u8>)> {
     let primary_id = snap.primary;
     let info = snap.source(primary_id).context("primary source missing")?;
     let original = crate::file::source_bytes(info)?;
@@ -51,13 +74,19 @@ fn build(snap: &Snapshot, saving: bool) -> Result<(usize, Vec<u8>)> {
         bail!("incremental save of encrypted files is not supported yet");
     }
     let prev_startxref = pdf.xref_start;
+    if mode != Mode::Sidecar && prev_startxref == 0 {
+        // lopdf rebuilt a damaged file's cross-references by scanning it:
+        // there's no section for /Prev to point at. A rewrite writes new ones.
+        bail!("the file's cross-references are damaged; a full save writes new ones");
+    }
     let orig_max_id = pdf.max_id;
     let xref_type = pdf.reference_table.cross_reference_type;
 
     let primary = LoadedSource::from_pdf(&pdf)?;
+    let origins = crate::save::origins(snap);
     let mut others: std::collections::HashMap<_, LoadedSource> = std::collections::HashMap::new();
     for (&sid, sinfo) in &snap.sources {
-        if sid != primary_id && snap.state.pages.iter().any(|p| p.source == sid) {
+        if sid != primary_id && crate::save::needed(snap, &origins, sid) {
             let other = crate::file::load_source(sinfo)?;
             others.insert(sid, LoadedSource::from_pdf_owned(other)?);
         }
@@ -73,8 +102,9 @@ fn build(snap: &Snapshot, saving: bool) -> Result<(usize, Vec<u8>)> {
     let tree_changed = !is_identity(snap, &primary);
     let mut page_obj: std::collections::HashMap<crate::model::PageId, ObjectId> =
         std::collections::HashMap::new();
-    let mut copy_maps: std::collections::HashMap<_, std::collections::HashMap<ObjectId, ObjectId>> =
-        std::collections::HashMap::new();
+    let mut copy_maps: crate::forms::merge::CopyMaps = std::collections::HashMap::new();
+    // A copy of a primary page's form is copied from the file as it was.
+    let mut pristine = None;
 
     let mut connectors = Vec::new();
     let mut stamp_forms = crate::save::StampForms::new();
@@ -84,22 +114,77 @@ fn build(snap: &Snapshot, saving: bool) -> Result<(usize, Vec<u8>)> {
         let mut kids = Vec::with_capacity(snap.state.pages.len());
         let mut used = std::collections::HashSet::new();
         // Pages from other files get their ids first, so links among them
-        // follow and links to their other pages don't copy those (bug 14).
-        for pref in &snap.state.pages {
-            if pref.source != primary_id
-                && let Some(&p) = others
-                    .get(&pref.source)
-                    .and_then(|s| s.pages.get(pref.index as usize))
-            {
-                crate::save::reserve_pages(
-                    [p],
-                    &mut pdf,
-                    copy_maps.entry(pref.source).or_default(),
-                );
-            }
+        // follow and links to their other pages don't copy those (bug 14),
+        // and so does each page showing a copy of a form (M10 bug 4).
+        let own_objects = crate::save::reserve_page_objects(
+            snap,
+            &origins,
+            &|s, i| {
+                let from = if s == primary_id {
+                    &primary
+                } else {
+                    others.get(&s)?
+                };
+                from.pages.get(i as usize).copied()
+            },
+            &mut pdf,
+            &mut copy_maps,
+        );
+        if own_objects
+            .keys()
+            .any(|p| crate::save::copy_of(snap, &origins, *p).0 == primary_id)
+        {
+            pristine = Some(pdf.clone());
         }
         for pref in &snap.state.pages {
-            let (src_page, inherited, mut dict) = if pref.source == primary_id {
+            // A derived copy's page is written as the page it was made
+            // from: its object, annotations and form fields, with the
+            // copy's content (M10 bug 1).
+            let origin = origins.get(&pref.id).copied();
+            let source = origin.map_or(pref.source, |(s, _)| s);
+            let (src_page, inherited, mut dict) = if let Some((_, index)) = origin {
+                let shown = others.get(&pref.source).context("unknown source")?;
+                let id = *shown
+                    .pages
+                    .get(pref.index as usize)
+                    .context("page index out of range")?;
+                let map = copy_maps.entry((pref.source, 0)).or_default();
+                let mut dict =
+                    crate::save::copy_derived_page(shown.pdf.as_ref().unwrap(), id, &mut pdf, map)?;
+                let own = own_objects.contains_key(&pref.id);
+                let (src_page, annots) = if source == primary_id {
+                    let page = *primary
+                        .pages
+                        .get(index as usize)
+                        .context("page index out of range")?;
+                    (page, pdf.get_dictionary(page)?.get(b"Annots").ok().cloned())
+                } else {
+                    let from = others.get(&source).context("unknown source")?;
+                    let page = *from
+                        .pages
+                        .get(index as usize)
+                        .context("page index out of range")?;
+                    let from = from.pdf.as_ref().unwrap();
+                    let map = copy_maps.entry((source, 0)).or_default();
+                    let annots = match from.get_dictionary(page)?.get(b"Annots") {
+                        // A copy of a form gets its own, below.
+                        Ok(a) if !own => Some(crate::save::remap(from, a, &mut pdf, map)?),
+                        _ => None,
+                    };
+                    (page, annots)
+                };
+                if let Some(a) = annots {
+                    dict.set("Annots", a);
+                }
+                if source != primary_id {
+                    crate::kept::drop_dead_links(&pdf, &mut dict);
+                }
+                (
+                    src_page,
+                    shown.inherited.get(&id).cloned().unwrap_or_default(),
+                    dict,
+                )
+            } else if pref.source == primary_id {
                 let id = *primary
                     .pages
                     .get(pref.index as usize)
@@ -115,8 +200,13 @@ fn build(snap: &Snapshot, saving: bool) -> Result<(usize, Vec<u8>)> {
                     .pages
                     .get(pref.index as usize)
                     .context("page index out of range")?;
-                let map = copy_maps.entry(pref.source).or_default();
-                let mut dict = copy_page_dict(src.pdf.as_ref().unwrap(), id, &mut pdf, map)?;
+                let map = copy_maps.entry((pref.source, 0)).or_default();
+                let src_pdf = src.pdf.as_ref().unwrap();
+                let mut dict = if own_objects.contains_key(&pref.id) {
+                    crate::save::copy_derived_page(src_pdf, id, &mut pdf, map)?
+                } else {
+                    copy_page_dict(src_pdf, id, &mut pdf, map)?
+                };
                 crate::kept::drop_dead_links(&pdf, &mut dict);
                 (
                     id,
@@ -124,6 +214,23 @@ fn build(snap: &Snapshot, saving: bool) -> Result<(usize, Vec<u8>)> {
                     dict,
                 )
             };
+            if own_objects.contains_key(&pref.id) {
+                // A copy of a form: its annotations are its own (M10 bug 4).
+                let form = crate::save::copy_of(snap, &origins, pref.id);
+                let from = if form.0 == primary_id {
+                    pristine.as_ref()
+                } else {
+                    others.get(&form.0).and_then(|o| o.pdf.as_ref())
+                }
+                .context("a copy's source isn't loaded")?;
+                let map = copy_maps.entry(form).or_default();
+                match crate::forms::merge::copy_annots(from, src_page, &mut pdf, map)? {
+                    Some(a) => dict.set("Annots", a),
+                    None => {
+                        dict.remove(b"Annots");
+                    }
+                }
+            }
             for (k, v) in &inherited {
                 if !dict.has(k) {
                     dict.set(k.clone(), v.clone());
@@ -157,7 +264,7 @@ fn build(snap: &Snapshot, saving: bool) -> Result<(usize, Vec<u8>)> {
                 }
             }
             if let Some(layer) = snap.state.text_layers.get(&pref.id) {
-                if saving && text_layer::has_layer(&pdf, &dict) {
+                if mode == Mode::Save && text_layer::has_layer(&pdf, &dict) {
                     bail!(
                         "a page's OCR text is replaced: a full save takes the old out of the file"
                     );
@@ -168,12 +275,14 @@ fn build(snap: &Snapshot, saving: bool) -> Result<(usize, Vec<u8>)> {
             apply_rotation(&mut dict, pref.rotation.degrees());
             dict.set("Parent", pages_id);
             dict.set("Type", Object::Name(b"Page".to_vec()));
-            let first = used.insert((pref.source, src_page));
-            let id = if pref.source == primary_id && first {
+            let first = !own_objects.contains_key(&pref.id) && used.insert((source, src_page));
+            let id = if let Some(&id) = own_objects.get(&pref.id) {
+                id
+            } else if source == primary_id && first {
                 src_page
-            } else if pref.source != primary_id && first {
+            } else if source != primary_id && first {
                 // Its id was reserved above; a second use is a copy.
-                copy_maps[&pref.source][&src_page]
+                copy_maps[&(source, 0)][&src_page]
             } else {
                 pdf.new_object_id()
             };
@@ -209,7 +318,7 @@ fn build(snap: &Snapshot, saving: bool) -> Result<(usize, Vec<u8>)> {
                     }
                 }
                 if let Some(layer) = layer {
-                    if saving && text_layer::has_layer(&pdf, &dict) {
+                    if mode == Mode::Save && text_layer::has_layer(&pdf, &dict) {
                         bail!(
                             "a page's OCR text is replaced: a full save takes the old out of the file"
                         );
@@ -288,13 +397,74 @@ fn build(snap: &Snapshot, saving: bool) -> Result<(usize, Vec<u8>)> {
         }
         catalog_changed = true;
     }
+    // Forms from other files, and copies of forms, join the file's.
+    let written: Vec<Dictionary> = page_obj
+        .values()
+        .filter_map(|id| match changed.get(id) {
+            Some(Object::Dictionary(d)) => Some(d.clone()),
+            _ => pdf.get_dictionary(*id).ok().cloned(),
+        })
+        .collect();
+    let on_pages = crate::forms::merge::annots_on(&pdf, written);
+    pdf.objects
+        .insert(catalog_id, Object::Dictionary(catalog.clone()));
+    let touched = crate::forms::merge::merge(
+        &mut pdf,
+        snap,
+        &|sid| {
+            if sid == primary_id {
+                pristine.as_ref()
+            } else {
+                others.get(&sid).and_then(|o| o.pdf.as_ref())
+            }
+        },
+        &mut copy_maps,
+        &on_pages,
+    )?;
+    let mut touched = touched;
+    // A changed form's XFA copy and usage rights describe the file as it
+    // was: a save takes them out by a full rewrite, so the earlier revision
+    // doesn't keep them; a recovery sidecar takes them out here.
+    if snap.form_changed {
+        let (xfa, rights) = crate::forms::rules::has(&pdf);
+        if xfa || rights {
+            if mode == Mode::Save {
+                bail!("the form changed: a full save takes out its XFA copy and usage rights");
+            }
+            touched.extend(crate::forms::rules::take_out(&mut pdf, true).0);
+        }
+    }
+    for id in touched {
+        if id == catalog_id {
+            catalog = pdf.get_dictionary(catalog_id)?.clone();
+            catalog_changed = true;
+        } else {
+            changed.insert(id, pdf.get_object(id)?.clone());
+        }
+    }
     if catalog_changed {
         changed.insert(catalog_id, Object::Dictionary(catalog));
     }
     link_connectors(&mut pdf, &connectors, &snap.state, &page_obj);
-    // Everything allocated above the original max id is new and must be written.
-    for (&id, obj) in pdf.objects.range((orig_max_id + 1, 0)..) {
-        changed.entry(id).or_insert_with(|| obj.clone());
+    // What's new and reachable from what's written is written too: objects
+    // a copy brought that nothing keeps (a widget of a page left behind)
+    // stay out.
+    let mut queue: Vec<ObjectId> = changed.keys().copied().collect();
+    let mut reached = std::collections::HashSet::new();
+    while let Some(id) = queue.pop() {
+        let Some(obj) = changed.get(&id).or_else(|| pdf.objects.get(&id)) else {
+            continue;
+        };
+        refs(obj, &mut |r| {
+            if r.0 > orig_max_id && reached.insert(r) {
+                queue.push(r);
+            }
+        });
+    }
+    for id in reached {
+        if let Some(obj) = pdf.objects.get(&id) {
+            changed.entry(id).or_insert_with(|| obj.clone());
+        }
     }
     if changed.is_empty() {
         return Ok((original_len, std::sync::Arc::unwrap_or_clone(original)));
@@ -390,6 +560,17 @@ fn apply_rotation(dict: &mut Dictionary, delta: i32) {
         dict.remove(b"Rotate");
     } else {
         dict.set("Rotate", rotate);
+    }
+}
+
+/// Each reference in `o`.
+fn refs(o: &Object, f: &mut dyn FnMut(ObjectId)) {
+    match o {
+        Object::Reference(id) => f(*id),
+        Object::Array(a) => a.iter().for_each(|o| refs(o, f)),
+        Object::Dictionary(d) => d.iter().for_each(|(_, o)| refs(o, f)),
+        Object::Stream(s) => s.dict.iter().for_each(|(_, o)| refs(o, f)),
+        _ => {}
     }
 }
 

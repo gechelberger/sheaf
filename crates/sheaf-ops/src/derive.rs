@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
 use sheaf_core::PageSize;
-use sheaf_doc::{PageId, Rebase, Snapshot, SourceId, SourceInfo};
+use sheaf_doc::{Derived, PageId, Rebase, Snapshot, SourceId, SourceInfo};
 use sheaf_progress::{Progress, Unit};
 
 /// A generated PDF holding copies of some pages, and the rebases that
@@ -79,6 +79,10 @@ pub fn strip_stamps(snap: &Snapshot, progress: &dyn Progress) -> Result<Vec<Deri
                 bytes: bytes.len(),
                 password: None,
                 data: None,
+                derived: Some(Derived {
+                    from: sid,
+                    pages: keep.iter().map(|&(_, i)| i).collect(),
+                }),
             },
             pages: keep
                 .iter()
@@ -158,6 +162,10 @@ pub fn watermark(
                 bytes: bytes.len(),
                 password: None,
                 data: None,
+                derived: Some(Derived {
+                    from: sid,
+                    pages: keep.iter().map(|k| k.1).collect(),
+                }),
             },
             pages: keep
                 .iter()

@@ -273,6 +273,7 @@ mod tests {
                 bytes: 0,
                 password: None,
                 data: None,
+                derived: None,
             },
             &[],
             sheaf_doc::history::default_policy(),

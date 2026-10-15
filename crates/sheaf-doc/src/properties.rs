@@ -35,6 +35,9 @@ pub struct Properties {
     pub fonts: Vec<Font>,
     /// The font walk stopped early (a huge file).
     pub fonts_truncated: bool,
+    /// What the file's form is: its class, fields, scripts, usage rights
+    /// and signatures.
+    pub form: crate::forms::FormFacts,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -130,6 +133,7 @@ pub fn properties_of(pdf: &Pdf) -> Properties {
         security: None,
         fonts,
         fonts_truncated,
+        form: crate::forms::read(pdf).facts,
     }
 }
 

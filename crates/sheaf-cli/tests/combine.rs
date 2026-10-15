@@ -209,3 +209,29 @@ fn combines_pdfs_and_images_with_bookmarks() {
     assert_eq!(top, vec!["A 3", "B 1", "B 2", "B 3", "B 4"]);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_form_combined_with_itself_is_renamed_and_said_so() {
+    // M10 slice 4: the second copy's fields go under "form", and both
+    // copies are fields of the combined file's form.
+    let dir = std::env::temp_dir().join(format!("sheaf-cli-combine-form-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut form = sheaf_doc::forms::fixture::Form::new(1);
+    form.text("name", 0, sheaf_doc::forms::fixture::row(0));
+    let path = dir.join("form.pdf");
+    std::fs::write(&path, form.bytes()).unwrap();
+    let out = dir.join("both.pdf");
+    let p = path.to_str().unwrap();
+    let o = sheaf(&["combine", p, p, "-o", out.to_str().unwrap()]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(
+        err.contains("Fields from form.pdf are under “form”, since their names were taken"),
+        "{err}"
+    );
+    let report = sheaf_doc::forms::check_file(&out, None).unwrap();
+    assert!(report.is_clean(), "{:?}", report.findings);
+    assert_eq!(report.fields, 2);
+    let _ = std::fs::remove_dir_all(&dir);
+}

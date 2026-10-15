@@ -156,6 +156,7 @@ fn doc(pages: u32) -> Document {
             bytes: 1000,
             password: None,
             data: None,
+            derived: None,
         },
         &[],
         Box::new(FixedCount(50)),

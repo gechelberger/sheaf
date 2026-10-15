@@ -145,6 +145,7 @@ impl PropertiesDialog {
             ("Page Size", size),
             ("Tagged PDF", yes_no(p.tagged)),
             ("Fast Web View", yes_no(p.linearized)),
+            ("Form", p.form.to_string()),
         ];
         rows.into_iter().map(|(k, v)| row(k, v)).collect()
     }

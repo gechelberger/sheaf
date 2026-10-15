@@ -1,6 +1,6 @@
 //! Virtual document, edits, and snapshot history.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use sheaf_core::{DestView, PageSize, Rotation};
 
 use crate::annot::{Annot, AnnotId, AnnotKind};
+use crate::forms::{Field, FieldId, FileForm, Widget};
 use crate::history::{HistoryPolicy, HistoryStats};
 use crate::text_layer::TextLayer;
 
@@ -45,6 +46,19 @@ pub struct SourceInfo {
     /// them, the path is read (a cached file sheaf made, which never
     /// changes; or a headless run).
     pub data: Option<SourceData>,
+    /// For a copy sheaf made of another source's pages (cropped,
+    /// watermarked, a header/footer stripped): which pages. A save writes
+    /// each as the page it was made from, with its annotations and form
+    /// fields, and the copy's content (M10 bug 1).
+    pub derived: Option<Derived>,
+}
+
+/// Where a derived source's pages come from: its page `k` is a copy of page
+/// `pages[k]` of `from`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Derived {
+    pub from: SourceId,
+    pub pages: Vec<u32>,
 }
 
 /// A file's bytes, shared (an `Arc`, cheap to clone).
@@ -153,6 +167,12 @@ pub struct DocState {
     /// (`ForeignAnnot::name`). A save leaves them, and their own replies,
     /// out of the file.
     pub removed_comments: im::HashMap<PageId, im::OrdSet<String>>,
+    /// The form's terminal fields (M10 proposal 8): the primary file's,
+    /// read at open. Inserted files' come in with M10 slice 4.
+    pub fields: im::OrdMap<FieldId, Field>,
+    /// Their widgets, per page, each page's in `/Annots` order: they move
+    /// and go with their page.
+    pub widgets: im::HashMap<PageId, Vector<Widget>>,
 }
 
 impl DocState {
@@ -179,6 +199,10 @@ impl DocState {
 
     pub fn annots_on(&self, page: PageId) -> Option<&Vector<Annot>> {
         self.annots.get(&page)
+    }
+
+    pub fn widgets_on(&self, page: PageId) -> Option<&Vector<Widget>> {
+        self.widgets.get(&page)
     }
 
     pub fn text_layer(&self, page: PageId) -> Option<&Arc<TextLayer>> {
@@ -486,6 +510,13 @@ pub struct EditOutcome {
     pub pages_added: usize,
     pub bookmarks_removed: usize,
     pub bookmarks_added: usize,
+    /// Forms that came in with pages and were put under a new parent
+    /// field, since their names clashed (M10 proposal 5): its name, and the
+    /// file they came from.
+    pub forms_renamed: Vec<(String, SourceId)>,
+    /// Files whose signed fields came in with their pages: the signatures
+    /// don't cover this file (M10 proposal 7).
+    pub signatures_in: Vec<SourceId>,
 }
 
 /// A version's place in the history tree. Ids aren't reused.
@@ -505,6 +536,7 @@ pub struct Step {
 struct Ids {
     next_page: u64,
     next_outline: u64,
+    next_field: u64,
     seed: u64,
 }
 
@@ -584,10 +616,17 @@ pub struct Snapshot {
     pub header_footer_dirty: bool,
     /// Pages whose markup differs from what's in the primary file.
     pub annots_dirty: HashSet<PageId>,
+    /// Fields that differ from what's in the primary file (see
+    /// `Document::fields_dirty`).
+    pub fields_dirty: HashSet<FieldId>,
     /// Something in the primary file is gone from the document (see
     /// `Document::removes_content`): only a full rewrite takes it out of
     /// the file.
     pub removes_content: bool,
+    /// The form differs from the primary file's (see
+    /// `Document::form_changed`): a save takes out what described it as
+    /// it was, its XFA copy and usage rights (M10 proposals 6 and 7).
+    pub form_changed: bool,
 }
 
 impl Snapshot {
@@ -624,6 +663,16 @@ pub struct Document {
     baked_header_footer: Option<Arc<crate::stamps::HeaderFooter>>,
     /// Markup as it exists in the primary file on disk.
     saved_annots: im::HashMap<PageId, Vector<Annot>>,
+    /// Fields as they are in the primary file on disk: their values for
+    /// dirty tracking.
+    saved_fields: im::OrdMap<FieldId, Field>,
+    next_field: u64,
+    /// Each source's form as read (`set_source_form`), for the fields that
+    /// come in with its pages.
+    forms: HashMap<SourceId, Arc<FileForm>>,
+    /// A save made one form of forms whose scripts came from more than one
+    /// file (see [`Document::scripts_mixed`]).
+    scripts_mixed: bool,
 }
 
 impl Document {
@@ -655,6 +704,10 @@ impl Document {
             saved_removed: im::HashMap::new(),
             baked_header_footer: None,
             saved_annots: im::HashMap::new(),
+            saved_fields: im::OrdMap::new(),
+            next_field: 0,
+            forms: HashMap::new(),
+            scripts_mixed: false,
         };
         let pages: Vector<PageRef> = (0..primary.page_count)
             .map(|index| PageRef {
@@ -687,6 +740,8 @@ impl Document {
                     removed_comments: im::HashMap::new(),
                     labels: None,
                     header_footer: None,
+                    fields: im::OrdMap::new(),
+                    widgets: im::HashMap::new(),
                 }),
                 marginal_bytes: 0,
                 job: None,
@@ -738,6 +793,114 @@ impl Document {
         self.next_source += 1;
         self.sources.insert(id, Arc::new(info));
         id
+    }
+
+    /// Source `id`'s form, as `forms::read` read it: the fields that come
+    /// in with its pages when they're inserted or replace others. Call it
+    /// before the edit that brings them.
+    pub fn set_source_form(&mut self, id: SourceId, form: FileForm) {
+        if !form.fields.is_empty() {
+            self.forms.insert(id, Arc::new(form));
+        }
+    }
+
+    /// Sources whose fields in the document, or the document scripts
+    /// beside them, have scripts. More than one, and scripts are off by
+    /// default (M10 proposal 5): document scripts share one scope.
+    pub fn script_sources(&self) -> Vec<SourceId> {
+        let st = self.state();
+        let mut widgets: HashMap<FieldId, Vec<&Widget>> = HashMap::new();
+        for w in st.widgets.values().flatten() {
+            widgets.entry(w.field).or_default().push(w);
+        }
+        let mut out: Vec<SourceId> = Vec::new();
+        for f in st.fields.values() {
+            if out.contains(&f.source) {
+                continue;
+            }
+            let documents = self
+                .forms
+                .get(&f.source)
+                .is_some_and(|form| form.facts.document_scripts > 0);
+            let own = widgets.get(&f.id).map_or(&[][..], |w| &w[..]);
+            if documents || f.has_scripts(own) {
+                out.push(f.source);
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// Whether the document's scripts came from more than one file, now
+    /// or before a save this session: then they're off by default (M10
+    /// proposal 5).
+    pub fn scripts_mixed(&self) -> bool {
+        self.scripts_mixed || self.script_sources().len() > 1
+    }
+
+    /// What to tell the reader about the forms an edit brought: fields put
+    /// under a new parent (a copy's, after Duplicate Pages, when `copies`),
+    /// whether their scripts still name the old fields, and scripts turned
+    /// off when `mixed_before` (`scripts_mixed` before the edit) wasn't.
+    pub fn form_notice(
+        &self,
+        out: &EditOutcome,
+        copies: bool,
+        mixed_before: bool,
+    ) -> Option<String> {
+        let st = self.state();
+        let mut parts = Vec::new();
+        for (under, sid) in &out.forms_renamed {
+            let file = self
+                .sources
+                .get(sid)
+                .and_then(|s| s.path.file_name())
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let scripted = st.fields.values().any(|f| {
+                f.under.as_deref() == Some(under.as_str())
+                    && (f.has_scripts(&[])
+                        || self
+                            .forms
+                            .get(sid)
+                            .is_some_and(|form| form.facts.document_scripts > 0))
+            });
+            let mut part = if copies {
+                format!("the copies' fields are under “{under}”, apart from the originals")
+            } else {
+                format!("fields from {file} are under “{under}”, since their names were taken")
+            };
+            if scripted {
+                part.push_str("; its scripts still use the old names");
+            }
+            parts.push(part);
+        }
+        for sid in &out.signatures_in {
+            let file = self
+                .sources
+                .get(sid)
+                .and_then(|s| s.path.file_name())
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            parts.push(format!("the signature from {file} is no longer valid here"));
+        }
+        if !mixed_before && self.scripts_mixed() {
+            parts.push("scripts are off: fields from more than one form have them".into());
+        }
+        if parts.is_empty() {
+            return None;
+        }
+        let sentences: Vec<String> = parts
+            .iter()
+            .map(|p| {
+                let mut chars = p.chars();
+                chars
+                    .next()
+                    .map(|c| c.to_uppercase().chain(chars).collect())
+                    .unwrap_or_default()
+            })
+            .collect();
+        Some(sentences.join(". "))
     }
 
     /// Page sizes arrive after open; they're not part of any snapshot.
@@ -809,6 +972,55 @@ impl Document {
         st.annots = map.clone();
         self.saved_annots = map;
         Ok(())
+    }
+
+    /// The primary file's form, read after open (`forms::read`): its
+    /// fields keep their ids, and their widgets go to the pages they're on
+    /// by index. Only before any edit, like the other `set_initial_*`.
+    pub fn set_initial_fields(&mut self, form: &crate::forms::FileForm) -> Result<()> {
+        let primary = self.primary;
+        let st = self.opened_state_mut("form fields")?;
+        let ids: Vec<PageId> = st.pages.iter().map(|p| p.id).collect();
+        let fields: im::OrdMap<FieldId, Field> = form
+            .fields
+            .iter()
+            .map(|f| {
+                let mut f = f.clone();
+                f.source = primary;
+                (f.id, f)
+            })
+            .collect();
+        let mut widgets = im::HashMap::new();
+        for (&index, list) in &form.widgets {
+            if let Some(&pid) = ids.get(index as usize) {
+                widgets.insert(pid, list.iter().cloned().collect());
+            }
+        }
+        let next = fields.keys().next_back().map_or(0, |id| id.0 + 1);
+        st.fields = fields.clone();
+        st.widgets = widgets;
+        self.saved_fields = fields;
+        self.next_field = self.next_field.max(next);
+        if !form.fields.is_empty() {
+            self.forms.insert(primary, Arc::new(form.clone()));
+        }
+        Ok(())
+    }
+
+    /// Fields that differ from what's in the primary file: changed, added
+    /// or gone.
+    pub fn fields_dirty(&self) -> HashSet<FieldId> {
+        let cur = &self.state().fields;
+        if cur.ptr_eq(&self.saved_fields) {
+            return HashSet::new();
+        }
+        let mut dirty: HashSet<FieldId> = cur
+            .iter()
+            .filter(|(id, f)| self.saved_fields.get(id) != Some(f))
+            .map(|(id, _)| *id)
+            .collect();
+        dirty.extend(self.saved_fields.keys().filter(|id| !cur.contains_key(id)));
+        dirty
     }
 
     fn annots_dirty_pages(&self) -> HashSet<PageId> {
@@ -906,8 +1118,34 @@ impl Document {
             labels_dirty: self.state().labels != self.saved_labels,
             header_footer_dirty: self.header_footer_dirty(),
             annots_dirty: self.annots_dirty_pages(),
+            fields_dirty: self.fields_dirty(),
             removes_content: self.removes_content(),
+            form_changed: self.form_changed(),
         }
+    }
+
+    /// Whether the form differs from the primary file's: a field added,
+    /// removed or changed, or widgets of a page not as they were (it's
+    /// gone, or shows another file's page now). Then a save takes out what
+    /// described the form as it was: its XFA copy and Reader's usage rights
+    /// (M10 proposals 6 and 7).
+    pub fn form_changed(&self) -> bool {
+        if !self.fields_dirty().is_empty() {
+            return true;
+        }
+        let Some(saved) = self
+            .saved
+            .and_then(|v| self.versions.get(&v))
+            .and_then(|v| v.state.as_ref())
+        else {
+            return false;
+        };
+        let now = &self.state().widgets;
+        !saved.widgets.ptr_eq(now)
+            && saved
+                .widgets
+                .iter()
+                .any(|(page, list)| now.get(page) != Some(list))
     }
 
     /// Whether something in the primary file is gone from the document: a
@@ -968,6 +1206,9 @@ impl Document {
     /// an edit. Saved versions keep their snapshots (see `trim`), so
     /// nothing is ever replayed across a save.
     pub fn rebase_to_saved(&mut self, saved: SourceInfo) -> SourceId {
+        // The forms it was made of are one now; whether their scripts
+        // were from more than one is the session's to remember.
+        self.scripts_mixed |= self.script_sources().len() > 1;
         let path = saved.path.clone();
         let id = self.register_source(saved);
         self.primary = id;
@@ -995,9 +1236,25 @@ impl Document {
                 rotation: Rotation::R0,
             })
             .collect();
+        // Every field is the saved file's own now, under the name it was
+        // saved with. (Their objects there are slice 9's to find.)
+        st.fields = st
+            .fields
+            .iter()
+            .map(|(fid, f)| {
+                let f = Field {
+                    source: id,
+                    copy: 0,
+                    under: None,
+                    ..f.clone()
+                };
+                (*fid, f)
+            })
+            .collect();
         let st = self.state().clone();
         self.saved_outline = st.outline;
         self.saved_annots = st.annots;
+        self.saved_fields = st.fields;
         self.saved_removed = st.removed_comments;
         self.saved_labels = st.labels;
         self.baked_header_footer = st.header_footer;
@@ -1152,6 +1409,8 @@ impl Document {
             total.pages_added += out.pages_added;
             total.bookmarks_removed += out.bookmarks_removed;
             total.bookmarks_added += out.bookmarks_added;
+            total.forms_renamed.extend(out.forms_renamed);
+            total.signatures_in.extend(out.signatures_in);
         }
         if state != *self.state() {
             self.push(state, label.into(), steps, None);
@@ -1231,6 +1490,7 @@ impl Document {
         let ids = Ids {
             next_page: self.next_page,
             next_outline: self.next_outline,
+            next_field: self.next_field,
             seed: fastrand::u64(..),
         };
         self.rng = fastrand::Rng::with_seed(ids.seed);
@@ -1240,14 +1500,16 @@ impl Document {
 
     /// Run a recorded step again, exactly as the first time.
     fn replay_step(&mut self, state: DocState, step: &Step) -> Result<DocState> {
-        let (page, outline) = (self.next_page, self.next_outline);
+        let (page, outline, field) = (self.next_page, self.next_outline, self.next_field);
         self.next_page = step.ids.next_page;
         self.next_outline = step.ids.next_outline;
+        self.next_field = step.ids.next_field;
         self.rng = fastrand::Rng::with_seed(step.ids.seed);
         let result = self.compute(state, step.edit.clone()).map(|(s, _)| s);
         // Counters only grow; leave them as they were before the replay.
         self.next_page = self.next_page.max(page);
         self.next_outline = self.next_outline.max(outline);
+        self.next_field = self.next_field.max(field);
         result
     }
 
@@ -1545,6 +1807,12 @@ impl Document {
         if !old.annots.ptr_eq(&new.annots) {
             bytes += new.annots.values().map(|l| l.len() * 256).sum::<usize>();
         }
+        if !old.widgets.ptr_eq(&new.widgets) {
+            bytes += new.widgets.values().map(|l| l.len() * 256).sum::<usize>();
+        }
+        if !old.fields.ptr_eq(&new.fields) {
+            bytes += new.fields.len() * 256;
+        }
         if !old.text_layers.ptr_eq(&new.text_layers) {
             bytes += new
                 .text_layers
@@ -1560,6 +1828,204 @@ impl Document {
         let id = PageId(self.next_page);
         self.next_page += 1;
         id
+    }
+
+    /// Source `source`'s fields with widgets on the pages coming in
+    /// (`shown`: each page's index in the source, and the page showing it),
+    /// and its fields with no widget at all, into `st` as a copy of their
+    /// own (M10 proposal 5). Only widgets on those pages come along. When
+    /// any of their names clashes with a field in the document, or a parent
+    /// of one, they all go under a new parent field named for the file:
+    /// its name. Pages of a file whose form is here already (a run of its
+    /// pages after another, as Combine inserts them) join that form.
+    fn take_in_fields(
+        &mut self,
+        st: &mut DocState,
+        source: SourceId,
+        shown: &[(u32, PageId)],
+    ) -> Option<String> {
+        let form = self.forms.get(&source)?.clone();
+        let on_pages: HashSet<FieldId> = shown
+            .iter()
+            .flat_map(|(index, _)| form.widgets.get(index).into_iter().flatten())
+            .map(|w| w.field)
+            .collect();
+        if on_pages.is_empty() {
+            return None;
+        }
+        let with_widgets: HashSet<FieldId> =
+            form.widgets.values().flatten().map(|w| w.field).collect();
+        let fields: Vec<&Field> = form
+            .fields
+            .iter()
+            .filter(|f| on_pages.contains(&f.id) || !with_widgets.contains(&f.id))
+            .collect();
+        // The form as it's here already, by object: each field's id, and
+        // the parent they're all under.
+        let here: HashMap<lopdf::ObjectId, (FieldId, Option<Arc<str>>)> = st
+            .fields
+            .values()
+            .filter(|f| f.source == source && f.copy == 0)
+            .map(|f| (f.object, (f.id, f.under.clone())))
+            .collect();
+        let (under, ids) = match here.values().next() {
+            Some((_, joined)) => {
+                let joined = joined.as_deref().map(str::to_string);
+                let mut ids = HashMap::new();
+                let mut new = Vec::new();
+                for f in fields {
+                    match here.get(&f.object) {
+                        Some((id, _)) => {
+                            ids.insert(f.id, *id);
+                        }
+                        None => new.push(f),
+                    }
+                }
+                ids.extend(self.bring_fields(st, source, 0, new, joined));
+                (None, ids)
+            }
+            None => {
+                let under = self.name_apart(st, source, fields.iter().map(|f| f.name.as_str()));
+                let copy = next_copy(st, source);
+                (
+                    under.clone(),
+                    self.bring_fields(st, source, copy, fields, under),
+                )
+            }
+        };
+        for &(index, page) in shown {
+            let list: Vector<Widget> = form
+                .widgets
+                .get(&index)
+                .into_iter()
+                .flatten()
+                .filter_map(|w| {
+                    Some(Widget {
+                        field: *ids.get(&w.field)?,
+                        ..w.clone()
+                    })
+                })
+                .collect();
+            if !list.is_empty() {
+                st.widgets.insert(page, list);
+            }
+        }
+        under
+    }
+
+    /// Duplicate Pages: each copy's widgets get fields of their own, a new
+    /// copy of each form the pages show, renamed by
+    /// [`take_in_fields`](Self::take_in_fields)'s rule, so filling one never
+    /// fills the other (M10 bug 4). `copies` pairs each page with its copy.
+    fn copy_fields(
+        &mut self,
+        st: &mut DocState,
+        copies: &[(PageId, PageId)],
+    ) -> Vec<(String, SourceId)> {
+        // The forms the pages show, and their fields there, in order.
+        let mut forms: BTreeMap<(SourceId, u32), BTreeSet<FieldId>> = BTreeMap::new();
+        for (page, _) in copies {
+            for w in st.widgets.get(page).into_iter().flatten() {
+                if let Some(f) = st.fields.get(&w.field) {
+                    forms.entry((f.source, f.copy)).or_default().insert(f.id);
+                }
+            }
+        }
+        let mut renamed = Vec::new();
+        let mut ids = HashMap::new();
+        for ((source, _), fields) in forms {
+            let fields: Vec<Field> = fields.iter().map(|id| st.fields[id].clone()).collect();
+            let under = self.name_apart(st, source, fields.iter().map(|f| f.source_name()));
+            renamed.extend(under.clone().map(|u| (u, source)));
+            let copy = next_copy(st, source);
+            ids.extend(self.bring_fields(st, source, copy, fields.iter(), under));
+        }
+        for &(page, copy) in copies {
+            let list: Vector<Widget> = st
+                .widgets
+                .get(&page)
+                .into_iter()
+                .flatten()
+                .filter_map(|w| {
+                    Some(Widget {
+                        field: *ids.get(&w.field)?,
+                        ..w.clone()
+                    })
+                })
+                .collect();
+            if !list.is_empty() {
+                st.widgets.insert(copy, list);
+            }
+        }
+        renamed
+    }
+
+    /// `fields` of `source` into `st` with new ids, as copy `copy` of its
+    /// form, under `under` when given. Each old id, and its new one.
+    fn bring_fields<'a>(
+        &mut self,
+        st: &mut DocState,
+        source: SourceId,
+        copy: u32,
+        fields: impl IntoIterator<Item = &'a Field>,
+        under: Option<String>,
+    ) -> HashMap<FieldId, FieldId> {
+        let under: Option<Arc<str>> = under.map(Arc::from);
+        let mut ids = HashMap::new();
+        for f in fields {
+            let id = FieldId(self.next_field);
+            self.next_field += 1;
+            let name = match &under {
+                Some(u) => format!("{u}.{}", f.source_name()),
+                None => f.source_name().to_string(),
+            };
+            st.fields.insert(
+                id,
+                Field {
+                    id,
+                    source,
+                    copy,
+                    under: under.clone(),
+                    name,
+                    ..f.clone()
+                },
+            );
+            ids.insert(f.id, id);
+        }
+        ids
+    }
+
+    /// The parent field `names` (full names, as their source has them) go
+    /// under, when any of them, or a parent of one, is a field or parent
+    /// in `st` already: the file's name, or with `_2`, `_3`… when that's
+    /// taken. None when nothing clashes.
+    fn name_apart<'a>(
+        &self,
+        st: &DocState,
+        source: SourceId,
+        names: impl IntoIterator<Item = &'a str>,
+    ) -> Option<String> {
+        let existing = field_nodes(st.fields.values().map(|f| f.name.as_str()));
+        if !field_nodes(names).iter().any(|n| existing.contains(n)) {
+            return None;
+        }
+        // A dot would make it two names.
+        let stem = self
+            .sources
+            .get(&source)
+            .and_then(|s| s.path.file_stem())
+            .map(|s| s.to_string_lossy().replace('.', "_"))
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "form".to_string());
+        (1..)
+            .map(|n| {
+                if n == 1 {
+                    stem.clone()
+                } else {
+                    format!("{stem}_{n}")
+                }
+            })
+            .find(|name| !existing.contains(name.as_str()))
     }
 
     fn fresh_outline_id(&mut self) -> OutlineId {
@@ -1715,6 +2181,7 @@ impl Document {
                     st.annots.remove(id);
                     st.text_layers.remove(id);
                     st.removed_comments.remove(id);
+                    st.widgets.remove(id);
                 }
                 let (outline, removed) = cascade_delete(&st.outline, &set);
                 st.outline = outline;
@@ -1770,10 +2237,19 @@ impl Document {
                     })
                     .collect();
                 import_marks(&mut self.rng, &mut st, incoming);
+                let shown: Vec<(u32, PageId)> = range.map(|i| (i, by_index[i as usize])).collect();
+                if let Some(under) = self.take_in_fields(&mut st, source, &shown) {
+                    out.forms_renamed.push((under, source));
+                }
+                if signed_from(&st, source) {
+                    out.signatures_in.push(source);
+                }
             }
             Edit::DuplicatePages { ids } => {
                 let set: HashSet<PageId> = ids.into_iter().collect();
                 let mut pages = Vector::new();
+                // (page, its copy), for their fields.
+                let mut copies = Vec::new();
                 for p in st.pages.iter() {
                     pages.push_back(*p);
                     if set.contains(&p.id) {
@@ -1795,11 +2271,13 @@ impl Document {
                         if let Some(layer) = st.text_layers.get(&p.id).cloned() {
                             st.text_layers.insert(copy, layer);
                         }
+                        copies.push((p.id, copy));
                         pages.push_back(PageRef { id: copy, ..*p });
                         out.pages_added += 1;
                     }
                 }
                 st.pages = pages;
+                out.forms_renamed = self.copy_fields(&mut st, &copies);
             }
             Edit::ReplacePages {
                 ids,
@@ -1820,8 +2298,10 @@ impl Document {
                 let mut pages = st.pages.clone();
                 for id in &ids {
                     let i = *pos.get(id).context("page to replace not found")?;
-                    // The page shows different content now; its OCR is stale.
+                    // The page shows different content now; its OCR is
+                    // stale, and its widgets aren't on it.
                     st.text_layers.remove(id);
+                    st.widgets.remove(id);
                     match replacements.next() {
                         Some(index) => {
                             pages.set(
@@ -1878,6 +2358,14 @@ impl Document {
                     .filter_map(|(index, list)| Some((*shown_by.get(&index)?, list)))
                     .collect();
                 import_marks(&mut self.rng, &mut st, incoming);
+                let mut shown: Vec<(u32, PageId)> = shown_by.into_iter().collect();
+                shown.sort();
+                if let Some(under) = self.take_in_fields(&mut st, source, &shown) {
+                    out.forms_renamed.push((under, source));
+                }
+                if signed_from(&st, source) {
+                    out.signatures_in.push(source);
+                }
             }
             Edit::OutlineInsert {
                 parent,
@@ -1954,6 +2442,8 @@ impl Document {
                                 labels: st.labels.clone(),
                                 header_footer: st.header_footer.clone(),
                                 removed_comments: st.removed_comments.clone(),
+                                fields: st.fields.clone(),
+                                widgets: st.widgets.clone(),
                             };
                             let prev_node = flat[..my_pos]
                                 .iter()
@@ -2318,6 +2808,38 @@ fn fresh_annot_id(rng: &mut fastrand::Rng, st: &DocState, taken: &mut HashSet<An
     }
 }
 
+/// Whether `st` has signed fields from `source` (another file's: they're
+/// kept, and their signatures don't cover this one).
+fn signed_from(st: &DocState, source: SourceId) -> bool {
+    st.fields
+        .values()
+        .any(|f| f.source == source && f.value == Some(crate::forms::Value::Signed))
+}
+
+/// The copy of `source`'s form fields brought in next take: one past the
+/// last one `st` has, or 0.
+fn next_copy(st: &DocState, source: SourceId) -> u32 {
+    st.fields
+        .values()
+        .filter(|f| f.source == source)
+        .map(|f| f.copy + 1)
+        .max()
+        .unwrap_or(0)
+}
+
+/// Every node of a field tree with these full names: each name, and the
+/// parents in it (what comes before each dot).
+fn field_nodes<'a>(names: impl IntoIterator<Item = &'a str>) -> HashSet<&'a str> {
+    let mut out = HashSet::new();
+    for name in names {
+        out.insert(name);
+        for (i, _) in name.match_indices('.') {
+            out.insert(&name[..i]);
+        }
+    }
+    out
+}
+
 /// Marks that came with pages from another file, onto their new pages in
 /// `st`. They get fresh ids (the file's could clash with ours), and a
 /// connector keeps its partner only if the partner came too.
@@ -2470,6 +2992,7 @@ mod tests {
             bytes: 1000,
             password: None,
             data: None,
+            derived: None,
         }
     }
 
@@ -2526,6 +3049,74 @@ mod tests {
             .unwrap()
             .1
             .id
+    }
+
+    #[test]
+    fn form_fields_follow_their_pages() {
+        let form = crate::forms::read(&crate::forms::fixture::every_kind().pdf);
+        let mut d = Document::new(src(2), &[], Box::new(FixedCount(10)));
+        d.set_initial_fields(&form).unwrap();
+        let (p1, p2) = (id_at(&d, 0), id_at(&d, 1));
+        let st = d.state();
+        assert_eq!(st.fields.len(), 9);
+        assert!(st.fields.values().all(|f| f.source == d.primary()));
+        let on = |d: &Document, p: PageId| d.state().widgets_on(p).map_or(0, |w| w.len());
+        assert_eq!((on(&d, p1), on(&d, p2)), (6, 4));
+        assert!(d.fields_dirty().is_empty() && d.snapshot().fields_dirty.is_empty());
+        // Moving a page carries its widgets; deleting it takes them, and
+        // undo brings them back.
+        d.apply(
+            Edit::MovePages {
+                ids: vec![p2],
+                before: Some(p1),
+            },
+            "move",
+        )
+        .unwrap();
+        assert_eq!(on(&d, p2), 4);
+        assert!(d.set_initial_fields(&form).is_err());
+        d.apply(Edit::DeletePages { ids: vec![p2] }, "delete")
+            .unwrap();
+        assert_eq!((on(&d, p2), d.state().fields.len()), (0, 9));
+        d.undo();
+        assert_eq!(on(&d, p2), 4);
+        // A replaced page shows another page, without them.
+        let other = d.add_source(src(1));
+        d.apply(
+            Edit::ReplacePages {
+                ids: vec![p1],
+                source: other,
+                range: 0..1,
+                annots: Vec::new(),
+            },
+            "replace",
+        )
+        .unwrap();
+        assert_eq!(on(&d, p1), 0);
+        // Nothing changed a field.
+        assert!(d.fields_dirty().is_empty());
+    }
+
+    #[test]
+    fn fields_dirty_compares_with_the_saved_form() {
+        let form = crate::forms::read(&crate::forms::fixture::every_kind().pdf);
+        let mut d = Document::new(src(2), &[], Box::new(FixedCount(10)));
+        d.set_initial_fields(&form).unwrap();
+        // A field changed, one gone and one added, as edits will do.
+        let (changed, gone, added) = (FieldId(0), FieldId(1), FieldId(99));
+        let st = d.opened_state_mut("test").unwrap();
+        let mut f = st.fields.get(&changed).unwrap().clone();
+        f.value = Some(crate::forms::Value::Text("Bo Ng".into()));
+        st.fields.insert(changed, f.clone());
+        st.fields.remove(&gone);
+        f.id = added;
+        st.fields.insert(added, f);
+        let want = HashSet::from([changed, gone, added]);
+        assert_eq!(d.fields_dirty(), want);
+        assert_eq!(d.snapshot().fields_dirty, want);
+        // Saved, they're what's in the file.
+        d.rebase_to_saved(src(2));
+        assert!(d.fields_dirty().is_empty() && d.snapshot().fields_dirty.is_empty());
     }
 
     #[test]
@@ -2880,7 +3471,12 @@ mod tests {
                 &flat(&[("A", Some(0), 0), ("B", Some(3), 0)]),
                 Box::new(FixedCount(2)),
             );
+            // Both files have forms: inserts and duplicates bring fields,
+            // renamed, with new ids (M10 slice 4).
+            let form = crate::forms::read(&crate::forms::fixture::every_kind().pdf);
+            d.set_initial_fields(&form).unwrap();
             let other = d.add_source(src(4));
+            d.set_source_form(other, form);
             let mut made: Vec<(VersionId, DocState)> = Vec::new();
             for step in 0..25 {
                 let n = d.page_count();

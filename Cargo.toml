@@ -1,7 +1,8 @@
 [workspace]
 resolver = "3"
-# Plugins build for wasm32-wasip2 in their own workspaces.
-exclude = ["plugins", "crates/sheaf-plugin/tests/fixtures"]
+# Plugins build for wasm32-wasip2 in their own workspaces. vendor/lopdf is
+# a patched dependency, not one of ours (its SHEAF.md).
+exclude = ["plugins", "crates/sheaf-plugin/tests/fixtures", "vendor/lopdf"]
 members = [
     "crates/sheaf-core",
     "crates/sheaf-progress",
@@ -73,6 +74,14 @@ async-process = { git = "https://github.com/zed-industries/async-process.git", r
 calloop = { git = "https://github.com/zed-industries/calloop", rev = "3759371fee14c40066d64777e2a36b6ffcc22590" }
 khronos-egl = { git = "https://github.com/zed-industries/khronos-egl", rev = "42214b36347b108fd9630ca6254b96dde59e04fe" }
 windows-capture = { git = "https://github.com/zed-industries/windows-capture.git", rev = "f0d6c1b6691db75461b732f6d5ff56eed002eeb9" }
+
+# Not Zed's. lopdf 0.45.0 reads an earlier revision of some hybrid-reference
+# files (todos/m10.md, slice 2's note). vendor/lopdf is lopdf's main at
+# 39492cb, which fixes that (#598) and brings 22 other commits since 0.45.0,
+# a refactor of the reader, writer and encryption code among them. sheaf's
+# patch on top reads each cross-reference stream once. vendor/lopdf/SHEAF.md
+# has the details and the way back to crates.io.
+lopdf = { path = "vendor/lopdf" }
 
 [profile.dev]
 # GPUI and PDFium bindings are unusably slow unoptimized; mirror Zed's approach.

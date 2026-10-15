@@ -13,6 +13,7 @@ mod blanks;
 mod combine;
 mod comments;
 mod export;
+mod form;
 mod images;
 mod progress;
 mod scan;
@@ -23,6 +24,7 @@ pub const SUBCOMMANDS: &[&str] = &[
     "combine",
     "comments",
     "export",
+    "form",
     "images-to-pdf",
     "remove-blanks",
     "scan",
@@ -51,6 +53,7 @@ enum Command {
     Combine(combine::CombineArgs),
     Comments(comments::CommentsArgs),
     Export(export::ExportArgs),
+    Form(form::FormArgs),
     ImagesToPdf(images::ImagesArgs),
     RemoveBlanks(blanks::BlanksArgs),
     Scan(scan::ScanArgs),
@@ -78,6 +81,7 @@ where
         Command::Combine(args) => combine::run(args, cli.quiet),
         Command::Comments(args) => comments::run(args, cli.quiet),
         Command::Export(args) => export::run(args, cli.quiet),
+        Command::Form(args) => form::run(args, cli.quiet),
         Command::ImagesToPdf(args) => images::run(args, cli.quiet),
         Command::RemoveBlanks(args) => blanks::run(args, cli.quiet),
         Command::Scan(args) => scan::run(args, cli.quiet),

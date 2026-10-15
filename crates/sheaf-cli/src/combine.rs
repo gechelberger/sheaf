@@ -68,6 +68,9 @@ pub fn run(args: CombineArgs, quiet: bool) -> anyhow::Result<()> {
             "{} pages from {} files, {} bookmarks",
             report.pages, report.files, report.bookmarks
         );
+        if let Some(n) = &report.notice {
+            eprintln!("{n}");
+        }
     }
     println!("{}", args.output.display());
     Ok(())
