@@ -23,6 +23,7 @@ mod export;
 mod export_dialog;
 mod file_dialog;
 mod goto;
+mod groups;
 mod header_footer_dialog;
 mod history_panel;
 mod insert_dialog;
@@ -153,7 +154,12 @@ actions!(
         ToolInk,
         ToolTick,
         ToolStamp,
-        ToolConnector
+        ToolConnector,
+        NextConnectorLabel,
+        GroupNext,
+        GroupPrev,
+        GroupPagesWith,
+        GroupPagesWithout
     ]
 );
 actions!(
@@ -493,6 +499,9 @@ fn main() {
             KeyBinding::new("n", ToolInk, doc_keys),
             KeyBinding::new("k", ToolTick, doc_keys),
             KeyBinding::new("j", ToolStamp, doc_keys),
+            KeyBinding::new("shift-i", NextConnectorLabel, doc_keys),
+            KeyBinding::new("]", GroupNext, doc_keys),
+            KeyBinding::new("[", GroupPrev, doc_keys),
             KeyBinding::new("i", ToolConnector, doc_keys),
             KeyBinding::new("ctrl-f", Find, doc),
             KeyBinding::new("escape", CloseSearch, doc),

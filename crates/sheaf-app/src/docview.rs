@@ -179,7 +179,10 @@ pub(crate) struct Doc {
     /// Pages whose characters the engine is reading.
     pub(crate) chars_loading: HashSet<PageId>,
     pub(crate) annot_editor: Option<AnnotEditor>,
-    pub(crate) pending_connector: Option<crate::markup_tools::PendingConnector>,
+    /// "Pages with" or "without" a group of marks (see groups.rs).
+    pub(crate) group_list: Option<crate::groups::GroupList>,
+    /// The right-click menu on a mark, where it was opened.
+    pub(crate) mark_menu: Option<gpui::Point<gpui::Pixels>>,
     /// Comments other tools left in the files the pages come from
     /// (read-only), with the source each is in.
     pub(crate) foreign_annots: Vec<(SourceId, sheaf_doc::file::ForeignAnnot)>,
@@ -553,6 +556,8 @@ pub struct DocView {
     pub(crate) calc: Option<crate::calc_panel::CalcTape>,
     pub(crate) comments: Option<crate::comments_panel::Comments>,
     pub(crate) history: Option<crate::history_panel::History>,
+    /// The Connector tool's label; None for the next unused one.
+    pub(crate) connector_label: Option<String>,
     pub(crate) stamps: Option<crate::stamps_panel::StampsPanel>,
     /// The stamp the Stamp tool places.
     pub(crate) stamp_choice: Option<sheaf_ops::stamps::StampRef>,
@@ -676,6 +681,7 @@ impl DocView {
             plugin_run: None,
             pending_comments_focus: false,
             history: None,
+            connector_label: None,
             stamps: None,
             stamp_choice: None,
             pending_history_focus: false,
@@ -872,7 +878,8 @@ impl DocView {
             page_chars: HashMap::new(),
             chars_loading: HashSet::new(),
             annot_editor: None,
-            pending_connector: None,
+            group_list: None,
+            mark_menu: None,
             foreign_annots: Vec::new(),
             selected_foreign: None,
             labels: std::cell::RefCell::new((u64::MAX, None)),
@@ -4128,11 +4135,6 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
     {
         page_div = page_div.child(preview);
     }
-    if let Some(preview) =
-        DocView::pending_connector_preview(doc, ov.tool_color, pl.pref.id, src, rot, k)
-    {
-        page_div = page_div.child(preview);
-    }
     page_div
 }
 
@@ -4229,12 +4231,14 @@ impl DocView {
                 )
                 .on_mouse_down(
                     gpui::MouseButton::Right,
-                    cx.listener(move |v, _, _, cx| {
+                    cx.listener(move |v, ev: &gpui::MouseDownEvent, _, cx| {
                         if v.presentation == crate::presentation::Presentation::FullScreen {
                             v.turn_page(-1, cx);
                             return;
                         }
-                        v.activate_pane(ix, cx)
+                        v.activate_pane(ix, cx);
+                        // On a mark: its menu.
+                        v.open_mark_menu(ev.position, cx);
                     }),
                 )
                 .on_mouse_move(
@@ -4401,6 +4405,9 @@ impl Render for DocView {
         let search_bar = (!full).then(|| self.render_search_bar(cx)).flatten();
         let goto_bar = (!full).then(|| self.render_goto()).flatten();
         let props_bar = (!full).then(|| self.render_mark_properties(cx)).flatten();
+        let connector_bar = (!full).then(|| self.render_connector_bar(cx)).flatten();
+        let group_list = self.render_group_list(cx);
+        let mark_menu = self.render_mark_menu(cx);
         let mut body: Option<AnyElement> = None;
         // The status bar: where you are, then the latest notice, which
         // gives way (ellipsis, full text on hover) when space is short.
@@ -4525,8 +4532,9 @@ impl Render for DocView {
                     // Likewise an export or a split.
                 } else if v.cancel_plugin_run(cx) {
                     // And a plugin command that reports progress.
-                } else if v.cancel_tape_placing(cx) || v.cancel_pending_connector(cx) {
-                    // Esc with a tape or connector half-placed just drops it.
+                } else if v.cancel_tape_placing(cx) || v.close_group_list(cx) {
+                    // Esc with a tape half-placed drops it; then the pages
+                    // list closes.
                 } else if v.clear_text_sel(cx) {
                     // Then selected text.
                 } else {
@@ -4590,6 +4598,15 @@ impl Render for DocView {
             .on_action(cx.listener(|v, _: &ToolTextEdit, _, cx| v.markup_tool(Tool::TextEdit, cx)))
             .on_action(cx.listener(|v, _: &CycleTextMarkup, _, cx| v.cycle_text_markup(cx)))
             .on_action(cx.listener(|v, _: &ToggleCheckmark, _, cx| v.toggle_checkmark(cx)))
+            .on_action(
+                cx.listener(|v, _: &crate::NextConnectorLabel, _, cx| v.next_unused_label(cx)),
+            )
+            .on_action(cx.listener(|v, _: &crate::GroupNext, _, cx| v.group_step(1, cx)))
+            .on_action(cx.listener(|v, _: &crate::GroupPrev, _, cx| v.group_step(-1, cx)))
+            .on_action(cx.listener(|v, _: &crate::GroupPagesWith, _, cx| v.group_pages(true, cx)))
+            .on_action(
+                cx.listener(|v, _: &crate::GroupPagesWithout, _, cx| v.group_pages(false, cx)),
+            )
             .on_action(cx.listener(|v, _: &ToolFreeText, _, cx| v.set_tool(Tool::FreeText, cx)))
             .on_action(cx.listener(|v, _: &ToolSquare, _, cx| v.set_tool(Tool::Square, cx)))
             .on_action(cx.listener(|v, _: &ToolEllipse, _, cx| v.set_tool(Tool::Ellipse, cx)))
@@ -4624,13 +4641,16 @@ impl Render for DocView {
             .children(search_bar)
             .children(goto_bar)
             .children(props_bar)
+            .children(connector_bar)
             .child(
                 div()
                     .relative()
                     .flex_grow(1.0)
                     .min_h(px(0.0))
                     .children(body)
-                    .children(review),
+                    .children(review)
+                    .children(group_list)
+                    .children(mark_menu),
             )
             .when_some(ocr_progress, |d, frac| {
                 d.child(

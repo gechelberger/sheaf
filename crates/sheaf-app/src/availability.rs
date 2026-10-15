@@ -317,6 +317,11 @@ pub fn builtin(id: &str) -> Builtin {
         "tools::ToolTick" => (DOC, None, Some(|f| f.tool == Some(Tool::Tick))),
         "tools::ToolConnector" => (DOC, None, Some(|f| f.tool == Some(Tool::Connector))),
         "tools::ToolStamp" => (DOC, None, Some(|f| f.tool == Some(Tool::Stamp))),
+        "tools::NextConnectorLabel" => (DOC, None, None),
+        "tools::GroupNext"
+        | "tools::GroupPrev"
+        | "tools::GroupPagesWith"
+        | "tools::GroupPagesWithout" => (DOC, Some(|f| f.marks), None),
         _ => (&[], None, None),
     };
     Builtin {

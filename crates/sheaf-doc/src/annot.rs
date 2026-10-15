@@ -185,6 +185,49 @@ pub enum AnnotKind {
     },
 }
 
+/// What Previous/Next walks through: connectors by label, tickmarks by
+/// glyph, stamps by name, as in PDFlyer.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Group {
+    Connector(String),
+    Tickmark(String),
+    Stamp(String),
+}
+
+impl Group {
+    /// "connector 3", "tickmark ✓", "stamp Approved".
+    pub fn label(&self) -> String {
+        match self {
+            Group::Connector(l) => format!("connector {l}"),
+            Group::Tickmark(g) => format!("tickmark {g}"),
+            Group::Stamp(n) => format!("stamp {n}"),
+        }
+    }
+}
+
+/// The group a mark is in, if it's one that's walked through.
+pub fn group_of(kind: &AnnotKind) -> Option<Group> {
+    match kind {
+        AnnotKind::Connector { label, .. } => Some(Group::Connector(label.clone())),
+        AnnotKind::Stamp { glyph, .. } => Some(Group::Tickmark(glyph.clone())),
+        AnnotKind::PageStamp { name, .. } => Some(Group::Stamp(name.clone())),
+        AnnotKind::TextStamp { text, .. } => Some(Group::Stamp(
+            text.lines().next().unwrap_or_default().to_string(),
+        )),
+        _ => None,
+    }
+}
+
+/// Connector labels in order, as PDFlyer offers them: 1–50, then A–Z,
+/// then AA–ZZ.
+pub fn connector_labels() -> impl Iterator<Item = String> {
+    let letters = || (b'A'..=b'Z').map(|c| c as char);
+    (1..=50)
+        .map(|n| n.to_string())
+        .chain(letters().map(|c| c.to_string()))
+        .chain(letters().flat_map(move |a| letters().map(move |b| format!("{a}{b}"))))
+}
+
 /// The review state models (`/StateModel`).
 pub const REVIEW: &str = "Review";
 pub const MARKED: &str = "Marked";
@@ -1913,5 +1956,24 @@ mod tests {
         });
         assert_eq!(from_json(&serde_json::to_vec(&ins).unwrap()).unwrap(), ins);
         assert_eq!(ins.bounds().w, ins.bounds().h);
+    }
+
+    #[test]
+    fn connector_labels_run_numbers_then_letters() {
+        let labels: Vec<String> = connector_labels().collect();
+        assert_eq!(labels.len(), 50 + 26 + 26 * 26);
+        assert_eq!((labels[0].as_str(), labels[49].as_str()), ("1", "50"));
+        assert_eq!((labels[50].as_str(), labels[75].as_str()), ("A", "Z"));
+        assert_eq!(
+            (labels[76].as_str(), labels.last().unwrap().as_str()),
+            ("AA", "ZZ")
+        );
+        assert_eq!(
+            group_of(&AnnotKind::Stamp {
+                rect: bx(0.0, 0.0, 1.0, 1.0),
+                glyph: "✓".into()
+            }),
+            Some(Group::Tickmark("✓".into()))
+        );
     }
 }

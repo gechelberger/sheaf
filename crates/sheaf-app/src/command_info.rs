@@ -484,9 +484,39 @@ pub fn info(id: &str) -> Option<Info> {
             "Show the Stamps panel: your stamp collections, Recent and Favorites.",
             &["stamp library", "custom stamps"],
         ),
+        "tools::NextConnectorLabel" => (
+            "connector",
+            "Give the Connector tool the next label no connector uses, to start a new group.",
+            &["new connector group", "label"],
+        ),
+        "tools::GroupNext" => (
+            "next-page",
+            "Go to the next mark like the selected one: connector by label, tickmark by glyph, stamp by name.",
+            &["next connector", "next tickmark", "next stamp", "group"],
+        ),
+        "tools::GroupPrev" => (
+            "prev-page",
+            "Go to the previous mark like the selected one.",
+            &[
+                "previous connector",
+                "previous tickmark",
+                "previous stamp",
+                "group",
+            ],
+        ),
+        "tools::GroupPagesWith" => (
+            "find",
+            "List the pages that have a mark like the selected one, to go to them.",
+            &["pages with", "connector", "tickmark", "stamp"],
+        ),
+        "tools::GroupPagesWithout" => (
+            "find",
+            "List the pages that don't have a mark like the selected one.",
+            &["pages without", "missing", "connector", "tickmark", "stamp"],
+        ),
         "tools::ToolConnector" => (
             "connector",
-            "Click twice to place a linked pair of markers.",
+            "Click to place connectors with the label shown over the page: each click adds one to that label's group, and clicking one goes to the next.",
             &["link", "cross-reference", "tie"],
         ),
         // Plugins, Help

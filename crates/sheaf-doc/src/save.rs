@@ -1039,7 +1039,7 @@ pub(crate) fn strip_sheaf_annots(pdf: &Pdf, page: &mut Dictionary) {
 pub(crate) struct ConnectorRef {
     pub obj: ObjectId,
     pub id: AnnotId,
-    pub partner: Option<AnnotId>,
+    pub label: String,
     /// Top-left of the marker in its page's user space.
     pub top_left: (f32, f32),
 }
@@ -1156,12 +1156,12 @@ pub(crate) fn write_page_annots<'a>(
             part.set(crate::annot::PART, true);
             list.push(Object::Reference(pdf.add_object(Object::Dictionary(part))));
         }
-        if let AnnotKind::Connector { rect, partner, .. } = &a.kind {
+        if let AnnotKind::Connector { rect, label, .. } = &a.kind {
             let [llx, _, _, ury] = geom.box_to_user(*rect);
             connectors.push(ConnectorRef {
                 obj: id,
                 id: a.id,
-                partner: *partner,
+                label: label.clone(),
                 top_left: (llx, ury),
             });
         }
@@ -1232,25 +1232,34 @@ pub(crate) fn write_page_annots<'a>(
     }
 }
 
-/// Point each written connector's `/Dest` at its partner: at the partner's
-/// position when it was written in this save, else just its page.
+/// Point each written connector's `/Dest` at the next connector with its
+/// label, in page order and wrapping, so clicking walks the group in any
+/// viewer (M9 decision 8): at its position when it was written in this
+/// save, else just its page. A connector alone in its group goes nowhere.
 pub(crate) fn link_connectors(
     pdf: &mut Pdf,
     connectors: &[ConnectorRef],
     state: &DocState,
     page_obj: &HashMap<PageId, ObjectId>,
 ) {
+    let mut groups: HashMap<&str, Vec<(usize, PageId, Annot)>> = HashMap::new();
     for c in connectors {
-        let Some(pid) = c.partner else { continue };
-        let Some((ppage, _)) = state.find_annot(pid) else {
+        let members = groups.entry(c.label.as_str()).or_insert_with(|| {
+            state.group_members(&crate::annot::Group::Connector(c.label.clone()))
+        });
+        if members.len() < 2 {
+            continue;
+        }
+        let Some(i) = members.iter().position(|(_, _, a)| a.id == c.id) else {
             continue;
         };
-        let Some(&page_ref) = page_obj.get(&ppage) else {
+        let (_, next_page, next) = &members[(i + 1) % members.len()];
+        let Some(&page_ref) = page_obj.get(next_page) else {
             continue;
         };
         let mut dest = vec![Object::Reference(page_ref), Object::Name(b"XYZ".to_vec())];
-        match connectors.iter().find(|g| g.id == pid) {
-            // Land with the partner a little in from the top-left corner.
+        match connectors.iter().find(|g| g.id == next.id) {
+            // Land with it a little in from the top-left corner.
             Some(g) => dest.extend([
                 Object::Real(g.top_left.0 - 36.0),
                 Object::Real(g.top_left.1 + 36.0),
@@ -2902,6 +2911,118 @@ mod tests {
         let out3 = dir.join("rw.pdf");
         std::fs::write(&out3, &rw).unwrap();
         assert_eq!(crate::file::read_sheaf_annots(&out3).unwrap()[&0], want);
+    }
+
+    /// A connector group's /Dest walk it in page order and wrap; a new
+    /// member, saved later, is fitted into the cycle on every page.
+    #[test]
+    fn connector_groups_link_in_a_cycle() {
+        use crate::annot::{AnnotKind, Box2};
+        let dir = tempdir();
+        let a_path = make_pdf(&dir, "g.pdf", "G", 3, &[]);
+        let original = std::fs::read(&a_path).unwrap();
+        let mut model = opened_n(&a_path, 3, original.len());
+        let page = |i: usize| model.page(i).unwrap().id;
+        let (p0, p1, p2) = (page(0), page(1), page(2));
+        let connector = |y: f32| Annot {
+            id: crate::annot::AnnotId(0),
+            kind: AnnotKind::Connector {
+                rect: Box2 {
+                    x: 100.0,
+                    y,
+                    w: 22.0,
+                    h: 22.0,
+                },
+                label: "C".into(),
+                partner: None,
+            },
+            color: [220, 40, 40],
+            opacity: 1.0,
+            stroke: 1.0,
+            author: "greg".into(),
+            contents: String::new(),
+            modified: String::new(),
+            created: String::new(),
+            fill: None,
+            dashed: false,
+        };
+        for pg in [p0, p1, p2] {
+            model
+                .apply(
+                    Edit::AnnotAdd {
+                        page: pg,
+                        annot: connector(100.0),
+                    },
+                    "c",
+                )
+                .unwrap();
+        }
+        // Each page's links, top to bottom, as the page number each goes to.
+        let dests = |bytes: &[u8]| -> Vec<Vec<u32>> {
+            let pdf = Pdf::load_mem(bytes).unwrap();
+            let pages = pdf.get_pages();
+            let number: HashMap<ObjectId, u32> = pages.iter().map(|(n, id)| (*id, *n)).collect();
+            pages
+                .values()
+                .map(|id| {
+                    let mut links: Vec<(f32, u32)> = pdf
+                        .get_dictionary(*id)
+                        .unwrap()
+                        .get(b"Annots")
+                        .map(|a| a.as_array().unwrap().clone())
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|o| {
+                            let d = pdf.get_dictionary(o.as_reference().unwrap()).unwrap();
+                            let top = d.get(b"Rect").unwrap().as_array().unwrap()[3]
+                                .as_float()
+                                .unwrap();
+                            let to = d.get(b"Dest").unwrap().as_array().unwrap()[0]
+                                .as_reference()
+                                .unwrap();
+                            (-top, number[&to])
+                        })
+                        .collect();
+                    links.sort_by(|a, b| a.0.total_cmp(&b.0));
+                    links.into_iter().map(|(_, n)| n).collect()
+                })
+                .collect()
+        };
+        let bytes = crate::incremental::incremental(&model.snapshot()).unwrap();
+        assert_eq!(dests(&bytes), [vec![2], vec![3], vec![1]]);
+
+        // Saved, reopened, and a fourth added below the first: page 1's
+        // first now goes to its neighbour, and page 3 comes back to it.
+        let out = dir.join("g2.pdf");
+        std::fs::write(&out, &bytes).unwrap();
+        let mut model = opened_n(&out, 3, bytes.len());
+        model
+            .set_initial_annots(crate::file::read_sheaf_annots(&out).unwrap())
+            .unwrap();
+        let p0 = model.page(0).unwrap().id;
+        model
+            .apply(
+                Edit::AnnotAdd {
+                    page: p0,
+                    annot: connector(400.0),
+                },
+                "c",
+            )
+            .unwrap();
+        let bytes = crate::incremental::incremental(&model.snapshot()).unwrap();
+        assert_eq!(dests(&bytes), [vec![1, 2], vec![3], vec![1]]);
+    }
+
+    fn opened_n(path: &Path, n: u32, bytes: usize) -> Document {
+        Document::new(
+            {
+                let mut i = info(path, n);
+                i.bytes = bytes;
+                i
+            },
+            &[],
+            Box::new(FixedCount(10)),
+        )
     }
 
     /// Connectors come out as Link annotations whose /Dest is the partner's

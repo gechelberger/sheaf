@@ -11,7 +11,7 @@ use gpui::{
     PathBuilder, Pixels, Point, Window, canvas, div, prelude::*, px, rgb,
 };
 use sheaf_core::{PageSize, Rotation};
-use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, Edit, PageId, Pt, annot::CONNECTOR_SIZE};
+use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, Edit, PageId, Pt};
 use sheaf_render::Rect;
 use sheaf_ui::theme;
 use sheaf_ui::tooltip::Tooltip;
@@ -277,15 +277,6 @@ pub fn reshaped(r: &Resize, p: Pt, shift: bool) -> Annot {
     out
 }
 
-/// First end of a connector pair, placed but not yet committed; the pair is
-/// added as one edit when the second end lands.
-#[derive(Debug, Clone)]
-pub struct PendingConnector {
-    pub page_id: PageId,
-    pub rect: Box2,
-    pub label: String,
-}
-
 /// Map a point in the page's displayed (rotated) space back to the source
 /// page's own orientation.
 pub fn unrotate_pt(p: Pt, src: PageSize, rot: Rotation) -> Pt {
@@ -328,15 +319,6 @@ fn translate(kind: &AnnotKind, dx: f32, dy: f32) -> AnnotKind {
     kind.translated(dx, dy)
 }
 
-fn connector_rect(center: Pt) -> Box2 {
-    Box2 {
-        x: center.x - CONNECTOR_SIZE / 2.0,
-        y: center.y - CONNECTOR_SIZE / 2.0,
-        w: CONNECTOR_SIZE,
-        h: CONNECTOR_SIZE,
-    }
-}
-
 impl DocView {
     pub(crate) fn set_tool(&mut self, tool: Tool, cx: &mut Context<Self>) {
         self.tool = tool;
@@ -348,25 +330,8 @@ impl DocView {
                 doc.text_sel = None;
                 doc.text_drag = None;
             }
-            if tool != Tool::Connector && doc.pending_connector.take().is_some() {
-                doc.notice = Some("Connector cancelled".into());
-            }
         }
         cx.notify();
-    }
-
-    /// Drop a half-placed connector. Returns whether there was one.
-    pub(crate) fn cancel_pending_connector(&mut self, cx: &mut Context<Self>) -> bool {
-        let State::Ready(doc) = &mut self.state else {
-            return false;
-        };
-        if doc.pending_connector.take().is_some() {
-            doc.notice = Some("Connector cancelled".into());
-            cx.notify();
-            true
-        } else {
-            false
-        }
     }
 
     /// Scroll to an annotation anywhere in the document and select it.
@@ -417,7 +382,7 @@ impl DocView {
     /// Window position → (page index, point in source-page space, the
     /// page's scale in px per point, for hit areas that stay the same size
     /// on screen).
-    fn page_point_k(&self, pos: Point<Pixels>) -> Option<(usize, Pt, f32)> {
+    pub(crate) fn page_point_k(&self, pos: Point<Pixels>) -> Option<(usize, Pt, f32)> {
         let State::Ready(doc) = &self.state else {
             return None;
         };
@@ -446,7 +411,7 @@ impl DocView {
     }
 
     /// The topmost of our marks on page `page_id` under `p`.
-    fn mark_at(&self, page_id: PageId, p: Pt, tolerance: f32) -> Option<Annot> {
+    pub(crate) fn mark_at(&self, page_id: PageId, p: Pt, tolerance: f32) -> Option<Annot> {
         let State::Ready(doc) = &self.state else {
             return None;
         };
@@ -646,46 +611,7 @@ impl DocView {
                 self.add_annot(page_id, a, "Tickmark", cx);
             }
             Tool::Stamp => self.place_stamp(page_id, p, cx),
-            Tool::Connector => {
-                let rect = connector_rect(p);
-                match doc.pending_connector.take() {
-                    None => {
-                        let label = doc.model.state().next_connector_label();
-                        doc.notice = Some(format!(
-                            "Connector {label}: click where its other end goes (Esc cancels)"
-                        ));
-                        doc.pending_connector = Some(PendingConnector {
-                            page_id,
-                            rect,
-                            label,
-                        });
-                        cx.notify();
-                    }
-                    Some(first) => {
-                        let mk = |rect: Box2, label: String| {
-                            self.new_annot(
-                                AnnotKind::Connector {
-                                    rect,
-                                    label,
-                                    partner: None,
-                                },
-                                color,
-                                cx,
-                            )
-                        };
-                        let a = mk(first.rect, first.label.clone());
-                        let b = mk(rect, first.label.clone());
-                        self.apply(
-                            Edit::ConnectorAdd {
-                                a: (first.page_id, a),
-                                b: (page_id, b),
-                            },
-                            &format!("Connector {}", first.label),
-                            cx,
-                        );
-                    }
-                }
-            }
+            Tool::Connector => self.place_connector(page_id, p, cx),
             _ => {
                 doc.drag = Some(Drag {
                     page,
@@ -787,11 +713,12 @@ impl DocView {
         if !drag.moving.is_empty() {
             let (dx, dy) = (b.x - a.x, b.y - a.y);
             if dx.abs() < 0.5 && dy.abs() < 0.5 {
-                // A click: a connector jumps to its other end.
+                // A click: a connector goes to the next of its label.
                 if let [one] = drag.moving.as_slice()
-                    && let Some(partner) = one.partner()
+                    && let AnnotKind::Connector { label, .. } = &one.kind
                 {
-                    self.jump_to_annot(partner, cx);
+                    let group = sheaf_doc::annot::Group::Connector(label.clone());
+                    self.group_step_from(group, one.id, 1, cx);
                 }
                 return;
             }
@@ -927,28 +854,27 @@ impl DocView {
         };
         let marks = std::mem::take(&mut doc.selected_marks);
         let st = doc.model.state();
-        // A connector's partner goes with it; don't delete it twice.
-        let mut gone = std::collections::HashSet::new();
-        let mut edits = Vec::new();
-        for (page, id) in &marks {
-            if gone.contains(id) {
-                continue;
-            }
-            if let Some((_, a)) = st.find_annot(*id)
-                && let Some(p) = a.partner()
-            {
-                gone.insert(p);
-            }
-            gone.insert(*id);
-            edits.push(Edit::AnnotDelete {
+        // A reply or status goes with its comment; don't delete it twice.
+        let names: std::collections::HashSet<String> = marks
+            .iter()
+            .filter_map(|(_, id)| st.find_annot(*id).map(|(_, a)| a.name()))
+            .collect();
+        let edits: Vec<Edit> = marks
+            .iter()
+            .filter(|(_, id)| {
+                st.find_annot(*id)
+                    .and_then(|(_, a)| a.thread_parent().map(|p| !names.contains(p)))
+                    .unwrap_or(true)
+            })
+            .map(|(page, id)| Edit::AnnotDelete {
                 page: *page,
                 id: *id,
-            });
-        }
+            })
+            .collect();
         let label = match marks.as_slice() {
             [] => return false,
-            [(_, id)] => match st.find_annot(*id) {
-                Some((_, a)) if a.partner().is_some() => "Delete connector pair".to_string(),
+            [(_, id)] => match st.find_annot(*id).map(|(_, a)| a.kind.clone()) {
+                Some(AnnotKind::Connector { label, .. }) => format!("Delete connector {label}"),
                 _ => "Delete annotation".to_string(),
             },
             more => format!("Delete {} annotations", more.len()),
@@ -1196,46 +1122,6 @@ impl DocView {
             }
             Tool::Note | Tool::Tick | Tool::Stamp | Tool::Connector => None,
         }
-    }
-
-    /// The half-placed connector, drawn where it will land.
-    pub(crate) fn pending_connector_preview(
-        doc: &crate::docview::Doc,
-        color: [u8; 3],
-        page_id: PageId,
-        src: PageSize,
-        rot: Rotation,
-        k: f32,
-    ) -> Option<AnyElement> {
-        let pending = doc.pending_connector.as_ref()?;
-        if pending.page_id != page_id {
-            return None;
-        }
-        let mut ghost = Annot {
-            id: AnnotId(0),
-            kind: AnnotKind::Connector {
-                rect: pending.rect,
-                label: pending.label.clone(),
-                partner: None,
-            },
-            color,
-            opacity: 0.6,
-            stroke: 1.0,
-            author: String::new(),
-            contents: String::new(),
-            modified: String::new(),
-            created: String::new(),
-            fill: None,
-            dashed: false,
-        };
-        ghost.opacity = 0.6;
-        Some(
-            div()
-                .absolute()
-                .inset_0()
-                .children(crate::docview::annot_elements(&ghost, src, rot, k))
-                .into_any_element(),
-        )
     }
 }
 

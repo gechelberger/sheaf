@@ -196,20 +196,49 @@ impl DocState {
             .find_map(|(page, list)| list.iter().find(|a| a.id == id).map(|a| (*page, a)))
     }
 
-    /// The label for the next connector pair: one past the highest numeric
-    /// label in use.
+    /// The first connector label (1–50, then A–ZZ) no connector uses yet;
+    /// past those, one more than the highest number.
     pub fn next_connector_label(&self) -> String {
-        let max = self
+        let used: HashSet<&str> = self
             .annots
             .values()
             .flatten()
             .filter_map(|a| match &a.kind {
-                AnnotKind::Connector { label, .. } => label.trim().parse::<u32>().ok(),
+                AnnotKind::Connector { label, .. } => Some(label.as_str()),
                 _ => None,
             })
+            .collect();
+        if let Some(free) = crate::annot::connector_labels().find(|l| !used.contains(l.as_str())) {
+            return free;
+        }
+        let max = used
+            .iter()
+            .filter_map(|l| l.trim().parse::<u32>().ok())
             .max()
             .unwrap_or(0);
         (max + 1).to_string()
+    }
+
+    /// Every mark in `group` (see `annot::group_of`), in document order:
+    /// by page, then down the page, then across. With each, its page's
+    /// position.
+    pub fn group_members(&self, group: &crate::annot::Group) -> Vec<(usize, PageId, Annot)> {
+        let mut out = Vec::new();
+        for (i, p) in self.pages.iter().enumerate() {
+            let mut on_page: Vec<&Annot> = self
+                .annots
+                .get(&p.id)
+                .into_iter()
+                .flatten()
+                .filter(|a| crate::annot::group_of(&a.kind).as_ref() == Some(group))
+                .collect();
+            on_page.sort_by(|a, b| {
+                let (ba, bb) = (a.bounds(), b.bounds());
+                ba.y.total_cmp(&bb.y).then(ba.x.total_cmp(&bb.x))
+            });
+            out.extend(on_page.into_iter().map(|a| (i, p.id, a.clone())));
+        }
+        out
     }
 
     pub fn index_of(&self, id: PageId) -> Option<usize> {
@@ -789,6 +818,26 @@ impl Document {
         for pid in self.saved_annots.keys() {
             if !cur.contains_key(pid) {
                 dirty.insert(*pid);
+            }
+        }
+        // A changed connector changes its group's cycle of /Dest: every
+        // page with one of its label is written again.
+        let labels: HashSet<&str> = dirty
+            .iter()
+            .flat_map(|pid| cur.get(pid).into_iter().chain(self.saved_annots.get(pid)))
+            .flatten()
+            .filter_map(|a| match &a.kind {
+                AnnotKind::Connector { label, .. } => Some(label.as_str()),
+                _ => None,
+            })
+            .collect();
+        if !labels.is_empty() {
+            for (pid, list) in cur.iter() {
+                if list.iter().any(|a| {
+                    matches!(&a.kind, AnnotKind::Connector { label, .. } if labels.contains(label.as_str()))
+                }) {
+                    dirty.insert(*pid);
+                }
             }
         }
         // Other tools' comments deleted (or brought back) since.
@@ -1964,18 +2013,8 @@ impl Document {
                 } else {
                     st.annots.insert(page, list);
                 }
-                // The other end of a connector is meaningless alone.
-                if let Some(pid) = removed.partner()
-                    && let Some((ppage, _)) = st.find_annot(pid)
-                {
-                    let mut plist = st.annots.get(&ppage).cloned().unwrap_or_default();
-                    plist.retain(|a| a.id != pid);
-                    if plist.is_empty() {
-                        st.annots.remove(&ppage);
-                    } else {
-                        st.annots.insert(ppage, plist);
-                    }
-                }
+                // A connector is one of a group by label: the others stay
+                // (M9 decision 8).
             }
             Edit::CommentsDelete { page, names } => {
                 if st.index_of(page).is_none() {
@@ -2918,7 +2957,7 @@ mod tests {
     }
 
     #[test]
-    fn connector_pair_links_and_deletes_together() {
+    fn a_connector_pair_is_a_group_of_two() {
         use crate::annot::{AnnotKind, Box2};
         let mut d = doc();
         let (p0, p2) = (id_at(&d, 0), id_at(&d, 2));
@@ -2959,14 +2998,57 @@ mod tests {
         assert_eq!(b.partner(), Some(a.id));
         assert_eq!(d.state().find_annot(b.id).map(|(p, _)| p), Some(p2));
         assert_eq!(d.state().next_connector_label(), "2");
-        // Deleting one end removes the other.
+        // Deleting one end leaves the other: a group of one (decision 8).
         d.apply(Edit::AnnotDelete { page: p2, id: b.id }, "rm")
             .unwrap();
-        assert!(d.state().annots_on(p0).is_none());
+        assert_eq!(d.state().annots_on(p0).unwrap().len(), 1);
         assert!(d.state().annots_on(p2).is_none());
         d.undo();
         assert_eq!(d.state().annots_on(p0).unwrap().len(), 1);
         assert_eq!(d.state().annots_on(p2).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_group_runs_by_page_then_down_the_page() {
+        use crate::annot::{AnnotKind, Box2, Group};
+        let mut d = doc();
+        let (p0, p1) = (d.page(0).unwrap().id, d.page(1).unwrap().id);
+        let tick = |glyph: &str, y: f32| {
+            mark(
+                0,
+                AnnotKind::Stamp {
+                    rect: Box2 {
+                        x: 10.0,
+                        y,
+                        w: 20.0,
+                        h: 20.0,
+                    },
+                    glyph: glyph.into(),
+                },
+            )
+        };
+        for (page, glyph, y) in [
+            (p1, "✓", 300.0),
+            (p1, "✓", 100.0),
+            (p0, "✓", 500.0),
+            (p0, "✗", 50.0),
+        ] {
+            d.apply(
+                Edit::AnnotAdd {
+                    page,
+                    annot: tick(glyph, y),
+                },
+                "t",
+            )
+            .unwrap();
+        }
+        let order: Vec<(usize, f32)> = d
+            .state()
+            .group_members(&Group::Tickmark("✓".into()))
+            .iter()
+            .map(|(i, _, a)| (*i, a.bounds().y))
+            .collect();
+        assert_eq!(order, [(0, 500.0), (1, 100.0), (1, 300.0)]);
     }
 
     fn mark(id: u64, kind: crate::annot::AnnotKind) -> Annot {
