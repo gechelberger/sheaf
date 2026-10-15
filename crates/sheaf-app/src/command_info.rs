@@ -54,6 +54,32 @@ pub fn info(id: &str) -> Option<Info> {
             "Save a copy with annotations burned into the page, so they can't be changed or removed.",
             &["burn", "bake"],
         ),
+        "docview::SummarizeComments" => (
+            "summarize-comments",
+            "Make a PDF listing the comments the Comments panel shows, in its order: numbered, threaded, with who wrote each and when.",
+            &[
+                "summary",
+                "report",
+                "comment list",
+                "stamp summary",
+                "note summary",
+            ],
+        ),
+        "docview::SummarizeCommentsWithPages" => (
+            "summarize-with-pages",
+            "Make a PDF of each page that has comments beside a numbered list of them, with the numbers on the page where the comments are.",
+            &["summary", "report", "sequence numbers", "review"],
+        ),
+        "docview::ExportCommentsCsv" => (
+            "export-comments-csv",
+            "Save the comments the Comments panel shows as a spreadsheet: one row per comment, reply and status, in the columns chosen in its Export menu.",
+            &["csv", "spreadsheet", "excel", "export", "stamp summary"],
+        ),
+        "docview::ExportCommentsText" => (
+            "export-comments-text",
+            "Save the comments the Comments panel shows as plain text, numbered and threaded.",
+            &["txt", "export", "list", "note summary"],
+        ),
         "workspace::CombineFiles" => (
             "combine-files",
             "Make one PDF from several PDFs and images, choosing which pages of each, with a bookmark per file.",

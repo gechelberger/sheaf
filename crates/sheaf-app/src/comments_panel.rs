@@ -18,6 +18,11 @@ use gpui::{
 use sheaf_core::PageSize;
 use sheaf_doc::annot::{MARKED, REVIEW, REVIEW_STATES};
 use sheaf_doc::{Annot, AnnotId, AnnotKind, PageId, file::ForeignAnnot};
+use sheaf_ops::comments::{
+    self, Column, Comment, Layout, Sort, Summary, foreign_text, ours_text, parse_pages,
+    status_words, subtype_label, thread_status, threads,
+};
+pub use sheaf_ops::comments::{CommentFilter, Item, fmt_pdf_date, kind_label};
 use sheaf_render::Rect;
 use sheaf_ui::list::ListLayout;
 use sheaf_ui::text_area::{TextArea, TextAreaEvent};
@@ -66,6 +71,26 @@ pub struct Comments {
 pub enum Popover {
     Filter,
     Sort,
+    Export,
+}
+
+/// What File > Export Comments and the panel's Export menu write: the
+/// comments the panel lists, in its order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExportKind {
+    Summary(Layout),
+    Csv,
+    Text,
+}
+
+impl ExportKind {
+    fn extension(self) -> &'static str {
+        match self {
+            ExportKind::Summary(_) => "pdf",
+            ExportKind::Csv => "csv",
+            ExportKind::Text => "txt",
+        }
+    }
 }
 
 /// The box a reply is written in, under what it replies to.
@@ -80,100 +105,6 @@ pub struct ReplyBox {
     pub editing: Option<AnnotId>,
     pub input: Entity<TextArea>,
     pub _sub: Subscription,
-}
-
-/// A comment in the list: one of our marks, or another tool's (an index
-/// into `Doc::foreign_annots`).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum Item {
-    Ours(PageId, AnnotId),
-    Foreign(usize),
-}
-
-/// What the panel shows, and the page with it. Each set lists what's
-/// hidden, so everything shows until something is turned off.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct CommentFilter {
-    pub types: BTreeSet<String>,
-    pub authors: BTreeSet<String>,
-    /// Review states, "None" included.
-    pub statuses: BTreeSet<String>,
-    pub colors: BTreeSet<[u8; 3]>,
-    /// Only checked (true) or only unchecked (false) ones.
-    pub checked: Option<bool>,
-    /// Display pages, from 0, inclusive.
-    pub pages: Option<(usize, usize)>,
-    /// PDFlyer's Stamp Summary or Note Summary.
-    pub summary: Option<Summary>,
-    pub sort: Sort,
-}
-
-impl CommentFilter {
-    /// Whether it hides anything.
-    pub fn is_active(&self) -> bool {
-        !self.types.is_empty()
-            || !self.authors.is_empty()
-            || !self.statuses.is_empty()
-            || !self.colors.is_empty()
-            || self.checked.is_some()
-            || self.pages.is_some()
-            || self.summary.is_some()
-    }
-}
-
-/// PDFlyer's summaries, as filter presets.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Summary {
-    /// Tickmarks, stamps and connectors.
-    Stamps,
-    /// Notes and calculator tapes.
-    Notes,
-}
-
-impl Summary {
-    fn types(self) -> &'static [&'static str] {
-        match self {
-            Summary::Stamps => &["Tickmark", "Stamp", "Connector"],
-            Summary::Notes => &["Note", "Calculator tape"],
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Summary::Stamps => "Stamp Summary",
-            Summary::Notes => "Note Summary",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Sort {
-    #[default]
-    Page,
-    Author,
-    Date,
-    Type,
-    Color,
-}
-
-impl Sort {
-    pub const ALL: [Sort; 5] = [
-        Sort::Page,
-        Sort::Author,
-        Sort::Date,
-        Sort::Type,
-        Sort::Color,
-    ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Sort::Page => "Page",
-            Sort::Author => "Author",
-            Sort::Date => "Date",
-            Sort::Type => "Type",
-            Sort::Color => "Color",
-        }
-    }
 }
 
 /// The panel's rows and what goes with them, made in one pass over the
@@ -228,225 +159,6 @@ enum Row {
     ReplyBox {
         depth: usize,
     },
-}
-
-/// What threading needs to know of a comment.
-#[derive(Clone, Debug)]
-struct Node {
-    item: Item,
-    name: String,
-    /// What it's in the thread of, by name.
-    parent: Option<String>,
-    /// Part of its parent (`/RT /Group`), not listed.
-    grouped: bool,
-    /// When it was made: its creation date, else its last change.
-    date: String,
-    /// A status: (model, state).
-    state: Option<(String, String)>,
-    author: String,
-    /// What the filter looks in.
-    text: String,
-    /// Its type for the filter and sort (`ours_type`, `subtype_label`).
-    kind: String,
-    color: Option<[u8; 3]>,
-}
-
-/// A page's comments as threads: the top-level ones in order, and the
-/// replies and statuses in each one's thread (by its name) in date order.
-/// One whose parent isn't on the page is top-level; grouped parts are
-/// left out.
-fn threads(nodes: &[Node]) -> (Vec<usize>, HashMap<String, Vec<usize>>) {
-    let names: std::collections::HashSet<&str> = nodes.iter().map(|n| n.name.as_str()).collect();
-    let mut roots = Vec::new();
-    let mut children: HashMap<String, Vec<usize>> = HashMap::new();
-    for (i, n) in nodes.iter().enumerate() {
-        match &n.parent {
-            Some(p) if names.contains(p.as_str()) && n.grouped => {}
-            Some(p) if names.contains(p.as_str()) => children.entry(p.clone()).or_default().push(i),
-            _ => roots.push(i),
-        }
-    }
-    for list in children.values_mut() {
-        list.sort_by(|&a, &b| nodes[a].date.cmp(&nodes[b].date));
-    }
-    (roots, children)
-}
-
-/// The status a thread's statuses come to: the last review state, and
-/// whether the last checkmark change checked it.
-fn thread_status(nodes: &[Node], thread: &[usize]) -> (Option<String>, bool) {
-    let mut review = None;
-    let mut marked = false;
-    for &i in thread {
-        match &nodes[i].state {
-            Some((m, s)) if m == MARKED => marked = s == "Marked",
-            Some((_, s)) => review = (s != "None").then(|| s.clone()),
-            None => {}
-        }
-    }
-    (review, marked)
-}
-
-/// Every comment on the page `pref`: our marks, then the other tools'
-/// that are on it (`foreign`, indexes into `Doc::foreign_annots`), less
-/// those deleted in sheaf and their threads, which come back second.
-fn nodes_on(
-    st: &sheaf_doc::DocState,
-    foreign_all: &[(sheaf_doc::SourceId, ForeignAnnot)],
-    pref: &sheaf_doc::PageRef,
-    foreign: &[usize],
-) -> (Vec<Node>, Vec<usize>) {
-    let page = pref.id;
-    let mut nodes = Vec::new();
-    for a in st.annots_on(page).into_iter().flatten() {
-        nodes.push(Node {
-            item: Item::Ours(page, a.id),
-            name: a.name(),
-            parent: a.thread_parent().map(str::to_string),
-            grouped: false,
-            date: if a.created.is_empty() {
-                a.modified.clone()
-            } else {
-                a.created.clone()
-            },
-            state: match &a.kind {
-                AnnotKind::Status { model, state, .. } => Some((model.clone(), state.clone())),
-                _ => None,
-            },
-            author: a.author.clone(),
-            text: format!("{} {}", ours_text(a), kind_label(&a.kind)),
-            kind: ours_type(&a.kind).to_string(),
-            color: Some(a.color),
-        });
-    }
-    let theirs: Vec<(usize, &ForeignAnnot)> = foreign
-        .iter()
-        .filter_map(|&i| foreign_all.get(i).map(|(_, f)| (i, f)))
-        .collect();
-    let gone = match st.removed_comments.get(&page) {
-        Some(removed) => sheaf_doc::file::removed_with_threads(
-            theirs
-                .iter()
-                .map(|(_, f)| (f.name.as_str(), f.parent.as_deref())),
-            removed,
-        ),
-        None => HashSet::new(),
-    };
-    let mut deleted = Vec::new();
-    for (i, f) in theirs {
-        if gone.contains(&f.name) {
-            deleted.push(i);
-            continue;
-        }
-        nodes.push(Node {
-            item: Item::Foreign(i),
-            name: f.name.clone(),
-            parent: f.parent.clone(),
-            grouped: f.grouped,
-            date: if f.created.is_empty() {
-                f.modified.clone()
-            } else {
-                f.created.clone()
-            },
-            state: f.state.clone(),
-            author: f.author.clone(),
-            text: format!("{} {}", foreign_text(f), subtype_label(&f.subtype)),
-            kind: subtype_label(&f.subtype).to_string(),
-            color: f.color,
-        });
-    }
-    (nodes, deleted)
-}
-
-/// A mark's type for the filter and sort: coarser than its label (every
-/// tickmark is a "Tickmark").
-fn ours_type(kind: &AnnotKind) -> &'static str {
-    match kind {
-        AnnotKind::Highlight { .. } => "Highlight",
-        AnnotKind::Underline { .. } => "Underline",
-        AnnotKind::StrikeOut { .. } => "Strikethrough",
-        AnnotKind::Squiggly { .. } => "Squiggly",
-        AnnotKind::Replace { .. } => "Replace text",
-        AnnotKind::Insert { .. } => "Insert text",
-        AnnotKind::Note { .. } => "Note",
-        AnnotKind::FreeText { .. } => "Text",
-        AnnotKind::Square { .. } => "Rectangle",
-        AnnotKind::Ellipse { .. } => "Ellipse",
-        AnnotKind::Line { arrow: true, .. } => "Arrow",
-        AnnotKind::Line { .. } => "Line",
-        AnnotKind::Ink { .. } => "Pencil",
-        AnnotKind::Stamp { .. } => "Tickmark",
-        AnnotKind::Connector { .. } => "Connector",
-        AnnotKind::Tape { .. } => "Calculator tape",
-        AnnotKind::Reply { .. } => "Reply",
-        AnnotKind::Status { .. } => "Status",
-        AnnotKind::PageStamp { .. } | AnnotKind::TextStamp { .. } => "Stamp",
-        AnnotKind::PageBorder { .. } => "Page border",
-        AnnotKind::Polygon { .. } => "Polygon",
-        AnnotKind::Polyline { .. } => "Polyline",
-        AnnotKind::Callout { .. } => "Callout",
-        AnnotKind::FileAttachment { .. } => "Attachment",
-    }
-}
-
-/// Short label for one of our marks.
-pub(crate) fn kind_label(kind: &AnnotKind) -> String {
-    match kind {
-        AnnotKind::Highlight { .. } => "Highlight".into(),
-        AnnotKind::Note { .. } => "Note".into(),
-        AnnotKind::FreeText { .. } => "Text".into(),
-        AnnotKind::Square { .. } => "Rectangle".into(),
-        AnnotKind::Ellipse { .. } => "Ellipse".into(),
-        AnnotKind::Line { arrow: true, .. } => "Arrow".into(),
-        AnnotKind::Line { .. } => "Line".into(),
-        AnnotKind::Ink { .. } => "Pencil".into(),
-        AnnotKind::Stamp { glyph, .. } => format!("Tickmark {glyph}"),
-        AnnotKind::Connector { label, .. } => format!("Connector {label}"),
-        AnnotKind::Tape { .. } => "Calculator tape".into(),
-        AnnotKind::Underline { .. } => "Underline".into(),
-        AnnotKind::StrikeOut { .. } => "Strikethrough".into(),
-        AnnotKind::Squiggly { .. } => "Squiggly".into(),
-        AnnotKind::Replace { .. } => "Replace text".into(),
-        AnnotKind::Insert { .. } => "Insert text".into(),
-        AnnotKind::Reply { .. } => "Reply".into(),
-        AnnotKind::Status { state, .. } => state.clone(),
-        AnnotKind::PageStamp { name, .. } => format!("Stamp {name}"),
-        AnnotKind::TextStamp { text, .. } => {
-            format!("Stamp {}", text.lines().next().unwrap_or_default())
-        }
-        AnnotKind::PageBorder { status, .. } => format!("{status} border"),
-        AnnotKind::Polygon { .. } => "Polygon".into(),
-        AnnotKind::Polyline { .. } => "Polyline".into(),
-        AnnotKind::Callout { .. } => "Callout".into(),
-        AnnotKind::FileAttachment { name, .. } => format!("Attachment {name}"),
-    }
-}
-
-/// Acrobat's names for the common subtypes.
-fn subtype_label(subtype: &str) -> &str {
-    match subtype {
-        "Text" => "Note",
-        "FreeText" => "Text",
-        "Square" => "Rectangle",
-        "Circle" => "Ellipse",
-        "Ink" => "Pencil",
-        "StrikeOut" => "Strikethrough",
-        other => other,
-    }
-}
-
-/// `D:20261011153000Z` → `2026-10-11 15:30`.
-pub fn fmt_pdf_date(d: &str) -> String {
-    let s = d.strip_prefix("D:").unwrap_or(d);
-    let digit = |i: usize| s.as_bytes().get(i).filter(|b| b.is_ascii_digit()).is_some();
-    if !(0..8).all(digit) {
-        return String::new();
-    }
-    let mut out = format!("{}-{}-{}", &s[0..4], &s[4..6], &s[6..8]);
-    if (8..12).all(digit) {
-        out.push_str(&format!(" {}:{}", &s[8..10], &s[10..12]));
-    }
-    out
 }
 
 impl DocView {
@@ -706,9 +418,9 @@ impl DocView {
         let Some((page, name)) = self.item_page_and_name(item) else {
             return (None, false);
         };
-        let nodes = self.page_nodes(page);
-        let (_, children) = threads(&nodes);
-        thread_status(&nodes, children.get(&name).map_or(&[][..], |v| v))
+        let list = self.page_comments(page);
+        let (_, children) = threads(&list);
+        thread_status(&list, children.get(&name).map_or(&[][..], |v| v))
     }
 
     /// Shift+K: check or uncheck the selected comment.
@@ -730,7 +442,7 @@ impl DocView {
     }
 
     /// Every comment on a page, for threading.
-    fn page_nodes(&self, page: PageId) -> Vec<Node> {
+    fn page_comments(&self, page: PageId) -> Vec<Comment> {
         let State::Ready(doc) = &self.state else {
             return Vec::new();
         };
@@ -751,7 +463,7 @@ impl DocView {
             .filter(|(_, (source, f))| *source == pref.source && f.page == pref.index)
             .map(|(i, _)| i)
             .collect();
-        nodes_on(doc.model.state(), &doc.foreign_annots, &pref, &foreign).0
+        comments::comments_on(doc.model.state(), &doc.foreign_annots, &pref, &foreign).0
     }
 
     /// F2 / double-click: edit the selected mark's text in place (a
@@ -1315,6 +1027,7 @@ impl DocView {
         let popover = popover.map(|(which, pos)| match which {
             Popover::Filter => self.filter_menu(&view, &cf, pages_input.clone(), pos, cx),
             Popover::Sort => self.sort_menu(cf.sort, pos, cx),
+            Popover::Export => self.export_menu(pos, cx),
         });
         let chip = |id: &'static str, label: String, on: bool| {
             div()
@@ -1374,7 +1087,17 @@ impl DocView {
                     chip("cf-all", "Show All".into(), false)
                         .on_click(cx.listener(|v, _, _, cx| v.show_all_comments(cx))),
                 )
-            });
+            })
+            .child(
+                chip("cf-export", "Export ▾".into(), false).on_click(cx.listener(
+                    |v, ev: &gpui::ClickEvent, _, cx| {
+                        if let Some(cm) = &mut v.comments {
+                            cm.popover = Some((Popover::Export, ev.position()));
+                        }
+                        cx.notify();
+                    },
+                )),
+            );
         div()
             .id("comments")
             .key_context(KEY_CONTEXT)
@@ -1607,6 +1330,194 @@ impl DocView {
         .into_any_element()
     }
 
+    /// The Export popover: the summary PDFs, CSV and text, and the CSV's
+    /// columns (on: included).
+    fn export_menu(&self, pos: Point<Pixels>, cx: &mut Context<Self>) -> AnyElement {
+        let entry = |i: usize, label: &'static str, kind: ExportKind| {
+            div()
+                .id(("export", i))
+                .px_3()
+                .py_1()
+                .text_sm()
+                .cursor_pointer()
+                .hover(|s| s.bg(theme::HOVER))
+                .child(label)
+                .on_click(cx.listener(move |v, _, _, cx| {
+                    if let Some(cm) = &mut v.comments {
+                        cm.popover = None;
+                    }
+                    v.export_comments_prompt(kind, cx);
+                }))
+        };
+        let chosen = csv_columns(cx);
+        let columns = Column::ALL.iter().enumerate().map(|(i, &c)| {
+            let on = chosen.contains(&c);
+            div()
+                .id(("export-col", i))
+                .px_2()
+                .py(px(1.0))
+                .rounded_sm()
+                .cursor_pointer()
+                .text_xs()
+                .bg(if on { theme::ACCENT } else { theme::CONTROL })
+                .hover(|s| s.bg(theme::CONTROL_HOVER))
+                .child(c.name())
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    toggle_csv_column(c, cx);
+                    cx.notify();
+                }))
+        });
+        deferred(
+            anchored()
+                .position(pos)
+                .position_mode(AnchoredPositionMode::Window)
+                .child(
+                    div()
+                        .id("export-menu")
+                        .occlude()
+                        .on_mouse_down_out(cx.listener(|v, _, _, cx| {
+                            if let Some(cm) = &mut v.comments {
+                                cm.popover = None;
+                            }
+                            cx.notify();
+                        }))
+                        .w(px(260.0))
+                        .py_1()
+                        .rounded_md()
+                        .bg(theme::POPOVER)
+                        .border_1()
+                        .border_color(theme::DIVIDER)
+                        .shadow_lg()
+                        .flex()
+                        .flex_col()
+                        .child(entry(
+                            0,
+                            "Summary…",
+                            ExportKind::Summary(Layout::CommentsOnly),
+                        ))
+                        .child(entry(
+                            1,
+                            "Summary with Pages…",
+                            ExportKind::Summary(Layout::Pages),
+                        ))
+                        .child(entry(2, "CSV…", ExportKind::Csv))
+                        .child(entry(3, "Text…", ExportKind::Text))
+                        .child(
+                            div()
+                                .px_3()
+                                .pt_2()
+                                .text_xs()
+                                .text_color(theme::TEXT_MUTED)
+                                .child("CSV columns"),
+                        )
+                        .child(
+                            div()
+                                .px_3()
+                                .py_1()
+                                .flex()
+                                .flex_wrap()
+                                .gap_1()
+                                .children(columns),
+                        ),
+                ),
+        )
+        .into_any_element()
+    }
+
+    /// File > Export Comments, or the panel's Export menu: ask where, then
+    /// write what the panel lists.
+    pub(crate) fn export_comments_prompt(&mut self, kind: ExportKind, cx: &mut Context<Self>) {
+        let dir = self
+            .path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default();
+        let stem = self
+            .path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("document");
+        let suggested = match kind {
+            ExportKind::Summary(Layout::Pages) => format!("{stem} - comments with pages.pdf"),
+            _ => format!("{stem} - comments.{}", kind.extension()),
+        };
+        let rx = crate::file_dialog::save(cx, &dir, Some(&suggested));
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(path))) = rx.await {
+                this.update(cx, |view, cx| view.export_comments_to(kind, path, cx))
+                    .ok();
+            }
+        })
+        .detach();
+    }
+
+    /// Write the comments the panel lists, as `kind`, to `path`: with its
+    /// filter, sort and search, whether or not it's open.
+    pub fn export_comments_to(
+        &mut self,
+        kind: ExportKind,
+        path: std::path::PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        let needle = self.comment_needle(cx);
+        let columns = csv_columns(cx);
+        let title = self
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let State::Ready(doc) = &mut self.state else {
+            return;
+        };
+        doc.notice = Some(format!("Writing comments to {}…", path.display()));
+        let snapshot = doc.model.snapshot();
+        let foreign = doc.foreign_annots.clone();
+        let cf = doc.comment_filter.clone();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn({
+                    let path = path.clone();
+                    async move {
+                        let listing = comments::list(&snapshot.state, &foreign, &cf, &needle);
+                        let labels = snapshot.state.page_labels();
+                        let bytes = match kind {
+                            ExportKind::Summary(layout) => comments::summary_pdf(
+                                &snapshot, &foreign, &cf, &needle, layout, &title,
+                            )?,
+                            ExportKind::Csv => {
+                                comments::csv(&listing, labels.as_deref(), &columns).into_bytes()
+                            }
+                            ExportKind::Text => {
+                                comments::text(&listing, labels.as_deref(), &title, cf.sort)
+                                    .into_bytes()
+                            }
+                        };
+                        std::fs::write(&path, bytes)
+                            .map_err(|e| anyhow::anyhow!("writing {}: {e}", path.display()))?;
+                        anyhow::Ok(listing.count)
+                    }
+                })
+                .await;
+            this.update(cx, |view, cx| {
+                if let State::Ready(doc) = &mut view.state {
+                    doc.notice = Some(match result {
+                        Ok(n) => format!(
+                            "Wrote {n} comment{} to {}",
+                            if n == 1 { "" } else { "s" },
+                            path.display()
+                        ),
+                        Err(e) => format!("Export failed: {e:#}"),
+                    });
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// The right-click menu on a comment: reply, status, checkmark.
     fn comment_menu(&self, item: Item, pos: Point<Pixels>, cx: &mut Context<Self>) -> AnyElement {
         let (review, marked) = self.status_of(item);
@@ -1695,39 +1606,8 @@ impl DocView {
     }
 }
 
-/// Rows for `n`'s thread: it, then what's in reply to it, depth first,
-/// and the reply box where one is open.
-fn push_thread(
-    nodes: &[Node],
-    children: &HashMap<String, Vec<usize>>,
-    n: usize,
-    root: Item,
-    depth: usize,
-    reply: Option<(Item, Option<AnnotId>)>,
-    rows: &mut Vec<Row>,
-) {
-    let item = nodes[n].item;
-    let editing_this = matches!(reply, Some((to, Some(_))) if to == item);
-    if editing_this {
-        rows.push(Row::ReplyBox { depth });
-    } else if nodes[n].state.is_some() {
-        rows.push(Row::Status { item, root, depth });
-    } else {
-        rows.push(Row::Comment { item, root, depth });
-    }
-    if let Some(kids) = children.get(&nodes[n].name) {
-        for &k in kids {
-            push_thread(nodes, children, k, root, (depth + 1).min(3), reply, rows);
-        }
-    }
-    if matches!(reply, Some((to, None)) if to == item) {
-        rows.push(Row::ReplyBox {
-            depth: (depth + 1).min(3),
-        });
-    }
-}
-
-/// Make the panel's view of `doc` (see `CommentView`).
+/// Make the panel's view of `doc` (see `CommentView`): the list, as
+/// rows, with the reply box where one is open.
 fn build_view(
     st: &sheaf_doc::DocState,
     foreign_all: &[(sheaf_doc::SourceId, ForeignAnnot)],
@@ -1735,190 +1615,101 @@ fn build_view(
     needle: &str,
     reply: Option<(Item, Option<AnnotId>)>,
 ) -> CommentView {
-    let mut foreign_on: HashMap<(sheaf_doc::SourceId, u32), Vec<usize>> = HashMap::new();
-    for (i, (source, f)) in foreign_all.iter().enumerate() {
-        foreign_on.entry((*source, f.page)).or_default().push(i);
-    }
-    let mut view = CommentView::default();
-    // Each thread shown: what it sorts by, its page, its rows.
-    let mut kept: Vec<(GroupKey, usize, Vec<Row>)> = Vec::new();
-    for (index, pref) in st.pages.iter().enumerate() {
-        let foreign = foreign_on
-            .get(&(pref.source, pref.index))
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
-        let (nodes, deleted) = nodes_on(st, foreign_all, pref, foreign);
-        view.hidden_foreign.extend(deleted);
-        if nodes.is_empty() {
-            continue;
-        }
-        let (roots, children) = threads(&nodes);
-        for &r in &roots {
-            let root = &nodes[r];
-            let mut thread = vec![r];
-            let mut i = 0;
-            while i < thread.len() {
-                if let Some(kids) = children.get(&nodes[thread[i]].name) {
-                    thread.extend(kids);
-                }
-                i += 1;
-            }
-            view.types.insert(root.kind.clone());
-            view.authors.insert(author_label(root));
-            view.colors.extend(root.color);
-            let status = thread_status(&nodes, children.get(&root.name).map_or(&[][..], |v| v));
-            view.statuses.insert(root.item, status.clone());
-            if !passes(cf, root, &status, index) {
-                // Hidden here and on the page, thread and all.
-                view.filtered += 1;
-                for &n in &thread {
-                    match nodes[n].item {
-                        Item::Ours(_, id) => {
-                            view.hidden_ours.insert(id);
-                        }
-                        Item::Foreign(i) => {
-                            view.hidden_foreign.insert(i);
-                        }
-                    }
-                }
-                continue;
-            }
-            let matches = |n: &Node| {
-                needle.is_empty()
-                    || n.text.to_lowercase().contains(needle)
-                    || n.author.to_lowercase().contains(needle)
-            };
-            if !thread.iter().any(|&n| matches(&nodes[n])) {
-                continue;
-            }
-            view.count += 1;
-            let mut rows = Vec::new();
-            push_thread(&nodes, &children, r, root.item, 0, reply, &mut rows);
-            kept.push((group_key(cf.sort, root, index), index, rows));
-        }
-    }
-    kept.sort_by(|a, b| a.0.order.cmp(&b.0.order).then(a.1.cmp(&b.1)));
-    let mut i = 0;
-    while i < kept.len() {
-        let j = i + kept[i..]
-            .iter()
-            .take_while(|k| k.0.order == kept[i].0.order)
-            .count();
-        view.rows.push(Row::Header {
-            label: kept[i].0.label.clone(),
-            swatch: kept[i].0.swatch,
-            count: j - i,
+    let listing = comments::list(st, foreign_all, cf, needle);
+    let mut rows = Vec::new();
+    for g in &listing.groups {
+        rows.push(Row::Header {
+            label: g.label.clone(),
+            swatch: g.swatch,
+            count: g.threads.len(),
         });
-        for k in &mut kept[i..j] {
-            view.rows.append(&mut k.2);
+        for t in &g.threads {
+            push_thread(t, reply, &mut rows);
         }
-        i = j;
     }
-    view
-}
-
-/// What a thread is grouped and sorted under.
-struct GroupKey {
-    order: String,
-    label: String,
-    swatch: Option<[u8; 3]>,
-}
-
-fn group_key(sort: Sort, n: &Node, page: usize) -> GroupKey {
-    let simple = |order: String, label: String| GroupKey {
-        order,
-        label,
-        swatch: None,
-    };
-    match sort {
-        Sort::Page => simple(format!("{page:08}"), format!("Page {}", page + 1)),
-        Sort::Author => {
-            let a = author_label(n);
-            simple(a.to_lowercase(), a)
-        }
-        Sort::Date => {
-            let day = fmt_pdf_date(&n.date).chars().take(10).collect::<String>();
-            let label = if day.is_empty() {
-                "No date".into()
-            } else {
-                day
-            };
-            simple(n.date.chars().take(10).collect(), label)
-        }
-        Sort::Type => simple(n.kind.to_lowercase(), n.kind.clone()),
-        Sort::Color => match n.color {
-            Some(c) => GroupKey {
-                order: format!("{:02x}{:02x}{:02x}", c[0], c[1], c[2]),
-                label: crate::markup_tools::COLORS
-                    .iter()
-                    .find(|(k, _)| *k == c)
-                    .map(|(_, name)| name.to_string())
-                    .unwrap_or_else(|| format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2])),
-                swatch: Some(c),
-            },
-            None => simple("~".into(), "No color".into()),
-        },
+    CommentView {
+        rows,
+        statuses: listing.statuses,
+        count: listing.count,
+        filtered: listing.filtered,
+        types: listing.types,
+        authors: listing.authors,
+        colors: listing.colors,
+        hidden_ours: listing.hidden_ours,
+        hidden_foreign: listing.hidden_foreign,
     }
 }
 
-fn author_label(n: &Node) -> String {
-    if n.author.is_empty() {
-        "(no author)".into()
+/// A thread's rows, depth first, and the reply box where one is open: in
+/// place of the reply being edited, or under everything in reply to the
+/// comment being replied to.
+fn push_thread(t: &comments::Thread, reply: Option<(Item, Option<AnnotId>)>, rows: &mut Vec<Row>) {
+    let root = t.entries[0].comment.item;
+    // A new reply's box waits for the end of what's under its comment,
+    // at whose depth.
+    let mut pending: Option<usize> = None;
+    for e in &t.entries {
+        if let Some(d) = pending
+            && e.depth <= d
+        {
+            rows.push(Row::ReplyBox {
+                depth: (d + 1).min(3),
+            });
+            pending = None;
+        }
+        let item = e.comment.item;
+        let depth = e.depth.min(3);
+        match reply {
+            Some((to, Some(_))) if to == item => rows.push(Row::ReplyBox { depth }),
+            _ if e.comment.state.is_some() => rows.push(Row::Status { item, root, depth }),
+            _ => rows.push(Row::Comment { item, root, depth }),
+        }
+        if matches!(reply, Some((to, None)) if to == item) {
+            pending = Some(e.depth);
+        }
+    }
+    if let Some(d) = pending {
+        rows.push(Row::ReplyBox {
+            depth: (d + 1).min(3),
+        });
+    }
+}
+
+/// The CSV's columns, as last chosen.
+fn csv_columns(cx: &App) -> Vec<Column> {
+    let chosen: Vec<Column> = crate::state::get(cx)
+        .comment_columns
+        .iter()
+        .filter_map(|c| Column::from_name(c))
+        .collect();
+    if chosen.is_empty() {
+        Column::DEFAULT.to_vec()
     } else {
-        n.author.clone()
+        chosen
     }
 }
 
-/// Whether the filter shows a thread whose comment is `n`, with thread
-/// status `status`, on display page `page`.
-fn passes(cf: &CommentFilter, n: &Node, status: &(Option<String>, bool), page: usize) -> bool {
-    if let Some(sm) = cf.summary
-        && !sm.types().contains(&n.kind.as_str())
-    {
-        return false;
-    }
-    if cf.types.contains(&n.kind) || cf.authors.contains(&author_label(n)) {
-        return false;
-    }
-    if cf.statuses.contains(status.0.as_deref().unwrap_or("None")) {
-        return false;
-    }
-    if n.color.is_some_and(|c| cf.colors.contains(&c)) {
-        return false;
-    }
-    if cf.checked.is_some_and(|want| status.1 != want) {
-        return false;
-    }
-    !cf.pages.is_some_and(|(a, b)| page < a || page > b)
-}
-
-/// "3-10" → pages 3 to 10 (from 0: 2 to 9); "5" → page 5; blank or
-/// unreadable → all pages.
-fn parse_pages(text: &str) -> Option<(usize, usize)> {
-    let t = text.trim();
-    let num = |s: &str| s.trim().parse::<usize>().ok().filter(|n| *n > 0);
-    let (a, b) = match t.split_once(['-', '–']) {
-        Some((a, b)) => (num(a)?, num(b)?),
-        None => {
-            let n = num(t)?;
-            (n, n)
+/// Put `c` in the CSV or take it out; the last one stays.
+fn toggle_csv_column(c: Column, cx: &mut App) {
+    let mut chosen = csv_columns(cx);
+    if chosen.contains(&c) {
+        if chosen.len() > 1 {
+            chosen.retain(|x| *x != c);
         }
-    };
-    Some((a.min(b) - 1, a.max(b) - 1))
+    } else {
+        chosen.push(c);
+    }
+    let names: Vec<String> = Column::ALL
+        .iter()
+        .filter(|c| chosen.contains(c))
+        .map(|c| c.name().to_string())
+        .collect();
+    crate::state::update(cx, |s| s.comment_columns = names);
 }
 
 fn toggle<T: Ord>(set: &mut BTreeSet<T>, v: T) {
     if !set.remove(&v) {
         set.insert(v);
-    }
-}
-
-/// "Accepted", "Checked", "Unchecked".
-fn status_words(model: &str, state: &str) -> String {
-    match (model, state) {
-        (MARKED, "Marked") => "Checked".into(),
-        (MARKED, _) => "Unchecked".into(),
-        (_, s) => s.to_string(),
     }
 }
 
@@ -1932,39 +1723,6 @@ fn small_button(id: &'static str, label: &'static str) -> gpui::Stateful<gpui::D
         .bg(theme::CONTROL)
         .hover(|s| s.bg(theme::CONTROL_HOVER))
         .child(label)
-}
-
-/// A comment's text as its row shows it. Text edits read as what they
-/// suggest.
-fn ours_text(a: &Annot) -> String {
-    let one_line = |s: &str| s.replace('\n', " ");
-    match &a.kind {
-        AnnotKind::Replace { struck, .. } if a.contents.is_empty() => {
-            return format!("Cross out “{}”", one_line(struck));
-        }
-        AnnotKind::Replace { struck, .. } => {
-            return format!(
-                "Replace “{}” with “{}”",
-                one_line(struck),
-                one_line(&a.contents)
-            );
-        }
-        AnnotKind::Insert { .. } => return format!("Insert “{}”", one_line(&a.contents)),
-        _ => {}
-    }
-    if a.contents.is_empty() {
-        kind_label(&a.kind)
-    } else {
-        a.contents.replace('\n', " ")
-    }
-}
-
-fn foreign_text(f: &ForeignAnnot) -> String {
-    if f.contents.is_empty() {
-        subtype_label(&f.subtype).to_string()
-    } else {
-        f.contents.replace('\n', " ")
-    }
 }
 
 /// One comment row, in its `place` in the list: kind and author over the
@@ -2053,167 +1811,15 @@ pub(crate) fn foreign_outline(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sheaf_doc::{Box2, Document, FixedCount, SourceInfo};
 
-    #[test]
-    fn dates_format() {
-        assert_eq!(fmt_pdf_date("D:20261011153000Z"), "2026-10-11 15:30");
-        assert_eq!(fmt_pdf_date("D:20261011"), "2026-10-11");
-        assert_eq!(fmt_pdf_date(""), "");
-        assert_eq!(fmt_pdf_date("garbage"), "");
-    }
-
-    #[test]
-    fn text_edits_read_as_what_they_suggest() {
-        use sheaf_doc::{AnnotId, Box2};
-        let at = Box2 {
-            x: 0.0,
-            y: 0.0,
-            w: 6.0,
-            h: 6.0,
-        };
-        let mk = |kind: AnnotKind, contents: &str| Annot {
-            id: AnnotId(1),
-            kind,
-            color: [0, 0, 255],
-            opacity: 1.0,
-            stroke: 1.0,
-            author: String::new(),
-            contents: contents.into(),
-            modified: String::new(),
-            created: String::new(),
-            fill: None,
-            dashed: false,
-            cloudy: false,
-        };
-        let replace = |contents| {
-            mk(
-                AnnotKind::Replace {
-                    rects: vec![at],
-                    struck: "teh".into(),
-                    at,
-                },
-                contents,
-            )
-        };
-        assert_eq!(ours_text(&replace("the")), "Replace “teh” with “the”");
-        assert_eq!(ours_text(&replace("")), "Cross out “teh”");
-        assert_eq!(
-            ours_text(&mk(AnnotKind::Insert { at }, "not")),
-            "Insert “not”"
-        );
-    }
-
-    fn node(i: usize, name: &str, parent: Option<&str>, date: &str) -> Node {
-        Node {
-            item: Item::Foreign(i),
-            name: name.into(),
-            parent: parent.map(str::to_string),
-            grouped: false,
-            date: date.into(),
-            state: None,
-            author: "Pat".into(),
-            text: String::new(),
-            kind: "Note".into(),
-            color: None,
-        }
-    }
-
-    #[test]
-    fn replies_thread_under_their_comment_in_date_order() {
-        let mut strike = node(4, "s", Some("a"), "D:3");
-        strike.grouped = true;
-        let nodes = vec![
-            node(0, "a", None, "D:1"),
-            node(1, "late", Some("a"), "D:5"),
-            node(2, "early", Some("a"), "D:2"),
-            node(3, "lost", Some("gone"), "D:4"),
-            strike,
-        ];
-        let (roots, children) = threads(&nodes);
-        // A reply whose comment isn't here stands alone; a grouped part
-        // isn't listed at all.
-        assert_eq!(roots, vec![0, 3]);
-        assert_eq!(children["a"], vec![2, 1]);
-    }
-
-    #[test]
-    fn a_thread_shows_its_latest_status_and_checkmark() {
-        let status = |i, model: &str, state: &str, date| {
-            let mut n = node(i, &format!("s{i}"), Some("a"), date);
-            n.state = Some((model.into(), state.into()));
-            n
-        };
-        let nodes = vec![
-            node(0, "a", None, "D:1"),
-            status(1, REVIEW, "Accepted", "D:2"),
-            status(2, MARKED, "Marked", "D:3"),
-            status(3, REVIEW, "Rejected", "D:4"),
-        ];
-        let (_, children) = threads(&nodes);
-        assert_eq!(
-            thread_status(&nodes, &children["a"]),
-            (Some("Rejected".to_string()), true)
-        );
-        let nodes = vec![
-            node(0, "a", None, "D:1"),
-            status(1, REVIEW, "Accepted", "D:2"),
-            status(2, REVIEW, "None", "D:3"),
-            status(3, MARKED, "Marked", "D:4"),
-            status(4, MARKED, "Unmarked", "D:5"),
-        ];
-        let (_, children) = threads(&nodes);
-        assert_eq!(thread_status(&nodes, &children["a"]), (None, false));
-    }
-
-    #[test]
-    fn page_ranges_read_as_typed() {
-        assert_eq!(parse_pages("3-10"), Some((2, 9)));
-        assert_eq!(parse_pages(" 10 – 3 "), Some((2, 9)));
-        assert_eq!(parse_pages("5"), Some((4, 4)));
-        assert_eq!(parse_pages(""), None);
-        assert_eq!(parse_pages("0"), None);
-        assert_eq!(parse_pages("x-2"), None);
-    }
-
-    #[test]
-    fn the_filter_hides_by_each_facet() {
-        let mut n = node(0, "a", None, "D:1");
-        n.kind = "Tickmark".into();
-        n.color = Some([255, 0, 0]);
-        let open = (None, false);
-        let mut cf = CommentFilter::default();
-        assert!(passes(&cf, &n, &open, 0));
-        cf.summary = Some(Summary::Notes);
-        assert!(!passes(&cf, &n, &open, 0));
-        cf.summary = Some(Summary::Stamps);
-        assert!(passes(&cf, &n, &open, 0));
-        cf.colors.insert([255, 0, 0]);
-        assert!(!passes(&cf, &n, &open, 0));
-        cf.colors.clear();
-        cf.authors.insert("Pat".into());
-        assert!(!passes(&cf, &n, &open, 0));
-        cf.authors.clear();
-        cf.statuses.insert("None".into());
-        assert!(!passes(&cf, &n, &open, 0));
-        assert!(passes(&cf, &n, &(Some("Accepted".into()), false), 0));
-        cf.statuses.clear();
-        cf.checked = Some(true);
-        assert!(!passes(&cf, &n, &open, 0));
-        assert!(passes(&cf, &n, &(None, true), 0));
-        cf.checked = None;
-        cf.pages = Some((3, 5));
-        assert!(!passes(&cf, &n, &open, 2) && passes(&cf, &n, &open, 4));
-    }
-
-    /// The case Acrobat crawled on (acrobat.md §3.2): 1,000 comments over
-    /// 900 pages, filtered and sorted.
-    #[test]
-    fn a_thousand_comments_make_a_view_quickly() {
-        use sheaf_doc::{Box2, Document, FixedCount, Pt, SourceId, SourceInfo};
-        let mut d = Document::new(
+    /// The rows for a page with a thread (a; r in reply to it; rr in reply
+    /// to r) and a comment b, as short strings.
+    fn rows(reply: Option<(Item, Option<AnnotId>)>) -> Vec<String> {
+        let d = Document::new(
             SourceInfo {
-                path: "big.pdf".into(),
-                page_count: 900,
+                path: "x.pdf".into(),
+                page_count: 1,
                 first_page: PageSize {
                     width: 612.0,
                     height: 792.0,
@@ -2226,104 +1832,88 @@ mod tests {
             &[],
             Box::new(FixedCount(10)),
         );
-        let authors = ["Pat", "Greg", "Lee"];
-        let mut ours: HashMap<u32, Vec<Annot>> = HashMap::new();
-        for i in 0..600u32 {
-            ours.entry(i * 3 % 900).or_default().push(Annot {
-                id: AnnotId(i as u64 + 1),
-                kind: if i % 2 == 0 {
-                    AnnotKind::Note {
-                        pos: Pt { x: 10.0, y: 10.0 },
-                    }
-                } else {
-                    AnnotKind::Stamp {
-                        rect: Box2 {
-                            x: 10.0,
-                            y: 10.0,
-                            w: 20.0,
-                            h: 20.0,
-                        },
-                        glyph: "✓".into(),
-                    }
-                },
-                color: [255, 0, 0],
-                opacity: 1.0,
-                stroke: 1.0,
-                author: authors[i as usize % 3].into(),
-                contents: format!("comment {i}"),
-                modified: format!("D:2026101{}000000", i % 10),
-                created: String::new(),
-                fill: None,
-                dashed: false,
-                cloudy: false,
-            });
-        }
-        d.set_initial_annots(ours).unwrap();
         let source = d.state().pages[0].source;
-        let foreign: Vec<(SourceId, ForeignAnnot)> = (0..400u32)
-            .map(|i| {
-                (
-                    source,
-                    ForeignAnnot {
-                        page: i * 2 % 900,
-                        subtype: "Text".into(),
-                        author: authors[i as usize % 3].into(),
-                        contents: format!("theirs {i}"),
-                        modified: "D:20261001000000".into(),
-                        rect: Box2 {
-                            x: 0.0,
-                            y: 0.0,
-                            w: 10.0,
-                            h: 10.0,
-                        },
-                        name: format!("t{i}"),
-                        parent: None,
-                        grouped: false,
-                        state: None,
-                        created: String::new(),
-                        slot: 0,
-                        hidden: false,
-                        color: Some([0, 0, 255]),
+        let theirs = |name: &str, parent: Option<&str>, date: &str| {
+            (
+                source,
+                ForeignAnnot {
+                    page: 0,
+                    subtype: "Text".into(),
+                    author: "Ann".into(),
+                    contents: name.into(),
+                    modified: date.into(),
+                    rect: Box2 {
+                        x: 0.0,
+                        y: 0.0,
+                        w: 10.0,
+                        h: 10.0,
                     },
-                )
-            })
-            .collect();
-        let started = std::time::Instant::now();
-        let all = build_view(d.state(), &foreign, &CommentFilter::default(), "", None);
-        assert_eq!(all.count, 1000);
-        let mut cf = CommentFilter {
-            sort: Sort::Author,
-            ..Default::default()
+                    name: name.into(),
+                    parent: parent.map(str::to_string),
+                    grouped: false,
+                    state: None,
+                    created: String::new(),
+                    slot: 0,
+                    hidden: false,
+                    color: None,
+                },
+            )
         };
-        cf.authors.insert("Lee".into());
-        let some = build_view(d.state(), &foreign, &cf, "comment", None);
-        let elapsed = started.elapsed();
-        // Lee's are hidden on the page too; the rest are grouped by author.
-        assert_eq!(some.filtered, 200 + 133);
-        assert!(some.hidden_ours.len() == 200 && some.hidden_foreign.len() == 133);
-        let headers: Vec<String> = some
-            .rows
+        let foreign = vec![
+            theirs("a", None, "D:1"),
+            theirs("r", Some("a"), "D:2"),
+            theirs("rr", Some("r"), "D:3"),
+            theirs("b", None, "D:4"),
+        ];
+        let view = build_view(d.state(), &foreign, &CommentFilter::default(), "", reply);
+        view.rows
             .iter()
-            .filter_map(|r| match r {
-                Row::Header { label, .. } => Some(label.clone()),
-                _ => None,
+            .map(|r| match r {
+                Row::Header { label, count, .. } => format!("{label} ({count})"),
+                Row::Comment {
+                    item: Item::Foreign(i),
+                    depth,
+                    ..
+                } => format!("{} at {depth}", foreign[*i].1.name),
+                Row::ReplyBox { depth } => format!("box at {depth}"),
+                _ => "?".into(),
             })
-            .collect();
-        assert_eq!(headers, ["Greg", "Pat"]);
-        let summary = build_view(
-            d.state(),
-            &foreign,
-            &CommentFilter {
-                summary: Some(Summary::Stamps),
-                ..Default::default()
-            },
-            "",
-            None,
+            .collect()
+    }
+
+    #[test]
+    fn the_reply_box_goes_where_the_reply_will() {
+        assert_eq!(
+            rows(None),
+            ["Page 1 (2)", "a at 0", "r at 1", "rr at 2", "b at 0"]
         );
-        assert_eq!(summary.count, 300);
-        assert!(
-            elapsed < std::time::Duration::from_millis(250),
-            "two views took {elapsed:?}"
+        // A new reply to a comment goes under everything in reply to it.
+        assert_eq!(
+            rows(Some((Item::Foreign(0), None))),
+            [
+                "Page 1 (2)",
+                "a at 0",
+                "r at 1",
+                "rr at 2",
+                "box at 1",
+                "b at 0"
+            ]
+        );
+        assert_eq!(
+            rows(Some((Item::Foreign(1), None))),
+            [
+                "Page 1 (2)",
+                "a at 0",
+                "r at 1",
+                "rr at 2",
+                "box at 2",
+                "b at 0"
+            ]
+        );
+        // One being edited is replaced by the box.
+        assert_eq!(
+            rows(Some((Item::Foreign(1), Some(AnnotId(9))))),
+            ["Page 1 (2)", "a at 0", "box at 1", "rr at 2", "b at 0"]
         );
     }
 }

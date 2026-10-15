@@ -4,6 +4,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use sheaf_doc::file::ForeignAnnot;
 use sheaf_doc::{Document, FlatOutlineItem, SourceInfo};
 use sheaf_render::Renderer;
 use sheaf_render::pdfium::PdfiumEngine;
@@ -11,6 +12,14 @@ use sheaf_render::pdfium::PdfiumEngine;
 /// `path` as a document: its pages, bookmarks, page labels and sheaf's
 /// own marks, as the app shows them on open.
 pub fn open(path: &Path, password: Option<&str>) -> Result<Document> {
+    Ok(open_with_foreign(path, password)?.0)
+}
+
+/// [`open`], and the other tools' annotations in the file.
+pub fn open_with_foreign(
+    path: &Path,
+    password: Option<&str>,
+) -> Result<(Document, Vec<ForeignAnnot>)> {
     let (source, outline) = describe(path, password)?;
     let mut doc = Document::new(source, &outline, sheaf_doc::history::default_policy());
     let (annots, facts) = sheaf_doc::file::read_open(path, password)?;
@@ -23,7 +32,7 @@ pub fn open(path: &Path, password: Option<&str>) -> Result<Document> {
     if let Some((hf, scope)) = facts.header_footer {
         doc.set_initial_header_footer(hf, scope)?;
     }
-    Ok(doc)
+    Ok((doc, annots.foreign))
 }
 
 /// A renderer for a source: on the bytes the document kept from when it

@@ -355,40 +355,8 @@ pub fn page_form(stamp: &Pdf, dst: &mut Pdf) -> Result<(ObjectId, PageSize)> {
         .values()
         .next()
         .context("a stamp with no page")?;
-    let geom = crate::file::page_geom(stamp, page);
-    let mut map = HashMap::new();
-    let dict = page_without_extras(stamp, page, dst, &mut map)?;
-    // The page placeholder isn't wanted, only what it pointed at.
-    dst.objects.remove(&map[&page]);
-    let mut content = Vec::new();
-    let refs: Vec<ObjectId> = match dict.get(b"Contents") {
-        Ok(Object::Reference(r)) => match dst.get_object(*r) {
-            Ok(Object::Array(a)) => a.iter().filter_map(|o| o.as_reference().ok()).collect(),
-            _ => vec![*r],
-        },
-        Ok(Object::Array(a)) => a.iter().filter_map(|o| o.as_reference().ok()).collect(),
-        _ => Vec::new(),
-    };
-    for r in refs {
-        if let Ok(Object::Stream(s)) = dst.get_object(r) {
-            let bytes = s
-                .decompressed_content()
-                .unwrap_or_else(|_| s.content.clone());
-            content.extend_from_slice(&bytes);
-            content.push(b'\n');
-        }
-        dst.objects.remove(&r);
-    }
+    let (id, geom) = page_forms(stamp, &[page], dst)?[0];
     let [x0, y0, x1, y1] = geom.media;
-    let mut form = dictionary! {
-        "Type" => "XObject",
-        "Subtype" => "Form",
-        "BBox" => vec![Object::Real(x0), Object::Real(y0), Object::Real(x1), Object::Real(y1)],
-    };
-    if let Ok(r) = dict.get(b"Resources") {
-        form.set("Resources", r.clone());
-    }
-    let id = dst.add_object(compressed(Stream::new(form, content)));
     Ok((
         id,
         PageSize {
@@ -396,6 +364,60 @@ pub fn page_form(stamp: &Pdf, dst: &mut Pdf) -> Result<(ObjectId, PageSize)> {
             height: y1 - y0,
         },
     ))
+}
+
+/// `pages` of `src` as Form XObjects in `dst`, each with its visible box
+/// (the form's `/BBox`, in the page's user space) and `/Rotate`. What
+/// they share, fonts and images, is copied once.
+pub fn page_forms(
+    src: &Pdf,
+    pages: &[ObjectId],
+    dst: &mut Pdf,
+) -> Result<Vec<(ObjectId, crate::annot::PageGeom)>> {
+    // Copy from a trimmed clone, so annotations aren't copied at all, nor
+    // the content, which goes in the form itself.
+    let mut scratch = src.clone();
+    for &page in pages {
+        let mut trimmed = src.get_dictionary(page)?.clone();
+        for key in [
+            b"Annots".as_slice(),
+            b"B",
+            b"StructParents",
+            b"Thumb",
+            b"Contents",
+        ] {
+            trimmed.remove(key);
+        }
+        scratch.objects.insert(page, Object::Dictionary(trimmed));
+    }
+    let mut map = HashMap::new();
+    let mut out = Vec::new();
+    for &page in pages {
+        let geom = crate::file::page_geom(src, page);
+        let mut dict = crate::save::copy_page_dict(&scratch, page, dst, &mut map)?;
+        // The page placeholder isn't wanted, only what it pointed at.
+        dst.objects.remove(&map[&page]);
+        if !dict.has(b"Resources")
+            && let Some(r) = inherited(src, page, b"Resources")
+        {
+            dict.set(
+                "Resources",
+                crate::save::remap(&scratch, &r, dst, &mut map)?,
+            );
+        }
+        let content = src.get_page_content(page);
+        let [x0, y0, x1, y1] = geom.media;
+        let mut form = dictionary! {
+            "Type" => "XObject",
+            "Subtype" => "Form",
+            "BBox" => vec![Object::Real(x0), Object::Real(y0), Object::Real(x1), Object::Real(y1)],
+        };
+        if let Ok(r) = dict.get(b"Resources") {
+            form.set("Resources", r.clone());
+        }
+        out.push((dst.add_object(compressed(Stream::new(form, content))), geom));
+    }
+    Ok(out)
 }
 
 /// A one-page PDF of the Form XObject `form` in `src`: a placed stamp's

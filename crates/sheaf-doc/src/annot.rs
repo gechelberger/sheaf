@@ -273,6 +273,17 @@ pub fn connector_labels() -> impl Iterator<Item = String> {
         .chain(letters().flat_map(move |a| letters().map(move |b| format!("{a}{b}"))))
 }
 
+/// The markup colors the toolbar offers, with their names.
+pub const COLORS: &[([u8; 3], &str)] = &[
+    ([255, 230, 0], "Yellow"),
+    ([220, 40, 40], "Red"),
+    ([0, 120, 255], "Blue"),
+    ([0, 150, 0], "Green"),
+    ([255, 140, 0], "Orange"),
+    ([160, 60, 220], "Purple"),
+    ([20, 20, 20], "Black"),
+];
+
 /// The review state models (`/StateModel`).
 pub const REVIEW: &str = "Review";
 pub const MARKED: &str = "Marked";

@@ -148,16 +148,7 @@ impl Tool {
     ];
 }
 
-/// Colors offered in the toolbar, with their tooltip names.
-pub const COLORS: &[([u8; 3], &str)] = &[
-    ([255, 230, 0], "Yellow"),
-    ([220, 40, 40], "Red"),
-    ([0, 120, 255], "Blue"),
-    ([0, 150, 0], "Green"),
-    ([255, 140, 0], "Orange"),
-    ([160, 60, 220], "Purple"),
-    ([20, 20, 20], "Black"),
-];
+pub use sheaf_doc::annot::COLORS;
 
 /// A mouse drag in progress on a page.
 #[derive(Debug, Clone)]

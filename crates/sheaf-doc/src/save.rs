@@ -852,7 +852,7 @@ pub(crate) fn remap(
 }
 
 /// PDF text string: PDFDocEncoding when ASCII, otherwise UTF-16BE with BOM.
-pub(crate) fn text_string(s: &str) -> Object {
+pub fn text_string(s: &str) -> Object {
     if s.is_ascii() {
         Object::String(s.as_bytes().to_vec(), StringFormat::Literal)
     } else {

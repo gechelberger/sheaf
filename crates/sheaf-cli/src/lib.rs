@@ -11,6 +11,7 @@ use std::ffi::{OsStr, OsString};
 
 mod blanks;
 mod combine;
+mod comments;
 mod export;
 mod images;
 mod progress;
@@ -20,6 +21,7 @@ mod split;
 /// The subcommands, for the app to recognize its hand-off.
 pub const SUBCOMMANDS: &[&str] = &[
     "combine",
+    "comments",
     "export",
     "images-to-pdf",
     "remove-blanks",
@@ -47,6 +49,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     Combine(combine::CombineArgs),
+    Comments(comments::CommentsArgs),
     Export(export::ExportArgs),
     ImagesToPdf(images::ImagesArgs),
     RemoveBlanks(blanks::BlanksArgs),
@@ -73,6 +76,7 @@ where
     };
     let result = match cli.command {
         Command::Combine(args) => combine::run(args, cli.quiet),
+        Command::Comments(args) => comments::run(args, cli.quiet),
         Command::Export(args) => export::run(args, cli.quiet),
         Command::ImagesToPdf(args) => images::run(args, cli.quiet),
         Command::RemoveBlanks(args) => blanks::run(args, cli.quiet),

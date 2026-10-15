@@ -41,6 +41,9 @@ pub struct State {
     pub recent_stamps: Vec<sheaf_ops::stamps::StampRef>,
     /// Set Status's last choices, for Set Status Again.
     pub set_status: Option<crate::set_status::StatusSpec>,
+    /// The comment CSV's columns, by name (`sheaf_ops::comments::Column`);
+    /// none for the usual ones.
+    pub comment_columns: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -367,6 +370,7 @@ mod tests {
             },
             recent_stamps: vec![sheaf_ops::stamps::StampRef::preset("Approved")],
             set_status: Some(crate::set_status::StatusSpec::default()),
+            comment_columns: vec!["Number".into(), "Text".into()],
         }
     }
 

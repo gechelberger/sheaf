@@ -41,6 +41,7 @@ use sheaf_render::{
     Job, OutlineItem, Rect, RenderHandle, RenderRequest, Rendered, SearchEvent, SearchHit,
 };
 
+use crate::comments_panel::ExportKind;
 use crate::{
     CancelOcr, CloseSearch, CopySelection, CycleTextMarkup, DeletePage, DuplicatePages,
     ExportCleanCopy, ExportFlattened, ExtractPages, Find, FirstPage, InsertPdf, LastPage, LineDown,
@@ -4649,6 +4650,26 @@ impl Render for DocView {
             .on_action(cx.listener(|v, _: &SaveAs, _, cx| v.save_as(cx)))
             .on_action(cx.listener(|v, _: &ExportCleanCopy, _, cx| v.export_clean_copy_prompt(cx)))
             .on_action(cx.listener(|v, _: &ExportFlattened, _, cx| v.export_flattened_prompt(cx)))
+            .on_action(cx.listener(|v, _: &crate::SummarizeComments, _, cx| {
+                v.export_comments_prompt(
+                    ExportKind::Summary(sheaf_ops::comments::Layout::CommentsOnly),
+                    cx,
+                )
+            }))
+            .on_action(
+                cx.listener(|v, _: &crate::SummarizeCommentsWithPages, _, cx| {
+                    v.export_comments_prompt(
+                        ExportKind::Summary(sheaf_ops::comments::Layout::Pages),
+                        cx,
+                    )
+                }),
+            )
+            .on_action(cx.listener(|v, _: &crate::ExportCommentsCsv, _, cx| {
+                v.export_comments_prompt(ExportKind::Csv, cx)
+            }))
+            .on_action(cx.listener(|v, _: &crate::ExportCommentsText, _, cx| {
+                v.export_comments_prompt(ExportKind::Text, cx)
+            }))
             .on_action(cx.listener(|v, _: &ExtractPages, _, cx| v.extract_pages_prompt(cx)))
             .on_action(cx.listener(|v, _: &InsertPdf, _, cx| v.insert_pdf_prompt(cx)))
             .on_action(cx.listener(|v, _: &ToolSelect, _, cx| v.set_tool(Tool::Select, cx)))

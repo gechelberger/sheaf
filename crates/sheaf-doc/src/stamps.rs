@@ -204,8 +204,7 @@ impl HeaderFooter {
     }
 }
 
-/// Helvetica's advance widths (AFM, per 1000 em) for printable ASCII;
-/// anything else counts as an "n".
+/// Helvetica's advance widths (AFM, per 1000 em) for printable ASCII.
 const HELVETICA: [u16; 95] = [
     278, 278, 355, 556, 556, 889, 667, 191, 333, 333, 389, 584, 278, 333, 278,
     278, // ␠ … /
@@ -219,24 +218,84 @@ const HELVETICA: [u16; 95] = [
     334, 260, 334, 584, // { … ~
 ];
 
-pub fn helvetica_width(s: &str, size: f32) -> f32 {
-    s.chars()
-        .map(|c| match c as u32 {
-            32..=126 => HELVETICA[c as usize - 32] as f32,
-            _ => 556.0,
-        })
-        .sum::<f32>()
-        * size
-        / 1000.0
+/// Helvetica-Bold's, the same way.
+const HELVETICA_BOLD: [u16; 95] = [
+    278, 333, 474, 556, 556, 889, 722, 238, 333, 333, 389, 584, 278, 333, 278,
+    278, // ␠ … /
+    556, 556, 556, 556, 556, 556, 556, 556, 556, 556, // 0-9
+    333, 333, 584, 584, 584, 611, 975, // : … @
+    722, 722, 722, 722, 667, 611, 778, 722, 278, 556, 722, 611, 833, 722, 778, 667, 778, 722, 667,
+    611, 722, 667, 944, 667, 667, 611, // A-Z
+    333, 278, 333, 584, 556, 333, // [ … `
+    556, 611, 556, 611, 556, 333, 611, 611, 278, 278, 556, 278, 889, 611, 611, 611, 611, 389, 556,
+    333, 611, 556, 778, 556, 556, 500, // a-z
+    389, 280, 389, 584, // { … ~
+];
+
+/// The advance of `c` in Helvetica (or Helvetica-Bold), per 1000 em: the
+/// AFM widths of ASCII and of WinAnsi's punctuation; anything else counts
+/// as an "n".
+pub fn helvetica_advance(c: char, bold: bool) -> f32 {
+    let w = match c as u32 {
+        32..=126 if bold => HELVETICA_BOLD[c as usize - 32],
+        32..=126 => HELVETICA[c as usize - 32],
+        _ => match (c, bold) {
+            ('‘' | '’' | '‚', false) => 222,
+            ('‘' | '’' | '‚', true) => 278,
+            ('“' | '”' | '„', false) => 333,
+            ('“' | '”' | '„', true) => 500,
+            ('•', _) => 350,
+            ('‹' | '›', _) => 333,
+            ('…' | '—' | '‰' | '™', _) => 1000,
+            _ => 556,
+        },
+    };
+    w as f32
 }
 
-/// Text for a WinAnsi string: printable ASCII as is, Latin-1 bytes, the
-/// rest as "?".
-fn win_ansi(s: &str) -> Vec<u8> {
+pub fn helvetica_width(s: &str, size: f32) -> f32 {
+    s.chars().map(|c| helvetica_advance(c, false)).sum::<f32>() * size / 1000.0
+}
+
+/// `s` in WinAnsi: printable ASCII and Latin-1 as they are, the curly
+/// quotes, dashes and the rest of Windows-1252's punctuation at their
+/// codes, anything else as "?".
+pub fn win_ansi(s: &str) -> Vec<u8> {
     s.chars()
         .map(|c| match c as u32 {
             0x20..=0x7e | 0xa0..=0xff => c as u8,
-            _ => b'?',
+            _ => match c {
+                '€' => 0x80,
+                '‚' => 0x82,
+                '„' => 0x84,
+                '…' => 0x85,
+                '†' => 0x86,
+                '‡' => 0x87,
+                '‰' => 0x89,
+                '‹' => 0x8b,
+                '‘' => 0x91,
+                '’' => 0x92,
+                '“' => 0x93,
+                '”' => 0x94,
+                '•' => 0x95,
+                '–' => 0x96,
+                '—' => 0x97,
+                '™' => 0x99,
+                '›' => 0x9b,
+                _ => b'?',
+            },
+        })
+        .collect()
+}
+
+/// `s` as a PDF literal string's bytes (without the parentheses), in
+/// WinAnsi.
+pub fn pdf_literal(s: &str) -> Vec<u8> {
+    win_ansi(s)
+        .into_iter()
+        .flat_map(|b| match b {
+            b'(' | b')' | b'\\' => vec![b'\\', b],
+            b => vec![b],
         })
         .collect()
 }
@@ -259,29 +318,26 @@ pub fn to_content(placed: &[Placed], color: [u8; 3], geom: &PageGeom, extra: i32
     let theta = (rotate as f32).to_radians();
     let (cs, sn) = (theta.cos(), theta.sin());
     let [r, gr, b] = color.map(|v| v as f32 / 255.0);
-    let mut s = String::from("Q\n");
+    let mut s = b"Q\n".to_vec();
     for p in placed {
         let subtype = if p.header { "Header" } else { "Footer" };
         let o = g.to_user(Pt {
             x: p.x,
             y: p.baseline,
         });
-        let text: String = win_ansi(&p.text)
-            .iter()
-            .flat_map(|&b| match b {
-                b'(' | b')' | b'\\' => vec![b'\\', b],
-                b => vec![b],
-            })
-            .map(|b| b as char)
-            .collect();
-        s.push_str(&format!(
-            "/Artifact <</Type /Pagination /Subtype /{subtype} /{MARKER} true>> BDC\n\
-             q BT {r:.3} {gr:.3} {b:.3} rg /{FONT_NAME} {:.2} Tf \
-             {cs:.4} {sn:.4} {:.4} {cs:.4} {:.3} {:.3} Tm ({text}) Tj ET Q\nEMC\n",
-            p.size, -sn, o.x, o.y
-        ));
+        s.extend_from_slice(
+            format!(
+                "/Artifact <</Type /Pagination /Subtype /{subtype} /{MARKER} true>> BDC\n\
+                 q BT {r:.3} {gr:.3} {b:.3} rg /{FONT_NAME} {:.2} Tf \
+                 {cs:.4} {sn:.4} {:.4} {cs:.4} {:.3} {:.3} Tm (",
+                p.size, -sn, o.x, o.y
+            )
+            .as_bytes(),
+        );
+        s.extend(pdf_literal(&p.text));
+        s.extend_from_slice(b") Tj ET Q\nEMC\n");
     }
-    s.into_bytes()
+    s
 }
 
 /// Objects shared by every page's stamp: a font and the `q` that
@@ -581,6 +637,29 @@ mod tests {
     #[test]
     fn widths_are_helvetica() {
         assert_eq!(helvetica_width("Il", 1000.0), 278.0 + 222.0);
+        assert_eq!(helvetica_advance('m', true), 889.0);
+        assert_eq!(helvetica_advance('“', false), 333.0);
+    }
+
+    #[test]
+    fn text_goes_out_in_win_ansi() {
+        assert_eq!(win_ansi("é “x” – €"), b"\xe9 \x93x\x94 \x96 \x80");
+        assert_eq!(pdf_literal("(a\\b)"), b"\\(a\\\\b\\)");
+        // A header's Latin-1 is one byte each in the page, not UTF-8.
+        let placed = [Placed {
+            header: true,
+            text: "Café".into(),
+            x: 10.0,
+            baseline: 20.0,
+            size: 9.0,
+            width: 20.0,
+        }];
+        let geom = PageGeom {
+            media: [0.0, 0.0, 612.0, 792.0],
+            rotate: 0,
+        };
+        let out = to_content(&placed, [0, 0, 0], &geom, 0);
+        assert!(out.windows(6).any(|w| w == b"(Caf\xe9)"), "{out:?}");
     }
 
     #[test]

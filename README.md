@@ -49,6 +49,8 @@ sheaf export binder.pdf -f tiff --tiff bw -o binder.tif
 sheaf-cli export binder.pdf -f text -o binder.txt
 sheaf scan photos/*.jpg -o receipts.pdf --mode bw --ocr
 sheaf remove-blanks scans.pdf -o clean.pdf --rejects removed.pdf
+sheaf comments summary binder.pdf -l pages --summary stamps
+sheaf comments csv binder.pdf -c number,page,author,text --author "Pat Smith" > pat.csv
 ```
 
 | Subcommand | Does |
@@ -59,6 +61,7 @@ sheaf remove-blanks scans.pdf -o clean.pdf --rejects removed.pdf
 | `remove-blanks` | Blank, and "intentionally left blank", pages out of a PDF, as Document > Find Blank Pages…. Prints each page found and whether it goes; `--dry-run` writes nothing; `--rejects` keeps the removed pages in a file of their own, bookmarked "p. 4 — blank". Nearly blank pages (a signature) stay unless `--nearly-blank`; `--sensitivity strict\|normal\|lenient`, `--keep-intentional`, `--pages` |
 | `scan` | Photos or scans of paper to a clean PDF: finds the page in the photo and straightens it, turns it upright, levels the text, evens out shadows and color casts. `--mode color\|gray\|bw`, `--page letter\|a4\|original`, `--dpi`, `--ocr` (searchable text that lines up with the page), `--no-crop`/`--no-deskew`/… to skip a step, `--drop-blanks` to leave out blank pages, `--flatten-curl` for curled or bent pages (UVDoc model; `scripts/fetch-ocr-data.sh --uvdoc`) |
 | `images-to-pdf` | JPEG, PNG, TIFF (every page), BMP, GIF and WebP files to one PDF, a page each: `--page original\|letter\|a4`, `--margin`, `--dpi` |
+| `comments` | A PDF's comments, as File > Export Comments: `summary` (a PDF; `-l pages` puts each page beside its numbered list), `csv` (`-c` picks the columns) or `text`, to stdout unless `-o`. Filter and sort as the Comments panel does: `--pages 3-10`, `--type`, `--author`, `--status` (each repeats), `--checked`/`--unchecked`, `--summary stamps\|notes`, `--search`, `--sort page\|author\|date\|type\|color` |
 
 ## Why
 
@@ -230,6 +233,7 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 | **Connectors** (PDFlyer): linked markers that jump between pages | ✅ label groups as in PDFlyer (1–50, A–ZZ): the tool keeps its label, so each click adds to the group (Shift+I starts a new one); clicking one goes to the next. Saved as Link annotations that walk the group in page order, so they jump in Acrobat too. Previous/Next ([ and ], or right-click) and "pages with / without" work for tickmarks and stamps as well |
 | **Calculator tape** (PDFlyer): 10-key calc, tape placed as annotation | ✅ Calculator panel (Ctrl+Alt+4), in PDFlyer's format: sections numbered `1-1`, `1-2`… `1-T`, titles, subtotal (Space) and total (Enter), grand total (Shift+Enter), notes on rows (double-click; Ctrl+T dates them), memory (G H J K L), 00 and 000, change sign (S), decimals (D), insert and delete rows with the totals worked out again. Double-click a placed tape to edit it; turn it, resize it, hide its numbers or titles, and color its paper. **Pick from page** (a sheaf extension): click a number on the page to add it, or Shift+drag over a box for all of them, with a tickmark beside each if you like; it reads recognized (OCR) text too |
 | Comments list / review panel, status, replies | ✅ Comments panel (Ctrl+Alt+5) lists ours and third-party, in threads. Reply (R; Ctrl+Enter sends), set a status (right-click: None, Accepted, Rejected, Cancelled, Completed, with its history), checkmark (Shift+K), on anyone's comments. Written as Acrobat writes them, and Acrobat's replies to our marks stay attached across saves. Filter by type, author, status, color, checkmark and pages (what's filtered out is hidden on the page too; Show All undoes it), sort by page, author, date, type or color, and PDFlyer's Stamp Summary and Note Summary as presets. Other tools' comments can be deleted (one undo step; gone from the file at save). View > Show Comments hides them all |
+| Comment summary and export | ✅ File > Export Comments, or the panel's Export menu: what the panel lists, filtered and sorted as it is, as a summary PDF (the comments numbered and threaded; or each page beside its list, with the numbers on the page), a CSV (columns chosen in the Export menu: number, page, page label, type, author, dates, status, checked, color, text, reply-to) or text. `sheaf comments` |
 | Flatten annotations | ✅ File > Export Flattened Copy… (links and form fields kept) |
 | Export Clean Copy (strip annots, notes, tapes, stamps, attachments) | ✅ File > Export Clean Copy; keeps links, form fields, bookmarks |
 | Measurement tools (distance, area, perimeter, scale) | 📋 |

@@ -7,6 +7,7 @@
 
 pub mod blank;
 pub mod combine;
+pub mod comments;
 pub mod crop;
 pub mod derive;
 pub mod dirs;
