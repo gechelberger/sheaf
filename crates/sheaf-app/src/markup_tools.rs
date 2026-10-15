@@ -1382,10 +1382,12 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return false;
         };
+        // A reply or status pasted elsewhere would be in no thread.
         let marks: Vec<Annot> = doc
             .selected_mark_list()
             .into_iter()
             .map(|(_, a)| a)
+            .filter(|a| a.thread_parent().is_none())
             .collect();
         if marks.is_empty() {
             return false;
@@ -1486,10 +1488,12 @@ impl DocView {
         let State::Ready(doc) = &self.state else {
             return None;
         };
+        // Replies and statuses are in the Comments panel, not on the page.
         let marks: Vec<Annot> = doc
             .selected_mark_list()
             .into_iter()
             .map(|(_, a)| a)
+            .filter(|a| a.thread_parent().is_none())
             .collect();
         let last = marks.last()?.clone();
         let fillable = marks.iter().any(|a| a.kind.fillable());

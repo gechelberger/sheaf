@@ -148,7 +148,30 @@ pub enum AnnotKind {
     Insert {
         at: Box2,
     },
+    /// A reply (`contents`) in the thread of the comment whose `/NM` is
+    /// `parent`: one of ours (`sheaf:<id>`) or another tool's. Written as
+    /// Acrobat writes replies: a Text annotation with `/IRT` to its parent,
+    /// drawn by no one.
+    Reply {
+        parent: String,
+    },
+    /// A review state set on the comment `parent`: `model` is `Review`
+    /// (`state` None, Accepted, Rejected, Cancelled or Completed) or
+    /// `Marked` (the checkmark: Marked or Unmarked). Written as Acrobat
+    /// writes them: a hidden Text annotation with `/IRT`, `/State` and
+    /// `/StateModel`. Each change is a new one, so they keep the history.
+    Status {
+        parent: String,
+        model: String,
+        state: String,
+    },
 }
+
+/// The review state models (`/StateModel`).
+pub const REVIEW: &str = "Review";
+pub const MARKED: &str = "Marked";
+/// The review states sheaf offers, in menu order.
+pub const REVIEW_STATES: [&str; 5] = ["None", "Accepted", "Rejected", "Cancelled", "Completed"];
 
 /// A box array as `[x0, y0, x1, y1]`, normalized.
 pub fn box_of(arr: &[lopdf::Object]) -> Option<[f32; 4]> {
@@ -206,6 +229,7 @@ impl AnnotKind {
                 at: mb(at),
             },
             AnnotKind::Insert { at } => AnnotKind::Insert { at: mb(at) },
+            AnnotKind::Reply { .. } | AnnotKind::Status { .. } => self.clone(),
             AnnotKind::Note { pos } => AnnotKind::Note { pos: mp(pos) },
             AnnotKind::FreeText { rect, size } => AnnotKind::FreeText {
                 rect: mb(rect),
@@ -307,6 +331,8 @@ impl AnnotKind {
             | AnnotKind::Squiggly { .. }
             | AnnotKind::Replace { .. }
             | AnnotKind::Insert { .. }
+            | AnnotKind::Reply { .. }
+            | AnnotKind::Status { .. }
             | AnnotKind::Note { .. }
             | AnnotKind::Connector { .. } => Handles::None,
         }
@@ -412,6 +438,8 @@ impl Annot {
             | AnnotKind::Squiggly { rects } => union(rects),
             AnnotKind::Replace { rects, at, .. } => union(rects).union(*at),
             AnnotKind::Insert { at } => *at,
+            // Not on the page: they're in their parent's thread.
+            AnnotKind::Reply { .. } | AnnotKind::Status { .. } => union(&[]),
             AnnotKind::Note { pos } => Box2 {
                 x: pos.x,
                 y: pos.y,
@@ -453,6 +481,7 @@ impl Annot {
     pub fn hit(&self, p: Pt, tolerance: f32) -> bool {
         let near = |a: Pt, b: Pt| segment_distance(p, a, b) <= tolerance + self.stroke / 2.0;
         match &self.kind {
+            AnnotKind::Reply { .. } | AnnotKind::Status { .. } => false,
             AnnotKind::Line { a, b, .. } => near(*a, *b),
             AnnotKind::Ink { paths } => paths.iter().any(|path| match path.as_slice() {
                 [one] => near(*one, *one),
@@ -478,6 +507,14 @@ impl Annot {
         match self.kind {
             AnnotKind::Replace { .. } => vec![self.name(), self.strike_name()],
             _ => vec![self.name()],
+        }
+    }
+
+    /// The comment this is a reply or status in the thread of, by `/NM`.
+    pub fn thread_parent(&self) -> Option<&str> {
+        match &self.kind {
+            AnnotKind::Reply { parent } | AnnotKind::Status { parent, .. } => Some(parent),
+            _ => None,
         }
     }
 
@@ -994,6 +1031,22 @@ fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
                 p2.x,
                 p2.y
             ));
+        }
+        AnnotKind::Reply { .. } | AnnotKind::Status { .. } => {
+            // The writer sets /IRT and /Rect from the parent. Nothing to
+            // draw: a thread is read in a comments list.
+            dict.set("Subtype", Object::Name(b"Text".to_vec()));
+            dict.set("Name", Object::Name(b"Comment".to_vec()));
+            dict.set("C", color_arr);
+            dict.set("Open", false);
+            // Print, NoZoom, NoRotate, as Acrobat writes them; a status is
+            // hidden too.
+            let hidden = matches!(a.kind, AnnotKind::Status { .. });
+            dict.set("F", if hidden { 30i64 } else { 28i64 });
+            if let AnnotKind::Status { model, state, .. } = &a.kind {
+                dict.set("StateModel", pdf_text_string(model));
+                dict.set("State", pdf_text_string(state));
+            }
         }
         AnnotKind::Note { pos } => {
             dict.set("Subtype", Object::Name(b"Text".to_vec()));

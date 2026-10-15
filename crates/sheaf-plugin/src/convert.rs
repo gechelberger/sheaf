@@ -196,7 +196,9 @@ pub fn annot_to_wit(a: &Annot) -> Option<w::Annot> {
         | AnnotKind::StrikeOut { .. }
         | AnnotKind::Squiggly { .. }
         | AnnotKind::Replace { .. }
-        | AnnotKind::Insert { .. } => return None,
+        | AnnotKind::Insert { .. }
+        | AnnotKind::Reply { .. }
+        | AnnotKind::Status { .. } => return None,
     };
     Some(w::Annot {
         id: a.id.0,

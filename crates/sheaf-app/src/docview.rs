@@ -47,10 +47,10 @@ use crate::{
     LineUp, NewBookmark, NextPage, NextPane, PasteMarks, PasteMarksInPlace, PrevPage, Redo,
     RotatePageCcw, RotatePageCw, RotateViewCcw, RotateViewCw, Save, SaveAs, ScreenDown, ScreenUp,
     SearchNext, SearchPrev, SelectAllPages, SinglePage, SinglePageContinuous, SplitView,
-    ToggleCoverPage, ToolArrow, ToolConnector, ToolEllipse, ToolFreeText, ToolHighlight, ToolInk,
-    ToolLine, ToolNote, ToolSelect, ToolSquare, ToolSquiggly, ToolStrikeOut, ToolTextEdit,
-    ToolTick, ToolUnderline, TwoUp, TwoUpContinuous, Undo, ZoomActual, ZoomFitPage, ZoomFitWidth,
-    ZoomIn, ZoomOut,
+    ToggleCheckmark, ToggleCoverPage, ToolArrow, ToolConnector, ToolEllipse, ToolFreeText,
+    ToolHighlight, ToolInk, ToolLine, ToolNote, ToolSelect, ToolSquare, ToolSquiggly,
+    ToolStrikeOut, ToolTextEdit, ToolTick, ToolUnderline, TwoUp, TwoUpContinuous, Undo, ZoomActual,
+    ZoomFitPage, ZoomFitWidth, ZoomIn, ZoomOut,
 };
 
 pub const KEY_CONTEXT: &str = "DocView";
@@ -3999,7 +3999,7 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
     let selected: Vec<sheaf_doc::Annot> = doc
         .selected_mark_list()
         .into_iter()
-        .filter(|(pid, _)| *pid == pl.pref.id)
+        .filter(|(pid, a)| *pid == pl.pref.id && a.thread_parent().is_none())
         .map(|(_, a)| a)
         .collect();
     for a in &selected {
@@ -4542,6 +4542,7 @@ impl Render for DocView {
             .on_action(cx.listener(|v, _: &ToolSquiggly, _, cx| v.markup_tool(Tool::Squiggly, cx)))
             .on_action(cx.listener(|v, _: &ToolTextEdit, _, cx| v.markup_tool(Tool::TextEdit, cx)))
             .on_action(cx.listener(|v, _: &CycleTextMarkup, _, cx| v.cycle_text_markup(cx)))
+            .on_action(cx.listener(|v, _: &ToggleCheckmark, _, cx| v.toggle_checkmark(cx)))
             .on_action(cx.listener(|v, _: &ToolFreeText, _, cx| v.set_tool(Tool::FreeText, cx)))
             .on_action(cx.listener(|v, _: &ToolSquare, _, cx| v.set_tool(Tool::Square, cx)))
             .on_action(cx.listener(|v, _: &ToolEllipse, _, cx| v.set_tool(Tool::Ellipse, cx)))
@@ -5115,6 +5116,8 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
             }
         }
         AnnotKind::Insert { at } => out.push(caret_element(*at, fill, src, rot, k)),
+        // In their parent's thread, not on the page.
+        AnnotKind::Reply { .. } | AnnotKind::Status { .. } => {}
         AnnotKind::Line {
             a: pa,
             b: pb,

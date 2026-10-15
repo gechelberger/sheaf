@@ -115,7 +115,11 @@ fn build(snap: &Snapshot) -> Result<(usize, Vec<u8>)> {
                 .unwrap_or(0) as i32;
             if let Some(list) = snap.state.annots.get(&pref.id) {
                 let geom = geom_of(&dict, original_rot);
-                connectors.extend(write_page_annots(&mut pdf, &mut dict, list.iter(), &geom));
+                let w = write_page_annots(&mut pdf, &mut dict, list.iter(), &geom);
+                connectors.extend(w.connectors);
+                for id in w.touched {
+                    changed.insert(id, pdf.get_object(id)?.clone());
+                }
             } else {
                 strip_sheaf_annots(&pdf, &mut dict);
             }
@@ -172,12 +176,13 @@ fn build(snap: &Snapshot) -> Result<(usize, Vec<u8>)> {
                 if snap.annots_dirty.contains(&pref.id) {
                     let geom = crate::file::page_geom(&pdf, id);
                     match snap.state.annots.get(&pref.id) {
-                        Some(list) => connectors.extend(write_page_annots(
-                            &mut pdf,
-                            &mut dict,
-                            list.iter(),
-                            &geom,
-                        )),
+                        Some(list) => {
+                            let w = write_page_annots(&mut pdf, &mut dict, list.iter(), &geom);
+                            connectors.extend(w.connectors);
+                            for id in w.touched {
+                                changed.insert(id, pdf.get_object(id)?.clone());
+                            }
+                        }
                         None => strip_sheaf_annots(&pdf, &mut dict),
                     }
                 }

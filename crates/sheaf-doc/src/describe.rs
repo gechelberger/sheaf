@@ -65,9 +65,22 @@ pub fn describe(edit: &Edit, before: Option<&DocState>) -> String {
             }
         }
         Edit::OutlineDelete { .. } => "Delete a bookmark".into(),
-        Edit::AnnotAdd { page, annot } => {
-            format!("Add {}{}", noun(&annot.kind), on_page(*page, before))
-        }
+        Edit::AnnotAdd { page, annot } => match &annot.kind {
+            AnnotKind::Reply { .. } => format!("Reply{}", on_page(*page, before)),
+            AnnotKind::Status { model, state, .. } if model == crate::annot::MARKED => format!(
+                "{} a comment{}",
+                if state == "Marked" {
+                    "Check"
+                } else {
+                    "Uncheck"
+                },
+                on_page(*page, before)
+            ),
+            AnnotKind::Status { state, .. } => {
+                format!("Set status {state}{}", on_page(*page, before))
+            }
+            kind => format!("Add {}{}", noun(kind), on_page(*page, before)),
+        },
         Edit::AnnotUpdate { page, annot } => {
             format!("Change {}{}", noun(&annot.kind), on_page(*page, before))
         }
@@ -118,6 +131,8 @@ fn noun(kind: &AnnotKind) -> String {
         AnnotKind::Squiggly { .. } => "a squiggly underline".into(),
         AnnotKind::Replace { .. } => "a text replacement".into(),
         AnnotKind::Insert { .. } => "a text insertion".into(),
+        AnnotKind::Reply { .. } => "a reply".into(),
+        AnnotKind::Status { .. } => "a status".into(),
     }
 }
 

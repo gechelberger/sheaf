@@ -117,6 +117,8 @@ const FILES: &[(&str, &[u8])] = icons![
     "strikethrough",
     "squiggly",
     "text-edit",
+    "reply",
+    "checkmark",
     "undo",
     "watermark",
     "zoom-in",

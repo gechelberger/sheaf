@@ -257,6 +257,9 @@ pub fn builtin(id: &str) -> Builtin {
         | "docview::PasteMarks"
         | "docview::PasteMarksInPlace" => (DOC, None, None),
         "docview::CopySelection" => (DOC, Some(|f| f.marks || f.text), None),
+        "comments::ReplyToComment" | "comments::ToggleCheckmark" => {
+            (DOC, Some(|f| f.selection), None)
+        }
         "docview::Undo" => (DOC, Some(|f| f.can_undo), None),
         "docview::Redo" => (DOC, Some(|f| f.can_redo), None),
         "docview::SinglePage" => (DOC, None, Some(|f| f.mode(Spread::Single, false))),

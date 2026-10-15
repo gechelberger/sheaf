@@ -152,7 +152,10 @@ actions!(
         ToolConnector
     ]
 );
-actions!(comments, [EditComment, DeleteComment]);
+actions!(
+    comments,
+    [EditComment, DeleteComment, ReplyToComment, ToggleCheckmark]
+);
 actions!(history, [HistoryPrev, HistoryNext]);
 actions!(
     outline,
@@ -468,6 +471,9 @@ fn main() {
             // Comments panel (when it has focus).
             KeyBinding::new("f2", EditComment, comments_keys),
             KeyBinding::new("delete", DeleteComment, comments),
+            KeyBinding::new("r", ReplyToComment, comments_keys),
+            KeyBinding::new("shift-k", ToggleCheckmark, comments_keys),
+            KeyBinding::new("shift-k", ToggleCheckmark, doc_keys),
             // Markup tools (Acrobat's single-key accelerators where it has them).
             KeyBinding::new("v", ToolSelect, doc_keys),
             KeyBinding::new("s", ToolNote, doc_keys),

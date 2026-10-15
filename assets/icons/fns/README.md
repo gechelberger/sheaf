@@ -37,6 +37,8 @@ an image element does not inherit the parent element's color.
 | [copy](copy/icon.svg) | Copy | `CopySelection` |
 | [paste](paste/icon.svg) | Paste | `PasteMarks` |
 | [paste-in-place](paste-in-place/icon.svg) | Paste in place | `PasteMarksInPlace` |
+| [reply](reply/icon.svg) | Reply to comment | `ReplyToComment` |
+| [checkmark](checkmark/icon.svg) | Checkmark comment | `ToggleCheckmark` |
 | [open](open/icon.svg) | Open PDF | `OpenFile` |
 | [save](save/icon.svg) | Save | `Save` |
 | [insert-blank](insert-blank/icon.svg) | Insert blank pages | `InsertBlankPages` |

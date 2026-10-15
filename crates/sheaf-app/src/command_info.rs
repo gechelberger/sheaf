@@ -113,6 +113,16 @@ pub fn info(id: &str) -> Option<Info> {
             "Paste copied annotations onto the current page, a little offset.",
             &["clipboard"],
         ),
+        "comments::ReplyToComment" => (
+            "reply",
+            "Reply to the comment selected in the Comments panel.",
+            &["thread", "answer", "respond"],
+        ),
+        "comments::ToggleCheckmark" => (
+            "checkmark",
+            "Check or uncheck the selected comment, to keep track of the ones dealt with.",
+            &["mark", "done", "tick"],
+        ),
         "docview::PasteMarksInPlace" => (
             "paste-in-place",
             "Paste copied annotations onto the current page where they were.",

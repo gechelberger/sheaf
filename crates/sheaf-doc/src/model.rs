@@ -1927,6 +1927,15 @@ impl Document {
                     .position(|a| a.id == id)
                     .context("annotation not found")?;
                 let removed = list.remove(i);
+                // Its thread goes with it: replies and statuses, and theirs.
+                let mut gone = vec![removed.name()];
+                while let Some(name) = gone.pop() {
+                    let (thread, rest): (Vector<Annot>, Vector<Annot>) = list
+                        .into_iter()
+                        .partition(|a| a.thread_parent() == Some(name.as_str()));
+                    gone.extend(thread.iter().map(Annot::name));
+                    list = rest;
+                }
                 if list.is_empty() {
                     st.annots.remove(&page);
                 } else {

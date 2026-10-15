@@ -432,7 +432,8 @@ fn build_rewrite(model: &Snapshot, clean: bool) -> Result<Pdf> {
             strip_markup_annots(&pdf, &mut dict);
         } else if let Some(list) = state.annots.get(&pref.id) {
             let geom = geom_of(&dict, original as i32);
-            connectors.extend(write_page_annots(&mut pdf, &mut dict, list.iter(), &geom));
+            connectors
+                .extend(write_page_annots(&mut pdf, &mut dict, list.iter(), &geom).connectors);
         } else {
             strip_sheaf_annots(&pdf, &mut dict);
         }
@@ -1021,15 +1022,44 @@ pub(crate) struct ConnectorRef {
     pub top_left: (f32, f32),
 }
 
+/// What writing a page's marks did besides the page dict.
+pub(crate) struct PageAnnotsWritten {
+    /// The connectors written, for `link_connectors`.
+    pub connectors: Vec<ConnectorRef>,
+    /// Objects already in the file that it changed: another tool's replies
+    /// to our marks, re-pointed at their new objects (bug 6), and comments
+    /// replied to in sheaf that had no `/NM`, given the one the reply uses.
+    /// An incremental save writes these again.
+    pub touched: Vec<ObjectId>,
+}
+
 /// Replace the page's sheaf annotations with `annots`, as new objects with
 /// appearance streams. `/P` is left unset; PDFium and Acrobat don't need it.
-/// Returns the connectors written, for `link_connectors`.
+///
+/// Replies and statuses (`Annot::thread_parent`) are written after what
+/// they're in the thread of, with `/IRT` to it and its `/Rect`.
 pub(crate) fn write_page_annots<'a>(
     pdf: &mut Pdf,
     page: &mut Dictionary,
     annots: impl Iterator<Item = &'a Annot>,
     geom: &PageGeom,
-) -> Vec<ConnectorRef> {
+) -> PageAnnotsWritten {
+    // Our marks as the file has them now, by object, so other tools'
+    // replies to them can follow them to the objects this writes.
+    let before: HashMap<ObjectId, String> = page
+        .get(b"Annots")
+        .ok()
+        .and_then(|a| pdf.dereference(a).ok())
+        .and_then(|(_, o)| o.as_array().ok().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|e| {
+            let id = e.as_reference().ok()?;
+            let d = pdf.get_dictionary(id).ok()?;
+            (d.has(b"SheafAnnot") && crate::file::is_ours(pdf, e))
+                .then(|| (id, crate::file::thread_name(d)))
+        })
+        .collect();
     strip_sheaf_annots(pdf, page);
     let mut list: Vec<Object> = page
         .get(b"Annots")
@@ -1037,11 +1067,30 @@ pub(crate) fn write_page_annots<'a>(
         .and_then(|a| pdf.dereference(a).ok())
         .and_then(|(_, o)| o.as_array().ok().cloned())
         .unwrap_or_default();
+    let theirs: Vec<ObjectId> = list.iter().filter_map(|e| e.as_reference().ok()).collect();
+    // Every comment on the page by name: its object and its /Rect.
+    let rect_of = |pdf: &Pdf, d: &Dictionary| {
+        d.get(b"Rect")
+            .ok()
+            .and_then(|r| pdf.dereference(r).ok())
+            .map(|(_, o)| o.clone())
+            .unwrap_or_else(|| Object::Array(vec![0.into(), 0.into(), 0.into(), 0.into()]))
+    };
+    let mut named: HashMap<String, (ObjectId, Object)> = HashMap::new();
+    for &id in &theirs {
+        if let Ok(d) = pdf.get_dictionary(id) {
+            named.insert(crate::file::thread_name(d), (id, rect_of(pdf, d)));
+        }
+    }
+    let (threads, marks): (Vec<&Annot>, Vec<&Annot>) =
+        annots.partition(|a| a.thread_parent().is_some());
     let mut connectors = Vec::new();
-    for a in annots {
+    for a in marks {
         let written = to_pdf(a, geom, pdf);
+        let rect = rect_of(pdf, &written.main);
         let id = pdf.add_object(Object::Dictionary(written.main));
         list.push(Object::Reference(id));
+        named.insert(a.name(), (id, rect));
         for mut part in written.companions {
             part.set("IRT", id);
             part.set("RT", Object::Name(b"Group".to_vec()));
@@ -1058,12 +1107,70 @@ pub(crate) fn write_page_annots<'a>(
             });
         }
     }
+    // Replies after what they reply to, a reply to a reply after that one;
+    // any whose parent isn't on the page, last and unthreaded.
+    let wanted: std::collections::HashSet<String> = threads
+        .iter()
+        .filter_map(|a| a.thread_parent().map(str::to_string))
+        .collect();
+    let mut pending = threads;
+    while !pending.is_empty() {
+        let (ready, waiting): (Vec<&Annot>, Vec<&Annot>) = pending
+            .iter()
+            .partition(|a| named.contains_key(a.thread_parent().unwrap_or_default()));
+        let stuck = ready.is_empty();
+        for a in if stuck { &waiting } else { &ready } {
+            let mut main = to_pdf(a, geom, pdf).main;
+            if let Some((parent, rect)) = a.thread_parent().and_then(|p| named.get(p)).cloned() {
+                main.set("IRT", parent);
+                main.set("Rect", rect);
+            }
+            let rect = rect_of(pdf, &main);
+            let id = pdf.add_object(Object::Dictionary(main));
+            list.push(Object::Reference(id));
+            named.insert(a.name(), (id, rect));
+        }
+        pending = if stuck { Vec::new() } else { waiting };
+    }
+    // Other tools' replies to our marks follow them; a comment replied to
+    // in sheaf takes the name the reply uses.
+    let mut touched = Vec::new();
+    for id in theirs {
+        let Ok(d) = pdf.get_dictionary(id) else {
+            continue;
+        };
+        let repoint = d
+            .get(b"IRT")
+            .ok()
+            .and_then(|o| o.as_reference().ok())
+            .and_then(|irt| before.get(&irt))
+            .and_then(|name| named.get(name))
+            .map(|(obj, _)| *obj);
+        let name = (!d.has(b"NM"))
+            .then(|| crate::file::anon_name(d))
+            .filter(|n| wanted.contains(n));
+        if repoint.is_none() && name.is_none() {
+            continue;
+        }
+        if let Ok(d) = pdf.get_dictionary_mut(id) {
+            if let Some(obj) = repoint {
+                d.set("IRT", obj);
+            }
+            if let Some(n) = name {
+                d.set("NM", Object::string_literal(n));
+            }
+            touched.push(id);
+        }
+    }
     if list.is_empty() {
         page.remove(b"Annots");
     } else {
         page.set("Annots", Object::Array(list));
     }
-    connectors
+    PageAnnotsWritten {
+        connectors,
+        touched,
+    }
 }
 
 /// Point each written connector's `/Dest` at its partner: at the partner's
@@ -1916,6 +2023,336 @@ mod tests {
                 .collect();
             assert_eq!(pages, vec!["A 0", "A 1", "A 2"], "{incremental_first}");
         }
+    }
+
+    /// A note of ours as the thread tests use it.
+    fn thread_mark(kind: crate::annot::AnnotKind, contents: &str) -> Annot {
+        Annot {
+            id: crate::annot::AnnotId(0),
+            kind,
+            color: [255, 200, 0],
+            opacity: 1.0,
+            stroke: 1.0,
+            author: "Greg".into(),
+            contents: contents.into(),
+            modified: "D:20261014000000".into(),
+            created: "D:20261014000000".into(),
+            fill: None,
+            dashed: false,
+        }
+    }
+
+    /// Page 1's annotations: (object, dict), in /Annots order.
+    fn page_annots(bytes: &[u8]) -> Vec<(ObjectId, Dictionary)> {
+        let pdf = Pdf::load_mem(bytes).unwrap();
+        let page0 = pdf.get_pages()[&1];
+        pdf.get_dictionary(page0)
+            .unwrap()
+            .get(b"Annots")
+            .map(|a| a.as_array().unwrap().clone())
+            .unwrap_or_default()
+            .iter()
+            .map(|o| {
+                let id = o.as_reference().unwrap();
+                (id, pdf.get_dictionary(id).unwrap().clone())
+            })
+            .collect()
+    }
+
+    fn opened(path: &Path, bytes: usize) -> Document {
+        Document::new(
+            {
+                let mut i = info(path, 1);
+                i.bytes = bytes;
+                i
+            },
+            &[],
+            Box::new(FixedCount(10)),
+        )
+    }
+
+    #[test]
+    fn replies_and_statuses_thread_under_their_comment() {
+        use crate::annot::{AnnotKind, Pt};
+        let dir = tempdir();
+        let a_path = make_pdf(&dir, "a.pdf", "A", 1, &[]);
+        let original = std::fs::read(&a_path).unwrap();
+        let mut model = opened(&a_path, original.len());
+        let p0 = model.page(0).unwrap().id;
+        let note = thread_mark(
+            AnnotKind::Note {
+                pos: Pt { x: 100.0, y: 100.0 },
+            },
+            "Tie to the K-1",
+        );
+        model
+            .apply(
+                Edit::AnnotAdd {
+                    page: p0,
+                    annot: note,
+                },
+                "note",
+            )
+            .unwrap();
+        let parent = model.state().annots_on(p0).unwrap()[0].name();
+        for (kind, text) in [
+            (
+                AnnotKind::Reply {
+                    parent: parent.clone(),
+                },
+                "Tied.",
+            ),
+            (
+                AnnotKind::Status {
+                    parent: parent.clone(),
+                    model: crate::annot::REVIEW.into(),
+                    state: "Accepted".into(),
+                },
+                "Accepted set by Greg",
+            ),
+        ] {
+            model
+                .apply(
+                    Edit::AnnotAdd {
+                        page: p0,
+                        annot: thread_mark(kind, text),
+                    },
+                    "thread",
+                )
+                .unwrap();
+        }
+        let want: Vec<Annot> = model
+            .state()
+            .annots_on(p0)
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect();
+        let bytes = crate::incremental::incremental(&model.snapshot()).unwrap();
+        let list = page_annots(&bytes);
+        assert_eq!(list.len(), 3);
+        let (note_id, note_dict) = &list[0];
+        for (_, d) in &list[1..] {
+            assert_eq!(d.get(b"Subtype").unwrap().as_name().unwrap(), b"Text");
+            assert_eq!(d.get(b"IRT").unwrap().as_reference().unwrap(), *note_id);
+            assert_eq!(d.get(b"Rect").unwrap(), note_dict.get(b"Rect").unwrap());
+        }
+        let status = &list[2].1;
+        assert_eq!(status.get(b"State").unwrap().as_str().unwrap(), b"Accepted");
+        assert_eq!(
+            status.get(b"StateModel").unwrap().as_str().unwrap(),
+            b"Review"
+        );
+        // Hidden, as Acrobat writes a state.
+        assert_eq!(status.get(b"F").unwrap().as_i64().unwrap() & 2, 2);
+        assert_eq!(
+            crate::file::read_sheaf_annots_mem(&bytes).unwrap()[&0],
+            want
+        );
+
+        // Deleting the note takes its thread.
+        let id = want[0].id;
+        model
+            .apply(Edit::AnnotDelete { page: p0, id }, "rm")
+            .unwrap();
+        assert!(model.state().annots_on(p0).is_none());
+    }
+
+    /// A one-page file with a note of ours and, as Acrobat leaves them, a
+    /// reply to it and a comment of its own with no /NM.
+    fn file_with_their_comments(dir: &Path) -> (std::path::PathBuf, Vec<Annot>) {
+        use crate::annot::{AnnotKind, Pt};
+        let a_path = make_pdf(dir, "a.pdf", "A", 1, &[]);
+        let original = std::fs::read(&a_path).unwrap();
+        let mut model = opened(&a_path, original.len());
+        let p0 = model.page(0).unwrap().id;
+        let note = thread_mark(
+            AnnotKind::Note {
+                pos: Pt { x: 100.0, y: 100.0 },
+            },
+            "ours",
+        );
+        model
+            .apply(
+                Edit::AnnotAdd {
+                    page: p0,
+                    annot: note,
+                },
+                "note",
+            )
+            .unwrap();
+        let ours: Vec<Annot> = model
+            .state()
+            .annots_on(p0)
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect();
+        let bytes = crate::incremental::incremental(&model.snapshot()).unwrap();
+        let mut pdf = Pdf::load_mem(&bytes).unwrap();
+        let page0 = pdf.get_pages()[&1];
+        let note_obj = page_annots(&bytes)[0].0;
+        let rect = || Object::Array(vec![300.into(), 300.into(), 320.into(), 320.into()]);
+        let reply = pdf.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "Text", "Rect" => rect(),
+            "IRT" => note_obj, "NM" => Object::string_literal("acro-reply"),
+            "T" => Object::string_literal("Pat"), "Contents" => Object::string_literal("Agreed"),
+        });
+        let theirs = pdf.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "Text", "Rect" => rect(),
+            "T" => Object::string_literal("Pat"), "Contents" => Object::string_literal("No name"),
+        });
+        let mut annots = pdf
+            .get_dictionary(page0)
+            .unwrap()
+            .get(b"Annots")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .clone();
+        annots.extend([Object::Reference(reply), Object::Reference(theirs)]);
+        pdf.get_dictionary_mut(page0)
+            .unwrap()
+            .set("Annots", Object::Array(annots));
+        let path = dir.join("theirs.pdf");
+        pdf.save(&path).unwrap();
+        (path, ours)
+    }
+
+    #[test]
+    fn their_replies_follow_our_marks_across_saves() {
+        // Bug 6: every save rewrites our marks as new objects.
+        let dir = tempdir();
+        let (path, ours) = file_with_their_comments(&dir);
+        let found = crate::file::read_annots(&path, None).unwrap();
+        let reply = found
+            .foreign
+            .iter()
+            .find(|f| f.name == "acro-reply")
+            .unwrap();
+        assert_eq!(reply.parent.as_deref(), Some(ours[0].name().as_str()));
+
+        for incremental in [true, false] {
+            let bytes = std::fs::read(&path).unwrap();
+            let mut model = opened(&path, bytes.len());
+            model.set_initial_annots(found.sheaf.clone()).unwrap();
+            let p0 = model.page(0).unwrap().id;
+            let mut note = model.state().annots_on(p0).unwrap()[0].clone();
+            note.contents = "ours, edited".into();
+            model
+                .apply(
+                    Edit::AnnotUpdate {
+                        page: p0,
+                        annot: note,
+                    },
+                    "edit",
+                )
+                .unwrap();
+            let out = if incremental {
+                crate::incremental::incremental(&model.snapshot()).unwrap()
+            } else {
+                rewrite(&model.snapshot()).unwrap()
+            };
+            let list = page_annots(&out);
+            let note_obj = list
+                .iter()
+                .find(|(_, d)| d.has(b"SheafAnnot"))
+                .map(|(id, _)| *id)
+                .unwrap();
+            let (_, reply) = list
+                .iter()
+                .find(|(_, d)| {
+                    d.get(b"NM").ok().map(crate::file::pdf_text).as_deref() == Some("acro-reply")
+                })
+                .unwrap();
+            assert_eq!(
+                reply.get(b"IRT").unwrap().as_reference().unwrap(),
+                note_obj,
+                "incremental {incremental}"
+            );
+            // Read back from what was saved, it's still in the note's thread.
+            let again = crate::file::read_annots_mem(&out).unwrap();
+            let reply = again
+                .foreign
+                .iter()
+                .find(|f| f.name == "acro-reply")
+                .unwrap();
+            assert_eq!(
+                reply.parent.as_deref(),
+                Some(ours[0].name().as_str()),
+                "incremental {incremental}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reply_names_a_comment_that_had_no_name() {
+        use crate::annot::AnnotKind;
+        let dir = tempdir();
+        let (path, _) = file_with_their_comments(&dir);
+        let found = crate::file::read_annots(&path, None).unwrap();
+        let unnamed = found
+            .foreign
+            .iter()
+            .find(|f| f.contents == "No name")
+            .unwrap();
+        assert!(unnamed.name.starts_with("sheaf-anon:"));
+        // The same name every time it's read.
+        assert_eq!(
+            crate::file::read_annots(&path, None).unwrap().foreign,
+            found.foreign
+        );
+        let bytes = std::fs::read(&path).unwrap();
+        let mut model = opened(&path, bytes.len());
+        model.set_initial_annots(found.sheaf.clone()).unwrap();
+        let p0 = model.page(0).unwrap().id;
+        model
+            .apply(
+                Edit::AnnotAdd {
+                    page: p0,
+                    annot: thread_mark(
+                        AnnotKind::Reply {
+                            parent: unnamed.name.clone(),
+                        },
+                        "Answered",
+                    ),
+                },
+                "reply",
+            )
+            .unwrap();
+        let out = crate::incremental::incremental(&model.snapshot()).unwrap();
+        let list = page_annots(&out);
+        let (theirs_id, theirs) = list
+            .iter()
+            .find(|(_, d)| {
+                d.get(b"Contents")
+                    .ok()
+                    .map(crate::file::pdf_text)
+                    .as_deref()
+                    == Some("No name")
+            })
+            .unwrap();
+        assert_eq!(
+            crate::file::pdf_text(theirs.get(b"NM").unwrap()),
+            unnamed.name
+        );
+        let (_, reply) = list
+            .iter()
+            .find(|(_, d)| {
+                d.get(b"Contents")
+                    .ok()
+                    .map(crate::file::pdf_text)
+                    .as_deref()
+                    == Some("Answered")
+            })
+            .unwrap();
+        assert_eq!(
+            reply.get(b"IRT").unwrap().as_reference().unwrap(),
+            *theirs_id
+        );
+        // Read back, the reply is in its thread and theirs keeps the name.
+        let back = crate::file::read_annots_mem(&out).unwrap();
+        assert!(back.foreign.iter().any(|f| f.name == unnamed.name));
     }
 
     #[test]

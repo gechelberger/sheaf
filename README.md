@@ -228,7 +228,7 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 | **Tickmarks** (PDFlyer): quick-stamp library, keyboard-driven | ✅ |
 | **Connectors** (PDFlyer): linked markers that jump between pages | ✅ pairs saved as Link annotations, so they jump in Acrobat too. PDFlyer's are label *groups* (1–50, A–ZZ) with Prev/Next and "all pages with / without"; groups are 📋 ([Pending](ROADMAP.md#pdflyer-parity-gaps)) |
 | **Calculator tape** (PDFlyer): 10-key calc, tape placed as annotation | ✅ Calculator panel (Ctrl+Alt+4) |
-| Comments list / review panel, status, replies | ✅ Comments panel (Ctrl+Alt+5) lists ours and third-party; status/replies 📋 |
+| Comments list / review panel, status, replies | ✅ Comments panel (Ctrl+Alt+5) lists ours and third-party, in threads. Reply (R; Ctrl+Enter sends), set a status (right-click: None, Accepted, Rejected, Cancelled, Completed, with its history), checkmark (Shift+K), on anyone's comments. Written as Acrobat writes them, and Acrobat's replies to our marks stay attached across saves |
 | Flatten annotations | ✅ File > Export Flattened Copy… (links and form fields kept) |
 | Export Clean Copy (strip annots, notes, tapes, stamps, attachments) | ✅ File > Export Clean Copy; keeps links, form fields, bookmarks |
 | Measurement tools (distance, area, perimeter, scale) | 📋 |

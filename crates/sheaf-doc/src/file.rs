@@ -126,6 +126,62 @@ pub struct ForeignAnnot {
     pub modified: String,
     /// Bounds in the page's displayed space.
     pub rect: Box2,
+    /// `/NM`, or for one without, a stand-in made from what it says
+    /// ([`anon_name`]), so replies can still name it.
+    pub name: String,
+    /// The comment whose thread it's in (`/IRT`), by name.
+    pub parent: Option<String>,
+    /// `/RT /Group`: part of its parent (the StrikeOut of Acrobat's
+    /// replace-text edit, say) rather than a reply to it.
+    pub grouped: bool,
+    /// A review state it sets on its parent: (`/StateModel`, `/State`).
+    pub state: Option<(String, String)>,
+    /// `/CreationDate`, or empty.
+    pub created: String,
+}
+
+/// A name for an annotation without `/NM`, from what it says: the same
+/// every time it's read, so a reply made in sheaf can name it, and a save
+/// writes it in as its `/NM`.
+pub fn anon_name(dict: &lopdf::Dictionary) -> String {
+    // FNV-1a: stable across builds, unlike std's hasher.
+    let mut h: u64 = 0xcbf29ce484222325;
+    let mut eat = |bytes: &[u8]| {
+        for b in bytes.iter().chain(&[0xff]) {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+    };
+    for key in [
+        b"Subtype".as_slice(),
+        b"Rect",
+        b"T",
+        b"M",
+        b"CreationDate",
+        b"Contents",
+    ] {
+        let v = dict.get(key).ok();
+        match v {
+            Some(lopdf::Object::Array(a)) => {
+                for o in a {
+                    eat(format!("{:.2}", o.as_float().unwrap_or(0.0)).as_bytes());
+                }
+            }
+            Some(lopdf::Object::Name(n)) => eat(n),
+            Some(o) => eat(pdf_text(o).as_bytes()),
+            None => eat(b""),
+        }
+    }
+    format!("sheaf-anon:{h:016x}")
+}
+
+/// What an annotation is called in threads: its `/NM`, else [`anon_name`].
+pub fn thread_name(dict: &lopdf::Dictionary) -> String {
+    dict.get(b"NM")
+        .ok()
+        .map(pdf_text)
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| anon_name(dict))
 }
 
 /// Everything annotation-shaped in a file: our marks (editable, keyed by
@@ -327,6 +383,12 @@ pub fn read_sheaf_annots_mem(bytes: &[u8]) -> Result<HashMap<u32, Vec<Annot>>> {
     Ok(annots_in(&pdf).sheaf)
 }
 
+/// All annotations in a file's bytes.
+pub fn read_annots_mem(bytes: &[u8]) -> Result<AnnotsInFile> {
+    let pdf = lopdf::Document::load_mem(bytes)?;
+    Ok(annots_in(&pdf))
+}
+
 /// All annotations in `path`.
 pub fn read_annots(path: impl AsRef<Path>, password: Option<&str>) -> Result<AnnotsInFile> {
     let pdf = load_pdf(path.as_ref(), password)?;
@@ -428,6 +490,16 @@ fn annots_in(pdf: &lopdf::Document) -> AnnotsInFile {
                 y: rect[3],
             });
             let text = |key: &[u8]| dict.get(key).map(pdf_text).unwrap_or_default();
+            let name_of = |key: &[u8]| -> Option<String> {
+                let (_, o) = pdf.dereference(dict.get(key).ok()?).ok()?;
+                Some(thread_name(o.as_dict().ok()?))
+            };
+            let state = match (text(b"StateModel"), text(b"State")) {
+                (_, s) if s.is_empty() => None,
+                // Acrobat's default model.
+                (m, s) if m.is_empty() => Some((crate::annot::REVIEW.to_string(), s)),
+                (m, s) => Some((m, s)),
+            };
             out.foreign.push(ForeignAnnot {
                 page: i as u32,
                 subtype,
@@ -435,6 +507,15 @@ fn annots_in(pdf: &lopdf::Document) -> AnnotsInFile {
                 contents: text(b"Contents"),
                 modified: text(b"M"),
                 rect: Box2::from_corners(p, q),
+                name: thread_name(dict),
+                parent: name_of(b"IRT"),
+                grouped: dict
+                    .get(b"RT")
+                    .ok()
+                    .and_then(|o| o.as_name().ok())
+                    .is_some_and(|n| n == b"Group"),
+                state,
+                created: text(b"CreationDate"),
             });
         }
     }
@@ -495,8 +576,60 @@ mod tests {
     use super::*;
     use lopdf::{Object, Stream, dictionary};
 
-    /// One page carrying a third-party sticky note, a link (not a comment),
-    /// a popup (not a comment), and one of ours.
+    #[test]
+    fn their_threads_read_with_states_and_groups() {
+        use lopdf::{Object, Stream, dictionary};
+        let mut pdf = lopdf::Document::with_version("1.7");
+        let pages_id = pdf.new_object_id();
+        let content = pdf.add_object(Stream::new(dictionary! {}, b"".to_vec()));
+        let rect = || Object::Array(vec![10.into(), 10.into(), 20.into(), 20.into()]);
+        let text = |s: &str| Object::string_literal(s);
+        let parent = pdf.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "Highlight", "Rect" => rect(), "NM" => text("p"),
+        });
+        let accepted = pdf.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "Text", "Rect" => rect(), "IRT" => parent,
+            "State" => text("Accepted"), "StateModel" => text("Review"), "F" => 30,
+        });
+        // No /StateModel: Review, as Acrobat reads it.
+        let completed = pdf.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "Text", "Rect" => rect(), "IRT" => parent,
+            "State" => text("Completed"),
+        });
+        let part = pdf.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "StrikeOut", "Rect" => rect(), "IRT" => parent,
+            "RT" => Object::Name(b"Group".to_vec()),
+        });
+        let list: Vec<Object> = [parent, accepted, completed, part]
+            .into_iter()
+            .map(Object::Reference)
+            .collect();
+        let page = pdf.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages_id, "Contents" => content,
+            "MediaBox" => Object::Array(vec![0.into(), 0.into(), 612.into(), 792.into()]),
+            "Annots" => list,
+        });
+        pdf.objects.insert(
+            pages_id,
+            Object::Dictionary(
+                dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 },
+            ),
+        );
+        let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        pdf.trailer.set("Root", catalog);
+        let found = annots_in(&pdf).foreign;
+        assert_eq!(found.len(), 4);
+        assert_eq!(found[0].name, "p");
+        assert_eq!(found[0].parent, None);
+        assert_eq!(
+            found[1].state,
+            Some(("Review".to_string(), "Accepted".to_string()))
+        );
+        assert_eq!(found[1].parent.as_deref(), Some("p"));
+        assert_eq!(found[2].state.as_ref().unwrap().0, "Review");
+        assert!(found[3].grouped && !found[1].grouped);
+    }
+
     #[test]
     fn a_companion_follows_its_mark() {
         use lopdf::{Object, Stream, dictionary};
@@ -566,6 +699,8 @@ mod tests {
         assert_eq!(subtypes, vec!["StrikeOut", "Caret"]);
     }
 
+    /// One page carrying a third-party sticky note, a link (not a comment),
+    /// a popup (not a comment), and one of ours.
     #[test]
     fn reads_foreign_and_sheaf_annotations() {
         let mut pdf = lopdf::Document::with_version("1.7");
