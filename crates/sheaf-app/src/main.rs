@@ -59,6 +59,7 @@ mod scan_dialog;
 mod script;
 mod split_dialog;
 mod state;
+mod text_select;
 mod toolbar;
 mod toolbar_dialog;
 mod watermark_dialog;

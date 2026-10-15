@@ -17,7 +17,7 @@
 //! - `{"checkpoint": "name"}`: print `SCRIPT checkpoint name` and wait (up to
 //!   two minutes) until `<script>.go` contains that name, so a harness can
 //!   take a screenshot first.
-//! - `{"dump": "outline" | "notice" | "annots" | "pages" | "panels" |
+//! - `{"dump": "outline" | "notice" | "selection" | "annots" | "pages" | "panels" |
 //!   "plugins" | "region" | "view" | "layout" | "toolbar" | "focus"}`: print state as `SCRIPT <what>: …` lines.
 //! - `{"quit": true}`
 //!
@@ -389,6 +389,10 @@ impl Workspace {
         let st = d.model.state();
         match what {
             "notice" => eprintln!("SCRIPT notice: {:?}", d.notice),
+            "selection" => eprintln!(
+                "SCRIPT selection: {:?}",
+                view.selected_text().map(|(_, text, _)| text)
+            ),
             "pages" => eprintln!("SCRIPT pages: {}", st.pages.len()),
             "view" => eprintln!(
                 "SCRIPT view: page {} {:?} selected {:?}",

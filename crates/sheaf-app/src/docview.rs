@@ -152,6 +152,15 @@ pub(crate) struct Doc {
     /// The marks selected, in the order picked. The last is the one the
     /// handles and the text editor are on ([`Doc::selected_annot`]).
     pub(crate) selected_marks: Vec<(PageId, AnnotId)>,
+    /// Text selected with the Select tool (see text_select.rs).
+    pub(crate) text_sel: Option<crate::text_select::TextSel>,
+    pub(crate) text_drag: Option<crate::text_select::TextDrag>,
+    /// Pages' characters, as read for selecting text, with what they were
+    /// read from.
+    pub(crate) page_chars:
+        HashMap<PageId, (crate::text_select::CharsKey, Arc<sheaf_doc::PageChars>)>,
+    /// Pages whose characters the engine is reading.
+    pub(crate) chars_loading: HashSet<PageId>,
     pub(crate) annot_editor: Option<AnnotEditor>,
     pub(crate) pending_connector: Option<crate::markup_tools::PendingConnector>,
     /// Comments other tools left in the files the pages come from
@@ -564,6 +573,11 @@ pub struct DocView {
     pub(crate) tool: Tool,
     pub(crate) tool_color: [u8; 3],
     pub(crate) tick_glyph: String,
+    /// The Select tool is over text (the pointer is an I-beam).
+    pub(crate) text_hover: bool,
+    /// Where the pointer last was over a page: page, point, and how near
+    /// counts as on text.
+    pub(crate) last_hover: Option<(PageId, sheaf_doc::Pt, f32)>,
     /// Set while a plugin's edits are applied, so its own edits aren't
     /// reported back to it.
     pub(crate) edit_source: Option<String>,
@@ -659,6 +673,8 @@ impl DocView {
             tool: Tool::Select,
             tool_color: [255, 230, 0],
             tick_glyph: "✓".into(),
+            text_hover: false,
+            last_hover: None,
             edit_source: None,
             region: None,
             presentation: Default::default(),
@@ -821,6 +837,10 @@ impl DocView {
             outline_rows: Vec::new(),
             drag: None,
             selected_marks: Vec::new(),
+            text_sel: None,
+            text_drag: None,
+            page_chars: HashMap::new(),
+            chars_loading: HashSet::new(),
             annot_editor: None,
             pending_connector: None,
             foreign_annots: Vec::new(),
@@ -1334,6 +1354,10 @@ impl DocView {
                 .is_some_and(|l| l.iter().any(|a| a.id == *aid))
         });
         let live: HashSet<PageId> = doc.model.state().pages.iter().map(|p| p.id).collect();
+        if doc.text_sel.is_some_and(|s| !live.contains(&s.page)) {
+            doc.text_sel = None;
+        }
+        doc.page_chars.retain(|id, _| live.contains(id));
         let before = doc.selection.len();
         doc.selection.retain(|id| live.contains(id));
         doc.selection.len() != before
@@ -3906,6 +3930,31 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
             theme::PATTERN_HIT_CURRENT,
         ));
     }
+    // Selected text.
+    if let Some(sel) = doc.text_sel.filter(|s| s.page == pl.pref.id)
+        && let Some((_, chars)) = doc.page_chars.get(&sel.page)
+    {
+        let (a, b) = sel.range();
+        page_div = page_div.children(chars.rects(a, b).into_iter().map(|r| {
+            let r = rotate_rect(
+                Rect {
+                    x: r.x,
+                    y: r.y,
+                    w: r.w,
+                    h: r.h,
+                },
+                src,
+                rot,
+            );
+            div()
+                .absolute()
+                .left(px(r.x * k))
+                .top(px(r.y * k))
+                .w(px(r.w * k))
+                .h(px(r.h * k))
+                .bg(theme::SELECTION)
+        }));
+    }
     // A header/footer not yet saved into the file, drawn as it will be.
     page_div = page_div.children(header_footer_elements(doc, pl, k));
     // Our markup, drawn over the page in the displayed orientation.
@@ -4401,6 +4450,8 @@ impl Render for DocView {
                     // And a plugin command that reports progress.
                 } else if v.cancel_tape_placing(cx) || v.cancel_pending_connector(cx) {
                     // Esc with a tape or connector half-placed just drops it.
+                } else if v.clear_text_sel(cx) {
+                    // Then selected text.
                 } else {
                     if let State::Ready(doc) = &mut v.state {
                         doc.selected_marks.clear();
@@ -4428,7 +4479,9 @@ impl Render for DocView {
                 }
             }))
             .on_action(cx.listener(|v, _: &CopySelection, _, cx| {
-                v.copy_marks(cx);
+                if !v.copy_text(cx) {
+                    v.copy_marks(cx);
+                }
             }))
             .on_action(cx.listener(|v, _: &PasteMarks, _, cx| {
                 v.paste_marks(false, cx);
@@ -4446,7 +4499,9 @@ impl Render for DocView {
             .on_action(cx.listener(|v, _: &InsertPdf, _, cx| v.insert_pdf_prompt(cx)))
             .on_action(cx.listener(|v, _: &ToolSelect, _, cx| v.set_tool(Tool::Select, cx)))
             .on_action(cx.listener(|v, _: &ToolNote, _, cx| v.set_tool(Tool::Note, cx)))
-            .on_action(cx.listener(|v, _: &ToolHighlight, _, cx| v.set_tool(Tool::Highlight, cx)))
+            .on_action(
+                cx.listener(|v, _: &ToolHighlight, _, cx| v.markup_tool(Tool::Highlight, cx)),
+            )
             .on_action(cx.listener(|v, _: &ToolFreeText, _, cx| v.set_tool(Tool::FreeText, cx)))
             .on_action(cx.listener(|v, _: &ToolSquare, _, cx| v.set_tool(Tool::Square, cx)))
             .on_action(cx.listener(|v, _: &ToolEllipse, _, cx| v.set_tool(Tool::Ellipse, cx)))

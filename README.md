@@ -170,6 +170,7 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 | Thumbnails sidebar (lazy, virtualized) | ✅ |
 | Bookmarks (outline) sidebar | ✅ |
 | Text search (find in document) | ✅ progressive; ~6 ms/page |
+| Select and copy text | ✅ Select tool (V): drag over text, or double-click a word; Ctrl+C copies it. Recognized (OCR) text works before it's saved. Press U with text selected to highlight it |
 | Pattern search (regex: SSNs, EINs, amounts, dates) — separate tool from Find, shared engine with redaction | ✅ Patterns panel, Ctrl+Shift+F |
 | User-defined patterns: add, save, and delete presets; several date formats built in | ✅ `patterns.json`; right-click a preset |
 | Multiple documents, one window each | ✅ |

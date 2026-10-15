@@ -105,7 +105,7 @@ pub fn info(id: &str) -> Option<Info> {
         "docview::Redo" => ("redo", "Redo the change you just undid.", &[]),
         "docview::CopySelection" => (
             "copy",
-            "Copy the selected annotations, to paste here or in another document.",
+            "Copy the selected text, or the selected annotations to paste here or in another document.",
             &["clipboard", "duplicate"],
         ),
         "docview::PasteMarks" => (

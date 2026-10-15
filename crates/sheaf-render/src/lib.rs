@@ -71,6 +71,9 @@ pub struct Rect {
     pub h: f32,
 }
 
+/// A page's characters, each with its box (see [`Renderer::page_chars`]).
+pub type PageCharList = Vec<(char, Option<Rect>)>;
+
 /// One search match: the page it's on and the glyph boxes that make it up
 /// (usually one, more if the match wraps a line).
 #[derive(Debug, Clone)]
@@ -120,6 +123,10 @@ pub trait Renderer {
     fn page_text_len(&self, page: PageIndex) -> Result<usize>;
     /// The page's text in reading order, as the engine extracts it.
     fn page_text(&self, page: PageIndex) -> Result<String>;
+    /// The page's characters in the engine's order, each with its box (in
+    /// the displayed space); `None` for the spaces and line breaks the
+    /// engine adds between words and lines.
+    fn page_chars(&self, page: PageIndex) -> Result<PageCharList>;
     /// Render a whole page scaled so its width is `target_width` device pixels.
     fn render(&self, page: PageIndex, job: Job, format: PixelFormat) -> Result<Raster>;
 
@@ -506,6 +513,41 @@ pub mod pdfium {
                 .count())
         }
 
+        fn page_chars(&self, page: PageIndex) -> Result<PageCharList> {
+            let p = self.doc.pages().get(page.0 as i32)?;
+            let text = p.text()?;
+            const SCALE: f32 = 16.0;
+            let (pw, ph) = (p.width().value, p.height().value);
+            let cfg =
+                PdfRenderConfig::new().set_fixed_size((pw * SCALE) as i32, (ph * SCALE) as i32);
+            let to_display = |x: f32, y: f32| -> Option<(f32, f32)> {
+                let (dx, dy) = p
+                    .points_to_pixels(PdfPoints::new(x), PdfPoints::new(y), &cfg)
+                    .ok()?;
+                Some((dx as f32 / SCALE, dy as f32 / SCALE))
+            };
+            let mut out = Vec::new();
+            for c in text.chars().iter() {
+                let Some(ch) = c.unicode_char() else { continue };
+                let rect = if c.is_generated().unwrap_or(false) {
+                    None
+                } else {
+                    c.loose_bounds().ok().and_then(|b| {
+                        let (x0, y0) = to_display(b.left().value, b.bottom().value)?;
+                        let (x1, y1) = to_display(b.right().value, b.top().value)?;
+                        Some(Rect {
+                            x: x0.min(x1),
+                            y: y0.min(y1),
+                            w: (x1 - x0).abs(),
+                            h: (y1 - y0).abs(),
+                        })
+                    })
+                };
+                out.push((ch, rect));
+            }
+            Ok(out)
+        }
+
         fn page_text(&self, page: PageIndex) -> Result<String> {
             let p = self.doc.pages().get(page.0 as i32)?;
             Ok(p.text()?.all())
@@ -799,6 +841,10 @@ enum Msg {
         page: u32,
         reply: oneshot::Sender<Result<String>>,
     },
+    Chars {
+        page: u32,
+        reply: oneshot::Sender<Result<PageCharList>>,
+    },
     SearchPage {
         page: u32,
         query: String,
@@ -942,6 +988,13 @@ impl RenderHandle {
     pub fn page_text_len(&self, page: u32) -> oneshot::Receiver<Result<usize>> {
         let (tx, rx) = oneshot::channel();
         self.send(Msg::TextLen { page, reply: tx });
+        rx
+    }
+
+    /// The page's characters and their boxes (see [`Renderer::page_chars`]).
+    pub fn page_chars(&self, page: u32) -> oneshot::Receiver<Result<PageCharList>> {
+        let (tx, rx) = oneshot::channel();
+        self.send(Msg::Chars { page, reply: tx });
         rx
     }
 
@@ -1099,6 +1152,9 @@ fn worker_loop(engine: impl Renderer, rx: mpsc::Receiver<Msg>) {
                 }
                 Msg::Text { page, reply } => {
                     let _ = reply.send(engine.page_text(PageIndex(page)));
+                }
+                Msg::Chars { page, reply } => {
+                    let _ = reply.send(engine.page_chars(PageIndex(page)));
                 }
                 Msg::SearchPage {
                     page,

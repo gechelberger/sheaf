@@ -56,6 +56,8 @@ pub struct Facts {
     pub selection: bool,
     /// Marks of sheaf's selected (what Copy takes).
     pub marks: bool,
+    /// Text selected on a page (Copy takes that first).
+    pub text: bool,
     pub pages: bool,
     pub region: bool,
     pub can_undo: bool,
@@ -113,6 +115,7 @@ impl Facts {
         f.document = true;
         f.selection = !doc.selected_marks.is_empty() || doc.selected_foreign.is_some();
         f.marks = !doc.selected_marks.is_empty();
+        f.text = doc.text_sel.is_some_and(|s| !s.is_empty());
         f.pages = !doc.selection.is_empty();
         f.region = view.region.is_some();
         f.can_undo = doc.model.can_undo();
@@ -253,7 +256,7 @@ pub fn builtin(id: &str) -> Builtin {
         | "docview::NewBookmark"
         | "docview::PasteMarks"
         | "docview::PasteMarksInPlace" => (DOC, None, None),
-        "docview::CopySelection" => (DOC, Some(|f| f.marks), None),
+        "docview::CopySelection" => (DOC, Some(|f| f.marks || f.text), None),
         "docview::Undo" => (DOC, Some(|f| f.can_undo), None),
         "docview::Redo" => (DOC, Some(|f| f.can_redo), None),
         "docview::SinglePage" => (DOC, None, Some(|f| f.mode(Spread::Single, false))),

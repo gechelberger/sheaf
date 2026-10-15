@@ -299,10 +299,13 @@ fn connector_rect(center: Pt) -> Box2 {
 impl DocView {
     pub(crate) fn set_tool(&mut self, tool: Tool, cx: &mut Context<Self>) {
         self.tool = tool;
+        self.text_hover = false;
         if let State::Ready(doc) = &mut self.state {
             doc.drag = None;
             if tool != Tool::Select {
                 doc.selected_marks.clear();
+                doc.text_sel = None;
+                doc.text_drag = None;
             }
             if tool != Tool::Connector && doc.pending_connector.take().is_some() {
                 doc.notice = Some("Connector cancelled".into());
@@ -370,13 +373,9 @@ impl DocView {
         cx.notify();
     }
 
-    /// Window position → (page index, point in source-page space).
-    fn page_point(&self, pos: Point<Pixels>) -> Option<(usize, Pt)> {
-        self.page_point_k(pos).map(|(i, p, _)| (i, p))
-    }
-
-    /// [`page_point`](Self::page_point), and the page's scale (px per
-    /// point), for hit areas that stay the same size on screen.
+    /// Window position → (page index, point in source-page space, the
+    /// page's scale in px per point, for hit areas that stay the same size
+    /// on screen).
     fn page_point_k(&self, pos: Point<Pixels>) -> Option<(usize, Pt, f32)> {
         let State::Ready(doc) = &self.state else {
             return None;
@@ -448,6 +447,12 @@ impl DocView {
             return;
         };
         window.focus(&self.focus_handle, cx);
+        // A press anywhere on a page drops selected text; a drag on text
+        // makes a new selection.
+        if let State::Ready(doc) = &mut self.state {
+            doc.text_sel = None;
+            doc.text_drag = None;
+        }
         // Hit areas of a few screen pixels, whatever the zoom.
         let tolerance = 4.0 / k.max(0.01);
         let page_id = match &self.state {
@@ -531,10 +536,8 @@ impl DocView {
                 return;
             }
             if self.tool == Tool::Select {
-                if let State::Ready(doc) = &mut self.state {
-                    doc.selected_marks.clear();
-                }
-                cx.notify();
+                // Away from any mark: select text.
+                self.start_text_drag(page_id, page, p, tolerance, ev.click_count, cx);
                 return;
             }
         }
@@ -638,13 +641,29 @@ impl DocView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let Some((page, p, k)) = self.page_point_k(ev.position) else {
+            if ev.pressed_button.is_none() {
+                self.hover_off_pages(cx);
+            }
+            return;
+        };
+        if ev.pressed_button.is_none() {
+            let page_id = match &self.state {
+                State::Ready(doc) => doc.page_ref(page).map(|r| r.id),
+                _ => None,
+            };
+            if let Some(page_id) = page_id {
+                self.hover_page(page_id, p, 4.0 / k.max(0.01), cx);
+            }
+            return;
+        }
         if ev.pressed_button != Some(MouseButton::Left) {
             return;
         }
-        let Some((page, p)) = self.page_point(ev.position) else {
-            return;
-        };
         if self.drag_region(page, p, cx) {
+            return;
+        }
+        if self.move_text_drag(page, p, cx) {
             return;
         }
         let tool = self.tool;
@@ -672,7 +691,7 @@ impl DocView {
         if ev.button != MouseButton::Left {
             return;
         }
-        if self.end_region(cx) {
+        if self.end_region(cx) || self.end_text_drag(cx) {
             return;
         }
         let tool = self.tool;
@@ -740,7 +759,7 @@ impl DocView {
                 if too_small {
                     return;
                 }
-                self.highlight_from_drag(page_id, drag.page, rect, cx);
+                self.highlight_from_drag(page_id, rect, cx);
             }
             Tool::FreeText => {
                 if too_small {
@@ -809,57 +828,17 @@ impl DocView {
         }
     }
 
-    /// Ask the engine which glyphs the drag covered; fall back to an area
-    /// highlight when there's no text there.
-    fn highlight_from_drag(
-        &mut self,
-        page_id: PageId,
-        page: usize,
-        rect: Box2,
-        cx: &mut Context<Self>,
-    ) {
+    /// Highlight the text the drag covered (the engine's, or an unsaved
+    /// OCR layer's); an area highlight where there's no text.
+    fn highlight_from_drag(&mut self, page_id: PageId, rect: Box2, cx: &mut Context<Self>) {
         let color = self.tool_color;
-        let State::Ready(doc) = &self.state else {
-            return;
-        };
-        let Some(pref) = doc.page_ref(page) else {
-            return;
-        };
-        let Some(handle) = doc.handles.get(&pref.source).cloned() else {
-            return;
-        };
-        let rx = handle.text_boxes_in_rect(
-            pref.index,
-            Rect {
-                x: rect.x,
-                y: rect.y,
-                w: rect.w,
-                h: rect.h,
-            },
-        );
-        cx.spawn(async move |this, cx| {
-            let boxes = rx.await.ok().and_then(|r| r.ok()).unwrap_or_default();
-            this.update(cx, |view, cx| {
-                let rects: Vec<Box2> = if boxes.is_empty() {
-                    vec![rect]
-                } else {
-                    boxes
-                        .into_iter()
-                        .map(|r| Box2 {
-                            x: r.x,
-                            y: r.y,
-                            w: r.w,
-                            h: r.h,
-                        })
-                        .collect()
-                };
-                let mut a = view.new_annot(AnnotKind::Highlight { rects }, color, cx);
-                a.opacity = 0.6;
-                view.add_annot(page_id, a, "Highlight", cx);
-            })
-            .ok();
-        })
-        .detach();
+        self.with_chars(page_id, cx, move |view, chars, cx| {
+            let rects = chars.map(|c| c.rects_in(rect)).unwrap_or_default();
+            let rects = if rects.is_empty() { vec![rect] } else { rects };
+            let mut a = view.new_annot(AnnotKind::Highlight { rects }, color, cx);
+            a.opacity = 0.6;
+            view.add_annot(page_id, a, "Highlight", cx);
+        });
     }
 
     pub(crate) fn delete_selected_annot(&mut self, cx: &mut Context<Self>) -> bool {
@@ -1021,7 +1000,9 @@ impl DocView {
     }
 
     pub(crate) fn page_cursor(&self) -> CursorStyle {
-        if self.tool == Tool::Select {
+        if self.tool == Tool::Select && self.text_hover {
+            CursorStyle::IBeam
+        } else if self.tool == Tool::Select {
             CursorStyle::Arrow
         } else {
             CursorStyle::Crosshair

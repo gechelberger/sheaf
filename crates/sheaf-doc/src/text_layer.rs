@@ -136,12 +136,12 @@ impl TextLayer {
     }
 
     /// A word's box in the upright frame.
-    fn upright_box(&self, w: &OcrWord) -> Box2 {
+    pub(crate) fn upright_box(&self, w: &OcrWord) -> Box2 {
         rotate_box(w.rect, self.page, self.upright)
     }
 
     /// An upright-frame box back in source-displayed space.
-    fn unrotate_from_upright(&self, b: Box2) -> Box2 {
+    pub(crate) fn unrotate_from_upright(&self, b: Box2) -> Box2 {
         rotate_box(b, self.rendered(), Rotation::R0.minus(self.upright))
     }
 
@@ -188,7 +188,9 @@ fn group_lines(words: &mut Vec<OcrWord>) -> Vec<Range<usize>> {
     ranges
 }
 
-fn overlaps_line(line: Box2, r: Box2) -> bool {
+/// Whether `r` is level with a line whose box is `line`: their vertical
+/// overlap is at least half the smaller height.
+pub(crate) fn overlaps_line(line: Box2, r: Box2) -> bool {
     let overlap = line.bottom().min(r.bottom()) - line.y.max(r.y);
     overlap >= 0.5 * line.h.min(r.h)
 }

@@ -16,6 +16,7 @@ pub mod incremental;
 pub mod labels;
 pub mod layers;
 pub mod model;
+pub mod page_chars;
 pub mod portfolio;
 pub mod properties;
 pub mod recovery;
@@ -33,4 +34,5 @@ pub use model::{
     OutlineNode, PageId, PageRef, Rebase, Saved, Snapshot, SourceData, SourceId, SourceInfo, Step,
     TextStyle, VersionId, VersionView,
 };
+pub use page_chars::{Glyph, PageChars};
 pub use text_layer::{OcrWord, TextHit, TextLayer};
