@@ -297,6 +297,7 @@ fn builtin_menus() -> Vec<(&'static str, Vec<Item>)> {
                 sep(),
                 item("Tic&kmark", ToolTick),
                 item("Sta&mp", ToolStamp),
+                item("Attach File", ToolAttachFile),
                 item("&Connector", ToolConnector),
                 item("New Connector &Group", NextConnectorLabel),
                 sep(),

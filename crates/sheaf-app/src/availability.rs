@@ -324,6 +324,8 @@ pub fn builtin(id: &str) -> Builtin {
         "tools::ToolPolyline" => (DOC, None, Some(|f| f.tool == Some(Tool::Polyline))),
         "tools::ToolCloud" => (DOC, None, Some(|f| f.tool == Some(Tool::Cloud))),
         "tools::ToolCallout" => (DOC, None, Some(|f| f.tool == Some(Tool::Callout))),
+        "tools::ToolAttachFile" => (DOC, None, Some(|f| f.tool == Some(Tool::AttachFile))),
+        "tools::CycleStampTools" => (DOC, None, None),
         "tools::CycleDrawingTools" | "tools::CycleTextTools" | "tools::UndoVertex" => {
             (DOC, None, None)
         }

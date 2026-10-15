@@ -16,6 +16,9 @@ pub enum AttachmentRef {
     Named(String),
     /// The `n`th file-attachment annotation on page `page` (file order).
     Annot { page: u32, n: u32 },
+    /// One of sheaf's, by its bytes' name in the cache
+    /// (`generated::store_blob`): saved or not yet.
+    Cached(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -75,6 +78,10 @@ pub fn attachments_in(pdf: &Pdf) -> Vec<Attachment> {
                 n,
             };
             n += 1;
+            // sheaf's own are listed from the document (`Cached`).
+            if annot.has(b"SheafAnnot") {
+                continue;
+            }
             let Some(fs) = annot
                 .get(b"FS")
                 .ok()
@@ -95,12 +102,20 @@ pub fn attachments_in(pdf: &Pdf) -> Vec<Attachment> {
 
 /// The bytes of attachment `at` in the file at `path`.
 pub fn read_attachment(path: &Path, password: Option<&str>, at: &AttachmentRef) -> Result<Vec<u8>> {
+    if let AttachmentRef::Cached(stem) = at {
+        let p = crate::generated::blob_path(stem);
+        return std::fs::read(&p).with_context(|| format!("reading {}", p.display()));
+    }
     let pdf = crate::file::load_pdf(path, password)?;
     attachment_bytes(&pdf, at)
 }
 
 /// The bytes of attachment `at` in a loaded file.
 pub fn attachment_bytes(pdf: &Pdf, at: &AttachmentRef) -> Result<Vec<u8>> {
+    if let AttachmentRef::Cached(stem) = at {
+        let p = crate::generated::blob_path(stem);
+        return std::fs::read(&p).with_context(|| format!("reading {}", p.display()));
+    }
     let spec = match at {
         AttachmentRef::Named(key) => named_files(pdf)
             .into_iter()
@@ -108,6 +123,7 @@ pub fn attachment_bytes(pdf: &Pdf, at: &AttachmentRef) -> Result<Vec<u8>> {
             .and_then(|(_, o)| resolve(pdf, o))
             .and_then(|o| o.as_dict().ok())
             .with_context(|| format!("no embedded file named {key:?}"))?,
+        AttachmentRef::Cached(_) => unreachable!("read from the cache above"),
         AttachmentRef::Annot { page, n } => {
             let page_id = *pdf
                 .get_pages()

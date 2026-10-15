@@ -560,6 +560,8 @@ pub struct DocView {
     pub(crate) pending_calc_focus: Option<Entity<sheaf_ui::text_input::TextInput>>,
     pub(crate) comments: Option<crate::comments_panel::Comments>,
     pub(crate) history: Option<crate::history_panel::History>,
+    /// The icon the Attach File tool gives.
+    pub(crate) attach_icon: String,
     /// The Connector tool's label; None for the next unused one.
     pub(crate) connector_label: Option<String>,
     pub(crate) stamps: Option<crate::stamps_panel::StampsPanel>,
@@ -687,6 +689,7 @@ impl DocView {
             pending_comments_focus: false,
             history: None,
             connector_label: None,
+            attach_icon: "PushPin".into(),
             stamps: None,
             stamp_choice: None,
             pending_history_focus: false,
@@ -2219,6 +2222,20 @@ impl DocView {
         };
         doc.notice = Some(format!("Exporting flattened copy to {}…", path.display()));
         let snapshot = doc.model.snapshot();
+        // Flattening keeps an attachment's icon and drops its file, as
+        // Acrobat does: say so.
+        let files = snapshot
+            .state
+            .annots
+            .values()
+            .flatten()
+            .filter(|a| matches!(a.kind, AnnotKind::FileAttachment { .. }))
+            .count()
+            + doc
+                .attachments
+                .iter()
+                .filter(|a| matches!(a.at, sheaf_doc::attachments::AttachmentRef::Annot { .. }))
+                .count();
         let timing = self.timing;
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -2241,9 +2258,15 @@ impl DocView {
                                 );
                             }
                             format!(
-                                "Exported flattened copy to {} ({n} mark{})",
+                                "Exported flattened copy to {} ({n} mark{}){}",
                                 path.display(),
-                                if n == 1 { "" } else { "s" }
+                                if n == 1 { "" } else { "s" },
+                                match files {
+                                    0 => String::new(),
+                                    1 => " — the attachment's icon is kept, its file isn't".into(),
+                                    _ =>
+                                        " — attachments' icons are kept, their files aren't".into(),
+                                }
                             )
                         }
                         Err(e) => format!("Export failed: {e:#}"),
@@ -4589,6 +4612,10 @@ impl Render for DocView {
                 cx.listener(|v, _: &crate::ToolCallout, _, cx| v.set_tool(Tool::Callout, cx)),
             )
             .on_action(
+                cx.listener(|v, _: &crate::ToolAttachFile, _, cx| v.set_tool(Tool::AttachFile, cx)),
+            )
+            .on_action(cx.listener(|v, _: &crate::CycleStampTools, _, cx| v.cycle_stamp_tools(cx)))
+            .on_action(
                 cx.listener(|v, _: &crate::CycleDrawingTools, _, cx| v.cycle_drawing_tools(cx)),
             )
             .on_action(cx.listener(|v, _: &crate::CycleTextTools, _, cx| v.cycle_text_tools(cx)))
@@ -5193,6 +5220,26 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
         AnnotKind::Polygon { .. } | AnnotKind::Polyline { .. } => {
             let closed = matches!(a.kind, AnnotKind::Polygon { .. });
             out.extend(outline_elements(a, closed, src, rot, k, fill, alpha));
+        }
+        AnnotKind::FileAttachment { pos, icon, .. } => {
+            let at = Box2 {
+                x: pos.x,
+                y: pos.y,
+                w: sheaf_doc::annot::NOTE_SIZE,
+                h: sheaf_doc::annot::NOTE_SIZE,
+            };
+            let paths = sheaf_doc::annot::attachment_icon(icon, at)
+                .into_iter()
+                .map(|path| {
+                    path.into_iter()
+                        .map(|p| {
+                            let q = rotate_pt(p, src, rot);
+                            (q.x * k, q.y * k)
+                        })
+                        .collect()
+                })
+                .collect();
+            out.push(stroke_canvas(paths, fill, 1.5 * k, src.rotated(rot), k));
         }
         AnnotKind::Callout {
             rect,

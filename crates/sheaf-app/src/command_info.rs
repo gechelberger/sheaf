@@ -529,6 +529,16 @@ pub fn info(id: &str) -> Option<Info> {
                 "dynamic stamp",
             ],
         ),
+        "tools::ToolAttachFile" => (
+            "attach-file",
+            "Click where the icon goes, then pick the file to attach; it's embedded when you save.",
+            &["attachment", "embed", "paperclip"],
+        ),
+        "tools::CycleStampTools" => (
+            "stamp",
+            "Switch between the Stamp and Attach File tools.",
+            &["cycle"],
+        ),
         "workspace::ShowStamps" => (
             "stamp",
             "Show the Stamps panel: your stamp collections, Recent and Favorites.",

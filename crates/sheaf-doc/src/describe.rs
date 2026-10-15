@@ -147,6 +147,7 @@ fn noun(kind: &AnnotKind) -> String {
         AnnotKind::Polygon { .. } => "a polygon".into(),
         AnnotKind::Polyline { .. } => "a polyline".into(),
         AnnotKind::Callout { .. } => "a callout".into(),
+        AnnotKind::FileAttachment { name, .. } => format!("attachment {name}"),
         AnnotKind::Reply { .. } => "a reply".into(),
         AnnotKind::Status { .. } => "a status".into(),
     }

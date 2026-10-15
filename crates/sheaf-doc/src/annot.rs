@@ -214,7 +214,21 @@ pub enum AnnotKind {
         point: Pt,
         size: f32,
     },
+    /// A file attached at `pos` (Acrobat's Attach File). Its bytes are
+    /// `file` in the cache (`generated::store_blob`) until a save embeds
+    /// them; `name` and `size` are the file's. `icon` is one of
+    /// [`ATTACHMENT_ICONS`].
+    FileAttachment {
+        pos: Pt,
+        icon: String,
+        file: String,
+        name: String,
+        size: u64,
+    },
 }
+
+/// The icons an attachment can have, as PDF names them.
+pub const ATTACHMENT_ICONS: [&str; 4] = ["PushPin", "Paperclip", "Graph", "Tag"];
 
 /// What Previous/Next walks through: connectors by label, tickmarks by
 /// glyph, stamps by name, as in PDFlyer.
@@ -359,6 +373,19 @@ impl AnnotKind {
                 point: mp(point),
                 size: *s,
             },
+            AnnotKind::FileAttachment {
+                pos,
+                icon,
+                file,
+                name,
+                size,
+            } => AnnotKind::FileAttachment {
+                pos: mp(pos),
+                icon: icon.clone(),
+                file: file.clone(),
+                name: name.clone(),
+                size: *size,
+            },
             AnnotKind::Note { pos } => AnnotKind::Note { pos: mp(pos) },
             AnnotKind::FreeText { rect, size } => AnnotKind::FreeText {
                 rect: mb(rect),
@@ -480,6 +507,7 @@ impl AnnotKind {
             | AnnotKind::Reply { .. }
             | AnnotKind::Status { .. }
             | AnnotKind::PageBorder { .. }
+            | AnnotKind::FileAttachment { .. }
             | AnnotKind::Note { .. }
             | AnnotKind::Connector { .. } => Handles::None,
         }
@@ -688,6 +716,69 @@ pub fn cloud_curves(pts: &[Pt], step: f32) -> Vec<[Pt; 4]> {
     curves
 }
 
+/// An attachment icon's strokes in the box `at` (displayed space).
+pub fn attachment_icon(icon: &str, at: Box2) -> Vec<Vec<Pt>> {
+    let shape: Vec<Vec<(f32, f32)>> = match icon {
+        "Paperclip" => vec![vec![
+            (0.36, 0.72),
+            (0.36, 0.24),
+            (0.5, 0.1),
+            (0.64, 0.24),
+            (0.64, 0.82),
+            (0.5, 0.94),
+            (0.43, 0.84),
+            (0.43, 0.32),
+        ]],
+        "Graph" => vec![
+            vec![(0.14, 0.1), (0.14, 0.86), (0.9, 0.86)],
+            vec![(0.32, 0.86), (0.32, 0.58)],
+            vec![(0.52, 0.86), (0.52, 0.36)],
+            vec![(0.72, 0.86), (0.72, 0.18)],
+        ],
+        "Tag" => vec![
+            vec![
+                (0.1, 0.3),
+                (0.6, 0.3),
+                (0.9, 0.5),
+                (0.6, 0.7),
+                (0.1, 0.7),
+                (0.1, 0.3),
+            ],
+            vec![
+                (0.62, 0.45),
+                (0.7, 0.45),
+                (0.7, 0.55),
+                (0.62, 0.55),
+                (0.62, 0.45),
+            ],
+        ],
+        // PushPin, and anything this build doesn't know.
+        _ => vec![
+            vec![
+                (0.3, 0.12),
+                (0.7, 0.12),
+                (0.6, 0.32),
+                (0.68, 0.56),
+                (0.32, 0.56),
+                (0.4, 0.32),
+                (0.3, 0.12),
+            ],
+            vec![(0.5, 0.56), (0.5, 0.94)],
+        ],
+    };
+    shape
+        .into_iter()
+        .map(|path| {
+            path.into_iter()
+                .map(|(fx, fy)| Pt {
+                    x: at.x + fx * at.w,
+                    y: at.y + fy * at.h,
+                })
+                .collect()
+        })
+        .collect()
+}
+
 /// `/BE` for a cloudy border.
 fn cloudy_style() -> Dictionary {
     dictionary! { "S" => Object::Name(b"C".to_vec()), "I" => 1 }
@@ -800,7 +891,7 @@ impl Annot {
             AnnotKind::Callout {
                 rect, knee, point, ..
             } => union(&[*rect, Box2::from_corners(*knee, *point)]),
-            AnnotKind::Note { pos } => Box2 {
+            AnnotKind::Note { pos } | AnnotKind::FileAttachment { pos, .. } => Box2 {
                 x: pos.x,
                 y: pos.y,
                 w: NOTE_SIZE,
@@ -1025,6 +1116,35 @@ pub fn to_pdf_in(
     }
     let ap = pdf.add_object(Object::Stream(appearance));
     main.set("AP", dictionary! { "N" => ap });
+    // An attachment's file goes into the document now.
+    if let AnnotKind::FileAttachment {
+        file, name, size, ..
+    } = &a.kind
+    {
+        match std::fs::read(crate::generated::blob_path(file)) {
+            Ok(bytes) => {
+                let mut stream = Stream::new(
+                    dictionary! {
+                        "Type" => "EmbeddedFile",
+                        "Params" => dictionary! { "Size" => *size as i64 },
+                    },
+                    bytes,
+                );
+                let _ = stream.compress();
+                let ef = pdf.add_object(Object::Stream(stream));
+                main.set(
+                    "FS",
+                    dictionary! {
+                        "Type" => "Filespec",
+                        "F" => pdf_text_string(&name.chars().map(|c| if c.is_ascii() { c } else { '_' }).collect::<String>()),
+                        "UF" => pdf_text_string(name),
+                        "EF" => dictionary! { "F" => ef, "UF" => ef },
+                    },
+                );
+            }
+            Err(e) => log::warn!("attachment {name} ({file}) isn't on this machine: {e}"),
+        }
+    }
     let mut companions = Vec::new();
     // A replacement's crossed-out text: a StrikeOut of its own, grouped
     // under the Caret, which carries the mark.
@@ -1526,6 +1646,31 @@ fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
             if let AnnotKind::Status { model, state, .. } = &a.kind {
                 dict.set("StateModel", pdf_text_string(model));
                 dict.set("State", pdf_text_string(state));
+            }
+        }
+        AnnotKind::FileAttachment {
+            pos, icon, name, ..
+        } => {
+            dict.set("Subtype", Object::Name(b"FileAttachment".to_vec()));
+            dict.set("Name", Object::Name(icon.clone().into_bytes()));
+            dict.set("C", color_arr);
+            if a.contents.is_empty() {
+                dict.set("Contents", pdf_text_string(name));
+            }
+            content.push_str(&format!(" {} 1.5 w 1 J 1 j", color_ops(c, false)));
+            let at = Box2 {
+                x: pos.x,
+                y: pos.y,
+                w: NOTE_SIZE,
+                h: NOTE_SIZE,
+            };
+            for path in attachment_icon(icon, at) {
+                for (i, p) in path.iter().enumerate() {
+                    let u = up(*p);
+                    let op = if i == 0 { "m" } else { "l" };
+                    content.push_str(&format!(" {:.2} {:.2} {op}", u.x, u.y));
+                }
+                content.push_str(" S");
             }
         }
         AnnotKind::Note { pos } => {

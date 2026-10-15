@@ -385,6 +385,7 @@ fn ours_type(kind: &AnnotKind) -> &'static str {
         AnnotKind::Polygon { .. } => "Polygon",
         AnnotKind::Polyline { .. } => "Polyline",
         AnnotKind::Callout { .. } => "Callout",
+        AnnotKind::FileAttachment { .. } => "Attachment",
     }
 }
 
@@ -417,6 +418,7 @@ pub(crate) fn kind_label(kind: &AnnotKind) -> String {
         AnnotKind::Polygon { .. } => "Polygon".into(),
         AnnotKind::Polyline { .. } => "Polyline".into(),
         AnnotKind::Callout { .. } => "Callout".into(),
+        AnnotKind::FileAttachment { name, .. } => format!("Attachment {name}"),
     }
 }
 

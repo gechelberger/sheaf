@@ -5,6 +5,7 @@
 //! Each file opens in its own window.
 
 mod assets;
+mod attach;
 mod attachments_panel;
 mod availability;
 mod blank_review;
@@ -160,6 +161,8 @@ actions!(
         ToolPolyline,
         ToolCloud,
         ToolCallout,
+        ToolAttachFile,
+        CycleStampTools,
         CycleDrawingTools,
         CycleTextTools,
         UndoVertex,
@@ -511,6 +514,7 @@ fn main() {
             KeyBinding::new("n", ToolInk, doc_keys),
             KeyBinding::new("k", ToolTick, doc_keys),
             KeyBinding::new("j", ToolStamp, doc_keys),
+            KeyBinding::new("shift-j", CycleStampTools, doc_keys),
             KeyBinding::new("q", ToolCloud, doc_keys),
             KeyBinding::new("x", ToolFreeText, doc_keys),
             KeyBinding::new("shift-x", CycleTextTools, doc_keys),

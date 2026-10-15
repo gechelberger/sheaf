@@ -2496,6 +2496,72 @@ mod tests {
     }
 
     #[test]
+    fn an_attachment_is_embedded_and_recovered() {
+        use crate::annot::{AnnotKind, Pt};
+        let bytes = format!("workpaper notes {:x}", fastrand::u64(..)).into_bytes();
+        let stem = crate::generated::store_blob(&bytes).unwrap();
+        let dir = tempdir();
+        let a_path = make_pdf(&dir, "a.pdf", "A", 1, &[]);
+        let original = std::fs::read(&a_path).unwrap();
+        let mut model = opened(&a_path, original.len());
+        let p0 = model.page(0).unwrap().id;
+        model
+            .apply(
+                Edit::AnnotAdd {
+                    page: p0,
+                    annot: thread_mark(
+                        AnnotKind::FileAttachment {
+                            pos: Pt { x: 50.0, y: 50.0 },
+                            icon: "Paperclip".into(),
+                            file: stem.clone(),
+                            name: "notes.txt".into(),
+                            size: bytes.len() as u64,
+                        },
+                        "",
+                    ),
+                },
+                "attach",
+            )
+            .unwrap();
+        let out = crate::incremental::incremental(&model.snapshot()).unwrap();
+        let pdf = Pdf::load_mem(&out).unwrap();
+        let (_, d) = &page_annots(&out)[0];
+        assert_eq!(
+            d.get(b"Subtype").unwrap().as_name().unwrap(),
+            b"FileAttachment"
+        );
+        assert_eq!(d.get(b"Name").unwrap().as_name().unwrap(), b"Paperclip");
+        // The file is in it, byte for byte; ours aren't listed twice.
+        let embedded = pdf
+            .dereference(
+                d.get(b"FS")
+                    .unwrap()
+                    .as_dict()
+                    .unwrap()
+                    .get(b"EF")
+                    .unwrap()
+                    .as_dict()
+                    .unwrap()
+                    .get(b"F")
+                    .unwrap(),
+            )
+            .unwrap()
+            .1
+            .as_stream()
+            .unwrap()
+            .decompressed_content()
+            .unwrap();
+        assert_eq!(embedded, bytes);
+        assert!(crate::attachments::attachments_in(&pdf).is_empty());
+        // Elsewhere, without the cache: back from the file.
+        let path = crate::generated::blob_path(&stem);
+        std::fs::remove_file(&path).unwrap();
+        crate::file::recover_cached(&pdf);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn a_page_stamp_is_written_once_and_recovered_from_the_file() {
         use crate::annot::{AnnotKind, Box2};
         // A stamp page of its own, unlike any other test's.
@@ -2606,7 +2672,7 @@ mod tests {
 
         // On a machine without the stamp, it comes back from the file.
         std::fs::remove_file(&path).unwrap();
-        crate::file::recover_stamps(&pdf);
+        crate::file::recover_cached(&pdf);
         let back = Pdf::load_mem(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(back.get_pages().len(), 1);
         let _ = std::fs::remove_file(&path);

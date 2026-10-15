@@ -94,6 +94,24 @@ pub fn store_as(stem: &str, pdf: &[u8]) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Keep any file's bytes in the cache (an attachment until it's saved
+/// into the document), named by content; returns the name.
+pub fn store_blob(bytes: &[u8]) -> Result<String> {
+    let dir = cache_dir().join("files");
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let stem = format!("{:016x}-{}", fnv(bytes), bytes.len());
+    let path = dir.join(&stem);
+    if !std::fs::read(&path).is_ok_and(|b| b == bytes) {
+        write_new(&path, bytes)?;
+    }
+    Ok(stem)
+}
+
+/// Where the cache keeps the file named `stem` (see [`store_blob`]).
+pub fn blob_path(stem: &str) -> PathBuf {
+    cache_dir().join("files").join(stem)
+}
+
 /// One blank page of `width` × `height` points.
 pub fn blank_pdf(width: f32, height: f32) -> Result<Vec<u8>> {
     blank_pages(width, height, 1)

@@ -27,6 +27,8 @@ pub enum Filter {
     Pdf,
     Images,
     PdfAndImages,
+    /// Any file at all (an attachment).
+    Any,
 }
 
 pub fn open(cx: &App, options: PathPromptOptions) -> Dialog<Vec<PathBuf>> {
@@ -52,6 +54,7 @@ pub fn open_filtered(cx: &App, options: PathPromptOptions, filter: Filter) -> Di
             command.arg("--directory");
         } else {
             command.arg(match filter {
+                Filter::Any => "--file-filter=All files | *",
                 Filter::Pdf => "--file-filter=PDF files | *.pdf *.PDF",
                 Filter::Images => {
                     "--file-filter=Images | *.jpg *.jpeg *.png *.tif *.tiff *.bmp *.gif *.webp \
@@ -62,7 +65,9 @@ pub fn open_filtered(cx: &App, options: PathPromptOptions, filter: Filter) -> Di
                      *.tiff *.bmp *.gif *.webp *.JPG *.JPEG *.PNG *.TIF *.TIFF *.BMP *.GIF *.WEBP"
                 }
             });
-            command.arg("--file-filter=All files | *");
+            if filter != Filter::Any {
+                command.arg("--file-filter=All files | *");
+            }
         }
         if options.multiple {
             command.args(["--multiple", "--separator=\n"]);

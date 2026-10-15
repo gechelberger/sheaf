@@ -400,13 +400,14 @@ pub fn read_open(
 ) -> Result<(AnnotsInFile, FileFacts)> {
     let pdf = load_pdf(path.as_ref(), password)?;
     let found = annots_in(&pdf);
-    recover_stamps(&pdf);
+    recover_cached(&pdf);
     Ok((found, facts_in(&pdf)))
 }
 
-/// Our stamps whose page isn't in this machine's cache (a file from
-/// someone else), made again from their saved appearance.
-pub fn recover_stamps(pdf: &lopdf::Document) {
+/// What our marks keep in this machine's cache, when it isn't there (a
+/// file from someone else): a stamp's page, made again from its saved
+/// appearance, and an attachment's file, from its embedded copy.
+pub fn recover_cached(pdf: &lopdf::Document) {
     for (_, page_id) in pdf.get_pages() {
         let Ok(page) = pdf.get_dictionary(page_id) else {
             continue;
@@ -427,10 +428,41 @@ pub fn recover_stamps(pdf: &lopdf::Document) {
             else {
                 continue;
             };
+            let mark = sheaf_mark(dict);
+            if let Some(Annot {
+                kind: crate::annot::AnnotKind::FileAttachment { file, .. },
+                ..
+            }) = &mark
+                && !crate::generated::blob_path(file).exists()
+            {
+                let bytes = dict
+                    .get(b"FS")
+                    .ok()
+                    .and_then(|o| pdf.dereference(o).ok())
+                    .and_then(|(_, o)| o.as_dict().ok())
+                    .and_then(|fs| fs.get(b"EF").ok())
+                    .and_then(|o| pdf.dereference(o).ok())
+                    .and_then(|(_, o)| o.as_dict().ok())
+                    .and_then(|ef| ef.get(b"F").ok())
+                    .and_then(|o| o.as_reference().ok())
+                    .and_then(|id| match pdf.get_object(id) {
+                        Ok(lopdf::Object::Stream(s)) => Some(
+                            s.decompressed_content()
+                                .unwrap_or_else(|_| s.content.clone()),
+                        ),
+                        _ => None,
+                    });
+                match bytes.map(|b| crate::generated::store_blob(&b)) {
+                    Some(Ok(_)) => {}
+                    Some(Err(e)) => log::warn!("recovering attachment {file}: {e:#}"),
+                    None => log::warn!("attachment {file} has no embedded file"),
+                }
+                continue;
+            }
             let Some(Annot {
                 kind: crate::annot::AnnotKind::PageStamp { stamp, .. },
                 ..
-            }) = sheaf_mark(dict)
+            }) = mark
             else {
                 continue;
             };

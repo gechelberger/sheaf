@@ -43,6 +43,8 @@ pub enum Tool {
     Cloud,
     /// A text box with a leader line.
     Callout,
+    /// A file, behind an icon.
+    AttachFile,
     /// PDFlyer connector: two clicks place a linked pair of markers.
     Connector,
 }
@@ -69,6 +71,7 @@ impl Tool {
             Tool::Polyline => "Polyline",
             Tool::Cloud => "Cloud",
             Tool::Callout => "Callout",
+            Tool::AttachFile => "Attach File",
             Tool::Connector => "Connector",
         }
     }
@@ -115,11 +118,12 @@ impl Tool {
             Tool::Polyline => Box::new(ToolPolyline),
             Tool::Cloud => Box::new(ToolCloud),
             Tool::Callout => Box::new(ToolCallout),
+            Tool::AttachFile => Box::new(ToolAttachFile),
             Tool::Connector => Box::new(ToolConnector),
         }
     }
 
-    pub const ALL: [Tool; 20] = [
+    pub const ALL: [Tool; 21] = [
         Tool::Select,
         Tool::Note,
         Tool::Highlight,
@@ -139,6 +143,7 @@ impl Tool {
         Tool::Ink,
         Tool::Tick,
         Tool::Stamp,
+        Tool::AttachFile,
         Tool::Connector,
     ];
 }
@@ -594,9 +599,12 @@ impl DocView {
             }
             if let Some(a) = mark {
                 if ev.click_count >= 2 && self.tool == Tool::Select {
-                    // A tape goes back to the calculator to be edited.
+                    // A tape goes back to the calculator to be edited; an
+                    // attachment opens its file.
                     if matches!(a.kind, AnnotKind::Tape { .. }) {
                         self.edit_tape(page_id, a.id, cx);
+                    } else if matches!(a.kind, AnnotKind::FileAttachment { .. }) {
+                        self.open_attached(page_id, a.id, window, cx);
                     } else {
                         self.start_annot_editor_for(page_id, a.id, window, cx);
                     }
@@ -691,6 +699,7 @@ impl DocView {
                 self.add_annot(page_id, a, "Tickmark", cx);
             }
             Tool::Stamp => self.place_stamp(page_id, p, cx),
+            Tool::AttachFile => self.attach_file_at(page_id, p, cx),
             Tool::Polygon | Tool::Polyline | Tool::Cloud => {
                 self.add_vertex(page, page_id, p, ev.click_count, cx)
             }
@@ -904,7 +913,7 @@ impl DocView {
                 an.stroke = 2.0;
                 self.add_annot(page_id, an, "Pencil", cx);
             }
-            Tool::Note | Tool::Tick | Tool::Stamp | Tool::Connector => {}
+            Tool::Note | Tool::Tick | Tool::Stamp | Tool::AttachFile | Tool::Connector => {}
         }
     }
 
@@ -1206,7 +1215,7 @@ impl DocView {
                     _ => el.border_1().border_color(c).into_any_element(),
                 })
             }
-            Tool::Note | Tool::Tick | Tool::Stamp | Tool::Connector => None,
+            Tool::Note | Tool::Tick | Tool::Stamp | Tool::AttachFile | Tool::Connector => None,
             Tool::Polygon | Tool::Polyline | Tool::Cloud => None,
             Tool::Callout => {
                 let (pa, pb) = (rotate_pt(a, src, rot), rotate_pt(b, src, rot));
@@ -1498,6 +1507,10 @@ impl DocView {
             .iter()
             .any(|a| matches!(a.kind, AnnotKind::Line { .. }));
         let cloudable = marks.iter().any(|a| a.kind.cloudable());
+        let icon = marks.iter().find_map(|a| match &a.kind {
+            AnnotKind::FileAttachment { icon, .. } => Some(icon.clone()),
+            _ => None,
+        });
         let cloudy = last.cloudy;
         let text_size = marks.iter().find_map(|a| a.kind.text_size());
         let label = |s: &'static str| div().text_color(theme::TEXT_MUTED).child(s);
@@ -1707,6 +1720,31 @@ impl DocView {
                                 )
                             },
                         )),
+                    )
+                })
+                .when_some(icon, |d, current| {
+                    d.child(div().w(px(8.0))).child(label("Icon")).children(
+                        sheaf_doc::annot::ATTACHMENT_ICONS
+                            .iter()
+                            .enumerate()
+                            .map(|(i, name)| {
+                                chip(("prop-icon", i), (*name).into(), current == *name).on_click(
+                                    cx.listener(move |v, _, _, cx| {
+                                        v.attach_icon = name.to_string();
+                                        v.restyle(
+                                            "Attachment icon",
+                                            |a| match &mut a.kind {
+                                                AnnotKind::FileAttachment { icon, .. } => {
+                                                    *icon = name.to_string();
+                                                    true
+                                                }
+                                                _ => false,
+                                            },
+                                            cx,
+                                        )
+                                    }),
+                                )
+                            }),
                     )
                 })
                 .when(lines, |d| {

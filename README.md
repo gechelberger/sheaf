@@ -178,7 +178,7 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 | Page labels (display) | ✅ status bar and thumbnails; View > Page Navigation > Go to Page (Ctrl+Shift+N) takes a label or number |
 | Rulers, grid, guides | ✅ View > Rulers (Ctrl+R), Grid (Ctrl+U); drag from a ruler for a guide |
 | Split view (same document, two places) | ✅ View > Split (Ctrl+\\); F6 switches pane |
-| Attachments panel | ✅ View > Panels > Attachments (Ctrl+Alt+6): open (PDFs in sheaf, others with the system program after a warning) or save out |
+| Attachments panel | ✅ View > Panels > Attachments (Ctrl+Alt+6): open (PDFs in sheaf, others with the system program after a warning) or save out. **Attach File** (Shift+J from Stamp) puts a file on the page behind a push pin, paperclip, graph or tag; it's embedded when you save, and double-clicking the icon opens it. Flattening keeps the icon and drops the file, as Acrobat does |
 | Open PDF Portfolios (browse and extract embedded files) | ✅ opens on its cover sheet with the Attachments panel: folders, metadata columns, open/save |
 | Recent files | ✅ File > Open Recent (last 10, shared by every window) |
 | Document Properties | ✅ File > Properties (Alt+Enter): description, security, fonts |

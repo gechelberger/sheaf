@@ -124,6 +124,7 @@ const FILES: &[(&str, &[u8])] = icons![
     "polyline",
     "cloud",
     "callout",
+    "attach-file",
     "undo",
     "watermark",
     "zoom-in",
