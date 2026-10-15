@@ -29,6 +29,11 @@ pub fn info(id: &str) -> Option<Info> {
             "Forget the files listed under Open Recent.",
             &["history", "mru"],
         ),
+        "workspace::OpenSettingsFile" => (
+            "settings",
+            "Open settings.toml, where your name, initials and other preferences are set, in a text editor. If there's no file yet, sheaf writes one with every setting explained.",
+            &["preferences", "options", "identity", "configure", "toml"],
+        ),
         "docview::Save" => (
             "save",
             "Save changes to this file. Annotations are added without rewriting the original when possible.",
@@ -48,6 +53,54 @@ pub fn info(id: &str) -> Option<Info> {
             "flatten",
             "Save a copy with annotations burned into the page, so they can't be changed or removed.",
             &["burn", "bake"],
+        ),
+        "docview::SummarizeComments" => (
+            "summarize-comments",
+            "Make a PDF listing the comments the Comments panel shows, in its order: numbered, threaded, with who wrote each and when.",
+            &[
+                "summary",
+                "report",
+                "comment list",
+                "stamp summary",
+                "note summary",
+            ],
+        ),
+        "docview::SummarizeCommentsWithPages" => (
+            "summarize-with-pages",
+            "Make a PDF of each page that has comments beside a numbered list of them, with the numbers on the page where the comments are.",
+            &["summary", "report", "sequence numbers", "review"],
+        ),
+        "docview::ExportCommentsCsv" => (
+            "export-comments-csv",
+            "Save the comments the Comments panel shows as a spreadsheet: one row per comment, reply and status, in the columns chosen in its Export menu.",
+            &["csv", "spreadsheet", "excel", "export", "stamp summary"],
+        ),
+        "docview::ExportCommentsText" => (
+            "export-comments-text",
+            "Save the comments the Comments panel shows as plain text, numbered and threaded.",
+            &["txt", "export", "list", "note summary"],
+        ),
+        "docview::ImportComments" => (
+            "import-comments",
+            "Bring in comments from an FDF or XFDF file, or another PDF. One that's here already (by its name) is updated, the rest are added, all as one undo step; kinds sheaf can't hold are listed.",
+            &[
+                "fdf",
+                "xfdf",
+                "data file",
+                "merge",
+                "acrobat",
+                "import data file",
+            ],
+        ),
+        "docview::ExportCommentsXfdf" => (
+            "export-xfdf",
+            "Save the comments the Comments panel shows as XFDF, which Acrobat and other tools import.",
+            &["xfdf", "xml", "data file", "export data file", "acrobat"],
+        ),
+        "docview::ExportCommentsFdf" => (
+            "export-fdf",
+            "Save the comments the Comments panel shows as FDF, which Acrobat and other tools import.",
+            &["fdf", "data file", "export data file", "acrobat"],
         ),
         "workspace::CombineFiles" => (
             "combine-files",
@@ -98,6 +151,36 @@ pub fn info(id: &str) -> Option<Info> {
         // Edit
         "docview::Undo" => ("undo", "Undo the last change to the document.", &[]),
         "docview::Redo" => ("redo", "Redo the change you just undid.", &[]),
+        "docview::CopySelection" => (
+            "copy",
+            "Copy the selected text, or the selected annotations to paste here or in another document.",
+            &["clipboard", "duplicate"],
+        ),
+        "docview::PasteMarks" => (
+            "paste",
+            "Paste copied annotations onto the current page, a little offset.",
+            &["clipboard"],
+        ),
+        "docview::ToggleComments" => (
+            "comments",
+            "Show or hide every comment on the page; the Comments panel still lists them.",
+            &["hide comments", "annotations", "markup"],
+        ),
+        "comments::ReplyToComment" => (
+            "reply",
+            "Reply to the comment selected in the Comments panel.",
+            &["thread", "answer", "respond"],
+        ),
+        "comments::ToggleCheckmark" => (
+            "checkmark",
+            "Check or uncheck the selected comment, to keep track of the ones dealt with.",
+            &["mark", "done", "tick"],
+        ),
+        "docview::PasteMarksInPlace" => (
+            "paste-in-place",
+            "Paste copied annotations onto the current page where they were.",
+            &["clipboard", "same position"],
+        ),
         "docview::SelectAllPages" => (
             "select-all-pages",
             "Select every page in the thumbnails, for page commands.",
@@ -231,6 +314,11 @@ pub fn info(id: &str) -> Option<Info> {
             "Show the document's layers and turn them on or off.",
             &["ocg", "optional content"],
         ),
+        "workspace::ShowHistory" => (
+            "history",
+            "Every version of the document since it opened, with the edits that made it. Click one to go back to it; edits that were undone and replaced are kept too.",
+            &["undo", "redo", "versions", "changes", "log", "audit"],
+        ),
         "workspace::CommandPalette" => (
             "command-palette",
             "Find and run any command by name.",
@@ -312,6 +400,21 @@ pub fn info(id: &str) -> Option<Info> {
             "Make a bookmark for each page of a range, titled from a template like \"Page <<label>>\".",
             &["outline", "page bookmarks", "index"],
         ),
+        "workspace::SetStatus" => (
+            "color-bookmarks",
+            "On the selected bookmark: color it, border its pages, and stamp them with a status and your initials (PDFlyer's Set Status).",
+            &["status", "reviewed", "sign off", "border"],
+        ),
+        "workspace::SetStatusAgain" => (
+            "color-bookmarks",
+            "Set the last status again, on the selected bookmark.",
+            &["status", "repeat"],
+        ),
+        "workspace::ResetStatus" => (
+            "color-bookmarks",
+            "Take the selected bookmark's status off: its color, style and page borders.",
+            &["status", "clear", "remove border"],
+        ),
         "workspace::ColorBookmarksByLevel" => (
             "color-bookmarks",
             "Color every bookmark by how deeply it's nested, as PDFlyer does.",
@@ -385,8 +488,33 @@ pub fn info(id: &str) -> Option<Info> {
         ),
         "tools::ToolHighlight" => (
             "highlight",
-            "Drag across text to highlight it.",
+            "Drag across text to highlight it, or highlight the selected text.",
             &["marker"],
+        ),
+        "tools::ToolUnderline" => (
+            "underline",
+            "Drag across text to underline it, or underline the selected text.",
+            &["text markup"],
+        ),
+        "tools::ToolStrikeOut" => (
+            "strikethrough",
+            "Drag across text to cross it out, or cross out the selected text.",
+            &["strikeout", "cross out", "text markup"],
+        ),
+        "tools::ToolSquiggly" => (
+            "squiggly",
+            "Drag across text to put a wavy line under it.",
+            &["wavy", "text markup"],
+        ),
+        "tools::ToolTextEdit" => (
+            "text-edit",
+            "Drag across text and type its replacement, or click between characters and type to insert.",
+            &["replace text", "insert text", "caret", "suggest"],
+        ),
+        "tools::CycleTextMarkup" => (
+            "underline",
+            "Switch to the next text markup tool: highlight, underline, strikethrough, squiggly.",
+            &["cycle"],
         ),
         "tools::ToolFreeText" => (
             "text",
@@ -398,14 +526,125 @@ pub fn info(id: &str) -> Option<Info> {
         "tools::ToolLine" => ("line", "Drag to draw a straight line.", &[]),
         "tools::ToolArrow" => ("arrow", "Drag to draw an arrow.", &[]),
         "tools::ToolInk" => ("pencil", "Draw freehand.", &["ink", "pen", "draw"]),
+        "tools::ToolPolygon" => (
+            "polygon",
+            "Click each corner of a closed shape; double-click or Enter finishes, Backspace takes one off.",
+            &["shape", "vertices"],
+        ),
+        "tools::ToolPolyline" => (
+            "polyline",
+            "Click each point of an open line; double-click or Enter finishes.",
+            &["shape", "path", "vertices"],
+        ),
+        "tools::ToolCloud" => (
+            "cloud",
+            "Click each corner of a shape with a cloudy border, to call attention to an area.",
+            &["revision cloud", "shape"],
+        ),
+        "tools::ToolCallout" => (
+            "callout",
+            "Press where it points and drag to where its text goes, then type.",
+            &["leader", "text box", "label"],
+        ),
+        "tools::ToolDistance" => (
+            "distance",
+            "Measure between two points: drag from one to the other. Shift keeps it to 45°; the scale is in the bar under the toolbar.",
+            &["measure", "length", "ruler", "dimension", "scale"],
+        ),
+        "tools::ToolPerimeter" => (
+            "perimeter",
+            "Measure along a path: click each point; double-click or Enter finishes.",
+            &["measure", "length", "path", "dimension"],
+        ),
+        "tools::ToolArea" => (
+            "area",
+            "Measure the area inside a shape: click each corner; double-click or Enter finishes.",
+            &["measure", "square feet", "polygon", "dimension"],
+        ),
+        "tools::CalibrateScale" => (
+            "calibrate",
+            "Set the measuring scale from the page: draw a line along something of known length, then type how long it really is.",
+            &["scale", "measure", "set scale", "units"],
+        ),
+        "tools::CycleDrawingTools" => (
+            "rectangle",
+            "Switch to the next drawing tool: rectangle, ellipse, line, arrow, polyline, polygon, cloud, pencil.",
+            &["cycle", "shapes"],
+        ),
+        "tools::CycleTextTools" => (
+            "text",
+            "Switch between the text box and the callout.",
+            &["cycle"],
+        ),
+        "tools::UndoVertex" => (
+            "undo",
+            "Take the last corner off the shape being drawn.",
+            &["backspace"],
+        ),
         "tools::ToolTick" => (
             "tick",
             "Click to stamp the selected tickmark.",
             &["tickmark", "stamp", "check"],
         ),
+        "tools::ToolStamp" => (
+            "stamp",
+            "Click to place the stamp picked in the Stamps panel: yours, or a dynamic one with your initials and the date.",
+            &[
+                "approved",
+                "reviewed",
+                "signature",
+                "image",
+                "dynamic stamp",
+            ],
+        ),
+        "tools::ToolAttachFile" => (
+            "attach-file",
+            "Click where the icon goes, then pick the file to attach; it's embedded when you save.",
+            &["attachment", "embed", "paperclip"],
+        ),
+        "tools::CycleStampTools" => (
+            "stamp",
+            "Switch between the Stamp and Attach File tools.",
+            &["cycle"],
+        ),
+        "workspace::ShowStamps" => (
+            "stamp",
+            "Show the Stamps panel: your stamp collections, Recent and Favorites.",
+            &["stamp library", "custom stamps"],
+        ),
+        "tools::NextConnectorLabel" => (
+            "connector",
+            "Give the Connector tool the next label no connector uses, to start a new group.",
+            &["new connector group", "label"],
+        ),
+        "tools::GroupNext" => (
+            "next-page",
+            "Go to the next mark like the selected one: connector by label, tickmark by glyph, stamp by name.",
+            &["next connector", "next tickmark", "next stamp", "group"],
+        ),
+        "tools::GroupPrev" => (
+            "prev-page",
+            "Go to the previous mark like the selected one.",
+            &[
+                "previous connector",
+                "previous tickmark",
+                "previous stamp",
+                "group",
+            ],
+        ),
+        "tools::GroupPagesWith" => (
+            "find",
+            "List the pages that have a mark like the selected one, to go to them.",
+            &["pages with", "connector", "tickmark", "stamp"],
+        ),
+        "tools::GroupPagesWithout" => (
+            "find",
+            "List the pages that don't have a mark like the selected one.",
+            &["pages without", "missing", "connector", "tickmark", "stamp"],
+        ),
         "tools::ToolConnector" => (
             "connector",
-            "Click twice to place a linked pair of markers.",
+            "Click to place connectors with the label shown over the page: each click adds one to that label's group, and clicking one goes to the next.",
             &["link", "cross-reference", "tie"],
         ),
         // Plugins, Help

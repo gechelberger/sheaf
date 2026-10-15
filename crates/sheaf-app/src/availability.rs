@@ -54,6 +54,12 @@ impl When {
 pub struct Facts {
     pub document: bool,
     pub selection: bool,
+    /// Marks of sheaf's selected (what Copy takes).
+    pub marks: bool,
+    /// Text selected on a page (Copy takes that first).
+    pub text: bool,
+    /// Comments are shown on the page (View > Show Comments).
+    pub comments_shown: bool,
     pub pages: bool,
     pub region: bool,
     pub can_undo: bool,
@@ -109,7 +115,10 @@ impl Facts {
         };
         let pane = doc.pane();
         f.document = true;
-        f.selection = doc.selected_annot.is_some() || doc.selected_foreign.is_some();
+        f.selection = !doc.selected_marks.is_empty() || doc.selected_foreign.is_some();
+        f.marks = !doc.selected_marks.is_empty();
+        f.text = doc.text_sel.is_some_and(|s| !s.is_empty());
+        f.comments_shown = !doc.comments_hidden;
         f.pages = !doc.selection.is_empty();
         f.region = view.region.is_some();
         f.can_undo = doc.model.can_undo();
@@ -210,6 +219,13 @@ pub fn builtin(id: &str) -> Builtin {
         "docview::SaveAs"
         | "docview::ExportCleanCopy"
         | "docview::ExportFlattened"
+        | "docview::SummarizeComments"
+        | "docview::SummarizeCommentsWithPages"
+        | "docview::ExportCommentsCsv"
+        | "docview::ExportCommentsText"
+        | "docview::ExportCommentsXfdf"
+        | "docview::ExportCommentsFdf"
+        | "docview::ImportComments"
         | "workspace::ExportPages"
         | "workspace::SplitDocument"
         | "workspace::InsertBlankPages"
@@ -223,6 +239,9 @@ pub fn builtin(id: &str) -> Builtin {
         | "workspace::AddBackground"
         | "workspace::BookmarksFromPages"
         | "workspace::ColorBookmarksByLevel"
+        | "workspace::SetStatus"
+        | "workspace::SetStatusAgain"
+        | "workspace::ResetStatus"
         | "workspace::FindBlankPages"
         | "workspace::Print"
         | "workspace::DocumentProperties"
@@ -247,7 +266,14 @@ pub fn builtin(id: &str) -> Builtin {
         | "docview::DuplicatePages"
         | "docview::ExtractPages"
         | "docview::DeletePage"
-        | "docview::NewBookmark" => (DOC, None, None),
+        | "docview::NewBookmark"
+        | "docview::PasteMarks"
+        | "docview::PasteMarksInPlace" => (DOC, None, None),
+        "docview::CopySelection" => (DOC, Some(|f| f.marks || f.text), None),
+        "docview::ToggleComments" => (DOC, None, Some(|f| f.comments_shown)),
+        "comments::ReplyToComment" | "comments::ToggleCheckmark" => {
+            (DOC, Some(|f| f.selection), None)
+        }
         "docview::Undo" => (DOC, Some(|f| f.can_undo), None),
         "docview::Redo" => (DOC, Some(|f| f.can_redo), None),
         "docview::SinglePage" => (DOC, None, Some(|f| f.mode(Spread::Single, false))),
@@ -276,6 +302,7 @@ pub fn builtin(id: &str) -> Builtin {
         "workspace::ShowComments" => (&[], None, Some(|f| f.panel(Panel::Comments))),
         "workspace::ShowAttachments" => (&[], None, Some(|f| f.panel(Panel::Attachments))),
         "workspace::ShowLayers" => (&[], None, Some(|f| f.panel(Panel::Layers))),
+        "workspace::ShowHistory" => (&[], None, Some(|f| f.panel(Panel::History))),
         "workspace::ToggleSidebar" => (&[], None, Some(|f| !f.all_hidden)),
         "workspace::ToggleLeftDock" => (&[], None, Some(|f| f.dock(Side::Left))),
         "workspace::ToggleRightDock" => (&[], None, Some(|f| f.dock(Side::Right))),
@@ -286,6 +313,11 @@ pub fn builtin(id: &str) -> Builtin {
         "tools::ToolSelect" => (DOC, None, Some(|f| f.tool == Some(Tool::Select))),
         "tools::ToolNote" => (DOC, None, Some(|f| f.tool == Some(Tool::Note))),
         "tools::ToolHighlight" => (DOC, None, Some(|f| f.tool == Some(Tool::Highlight))),
+        "tools::ToolUnderline" => (DOC, None, Some(|f| f.tool == Some(Tool::Underline))),
+        "tools::ToolStrikeOut" => (DOC, None, Some(|f| f.tool == Some(Tool::StrikeOut))),
+        "tools::ToolSquiggly" => (DOC, None, Some(|f| f.tool == Some(Tool::Squiggly))),
+        "tools::ToolTextEdit" => (DOC, None, Some(|f| f.tool == Some(Tool::TextEdit))),
+        "tools::CycleTextMarkup" => (DOC, None, None),
         "tools::ToolFreeText" => (DOC, None, Some(|f| f.tool == Some(Tool::FreeText))),
         "tools::ToolSquare" => (DOC, None, Some(|f| f.tool == Some(Tool::Square))),
         "tools::ToolEllipse" => (DOC, None, Some(|f| f.tool == Some(Tool::Ellipse))),
@@ -294,6 +326,25 @@ pub fn builtin(id: &str) -> Builtin {
         "tools::ToolInk" => (DOC, None, Some(|f| f.tool == Some(Tool::Ink))),
         "tools::ToolTick" => (DOC, None, Some(|f| f.tool == Some(Tool::Tick))),
         "tools::ToolConnector" => (DOC, None, Some(|f| f.tool == Some(Tool::Connector))),
+        "tools::ToolStamp" => (DOC, None, Some(|f| f.tool == Some(Tool::Stamp))),
+        "tools::ToolPolygon" => (DOC, None, Some(|f| f.tool == Some(Tool::Polygon))),
+        "tools::ToolPolyline" => (DOC, None, Some(|f| f.tool == Some(Tool::Polyline))),
+        "tools::ToolCloud" => (DOC, None, Some(|f| f.tool == Some(Tool::Cloud))),
+        "tools::ToolCallout" => (DOC, None, Some(|f| f.tool == Some(Tool::Callout))),
+        "tools::ToolDistance" => (DOC, None, Some(|f| f.tool == Some(Tool::Distance))),
+        "tools::ToolPerimeter" => (DOC, None, Some(|f| f.tool == Some(Tool::Perimeter))),
+        "tools::ToolArea" => (DOC, None, Some(|f| f.tool == Some(Tool::Area))),
+        "tools::CalibrateScale" => (DOC, None, None),
+        "tools::ToolAttachFile" => (DOC, None, Some(|f| f.tool == Some(Tool::AttachFile))),
+        "tools::CycleStampTools" => (DOC, None, None),
+        "tools::CycleDrawingTools" | "tools::CycleTextTools" | "tools::UndoVertex" => {
+            (DOC, None, None)
+        }
+        "tools::NextConnectorLabel" => (DOC, None, None),
+        "tools::GroupNext"
+        | "tools::GroupPrev"
+        | "tools::GroupPagesWith"
+        | "tools::GroupPagesWithout" => (DOC, Some(|f| f.marks), None),
         _ => (&[], None, None),
     };
     Builtin {

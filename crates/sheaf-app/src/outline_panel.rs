@@ -255,6 +255,7 @@ impl DocView {
                             target: None,
                             color: None,
                             view: None,
+                            style: None,
                         },
                         "Rename bookmark",
                         cx,
@@ -315,6 +316,7 @@ impl DocView {
                 target: Some(Some(page)),
                 color: None,
                 view: Some(view),
+                style: None,
             },
             "Set destination",
             cx,
@@ -336,6 +338,7 @@ impl DocView {
                 target: None,
                 color: Some(color),
                 view: None,
+                style: None,
             },
             "Bookmark color",
             cx,
@@ -546,6 +549,8 @@ impl DocView {
                     .whitespace_nowrap()
                     .text_ellipsis()
                     .text_color(title_color)
+                    .when(node.style.bold, |d| d.font_weight(gpui::FontWeight::BOLD))
+                    .when(node.style.italic, |d| d.italic())
                     .child(node.title.clone())
                     .into_any_element(),
             };
@@ -767,6 +772,18 @@ fn self_menu(pos: Point<Pixels>, cx: &mut Context<DocView>) -> AnyElement {
                         cx,
                         |v, _, cx| v.set_selected_destination(cx),
                     ))
+                    .child(item("menu-status", "Set Status…", cx, |_, w, cx| {
+                        w.dispatch_action(Box::new(crate::SetStatus), cx)
+                    }))
+                    .child(item(
+                        "menu-status-again",
+                        "Set Status Again",
+                        cx,
+                        |_, w, cx| w.dispatch_action(Box::new(crate::SetStatusAgain), cx),
+                    ))
+                    .child(item("menu-status-reset", "Reset Status", cx, |v, _, cx| {
+                        v.reset_status(false, cx)
+                    }))
                     .child(
                         div()
                             .px_3()

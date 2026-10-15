@@ -11,13 +11,15 @@
 //!   button. `{"hover": [x, y]}` only moves.
 //! - `{"drag_page": [x1, y1, x2, y2], "page": 0, "shift": true}`: in page
 //!   points (the page as the file draws it), on page index `page`.
+//!   `{"hover_page": [x, y], "page": 0}` only moves there, as a pointer
+//!   does before it presses.
 //! - `{"form": {"field-id": value, ...}}`: fill the open plugin form and
 //!   submit it (choices by index, page ranges as text).
 //! - `{"wait": 500}`: milliseconds.
 //! - `{"checkpoint": "name"}`: print `SCRIPT checkpoint name` and wait (up to
 //!   two minutes) until `<script>.go` contains that name, so a harness can
 //!   take a screenshot first.
-//! - `{"dump": "outline" | "notice" | "annots" | "pages" | "panels" |
+//! - `{"dump": "outline" | "notice" | "selection" | "annots" | "pages" | "panels" |
 //!   "plugins" | "region" | "view" | "layout" | "toolbar" | "focus"}`: print state as `SCRIPT <what>: …` lines.
 //! - `{"quit": true}`
 //!
@@ -104,19 +106,25 @@ async fn run_step(
         return Err(format!("checkpoint {name} timed out"));
     }
     if step.get("quit").is_some() {
-        cx.update(|cx| cx.quit());
+        cx.update(crate::instance::quit);
         return Ok(());
     }
     if step.get("dump").and_then(Value::as_str) == Some("focus") {
         return cx
             .update_window(handle.into(), |_, window, cx| {
+                let contexts: Vec<String> = window
+                    .context_stack()
+                    .iter()
+                    .map(|c| format!("{c:?}"))
+                    .collect();
                 eprintln!(
-                    "SCRIPT focus: {}",
+                    "SCRIPT focus: {} {}",
                     if window.focused(cx).is_some() {
                         "something"
                     } else {
                         "nothing"
-                    }
+                    },
+                    contexts.join(" > ")
                 );
             })
             .map_err(|e| e.to_string());
@@ -190,7 +198,23 @@ async fn run_step(
             .map(|v| v.as_f64().map(|f| f as f32))
             .collect()
     };
-    if let Some(c) = coords("hover") {
+    let page_point = |c: &[f32], cx: &mut AsyncApp| {
+        let page = step.get("page").and_then(Value::as_u64).unwrap_or(0) as usize;
+        handle
+            .update(cx, |ws, _, cx| {
+                let doc = ws.doc()?.clone();
+                doc.read(cx).window_point(page, c[0], c[1])
+            })
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "that page isn't laid out".to_string())
+    };
+    let hover_at = if let Some(c) = coords("hover_page") {
+        let p = page_point(&c, cx)?;
+        Some(vec![p.0, p.1])
+    } else {
+        coords("hover")
+    };
+    if let Some(c) = hover_at {
         cx.update_window(handle.into(), |_, window, cx| {
             window.dispatch_event(
                 PlatformInput::MouseMove(MouseMoveEvent {
@@ -383,6 +407,10 @@ impl Workspace {
         let st = d.model.state();
         match what {
             "notice" => eprintln!("SCRIPT notice: {:?}", d.notice),
+            "selection" => eprintln!(
+                "SCRIPT selection: {:?}",
+                view.selected_text().map(|(_, text, _)| text)
+            ),
             "pages" => eprintln!("SCRIPT pages: {}", st.pages.len()),
             "view" => eprintln!(
                 "SCRIPT view: page {} {:?} selected {:?}",
@@ -430,7 +458,16 @@ impl Workspace {
                     for a in st.annots_on(p.id).into_iter().flatten() {
                         let kind = format!("{:?}", a.kind);
                         let kind = kind.split([' ', '{', '(']).next().unwrap_or("");
-                        eprintln!("SCRIPT annots: page {} {kind} {:?}", i + 1, a.contents);
+                        eprintln!(
+                            "SCRIPT annots: page {} {kind} {:?} color {:?} fill {:?} width {} dashed {} at {:?}",
+                            i + 1,
+                            a.contents,
+                            a.color,
+                            a.fill,
+                            a.stroke,
+                            a.dashed,
+                            a.bounds()
+                        );
                     }
                 }
             }

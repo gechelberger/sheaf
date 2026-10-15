@@ -5,7 +5,7 @@
 //!
 //! User presets live in `patterns.json` and stay editable in the Patterns
 //! panel (see `patterns.rs`); plugin presets are shown beside them,
-//! read-only. Extra marks come from `marks.json` next to `settings.json`:
+//! read-only. Extra marks come from `marks.json` in the config folder:
 //!
 //! ```json
 //! {
@@ -89,7 +89,7 @@ impl Default for Contributions {
 }
 
 pub fn marks_path() -> PathBuf {
-    crate::settings::config_dir().join("marks.json")
+    sheaf_ops::dirs::config_dir().join("marks.json")
 }
 
 impl Contributions {

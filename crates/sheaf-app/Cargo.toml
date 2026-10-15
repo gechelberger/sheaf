@@ -27,6 +27,7 @@ sheaf-print.workspace = true
 sheaf-ops.workspace = true
 sheaf-image.workspace = true
 sheaf-cli.workspace = true
+sheaf-instance.workspace = true
 sheaf-plugin = { workspace = true, optional = true }
 semver = { version = "1", features = ["serde"], optional = true }
 # Reading .sheafplugin archives.
@@ -43,6 +44,10 @@ im.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# state.json is replaced through a uniquely named temp file.
+tempfile = "3"
+# Local times in the History panel (already in the tree through GPUI).
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 schemars.workspace = true
 unicode-segmentation.workspace = true
 

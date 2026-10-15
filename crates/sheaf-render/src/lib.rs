@@ -71,6 +71,9 @@ pub struct Rect {
     pub h: f32,
 }
 
+/// A page's characters, each with its box (see [`Renderer::page_chars`]).
+pub type PageCharList = Vec<(char, Option<Rect>)>;
+
 /// One search match: the page it's on and the glyph boxes that make it up
 /// (usually one, more if the match wraps a line).
 #[derive(Debug, Clone)]
@@ -107,9 +110,14 @@ pub trait Renderer {
     /// All matches of a regular expression on one page, run over the
     /// page's extracted text.
     fn pattern_search_page(&self, page: PageIndex, re: &regex::Regex) -> Result<Vec<SearchHit>>;
-    /// Hide (from rendering) every annotation on `page` whose /NM starts
-    /// with `sheaf:`; the app draws those itself. Returns how many.
-    fn hide_sheaf_annots(&self, page: PageIndex) -> Result<usize>;
+    /// Hide (from rendering) the annotations on `page` whose /NM is in
+    /// `names`: marks the app draws itself. Returns how many. Only those:
+    /// a mark this build can't read (`sheaf:` too) is still drawn here.
+    fn hide_annots(&self, page: PageIndex, names: &[String]) -> Result<usize>;
+    /// Hide or show annotations by their position in the page's
+    /// `/Annots`: (slot, hidden). For other tools' comments, which sheaf
+    /// leaves PDFium to draw.
+    fn set_annots_hidden(&self, page: PageIndex, slots: &[(usize, bool)]) -> Result<usize>;
     /// Glyph boxes (merged per line) of text intersecting `rect`, in the
     /// page's displayed space. Used to turn a drag into a text highlight.
     fn text_boxes_in_rect(&self, page: PageIndex, rect: Rect) -> Result<Vec<Rect>>;
@@ -119,6 +127,10 @@ pub trait Renderer {
     fn page_text_len(&self, page: PageIndex) -> Result<usize>;
     /// The page's text in reading order, as the engine extracts it.
     fn page_text(&self, page: PageIndex) -> Result<String>;
+    /// The page's characters in the engine's order, each with its box (in
+    /// the displayed space); `None` for the spaces and line breaks the
+    /// engine adds between words and lines.
+    fn page_chars(&self, page: PageIndex) -> Result<PageCharList>;
     /// Render a whole page scaled so its width is `target_width` device pixels.
     fn render(&self, page: PageIndex, job: Job, format: PixelFormat) -> Result<Raster>;
 
@@ -217,7 +229,10 @@ pub mod pdfium {
     }
 
     pub struct PdfiumEngine {
+        // Declared before `bytes`, so it's dropped first: PDFium reads the
+        // buffer for as long as the document is open.
         doc: PdfDocument<'static>,
+        bytes: Arc<Vec<u8>>,
     }
 
     impl PdfiumEngine {
@@ -231,19 +246,55 @@ pub mod pdfium {
             // viewer wants anyway. Truly huge files can revisit this.
             let bytes =
                 std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-            let doc = match pdfium()?.load_pdf_from_byte_vec(bytes, password) {
+            Self::open_bytes(Arc::new(bytes), password)
+                .with_context(|| format!("opening {}", path.display()))
+        }
+
+        /// Open a file already in memory, sharing the buffer: the document
+        /// model keeps the same bytes, so saves read what PDFium shows.
+        pub fn open_bytes(bytes: Arc<Vec<u8>>, password: Option<&str>) -> Result<Self> {
+            // SAFETY: the slice points into `bytes`, which the engine owns
+            // and never changes, and `doc` (which borrows it) is dropped
+            // before it (field order).
+            let slice: &'static [u8] =
+                unsafe { std::slice::from_raw_parts(bytes.as_ptr(), bytes.len()) };
+            let doc = match pdfium()?.load_pdf_from_byte_slice(slice, password) {
                 Ok(d) => d,
                 Err(PdfiumError::PdfiumLibraryInternalError(
                     PdfiumInternalError::PasswordError,
                 )) => {
-                    return Err(crate::OpenError::Password)
-                        .with_context(|| format!("opening {}", path.display()));
+                    return Err(crate::OpenError::Password.into());
                 }
-                Err(e) => {
-                    return Err(e).with_context(|| format!("pdfium loading {}", path.display()));
-                }
+                Err(e) => return Err(e).context("pdfium loading"),
             };
-            Ok(Self { doc })
+            Ok(Self { doc, bytes })
+        }
+
+        /// The file's bytes, shared.
+        pub fn bytes(&self) -> Arc<Vec<u8>> {
+            self.bytes.clone()
+        }
+
+        /// A page `width` pixels wide, RGBA, transparent where nothing is
+        /// drawn: a stamp's picture, to lay over another page.
+        pub fn render_transparent(&self, page: PageIndex, width: u32) -> Result<Raster> {
+            let p = self.doc.pages().get(page.0 as i32)?;
+            let w = width.max(1);
+            let h = ((w as f32) * p.height().value / p.width().value.max(1.0))
+                .round()
+                .max(1.0) as u32;
+            let cfg = PdfRenderConfig::new()
+                .set_fixed_size(w as i32, h as i32)
+                .set_format(PdfBitmapFormat::BGRA)
+                .set_reverse_byte_order(false)
+                .set_clear_color(PdfColor::new(255, 255, 255, 0));
+            let bmp = p.render_with_config(&cfg)?;
+            Ok(Raster {
+                width: bmp.width() as u32,
+                height: bmp.height() as u32,
+                format: PixelFormat::Rgba,
+                data: bmp.as_rgba_bytes(),
+            })
         }
     }
 
@@ -488,6 +539,41 @@ pub mod pdfium {
                 .count())
         }
 
+        fn page_chars(&self, page: PageIndex) -> Result<PageCharList> {
+            let p = self.doc.pages().get(page.0 as i32)?;
+            let text = p.text()?;
+            const SCALE: f32 = 16.0;
+            let (pw, ph) = (p.width().value, p.height().value);
+            let cfg =
+                PdfRenderConfig::new().set_fixed_size((pw * SCALE) as i32, (ph * SCALE) as i32);
+            let to_display = |x: f32, y: f32| -> Option<(f32, f32)> {
+                let (dx, dy) = p
+                    .points_to_pixels(PdfPoints::new(x), PdfPoints::new(y), &cfg)
+                    .ok()?;
+                Some((dx as f32 / SCALE, dy as f32 / SCALE))
+            };
+            let mut out = Vec::new();
+            for c in text.chars().iter() {
+                let Some(ch) = c.unicode_char() else { continue };
+                let rect = if c.is_generated().unwrap_or(false) {
+                    None
+                } else {
+                    c.loose_bounds().ok().and_then(|b| {
+                        let (x0, y0) = to_display(b.left().value, b.bottom().value)?;
+                        let (x1, y1) = to_display(b.right().value, b.top().value)?;
+                        Some(Rect {
+                            x: x0.min(x1),
+                            y: y0.min(y1),
+                            w: (x1 - x0).abs(),
+                            h: (y1 - y0).abs(),
+                        })
+                    })
+                };
+                out.push((ch, rect));
+            }
+            Ok(out)
+        }
+
         fn page_text(&self, page: PageIndex) -> Result<String> {
             let p = self.doc.pages().get(page.0 as i32)?;
             Ok(p.text()?.all())
@@ -547,13 +633,27 @@ pub mod pdfium {
             Ok(rects)
         }
 
-        fn hide_sheaf_annots(&self, page: PageIndex) -> Result<usize> {
+        fn set_annots_hidden(&self, page: PageIndex, slots: &[(usize, bool)]) -> Result<usize> {
+            let mut p = self.doc.pages().get(page.0 as i32)?;
+            let annots = p.annotations_mut();
+            let mut n = 0;
+            for &(slot, hidden) in slots {
+                if let Ok(mut a) = annots.get(slot)
+                    && a.set_is_hidden(hidden).is_ok()
+                {
+                    n += 1;
+                }
+            }
+            Ok(n)
+        }
+
+        fn hide_annots(&self, page: PageIndex, names: &[String]) -> Result<usize> {
             let mut p = self.doc.pages().get(page.0 as i32)?;
             let annots = p.annotations_mut();
             let mut n = 0;
             for i in 0..annots.len() {
                 if let Ok(mut a) = annots.get(i)
-                    && a.name().is_some_and(|name| name.starts_with("sheaf:"))
+                    && a.name().is_some_and(|name| names.contains(&name))
                     && a.set_is_hidden(true).is_ok()
                 {
                     n += 1;
@@ -781,6 +881,10 @@ enum Msg {
         page: u32,
         reply: oneshot::Sender<Result<String>>,
     },
+    Chars {
+        page: u32,
+        reply: oneshot::Sender<Result<PageCharList>>,
+    },
     SearchPage {
         page: u32,
         query: String,
@@ -797,7 +901,11 @@ enum Msg {
         reply: oneshot::Sender<Result<PageSize>>,
     },
     HideAnnots {
-        pages: Vec<u32>,
+        pages: Vec<(u32, Vec<String>)>,
+        reply: oneshot::Sender<Result<usize>>,
+    },
+    SetHidden {
+        pages: Vec<(u32, Vec<(usize, bool)>)>,
         reply: oneshot::Sender<Result<usize>>,
     },
     Search {
@@ -812,6 +920,9 @@ enum Msg {
 pub struct RenderHandle {
     tx: mpsc::Sender<Msg>,
     info: Arc<DocInfo>,
+    /// The file's bytes, which the worker's PDFium reads: the document
+    /// model keeps the same buffer (`SourceInfo::data`).
+    data: Arc<Vec<u8>>,
 }
 
 impl RenderHandle {
@@ -819,7 +930,7 @@ impl RenderHandle {
     /// Call from a background task if you don't want to block the UI.
     pub fn open(path: PathBuf, password: Option<String>) -> Result<Self> {
         let (tx, rx) = mpsc::channel::<Msg>();
-        let (ready_tx, ready_rx) = mpsc::channel::<Result<DocInfo>>();
+        let (ready_tx, ready_rx) = mpsc::channel::<Result<(DocInfo, Arc<Vec<u8>>)>>();
 
         std::thread::Builder::new()
             .name("sheaf-render".into())
@@ -832,10 +943,13 @@ impl RenderHandle {
                         return;
                     }
                 };
-                let info = engine.page_size(PageIndex(0)).map(|first_page| DocInfo {
-                    page_count: engine.page_count(),
-                    first_page,
-                    open_time: t.elapsed(),
+                let info = engine.page_size(PageIndex(0)).map(|first_page| {
+                    let info = DocInfo {
+                        page_count: engine.page_count(),
+                        first_page,
+                        open_time: t.elapsed(),
+                    };
+                    (info, engine.bytes())
                 });
                 let failed = info.is_err();
                 let _ = ready_tx.send(info);
@@ -846,13 +960,19 @@ impl RenderHandle {
             })
             .context("spawning render thread")?;
 
-        let info = ready_rx
+        let (info, data) = ready_rx
             .recv()
             .context("render thread died before opening")??;
         Ok(Self {
             tx,
             info: Arc::new(info),
+            data,
         })
+    }
+
+    /// The file's bytes as opened, shared with the renderer.
+    pub fn data(&self) -> Arc<Vec<u8>> {
+        self.data.clone()
     }
 
     pub fn info(&self) -> &DocInfo {
@@ -875,11 +995,22 @@ impl RenderHandle {
         rx
     }
 
-    /// Hide sheaf-written annotations on these pages so they aren't drawn
-    /// twice (the app overlays its own). Resolves with the count hidden.
-    pub fn hide_sheaf_annots(&self, pages: Vec<u32>) -> oneshot::Receiver<Result<usize>> {
+    /// Hide the marks the app draws itself (by `/NM`, per page index) so
+    /// they aren't drawn twice. Resolves with the count hidden.
+    pub fn hide_annots(&self, pages: Vec<(u32, Vec<String>)>) -> oneshot::Receiver<Result<usize>> {
         let (tx, rx) = oneshot::channel();
         self.send(Msg::HideAnnots { pages, reply: tx });
+        rx
+    }
+
+    /// Hide or show annotations by their slot in each page's `/Annots`
+    /// (see [`Renderer::set_annots_hidden`]). Resolves with the count set.
+    pub fn set_annots_hidden(
+        &self,
+        pages: Vec<(u32, Vec<(usize, bool)>)>,
+    ) -> oneshot::Receiver<Result<usize>> {
+        let (tx, rx) = oneshot::channel();
+        self.send(Msg::SetHidden { pages, reply: tx });
         rx
     }
 
@@ -912,6 +1043,13 @@ impl RenderHandle {
     pub fn page_text_len(&self, page: u32) -> oneshot::Receiver<Result<usize>> {
         let (tx, rx) = oneshot::channel();
         self.send(Msg::TextLen { page, reply: tx });
+        rx
+    }
+
+    /// The page's characters and their boxes (see [`Renderer::page_chars`]).
+    pub fn page_chars(&self, page: u32) -> oneshot::Receiver<Result<PageCharList>> {
+        let (tx, rx) = oneshot::channel();
+        self.send(Msg::Chars { page, reply: tx });
         rx
     }
 
@@ -1070,6 +1208,9 @@ fn worker_loop(engine: impl Renderer, rx: mpsc::Receiver<Msg>) {
                 Msg::Text { page, reply } => {
                     let _ = reply.send(engine.page_text(PageIndex(page)));
                 }
+                Msg::Chars { page, reply } => {
+                    let _ = reply.send(engine.page_chars(PageIndex(page)));
+                }
                 Msg::SearchPage {
                     page,
                     query,
@@ -1084,11 +1225,25 @@ fn worker_loop(engine: impl Renderer, rx: mpsc::Receiver<Msg>) {
                 Msg::PageSize { page, reply } => {
                     let _ = reply.send(engine.page_size(PageIndex(page)));
                 }
+                Msg::SetHidden { pages, reply } => {
+                    let mut n = 0;
+                    let mut err = None;
+                    for (p, slots) in pages {
+                        match engine.set_annots_hidden(PageIndex(p), &slots) {
+                            Ok(k) => n += k,
+                            Err(e) => err = Some(e),
+                        }
+                    }
+                    let _ = reply.send(match err {
+                        Some(e) => Err(e),
+                        None => Ok(n),
+                    });
+                }
                 Msg::HideAnnots { pages, reply } => {
                     let mut n = 0;
                     let mut err = None;
-                    for p in pages {
-                        match engine.hide_sheaf_annots(PageIndex(p)) {
+                    for (p, names) in pages {
+                        match engine.hide_annots(PageIndex(p), &names) {
                             Ok(k) => n += k,
                             Err(e) => err = Some(e),
                         }

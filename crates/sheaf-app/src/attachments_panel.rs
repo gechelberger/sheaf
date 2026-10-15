@@ -64,11 +64,56 @@ impl DocView {
         self.wanted_panel.take()
     }
 
-    pub(crate) fn attachments(&self) -> &[Attachment] {
-        match &self.state {
-            State::Ready(doc) => &doc.attachments,
-            _ => &[],
+    /// Every attachment: other tools' (and the file's own), as read from
+    /// the file, then sheaf's, from the document (saved or not), each with
+    /// the display page it's on.
+    pub(crate) fn attachment_rows(&self) -> Vec<(Attachment, Option<usize>)> {
+        let State::Ready(doc) = &self.state else {
+            return Vec::new();
+        };
+        let mut rows: Vec<(Attachment, Option<usize>)> = doc
+            .attachments
+            .iter()
+            .map(|a| {
+                let page = match a.at {
+                    AttachmentRef::Annot { page, .. } => Some(page as usize),
+                    _ => None,
+                };
+                (a.clone(), page)
+            })
+            .collect();
+        let st = doc.model.state();
+        for (i, p) in st.pages.iter().enumerate() {
+            for a in st.annots_on(p.id).into_iter().flatten() {
+                if let sheaf_doc::AnnotKind::FileAttachment {
+                    file, name, size, ..
+                } = &a.kind
+                {
+                    rows.push((
+                        Attachment {
+                            at: AttachmentRef::Cached(file.clone()),
+                            name: name.clone(),
+                            description: if a.contents == *name {
+                                String::new()
+                            } else {
+                                a.contents.clone()
+                            },
+                            size: Some(*size),
+                            modified: a.modified.clone(),
+                            created: a.created.clone(),
+                            folder: String::new(),
+                            fields: Vec::new(),
+                        },
+                        Some(i),
+                    ));
+                }
+            }
         }
+        rows
+    }
+
+    pub(crate) fn attachments(&self) -> Vec<Attachment> {
+        self.attachment_rows().into_iter().map(|(a, _)| a).collect()
     }
 
     /// Read the primary file's facts again (after a save rewrote it, so
@@ -129,6 +174,17 @@ impl DocView {
         let Some(a) = self.attachments().get(i).cloned() else {
             return;
         };
+        self.open_attachment_item(a, window, cx);
+    }
+
+    /// Open an attachment: a PDF in sheaf, anything else with the system's
+    /// program, after a warning.
+    pub(crate) fn open_attachment_item(
+        &mut self,
+        a: Attachment,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if a.is_pdf() {
             self.with_attachment(a, Then::Open, cx);
             return;
@@ -234,10 +290,11 @@ impl DocView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let all = self.attachment_rows();
         let State::Ready(doc) = &self.state else {
             return div().p_2().text_sm().child("…").into_any_element();
         };
-        if doc.attachments.is_empty() {
+        if all.is_empty() {
             return div()
                 .p_2()
                 .text_sm()
@@ -251,7 +308,7 @@ impl DocView {
         }
         let selected = doc.attachment_selected;
         let portfolio = doc.collection.is_some();
-        let rows = doc.attachments.iter().enumerate().map(|(i, a)| {
+        let rows = all.iter().enumerate().map(|(i, (a, page))| {
             let is_sel = selected == Some(i);
             let mut meta = Vec::new();
             if let Some(n) = a.size {
@@ -260,7 +317,7 @@ impl DocView {
             if !a.modified.is_empty() {
                 meta.push(fmt_pdf_date(&a.modified));
             }
-            if let AttachmentRef::Annot { page, .. } = a.at {
+            if let Some(page) = page {
                 meta.push(format!("on page {}", page + 1));
             }
             let fields = if portfolio {
@@ -422,7 +479,7 @@ fn temp_path(name: &str) -> anyhow::Result<PathBuf> {
 }
 
 /// Hand a file to the desktop's default program for its type.
-fn open_with_system(path: &std::path::Path) -> anyhow::Result<()> {
+pub(crate) fn open_with_system(path: &std::path::Path) -> anyhow::Result<()> {
     let mut cmd = if cfg!(target_os = "windows") {
         let mut c = std::process::Command::new("explorer");
         c.arg(path);

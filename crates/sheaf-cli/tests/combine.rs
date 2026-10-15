@@ -108,6 +108,22 @@ fn combines_pdfs_and_images_with_bookmarks() {
     std::fs::create_dir_all(&dir).unwrap();
     let a = pdf(&dir, "A", 3);
     let b = pdf(&dir, "B", 4);
+    // B's page 2 links to its page 3, which isn't taken: it mustn't come
+    // along (M9 bug 14).
+    {
+        let mut doc = Pdf::load(&b).unwrap();
+        let pages = doc.get_pages();
+        let (p2, p3) = (pages[&2], pages[&3]);
+        let link = doc.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "Link",
+            "Rect" => vec![72.into(), 72.into(), 144.into(), 96.into()],
+            "Dest" => vec![p3.into(), "Fit".into()],
+        });
+        doc.get_dictionary_mut(p2)
+            .unwrap()
+            .set("Annots", vec![Object::Reference(link)]);
+        doc.save(&b).unwrap();
+    }
     let img = dir.join("photo.png");
     image::RgbImage::from_pixel(96, 48, image::Rgb([10, 200, 10]))
         .save(&img)
@@ -129,6 +145,19 @@ fn combines_pdfs_and_images_with_bookmarks() {
     );
     let pdf = Pdf::load(&out).unwrap();
     assert_eq!(pdf.get_pages().len(), 3 + 2 + 1);
+    let says = |text: &str| {
+        pdf.objects.values().any(|o| match o {
+            Object::Stream(s) => {
+                let data = s
+                    .decompressed_content()
+                    .unwrap_or_else(|_| s.content.clone());
+                String::from_utf8_lossy(&data).contains(text)
+            }
+            _ => false,
+        })
+    };
+    assert!(says("B page 2") && says("B page 4"));
+    assert!(!says("B page 1") && !says("B page 3"));
     assert_eq!(
         outline(&out),
         vec![

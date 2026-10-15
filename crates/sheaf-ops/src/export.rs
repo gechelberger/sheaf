@@ -308,6 +308,7 @@ mod tests {
                 page_sizes: None,
                 bytes: 0,
                 password: None,
+                data: None,
             },
             &[],
             sheaf_doc::history::default_policy(),

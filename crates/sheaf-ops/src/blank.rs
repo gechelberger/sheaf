@@ -23,7 +23,6 @@ use sheaf_doc::{Document, Edit, NewOutlineItem, PageId, Snapshot, SourceId};
 use sheaf_image::blank::{Sensitivity, Verdict, is_blank};
 use sheaf_image::raster::PixelFormat;
 use sheaf_progress::{Progress, Unit};
-use sheaf_render::pdfium::PdfiumEngine;
 use sheaf_render::{Job, Renderer};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,8 +122,8 @@ pub fn find(
     let mut done = 0;
     for (sid, list) in by_source {
         let info = snap.source(sid).context("unknown source")?;
-        let engine = PdfiumEngine::open(&info.path, info.password.as_deref())?;
-        let file = sheaf_doc::file::load_pdf(&info.path, info.password.as_deref())?;
+        let engine = crate::open::engine_for(info)?;
+        let file = sheaf_doc::file::load_source(info)?;
         let objs: Vec<_> = file.get_pages().into_values().collect();
         for i in list {
             progress.check()?;

@@ -34,7 +34,7 @@ pub const SAVE_AS_PDF: &str = "Save as PDF";
 const PREVIEW_W: f32 = 300.0;
 const PREVIEW_H: f32 = 390.0;
 
-/// Choices remembered between jobs (in settings.json).
+/// Choices remembered between jobs (in `state.json`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PrintPrefs {

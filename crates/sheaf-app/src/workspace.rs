@@ -19,7 +19,7 @@ use sheaf_ui::theme;
 use crate::commands::{PanelAction, Run, ShowPluginPanel};
 use crate::docview::{DocEvent, DocView};
 use crate::ocr_dialog::{OcrDialog, OcrDialogContext, OcrDialogEvent, OcrSpec};
-use crate::settings::{DockLayout, DockState, Settings, WindowPlacement};
+use crate::state::{DockLayout, DockState, WindowPlacement};
 use crate::{
     About, ActivateMenuBar, CloseDocument, CloseWindow, CommandPalette, NewWindow, OpenFile, Quit,
     RecognizeText, ShowCalc, ShowComments, ShowOutline, ShowPatterns, ShowThumbnails,
@@ -45,7 +45,6 @@ pub struct Launch {
     /// Run this regex in the Patterns panel of the document.
     pub pattern: Option<String>,
     pub launched: Instant,
-    pub settings: Settings,
     /// Dev: open the command-line file with this password.
     pub password: Option<String>,
     pub selftest_extract: Option<PathBuf>,
@@ -66,7 +65,6 @@ impl Launch {
             start_panel: None,
             pattern: None,
             launched: Instant::now(),
-            settings: Settings::load(),
             password: None,
             selftest_extract: None,
             selftest_flatten: None,
@@ -89,6 +87,8 @@ pub enum Panel {
     Comments,
     Attachments,
     Layers,
+    History,
+    Stamps,
     /// A panel a plugin contributes, by its id without the `plugin:` prefix.
     /// Kept in the layout even while its plugin isn't loaded, so disabling
     /// a plugin doesn't forget where its panel was.
@@ -99,7 +99,7 @@ pub enum Panel {
 const PLUGIN_PANEL_PREFIX: &str = "plugin:";
 
 impl Panel {
-    const ALL: [Panel; 7] = [
+    const ALL: [Panel; 9] = [
         Panel::Thumbnails,
         Panel::Outline,
         Panel::Patterns,
@@ -107,6 +107,8 @@ impl Panel {
         Panel::Comments,
         Panel::Attachments,
         Panel::Layers,
+        Panel::History,
+        Panel::Stamps,
     ];
 
     /// Stable id for settings and the `--panel` flag.
@@ -119,6 +121,8 @@ impl Panel {
             Panel::Comments => "comments".into(),
             Panel::Attachments => "attachments".into(),
             Panel::Layers => "layers".into(),
+            Panel::History => "history".into(),
+            Panel::Stamps => "stamps".into(),
             Panel::Plugin(id) => format!("{PLUGIN_PANEL_PREFIX}{id}").into(),
         }
     }
@@ -139,6 +143,8 @@ impl Panel {
             Panel::Comments => "Comments".into(),
             Panel::Attachments => "Attachments".into(),
             Panel::Layers => "Layers".into(),
+            Panel::History => "History".into(),
+            Panel::Stamps => "Stamps".into(),
             // Plugins name their panels once they can contribute them
             // (M6 slice 3); until then, the id.
             Panel::Plugin(id) => id.clone(),
@@ -353,6 +359,7 @@ pub struct Workspace {
         Entity<crate::bookmark_tools::BookmarkToolsDialog>,
         Subscription,
     )>,
+    set_status: Option<(Entity<crate::set_status::SetStatusDialog>, Subscription)>,
     blanks: Option<(Entity<crate::blanks_dialog::BlanksDialog>, Subscription)>,
     /// File > Print, while open.
     print: Option<(Entity<crate::print_dialog::PrintDialog>, Subscription)>,
@@ -398,7 +405,10 @@ pub struct Workspace {
     area: gpui::Bounds<Pixels>,
     timing: bool,
     launched: Instant,
-    settings: Settings,
+    /// The dock layout changed since it was last put in the shared state.
+    layout_dirty: bool,
+    /// Coming forward re-reads settings files edited by hand.
+    _activation: Subscription,
     /// Only for the file named on the command line.
     password: Option<String>,
 }
@@ -416,7 +426,6 @@ impl Workspace {
             start_panel,
             pattern,
             launched,
-            settings,
             password,
             selftest_extract,
             selftest_flatten,
@@ -429,9 +438,23 @@ impl Workspace {
             .map(|p| p.id.clone())
             .collect();
         let (docks, all_hidden) = docks_from_layout(
-            settings.docks.as_ref().unwrap_or(&DockLayout::default()),
+            crate::state::get(cx)
+                .docks
+                .as_ref()
+                .unwrap_or(&DockLayout::default()),
             &plugin_panels,
         );
+        let activation = cx.observe_window_activation(window, |ws, window, cx| {
+            if window.is_window_active() {
+                crate::prefs::reload_if_changed(cx);
+                crate::patterns::reload_if_changed(cx);
+                crate::toolbar::reload_if_changed(cx);
+                // A new name in settings.toml signs the edits from now on.
+                if let Some(doc) = ws.doc().cloned() {
+                    doc.update(cx, |d, cx| d.sync_author(cx));
+                }
+            }
+        });
         let toolbar = cx.new(|_| sheaf_ui::toolbar::Toolbar::new(Default::default()));
         let toolbar_sub = cx.subscribe_in(&toolbar, window, |ws, _, ev, window, cx| {
             ws.on_toolbar(ev, window, cx)
@@ -457,6 +480,7 @@ impl Workspace {
             header_footer: None,
             watermark: None,
             bookmark_tool: None,
+            set_status: None,
             blanks: None,
             print: None,
             properties: None,
@@ -501,7 +525,8 @@ impl Workspace {
             area: gpui::Bounds::default(),
             timing,
             launched,
-            settings,
+            layout_dirty: false,
+            _activation: activation,
             password,
         };
         match start_panel.as_deref() {
@@ -511,6 +536,8 @@ impl Workspace {
             Some("comments") => this.show_panel(Panel::Comments),
             Some("attachments") => this.show_panel(Panel::Attachments),
             Some("layers") => this.show_panel(Panel::Layers),
+            Some("history") => this.show_panel(Panel::History),
+            Some("stamps") => this.show_panel(Panel::Stamps),
             _ => {}
         }
         if let Some(p) = path {
@@ -606,34 +633,50 @@ impl Workspace {
         self.persist_layout();
     }
 
-    /// Write the dock layout to the settings file.
+    /// Remember the dock layout as the one new windows start with. Many
+    /// places change it without a `cx`, so it goes to the shared state on
+    /// the next frame ([`sync_layout`](Self::sync_layout)).
     fn persist_layout(&mut self) {
-        self.settings.docks = Some(DockLayout {
+        self.layout_dirty = true;
+    }
+
+    fn layout(&self) -> DockLayout {
+        DockLayout {
             left: self.dock(Side::Left).to_state(),
             right: self.dock(Side::Right).to_state(),
             bottom: self.dock(Side::Bottom).to_state(),
             all_hidden: self.all_hidden,
-        });
-        if let Err(e) = self.settings.save() {
-            log::warn!("saving settings: {e:#}");
         }
     }
 
-    /// Remember where the window is, then write everything.
-    fn persist_window(&mut self, window: &Window) {
+    /// Put a changed dock layout in the shared state.
+    fn sync_layout(&mut self, cx: &mut App) {
+        if std::mem::take(&mut self.layout_dirty) {
+            let layout = self.layout();
+            crate::state::update(cx, |s| s.docks = Some(layout));
+        }
+    }
+
+    /// Remember where the window is, and its docks, for the next window.
+    fn persist_window(&mut self, window: &Window, cx: &mut App) {
         let (bounds, maximized) = match window.window_bounds() {
             gpui::WindowBounds::Windowed(b) => (b, false),
             gpui::WindowBounds::Maximized(b) => (b, true),
             gpui::WindowBounds::Fullscreen(b) => (b, false),
         };
-        self.settings.window = Some(WindowPlacement {
+        let placement = WindowPlacement {
             x: f32::from(bounds.origin.x),
             y: f32::from(bounds.origin.y),
             w: f32::from(bounds.size.width),
             h: f32::from(bounds.size.height),
             maximized,
+        };
+        let layout = self.layout();
+        self.layout_dirty = false;
+        crate::state::update(cx, |s| {
+            s.window = Some(placement);
+            s.docks = Some(layout);
         });
-        self.persist_layout();
     }
 
     fn move_panel(&mut self, panel: Panel, to: Side) {
@@ -1049,7 +1092,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let params = self.settings.combine.clone();
+        let params = crate::state::get(cx).combine.clone();
         let dialog =
             cx.new(|cx| crate::combine_dialog::CombineDialog::new(files, params, window, cx));
         let sub = cx.subscribe_in(
@@ -1059,10 +1102,8 @@ impl Workspace {
                 ws.combine = None;
                 ws.focus_active(window, cx);
                 if let crate::combine_dialog::CombineEvent::Created { path, params } = ev {
-                    ws.settings.combine = params.clone();
-                    if let Err(e) = ws.settings.save() {
-                        log::warn!("saving settings: {e:#}");
-                    }
+                    let params = params.clone();
+                    crate::state::update(cx, |s| s.combine = params);
                     let origin = window.window_handle().downcast::<Workspace>();
                     let path = path.clone();
                     if let Some(origin) = origin {
@@ -1112,8 +1153,10 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let opts = self.settings.scan.clone();
-        let ocr = self.settings.ocr.clone();
+        let (opts, ocr) = (
+            crate::state::get(cx).scan.clone(),
+            crate::prefs::ocr_config(cx),
+        );
         let dialog = cx.new(|cx| crate::scan_dialog::ScanDialog::new(files, opts, ocr, window, cx));
         let sub = cx.subscribe_in(
             &dialog,
@@ -1122,10 +1165,8 @@ impl Workspace {
                 ws.scan = None;
                 ws.focus_active(window, cx);
                 if let crate::scan_dialog::ScanEvent::Created { path, opts } = ev {
-                    ws.settings.scan = opts.clone();
-                    if let Err(e) = ws.settings.save() {
-                        log::warn!("saving settings: {e:#}");
-                    }
+                    let opts = opts.clone();
+                    crate::state::update(cx, |s| s.scan = opts);
                     let origin = window.window_handle().downcast::<Workspace>();
                     let path = path.clone();
                     if let Some(origin) = origin {
@@ -1282,7 +1323,7 @@ impl Workspace {
             return;
         };
         let (count, targets) = doc.read(cx).target_indexes();
-        let params = self.settings.blanks;
+        let params = crate::state::get(cx).blanks;
         let dialog = cx
             .new(|cx| crate::blanks_dialog::BlanksDialog::new(count, targets, params, window, cx));
         let sub = cx.subscribe_in(
@@ -1294,10 +1335,8 @@ impl Workspace {
                 if let crate::blanks_dialog::BlanksEvent::Find(pages, params) = ev
                     && let Some(doc) = ws.doc().cloned()
                 {
-                    ws.settings.blanks = *params;
-                    if let Err(e) = ws.settings.save() {
-                        log::warn!("saving settings: {e:#}");
-                    }
+                    let remembered = *params;
+                    crate::state::update(cx, |s| s.blanks = remembered);
                     let (pages, params) = (pages.clone(), *params);
                     doc.update(cx, |d, cx| d.find_blank_pages(pages, params, cx));
                 }
@@ -1354,6 +1393,48 @@ impl Workspace {
             },
         );
         self.bookmark_tool = Some((dialog, sub));
+        cx.notify();
+    }
+
+    /// Document > Set Status…: on the selected bookmark.
+    fn open_set_status(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.set_status.is_some() {
+            return;
+        }
+        let Some(doc) = self.doc().cloned() else {
+            return;
+        };
+        let Some((_, title, pages)) = doc.read(cx).status_bookmark() else {
+            doc.update(cx, |d, cx| d.set_notice("Select a bookmark first", cx));
+            return;
+        };
+        let spec = crate::state::get(cx).set_status.clone().unwrap_or_default();
+        let dialog =
+            cx.new(|cx| crate::set_status::SetStatusDialog::new(spec, title, pages, window, cx));
+        let sub = cx.subscribe_in(
+            &dialog,
+            window,
+            |ws, _, ev: &crate::set_status::SetStatusEvent, window, cx| {
+                use crate::set_status::SetStatusEvent;
+                ws.set_status = None;
+                ws.focus_active(window, cx);
+                if let Some(doc) = ws.doc().cloned() {
+                    match ev {
+                        SetStatusEvent::Set(spec) => {
+                            let spec = spec.clone();
+                            doc.update(cx, |d, cx| d.set_status(spec, cx));
+                        }
+                        SetStatusEvent::Reset { stamps } => {
+                            let stamps = *stamps;
+                            doc.update(cx, |d, cx| d.reset_status(stamps, cx));
+                        }
+                        SetStatusEvent::Dismiss => {}
+                    }
+                }
+                cx.notify();
+            },
+        );
+        self.set_status = Some((dialog, sub));
         cx.notify();
     }
 
@@ -1636,7 +1717,7 @@ impl Workspace {
             cx.notify();
             return;
         }
-        let prefs = self.settings.print.clone();
+        let prefs = crate::state::get(cx).print.clone();
         let Some(ctx) = self.doc().and_then(|d| d.read(cx).print_context(prefs)) else {
             return;
         };
@@ -1649,10 +1730,8 @@ impl Workspace {
                 ws.print = None;
                 ws.focus_active(window, cx);
                 if let crate::print_dialog::PrintEvent::Print(req) = ev {
-                    ws.settings.print = req.prefs.clone();
-                    if let Err(e) = ws.settings.save() {
-                        log::warn!("saving settings: {e:#}");
-                    }
+                    let prefs = req.prefs.clone();
+                    crate::state::update(cx, |s| s.print = prefs);
                     if let Some(doc) = ws.doc().cloned() {
                         let req = (**req).clone();
                         doc.update(cx, |d, cx| d.print(req, cx));
@@ -1700,7 +1779,7 @@ impl Workspace {
         let Some((page_count, current_page, selected)) = doc.read(cx).ocr_context() else {
             return;
         };
-        let config = self.settings.ocr.clone();
+        let config = crate::prefs::ocr_config(cx);
         let engines = sheaf_ocr::EngineKind::ALL
             .into_iter()
             .map(|k| {
@@ -1743,16 +1822,15 @@ impl Workspace {
 
     /// Remember the dialog's choices and start the run on the active document.
     fn run_ocr(&mut self, spec: OcrSpec, cx: &mut Context<Self>) {
-        let cfg = &mut self.settings.ocr;
-        cfg.engine = spec.engine;
-        cfg.dpi = spec.dpi;
-        cfg.skip_pages_with_text = spec.skip_pages_with_text;
-        cfg.last_scope = spec.scope.id().to_string();
-        sheaf_ocr::set_language(spec.engine, cfg, &spec.language);
-        let config = cfg.clone();
-        if let Err(e) = self.settings.save() {
-            log::warn!("saving settings: {e:#}");
-        }
+        crate::state::update(cx, |s| {
+            let cfg = &mut s.ocr;
+            cfg.engine = spec.engine;
+            cfg.dpi = spec.dpi;
+            cfg.skip_pages_with_text = spec.skip_pages_with_text;
+            cfg.last_scope = spec.scope.id().to_string();
+            sheaf_ocr::set_language(spec.engine, cfg, &spec.language);
+        });
+        let config = crate::prefs::ocr_config(cx);
         if let Some(doc) = self.doc().cloned() {
             doc.update(cx, |d, cx| d.start_ocr(spec, config, cx));
         }
@@ -1769,7 +1847,7 @@ impl Workspace {
 
     fn continue_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(dirty) = self.doc.clone().filter(|d| d.read(cx).is_dirty()) else {
-            self.persist_window(window);
+            self.persist_window(window, cx);
             window.remove_window();
             if cx.try_global::<crate::Quitting>().is_some_and(|q| q.0) {
                 cx.defer(crate::close_next_window);
@@ -1980,6 +2058,8 @@ impl Workspace {
                 Panel::Patterns => d.render_patterns(wide, window, cx),
                 Panel::Calc => d.render_calc(wide, window, cx),
                 Panel::Comments => d.render_comments(window, cx),
+                Panel::History => d.render_history(window, cx),
+                Panel::Stamps => d.render_stamps(window, cx),
                 Panel::Attachments => d.render_attachments(window, cx),
                 Panel::Layers => d.render_layers(window, cx),
                 Panel::Plugin(id) => plugin_panel_body(d, &id, window, cx),
@@ -2387,6 +2467,38 @@ impl Workspace {
         self.popup_menu("toolbar-menu", pos, items, cx)
     }
 
+    /// A problem in `settings.toml`, shown until it's fixed or dismissed.
+    fn render_settings_banner(&self, text: String, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .py_1()
+            .bg(theme::RAISED)
+            .border_b_1()
+            .border_color(theme::BORDER)
+            .text_sm()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .text_color(theme::WARNING)
+                    .child(text),
+            )
+            .child(
+                sheaf_ui::button::Button::new("settings-open", "Open Settings File")
+                    .compact()
+                    .on_click(cx.listener(|_, _, _, cx| crate::prefs::open_settings_file(cx))),
+            )
+            .child(
+                sheaf_ui::button::Button::new("settings-dismiss", "Dismiss")
+                    .compact()
+                    .on_click(cx.listener(|_, _, _, cx| crate::prefs::dismiss(cx))),
+            )
+            .into_any_element()
+    }
+
     /// The toolbar's layout (`toolbar.json`, shared by every window).
     fn toolbar_spec(&self, cx: &App) -> crate::toolbar::Spec {
         cx.try_global::<crate::toolbar::Toolbars>()
@@ -2459,6 +2571,7 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_layout(cx);
         let main: AnyElement = match self.doc().cloned() {
             Some(doc) => self.render_doc_area(doc, cx),
             None => div()
@@ -2517,12 +2630,14 @@ impl Render for Workspace {
         .absolute()
         .size_full();
 
+        let banner = crate::prefs::banner(cx).map(|text| self.render_settings_banner(text, cx));
         let middle = div()
             .flex_1()
             .min_w(px(0.0))
             .min_h(px(0.0))
             .flex()
             .flex_col()
+            .when_some(banner, |d, b| d.child(b))
             .child(div().flex_1().min_h(px(0.0)).child(main))
             .when_some(bottom, |d, b| {
                 d.child(self.splitter(Side::Bottom, cx)).child(b)
@@ -2586,6 +2701,23 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|ws, _: &crate::ShowLayers, _, cx| {
                 ws.show_panel(Panel::Layers);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|ws, _: &crate::ShowHistory, _, cx| {
+                ws.show_panel(Panel::History);
+                if let Some(doc) = ws.doc().cloned() {
+                    doc.update(cx, |d, cx| d.focus_history(cx));
+                }
+                cx.notify();
+            }))
+            .on_action(cx.listener(|ws, _: &crate::ShowStamps, _, cx| {
+                ws.show_panel(Panel::Stamps);
+                cx.notify();
+            }))
+            // J picks the Stamp tool (in the document) and shows where
+            // stamps are picked.
+            .on_action(cx.listener(|ws, _: &crate::ToolStamp, _, cx| {
+                ws.show_panel(Panel::Stamps);
                 cx.notify();
             }))
             .on_action(cx.listener(|ws, _: &crate::ShowAttachments, _, cx| {
@@ -2680,6 +2812,23 @@ impl Render for Workspace {
                 }),
             )
             .on_action(
+                cx.listener(|ws, _: &crate::SetStatus, window, cx| ws.open_set_status(window, cx)),
+            )
+            .on_action(cx.listener(|ws, _: &crate::SetStatusAgain, window, cx| {
+                let done = ws
+                    .doc()
+                    .cloned()
+                    .is_some_and(|d| d.update(cx, |d, cx| d.set_status_again(cx)));
+                if !done {
+                    ws.open_set_status(window, cx);
+                }
+            }))
+            .on_action(cx.listener(|ws, _: &crate::ResetStatus, _, cx| {
+                if let Some(d) = ws.doc().cloned() {
+                    d.update(cx, |d, cx| d.reset_status(false, cx));
+                }
+            }))
+            .on_action(
                 cx.listener(|ws, _: &crate::FindBlankPages, window, cx| ws.open_blanks(window, cx)),
             )
             .on_action(
@@ -2688,6 +2837,7 @@ impl Render for Workspace {
                 }),
             )
             .on_action(|_: &crate::ClearRecent, _, cx| crate::recent::clear(cx))
+            .on_action(|_: &crate::OpenSettingsFile, _, cx| crate::prefs::open_settings_file(cx))
             .on_action(
                 cx.listener(|ws, _: &crate::DocumentProperties, window, cx| {
                     ws.toggle_properties(window, cx)
@@ -2842,6 +2992,11 @@ impl Render for Workspace {
                     .map(|(d, _)| deferred(d.clone()).with_priority(2)),
             )
             .children(
+                self.set_status
+                    .as_ref()
+                    .map(|(d, _)| deferred(d.clone()).with_priority(2)),
+            )
+            .children(
                 self.blanks
                     .as_ref()
                     .map(|(d, _)| deferred(d.clone()).with_priority(2)),
@@ -2883,6 +3038,55 @@ fn open_paths(origin: WindowHandle<Workspace>, paths: Vec<PathBuf>, cx: &mut App
                 .ok();
         }
     }
+}
+
+/// Files another launch handed over, or Finder opened: as File > Open, one
+/// that's already open comes forward, the next fills an empty window, and
+/// the rest get windows of their own. With none, the frontmost window comes
+/// forward.
+pub fn open_from_launch(paths: Vec<PathBuf>, cx: &mut App) {
+    let activate = |handle: WindowHandle<Workspace>, cx: &mut App| {
+        handle
+            .update(cx, |_, window, _| window.activate_window())
+            .ok();
+    };
+    if paths.is_empty() {
+        let front = cx
+            .window_stack()
+            .and_then(|stack| stack.into_iter().find_map(|w| w.downcast::<Workspace>()))
+            .or_else(|| {
+                cx.windows()
+                    .into_iter()
+                    .find_map(|w| w.downcast::<Workspace>())
+            });
+        match front {
+            Some(handle) => activate(handle, cx),
+            None => Workspace::new_window(None, cx),
+        }
+        return;
+    }
+    for path in crate::window_paths(paths).into_iter().flatten() {
+        if let Some(handle) = find_open(&path, cx) {
+            activate(handle, cx);
+        } else if let Some(handle) = find_empty(cx) {
+            handle
+                .update(cx, |ws, window, cx| {
+                    ws.open_path(path, window, cx);
+                    window.activate_window();
+                })
+                .ok();
+        } else {
+            Workspace::new_window(Some(path), cx);
+        }
+    }
+}
+
+/// A window with no document in it.
+fn find_empty(cx: &App) -> Option<WindowHandle<Workspace>> {
+    cx.windows()
+        .into_iter()
+        .filter_map(|w| w.downcast::<Workspace>())
+        .find(|handle| handle.read(cx).is_ok_and(|ws| ws.doc.is_none()))
 }
 
 /// The window showing this file, if any.
@@ -3009,6 +3213,9 @@ mod tests {
             [
                 Panel::Comments,
                 Panel::Plugin("amount-crossref.pairs".into()),
+                // Built-in panels the layout predates join their dock.
+                Panel::History,
+                Panel::Stamps,
                 Panel::Plugin("wp.ticks".into()),
             ]
         );

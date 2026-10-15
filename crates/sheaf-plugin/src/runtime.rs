@@ -13,24 +13,10 @@ use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder, Trap, UpdateDeadline};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
-use crate::convert;
+use crate::api;
 use crate::manifest::{Grants, Manifest, WASM_NAME};
 use crate::storage::Storage;
-use crate::ui::{BuiltinPanel, ShowPanel, Ui};
-
-pub(crate) mod bindings {
-    wasmtime::component::bindgen!({
-        world: "plugin",
-        path: "../../wit",
-        with: {
-            "sheaf:plugin/render.page-renderer": crate::render::PageRenderer,
-            "sheaf:plugin/render.image": crate::render::RenderedImage,
-            "sheaf:plugin/progress.task": crate::progress::Task,
-        },
-    });
-}
-
-use bindings::sheaf::plugin as api;
+use crate::ui::Ui;
 
 /// How often the epoch advances; timeouts are measured in these.
 const TICK: Duration = Duration::from_millis(10);
@@ -163,6 +149,10 @@ pub struct CallContext {
     /// Where the plugin's `progress` tasks report, and how the call is
     /// cancelled. None: tasks report nowhere and are never cancelled.
     pub progress: Option<sheaf_progress::Tracker>,
+    /// The plugin's section of the user's `settings.toml`, as JSON (API
+    /// 0.3's `storage.preferences`), taken when the call starts so it
+    /// stays the same throughout. Empty for none.
+    pub preferences: String,
 }
 
 /// One entry point into a plugin.
@@ -268,7 +258,10 @@ impl Runtime {
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker).map_err(anyhow::Error::from)?;
         wasmtime_wasi_http::p2::add_only_http_to_linker_sync(&mut linker)
             .map_err(anyhow::Error::from)?;
-        bindings::Plugin::add_to_linker::<_, HasSelf<_>>(&mut linker, |s| s)
+        // Both worlds: a plugin links to the one it was built for.
+        api::v03::World::add_to_linker::<_, HasSelf<_>>(&mut linker, |s| s)
+            .map_err(anyhow::Error::from)?;
+        api::v02::World::add_to_linker::<_, HasSelf<_>>(&mut linker, |s| s)
             .map_err(anyhow::Error::from)?;
         let token = Arc::new(());
         let alive = Arc::downgrade(&token);
@@ -297,9 +290,10 @@ impl Runtime {
         let status = Arc::new(Mutex::new(Status::Loading));
         let (rt, st, id) = (self.clone(), status.clone(), manifest.id.clone());
         let panels = manifest.panels.iter().map(|p| p.id.clone()).collect();
+        let v02 = !manifest.api.matches(&crate::API_VERSION);
         let spawned = thread::Builder::new()
             .name(format!("plugin-{id}"))
-            .spawn(move || worker(rt, dir, id, panels, opts, st, rx));
+            .spawn(move || worker(rt, dir, id, panels, v02, opts, st, rx));
         if let Err(e) = spawned {
             *status.lock().unwrap() = Status::Failed(format!("starting its thread: {e}"));
         }
@@ -369,17 +363,19 @@ impl Plugin {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn worker(
     rt: Arc<Runtime>,
     dir: PathBuf,
     id: String,
     panels: Vec<String>,
+    v02: bool,
     opts: LoadOptions,
     status: Arc<Mutex<Status>>,
     rx: mpsc::Receiver<Request>,
 ) {
     let set = |s: Status| *status.lock().unwrap() = s;
-    let mut inst = match Instance::start(&rt, &dir, &id, panels, opts) {
+    let mut inst = match Instance::start(&rt, &dir, &id, panels, v02, opts) {
         Ok(i) => {
             set(Status::Ready);
             i
@@ -416,8 +412,46 @@ fn worker(
 
 struct Instance {
     store: Option<Store<HostState>>,
-    world: Option<bindings::Plugin>,
+    world: Option<World>,
     timeout: Duration,
+}
+
+/// A plugin's instance, in the API it was built for.
+enum World {
+    V03(api::v03::World),
+    V02(api::v02::World),
+}
+
+impl World {
+    fn activate(&self, store: &mut Store<HostState>) -> wasmtime::Result<Result<(), String>> {
+        match self {
+            World::V03(w) => w.call_activate(store),
+            World::V02(w) => w.call_activate(store),
+        }
+    }
+
+    fn run(
+        &self,
+        store: &mut Store<HostState>,
+        call: &Call,
+    ) -> wasmtime::Result<Result<(), String>> {
+        match (self, call) {
+            (World::V03(w), Call::Command { id, args }) => {
+                w.call_run_command(store, id, args.as_deref())
+            }
+            (World::V02(w), Call::Command { id, args }) => {
+                w.call_run_command(store, id, args.as_deref())
+            }
+            (World::V03(w), Call::PanelAction { panel, row, action }) => {
+                w.call_panel_action(store, panel, row, action)
+            }
+            (World::V02(w), Call::PanelAction { panel, row, action }) => {
+                w.call_panel_action(store, panel, row, action)
+            }
+            (World::V03(w), Call::Event(e)) => w.call_on_event(store, &api::v03::event_to_wit(e)),
+            (World::V02(w), Call::Event(e)) => w.call_on_event(store, &api::v02::event_to_wit(e)),
+        }
+    }
 }
 
 impl Instance {
@@ -426,6 +460,7 @@ impl Instance {
         dir: &std::path::Path,
         id: &str,
         panels: Vec<String>,
+        v02: bool,
         opts: LoadOptions,
     ) -> Result<Self> {
         let wasm = dir.join(WASM_NAME);
@@ -469,13 +504,17 @@ impl Instance {
             })
         });
         store.set_epoch_deadline(1);
-        let world = bindings::Plugin::instantiate(&mut store, &component, &rt.linker)
-            .map_err(anyhow::Error::from)
-            .context("instantiating")?;
+        let world = if v02 {
+            api::v02::World::instantiate(&mut store, &component, &rt.linker).map(World::V02)
+        } else {
+            api::v03::World::instantiate(&mut store, &component, &rt.linker).map(World::V03)
+        }
+        .map_err(anyhow::Error::from)
+        .context("instantiating")?;
         store.data_mut().deadline = Instant::now() + rt.limits.call_timeout;
         store.set_epoch_deadline(1);
         world
-            .call_activate(&mut store)
+            .activate(&mut store)
             .map_err(|e| anyhow!(describe_trap(&e, rt.limits.call_timeout)))
             .context("activate")?
             .map_err(|e| anyhow!("activate: {e}"))?;
@@ -501,13 +540,7 @@ impl Instance {
         data.deadline = Instant::now() + self.timeout;
         data.credit.store(0, std::sync::atomic::Ordering::Relaxed);
         store.set_epoch_deadline(1);
-        let result = match call {
-            Call::Command { id, args } => world.call_run_command(&mut *store, id, args.as_deref()),
-            Call::PanelAction { panel, row, action } => {
-                world.call_panel_action(&mut *store, panel, row, action)
-            }
-            Call::Event(e) => world.call_on_event(&mut *store, &convert::event_to_wit(e)),
-        };
+        let result = world.run(store, call);
         let data = store.data_mut();
         data.drop_render_handles();
         data.drop_task_handles();
@@ -616,10 +649,10 @@ pub(crate) struct HostState {
     wasi: WasiCtx,
     pub(crate) table: ResourceTable,
     limits: StoreLimits,
-    plugin: String,
+    pub(crate) plugin: String,
     /// Panel ids the manifest declares.
-    panels: Vec<String>,
-    storage: Storage,
+    pub(crate) panels: Vec<String>,
+    pub(crate) storage: Storage,
     http: wasmtime_wasi_http::WasiHttpCtx,
     net: NetHooks,
     /// Nanoseconds this call spent waiting on the network (not charged).
@@ -628,8 +661,8 @@ pub(crate) struct HostState {
     pub(crate) render_handles: crate::render::CallHandles,
     /// `progress.task` handles this call made, freed when it returns.
     pub(crate) task_handles: Vec<u32>,
-    call: Option<CallContext>,
-    batches: Vec<EditBatch>,
+    pub(crate) call: Option<CallContext>,
+    pub(crate) batches: Vec<EditBatch>,
     /// When the running call times out.
     pub(crate) deadline: Instant,
 }
@@ -643,7 +676,7 @@ impl HostState {
         self.call.as_ref()?.progress.as_ref()
     }
 
-    fn ui(&self) -> Option<Arc<dyn Ui>> {
+    pub(crate) fn ui(&self) -> Option<Arc<dyn Ui>> {
         self.call.as_ref()?.ui.clone()
     }
 }
@@ -667,198 +700,9 @@ impl wasmtime_wasi_http::WasiHttpView for HostState {
     }
 }
 
-impl api::types::Host for HostState {}
-
-impl api::document::Host for HostState {
-    fn path(&mut self) -> Option<String> {
-        self.doc().map(|d| d.path.display().to_string())
-    }
-
-    fn pages(&mut self) -> Vec<api::types::PageInfo> {
-        let Some(d) = self.doc() else {
-            return Vec::new();
-        };
-        d.snapshot
-            .state
-            .pages
-            .iter()
-            .map(|p| convert::page_info(&d.snapshot, p))
-            .collect()
-    }
-
-    fn outline(&mut self) -> Vec<api::types::OutlineItem> {
-        let Some(d) = self.doc() else {
-            return Vec::new();
-        };
-        d.snapshot
-            .state
-            .outline_flat()
-            .into_iter()
-            .map(|(depth, n)| convert::outline_item(depth, n))
-            .collect()
-    }
-
-    fn annotations(&mut self, page: u64) -> Vec<api::types::Annot> {
-        let Some(d) = self.doc() else {
-            return Vec::new();
-        };
-        d.snapshot
-            .state
-            .annots_on(PageId(page))
-            .map(|l| l.iter().map(convert::annot_to_wit).collect())
-            .unwrap_or_default()
-    }
-
-    fn selection(&mut self) -> Vec<u64> {
-        self.doc()
-            .map(|d| d.selection.iter().map(|p| p.0).collect())
-            .unwrap_or_default()
-    }
-
-    fn current_page(&mut self) -> Option<u64> {
-        self.doc()?.current_page.map(|p| p.0)
-    }
-}
-
-impl api::text::Host for HostState {
-    fn page_text(&mut self, page: u64) -> Result<String, String> {
-        let d = self.doc().ok_or("no document is open")?;
-        let id = PageId(page);
-        if let Some(layer) = d.snapshot.state.text_layer(id) {
-            return Ok(layer.text());
-        }
-        let p = d
-            .snapshot
-            .state
-            .pages
-            .iter()
-            .find(|p| p.id == id)
-            .ok_or_else(|| format!("no page {page}"))?;
-        d.text
-            .page_text(p.source, p.index)
-            .map_err(|e| format!("{e:#}"))
-    }
-
-    fn pattern_search(
-        &mut self,
-        page: u64,
-        regex: String,
-    ) -> Result<Vec<api::types::TextMatch>, String> {
-        let d = self.doc().ok_or("no document is open")?;
-        let re = regex::RegexBuilder::new(&regex)
-            .size_limit(1 << 20)
-            .build()
-            .map_err(|e| e.to_string())?;
-        let id = PageId(page);
-        let found: Vec<TextMatch> = match d.snapshot.state.text_layer(id) {
-            Some(layer) => sheaf_doc::text_layer::pattern_search(layer, &re)
-                .into_iter()
-                .map(|h| TextMatch {
-                    text: h.text,
-                    rects: h.rects,
-                    groups: h.groups,
-                })
-                .collect(),
-            None => {
-                let p = d
-                    .snapshot
-                    .state
-                    .pages
-                    .iter()
-                    .find(|p| p.id == id)
-                    .ok_or_else(|| format!("no page {page}"))?;
-                d.text
-                    .pattern_search(p.source, p.index, &Arc::new(re))
-                    .map_err(|e| format!("{e:#}"))?
-            }
-        };
-        Ok(found.into_iter().map(convert::text_match_to_wit).collect())
-    }
-
-    fn search(
-        &mut self,
-        page: u64,
-        query: String,
-        match_case: bool,
-    ) -> Result<Vec<api::types::TextMatch>, String> {
-        let (d, p) = self.page_ref(page)?;
-        let found: Vec<TextMatch> = match d.snapshot.state.text_layer(p.id) {
-            Some(layer) => sheaf_doc::text_layer::search(layer, &query, match_case)
-                .into_iter()
-                .map(|h| TextMatch {
-                    text: h.text,
-                    rects: h.rects,
-                    groups: h.groups,
-                })
-                .collect(),
-            None => d
-                .text
-                .search(p.source, p.index, &query, match_case)
-                .map_err(|e| format!("{e:#}"))?,
-        };
-        Ok(found.into_iter().map(convert::text_match_to_wit).collect())
-    }
-
-    fn words(
-        &mut self,
-        page: u64,
-        rect: Option<api::types::Box2>,
-    ) -> Result<Vec<api::types::TextMatch>, String> {
-        static WORD: std::sync::LazyLock<Arc<regex::Regex>> =
-            std::sync::LazyLock::new(|| Arc::new(regex::Regex::new(r"\S+").unwrap()));
-        let (d, p) = self.page_ref(page)?;
-        let words: Vec<TextMatch> = match d.snapshot.state.text_layer(p.id) {
-            Some(layer) => sheaf_doc::text_layer::pattern_search(layer, &WORD)
-                .into_iter()
-                .map(|h| TextMatch {
-                    text: h.text,
-                    rects: h.rects,
-                    groups: Vec::new(),
-                })
-                .collect(),
-            None => d
-                .text
-                .pattern_search(p.source, p.index, &WORD)
-                .map_err(|e| format!("{e:#}"))?,
-        };
-        let within = |m: &TextMatch| match rect {
-            None => true,
-            Some(r) => m.rects.first().is_some_and(|b| {
-                let (cx, cy) = (b.x + b.w / 2.0, b.y + b.h / 2.0);
-                cx >= r.x && cx <= r.x + r.w && cy >= r.y && cy <= r.y + r.h
-            }),
-        };
-        Ok(words
-            .into_iter()
-            .filter(within)
-            .map(|mut m| {
-                m.groups.clear();
-                convert::text_match_to_wit(m)
-            })
-            .collect())
-    }
-
-    fn text_boxes(
-        &mut self,
-        page: u64,
-        rect: api::types::Box2,
-    ) -> Result<Vec<api::types::Box2>, String> {
-        let (d, p) = self.page_ref(page)?;
-        let rect = convert::box_from_wit(rect);
-        let boxes = match d.snapshot.state.text_layer(p.id) {
-            Some(layer) => layer.boxes_in_rect(rect),
-            None => d
-                .text
-                .text_boxes(p.source, p.index, rect)
-                .map_err(|e| format!("{e:#}"))?,
-        };
-        Ok(boxes.into_iter().map(convert::box_to_wit).collect())
-    }
-}
-
 impl HostState {
     /// The page, for text calls.
-    fn page_ref(&self, page: u64) -> Result<(&DocContext, sheaf_doc::PageRef), String> {
+    pub(crate) fn page_ref(&self, page: u64) -> Result<(&DocContext, sheaf_doc::PageRef), String> {
         let d = self.doc().ok_or("no document is open")?;
         let p = d
             .snapshot
@@ -869,146 +713,5 @@ impl HostState {
             .copied()
             .ok_or_else(|| format!("no page {page}"))?;
         Ok((d, p))
-    }
-}
-
-impl api::patterns::Host for HostState {
-    fn presets(&mut self) -> Vec<api::patterns::Preset> {
-        self.call
-            .as_ref()
-            .map(|c| {
-                c.presets
-                    .iter()
-                    .map(|p| api::patterns::Preset {
-                        name: p.name.clone(),
-                        regex: p.regex.clone(),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-}
-
-impl api::ocr::Host for HostState {
-    fn recognize(
-        &mut self,
-        page: u64,
-        options: api::ocr::OcrOptions,
-    ) -> Result<api::ocr::TextLayer, String> {
-        let (d, p) = self.page_ref(page)?;
-        let ocr = d.ocr.clone().ok_or("OCR isn't available")?;
-        let size = convert::page_size(&d.snapshot, &p);
-        let started = Instant::now();
-        let layer = ocr.recognize(&p, size, options.language, options.dpi);
-        // The engine's time isn't the plugin's.
-        self.deadline += started.elapsed();
-        layer
-            .map(|l| convert::layer_to_wit(&l))
-            .map_err(|e| format!("{e:#}"))
-    }
-
-    fn page_text_layer(&mut self, page: u64) -> Option<api::ocr::TextLayer> {
-        let d = self.doc()?;
-        d.snapshot
-            .state
-            .text_layer(PageId(page))
-            .map(|l| convert::layer_to_wit(l))
-    }
-}
-
-impl api::storage::Host for HostState {
-    fn get(&mut self, key: String) -> Option<String> {
-        self.storage.get(&key)
-    }
-
-    fn set(&mut self, key: String, value: String) -> Result<(), String> {
-        self.storage.set(key, value)
-    }
-
-    fn delete(&mut self, key: String) {
-        if let Err(e) = self.storage.delete(&key) {
-            log::warn!(target: "plugin", "[{}] {e}", self.plugin);
-        }
-    }
-
-    fn keys(&mut self) -> Vec<String> {
-        self.storage.keys()
-    }
-
-    fn settings(&mut self) -> String {
-        self.storage.settings()
-    }
-}
-
-impl api::ui::Host for HostState {
-    fn show_form(&mut self, form: api::ui::Form) -> Option<Vec<api::ui::FieldAnswer>> {
-        let ui = self.ui()?;
-        let started = Instant::now();
-        let answer = ui.show_form(convert::form_from_wit(form));
-        // The user's thinking time isn't the plugin's.
-        self.deadline += started.elapsed();
-        answer.map(|a| a.into_iter().map(convert::answer_to_wit).collect())
-    }
-
-    fn notice(&mut self, message: String) {
-        match self.ui() {
-            Some(ui) => ui.notice(message),
-            None => log::info!(target: "plugin", "[{}] {message}", self.plugin),
-        }
-    }
-
-    fn set_panel(&mut self, panel: String, rows: Vec<api::ui::PanelRow>) {
-        if !self.panels.contains(&panel) {
-            log::warn!(
-                target: "plugin",
-                "[{}] set-panel: {panel:?} isn't declared in the manifest",
-                self.plugin
-            );
-            return;
-        }
-        if let Some(ui) = self.ui() {
-            ui.set_panel(panel, rows.into_iter().map(convert::row_from_wit).collect());
-        }
-    }
-
-    fn show_panel(&mut self, panel: String) {
-        // The plugin's own panels first, so a panel it calls "comments"
-        // is still its own.
-        let which = if self.panels.contains(&panel) {
-            ShowPanel::Plugin(panel)
-        } else if let Some(b) = BuiltinPanel::from_name(&panel) {
-            ShowPanel::Builtin(b)
-        } else {
-            log::warn!(
-                target: "plugin",
-                "[{}] show-panel: there's no panel {panel:?}",
-                self.plugin
-            );
-            return;
-        };
-        if let Some(ui) = self.ui() {
-            ui.show_panel(which);
-        }
-    }
-}
-
-impl api::edits::Host for HostState {
-    fn submit(&mut self, label: String, edits: Vec<api::types::Edit>) {
-        let edits = edits.into_iter().map(convert::edit_from_wit).collect();
-        self.batches.push(EditBatch { label, edits });
-    }
-}
-
-impl api::log::Host for HostState {
-    fn log(&mut self, level: api::log::Level, message: String) {
-        use api::log::Level;
-        let level = match level {
-            Level::Trace => log::Level::Trace,
-            Level::Debug => log::Level::Debug,
-            Level::Info => log::Level::Info,
-            Level::Warn => log::Level::Warn,
-            Level::Error => log::Level::Error,
-        };
-        log::log!(target: "plugin", level, "[{}] {message}", self.plugin);
     }
 }

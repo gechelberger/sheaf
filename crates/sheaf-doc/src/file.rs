@@ -78,7 +78,39 @@ impl PdfFile {
 
 use std::collections::HashMap;
 
-use crate::annot::{Annot, Box2, PageGeom, Pt, from_json};
+use crate::annot::{Annot, Box2, PART, PageGeom, Pt, from_json};
+use crate::model::{FlatOutlineItem, TextStyle};
+
+/// The mark an annotation dictionary carries, if this build can read it.
+pub(crate) fn sheaf_mark(dict: &lopdf::Dictionary) -> Option<Annot> {
+    from_json(pdf_text(dict.get(b"SheafAnnot").ok()?).as_bytes())
+}
+
+/// Is this `/Annots` entry one of ours to rewrite: a mark this build can
+/// read, or a companion of one (see `annot::PART`)? A `/SheafAnnot` it
+/// can't read, from a newer sheaf, isn't: it's kept like any other tool's
+/// annotation, so a save here never loses it.
+pub(crate) fn is_ours(pdf: &lopdf::Document, entry: &lopdf::Object) -> bool {
+    let Some(dict) = pdf
+        .dereference(entry)
+        .ok()
+        .and_then(|(_, o)| o.as_dict().ok())
+    else {
+        return false;
+    };
+    if dict.has(b"SheafAnnot") {
+        return sheaf_mark(dict).is_some();
+    }
+    // One step only: a companion's /IRT is its mark, never another companion.
+    dict.has(PART.as_bytes())
+        && dict
+            .get(b"IRT")
+            .ok()
+            .and_then(|irt| pdf.dereference(irt).ok())
+            .and_then(|(_, o)| o.as_dict().ok())
+            .and_then(sheaf_mark)
+            .is_some()
+}
 
 /// An annotation some other tool left in the file. Listed read-only in the
 /// Comments panel; PDFium draws it.
@@ -94,6 +126,94 @@ pub struct ForeignAnnot {
     pub modified: String,
     /// Bounds in the page's displayed space.
     pub rect: Box2,
+    /// `/NM`, or for one without, a stand-in made from what it says
+    /// ([`anon_name`]), so replies can still name it.
+    pub name: String,
+    /// The comment whose thread it's in (`/IRT`), by name.
+    pub parent: Option<String>,
+    /// `/RT /Group`: part of its parent (the StrikeOut of Acrobat's
+    /// replace-text edit, say) rather than a reply to it.
+    pub grouped: bool,
+    /// A review state it sets on its parent: (`/StateModel`, `/State`).
+    pub state: Option<(String, String)>,
+    /// `/CreationDate`, or empty.
+    pub created: String,
+    /// Its position in the page's `/Annots`, which is how PDFium counts
+    /// them too, so sheaf can hide it on screen.
+    pub slot: usize,
+    /// The file hides it (`/F` bit 2): sheaf never shows it.
+    pub hidden: bool,
+    /// `/C`, when it's RGB.
+    pub color: Option<[u8; 3]>,
+    /// What it is as one of our marks, when sheaf can hold it: what
+    /// editing it makes it (M9 decision 5). Read when the file is.
+    pub mark: Option<Box<Annot>>,
+}
+
+/// The names deleting `removed` takes off a page: those, and every
+/// comment in their threads. `comments` is each comment's name and its
+/// parent's.
+pub fn removed_with_threads<'a>(
+    comments: impl Iterator<Item = (&'a str, Option<&'a str>)> + Clone,
+    removed: &im::OrdSet<String>,
+) -> std::collections::HashSet<String> {
+    let mut gone: std::collections::HashSet<String> = removed.iter().cloned().collect();
+    loop {
+        let more: Vec<String> = comments
+            .clone()
+            .filter(|(name, parent)| {
+                !gone.contains(*name) && parent.is_some_and(|p| gone.contains(p))
+            })
+            .map(|(name, _)| name.to_string())
+            .collect();
+        if more.is_empty() {
+            return gone;
+        }
+        gone.extend(more);
+    }
+}
+
+/// A name for an annotation without `/NM`, from what it says: the same
+/// every time it's read, so a reply made in sheaf can name it, and a save
+/// writes it in as its `/NM`.
+pub fn anon_name(dict: &lopdf::Dictionary) -> String {
+    // The fields one after another, each ended by a byte no text has, and
+    // their checksum: stable across builds, unlike std's hasher.
+    let mut fields: Vec<u8> = Vec::new();
+    let mut eat = |bytes: &[u8]| {
+        fields.extend_from_slice(bytes);
+        fields.push(0xff);
+    };
+    for key in [
+        b"Subtype".as_slice(),
+        b"Rect",
+        b"T",
+        b"M",
+        b"CreationDate",
+        b"Contents",
+    ] {
+        let v = dict.get(key).ok();
+        match v {
+            Some(lopdf::Object::Array(a)) => {
+                for o in a {
+                    eat(format!("{:.2}", o.as_float().unwrap_or(0.0)).as_bytes());
+                }
+            }
+            Some(lopdf::Object::Name(n)) => eat(n),
+            Some(o) => eat(pdf_text(o).as_bytes()),
+            None => eat(b""),
+        }
+    }
+    format!("sheaf-anon:{}", sheaf_core::checksum_hex(&fields))
+}
+
+/// What an annotation is called in threads: its `/NM`, else [`anon_name`].
+pub fn thread_name(dict: &lopdf::Dictionary) -> String {
+    dict.get(b"NM")
+        .ok()
+        .map(pdf_text)
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| anon_name(dict))
 }
 
 /// Everything annotation-shaped in a file: our marks (editable, keyed by
@@ -102,6 +222,38 @@ pub struct ForeignAnnot {
 pub struct AnnotsInFile {
     pub sheaf: HashMap<u32, Vec<Annot>>,
     pub foreign: Vec<ForeignAnnot>,
+}
+
+/// A source's bytes: the ones kept from when it was opened, else the file's
+/// now (see `SourceInfo::data`).
+pub fn source_bytes(info: &crate::SourceInfo) -> Result<std::sync::Arc<Vec<u8>>> {
+    match &info.data {
+        Some(d) => Ok(d.0.clone()),
+        None => Ok(std::sync::Arc::new(
+            std::fs::read(&info.path)
+                .with_context(|| format!("reading {}", info.path.display()))?,
+        )),
+    }
+}
+
+/// A source as lopdf sees it, decrypted as [`load_pdf`] does: from the
+/// bytes kept from when it was opened when there are any, so a file
+/// replaced since (by a save in place) doesn't matter.
+pub fn load_source(info: &crate::SourceInfo) -> Result<lopdf::Document> {
+    let Some(data) = &info.data else {
+        return load_pdf(&info.path, info.password.as_deref());
+    };
+    let path = info.path.display();
+    let mut pdf = lopdf::Document::load_mem(&data.0).with_context(|| format!("loading {path}"))?;
+    if pdf.is_encrypted() {
+        let options = lopdf::LoadOptions::with_password(info.password.as_deref().unwrap_or(""));
+        pdf = lopdf::Document::load_mem_with_options(&data.0, options)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+            .with_context(|| format!("decrypting {path}"))?;
+        pdf.trailer.remove(b"Encrypt");
+        pdf.encryption_state = None;
+    }
+    Ok(pdf)
 }
 
 /// Load a file with lopdf and, if it's encrypted, decrypt it in memory with
@@ -138,6 +290,96 @@ pub struct FileFacts {
     pub collection: Option<crate::portfolio::Collection>,
     /// Optional content groups, in display order.
     pub layers: Vec<crate::layers::Layer>,
+    /// Each bookmark's color and style, in pre-order; empty when none has
+    /// either (see [`outline_styles`]).
+    pub outline_styles: Vec<OutlineStyle>,
+}
+
+/// A bookmark's `/C` and `/F`, which PDFium's outline doesn't carry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OutlineStyle {
+    pub title: String,
+    pub color: Option<[u8; 3]>,
+    pub style: TextStyle,
+}
+
+/// Each bookmark's title, color and style, in pre-order (the order PDFium
+/// lists them), or nothing when no bookmark has a color or style. Matched to
+/// PDFium's items by position, checked by title.
+pub fn outline_styles(pdf: &lopdf::Document) -> Vec<OutlineStyle> {
+    let first = pdf
+        .catalog()
+        .ok()
+        .and_then(|c| c.get(b"Outlines").ok())
+        .and_then(|o| pdf.dereference(o).ok())
+        .and_then(|(_, o)| o.as_dict().ok())
+        .and_then(|d| d.get(b"First").ok())
+        .and_then(|f| f.as_reference().ok());
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    // (item, depth); children before siblings, as in pre-order.
+    let mut stack: Vec<(lopdf::ObjectId, u16)> = first.into_iter().map(|f| (f, 0)).collect();
+    while let Some((id, depth)) = stack.pop() {
+        if !seen.insert(id) || out.len() >= 100_000 {
+            continue;
+        }
+        let Ok(item) = pdf.get_dictionary(id) else {
+            continue;
+        };
+        let color = item
+            .get(b"C")
+            .ok()
+            .and_then(|c| pdf.dereference(c).ok())
+            .and_then(|(_, c)| c.as_array().ok())
+            .filter(|a| a.len() == 3)
+            .map(|a| {
+                let v = |i: usize| {
+                    (a[i].as_float().unwrap_or(0.0).clamp(0.0, 1.0) * 255.0).round() as u8
+                };
+                [v(0), v(1), v(2)]
+            })
+            // Black is the default; don't call it a color.
+            .filter(|c| *c != [0, 0, 0]);
+        let flags = item
+            .get(b"F")
+            .ok()
+            .and_then(|f| f.as_i64().ok())
+            .unwrap_or(0);
+        out.push(OutlineStyle {
+            title: item.get(b"Title").map(pdf_text).unwrap_or_default(),
+            color,
+            style: TextStyle {
+                italic: flags & 1 != 0,
+                bold: flags & 2 != 0,
+            },
+        });
+        if let Ok(next) = item.get(b"Next").and_then(|n| n.as_reference()) {
+            stack.push((next, depth));
+        }
+        if depth < 64
+            && let Ok(child) = item.get(b"First").and_then(|c| c.as_reference())
+        {
+            stack.push((child, depth + 1));
+        }
+    }
+    if out
+        .iter()
+        .all(|s| s.color.is_none() && s.style == TextStyle::default())
+    {
+        out.clear();
+    }
+    out
+}
+
+/// Give PDFium's flattened bookmarks their colors and styles: the `i`th
+/// takes the `i`th style when their titles agree.
+pub fn style_flat_items(items: &mut [FlatOutlineItem], styles: &[OutlineStyle]) {
+    for (item, s) in items.iter_mut().zip(styles) {
+        if item.title.trim() == s.title.trim() {
+            item.color = s.color;
+            item.style = s.style;
+        }
+    }
 }
 
 /// The facts sheaf reads from an open file's catalog.
@@ -148,6 +390,7 @@ pub fn facts_in(pdf: &lopdf::Document) -> FileFacts {
         attachments: crate::attachments::attachments_in(pdf),
         collection: crate::portfolio::collection(pdf),
         layers: crate::layers::layers_in(pdf),
+        outline_styles: outline_styles(pdf),
     }
 }
 
@@ -158,7 +401,114 @@ pub fn read_open(
     password: Option<&str>,
 ) -> Result<(AnnotsInFile, FileFacts)> {
     let pdf = load_pdf(path.as_ref(), password)?;
-    Ok((annots_in(&pdf), facts_in(&pdf)))
+    let found = annots_in(&pdf);
+    recover_cached(&pdf);
+    Ok((found, facts_in(&pdf)))
+}
+
+/// What our marks keep in this machine's cache, when it isn't there (a
+/// file from someone else): a stamp's page, made again from its saved
+/// appearance, and an attachment's file, from its embedded copy.
+pub fn recover_cached(pdf: &lopdf::Document) {
+    for (_, page_id) in pdf.get_pages() {
+        let Ok(page) = pdf.get_dictionary(page_id) else {
+            continue;
+        };
+        let Some(list) = page
+            .get(b"Annots")
+            .ok()
+            .and_then(|a| pdf.dereference(a).ok())
+            .and_then(|(_, a)| a.as_array().ok())
+        else {
+            continue;
+        };
+        for entry in list {
+            let Some(dict) = pdf
+                .dereference(entry)
+                .ok()
+                .and_then(|(_, o)| o.as_dict().ok())
+            else {
+                continue;
+            };
+            let mark = sheaf_mark(dict);
+            if let Some(Annot {
+                kind: crate::annot::AnnotKind::FileAttachment { file, .. },
+                ..
+            }) = &mark
+                && !crate::generated::blob_path(file).is_some_and(|p| p.exists())
+            {
+                let bytes = dict
+                    .get(b"FS")
+                    .ok()
+                    .and_then(|o| pdf.dereference(o).ok())
+                    .and_then(|(_, o)| o.as_dict().ok())
+                    .and_then(|fs| fs.get(b"EF").ok())
+                    .and_then(|o| pdf.dereference(o).ok())
+                    .and_then(|(_, o)| o.as_dict().ok())
+                    .and_then(|ef| ef.get(b"F").ok())
+                    .and_then(|o| o.as_reference().ok())
+                    .and_then(|id| match pdf.get_object(id) {
+                        Ok(lopdf::Object::Stream(s)) => Some(
+                            s.decompressed_content()
+                                .unwrap_or_else(|_| s.content.clone()),
+                        ),
+                        _ => None,
+                    });
+                match bytes.map(|b| crate::generated::store_blob_as(file, &b)) {
+                    Some(Ok(_)) => {}
+                    Some(Err(e)) => log::warn!("recovering attachment {file}: {e:#}"),
+                    None => log::warn!("attachment {file} has no embedded file"),
+                }
+                continue;
+            }
+            let Some(Annot {
+                kind: crate::annot::AnnotKind::PageStamp { stamp, .. },
+                ..
+            }) = mark
+            else {
+                continue;
+            };
+            if crate::generated::path_of(&stamp).is_some_and(|p| p.exists()) {
+                continue;
+            }
+            // /AP /N → its /Resources /XObject /SheafStamp.
+            let form = dict
+                .get(b"AP")
+                .ok()
+                .and_then(|o| pdf.dereference(o).ok())
+                .and_then(|(_, o)| o.as_dict().ok())
+                .and_then(|ap| ap.get(b"N").ok())
+                .and_then(|n| n.as_reference().ok())
+                .and_then(|n| match pdf.get_object(n) {
+                    Ok(lopdf::Object::Stream(s)) => Some(s.dict.clone()),
+                    _ => None,
+                })
+                .and_then(|n| {
+                    let res = pdf
+                        .dereference(n.get(b"Resources").ok()?)
+                        .ok()?
+                        .1
+                        .as_dict()
+                        .ok()?
+                        .clone();
+                    let xo = pdf
+                        .dereference(res.get(b"XObject").ok()?)
+                        .ok()?
+                        .1
+                        .as_dict()
+                        .ok()?
+                        .clone();
+                    xo.get(b"SheafStamp").ok()?.as_reference().ok()
+                });
+            let made = form
+                .ok_or_else(|| anyhow::anyhow!("no saved appearance"))
+                .and_then(|f| crate::stamp_lib::form_to_pdf(pdf, f))
+                .and_then(|bytes| crate::generated::store_as(&stamp, &bytes));
+            if let Err(e) = made {
+                log::warn!("recovering stamp {stamp}: {e:#}");
+            }
+        }
+    }
 }
 
 /// Annotations sheaf wrote into `path` earlier, keyed by page index.
@@ -170,6 +520,12 @@ pub fn read_sheaf_annots(path: impl AsRef<Path>) -> Result<HashMap<u32, Vec<Anno
 pub fn read_sheaf_annots_mem(bytes: &[u8]) -> Result<HashMap<u32, Vec<Annot>>> {
     let pdf = lopdf::Document::load_mem(bytes)?;
     Ok(annots_in(&pdf).sheaf)
+}
+
+/// All annotations in a file's bytes.
+pub fn read_annots_mem(bytes: &[u8]) -> Result<AnnotsInFile> {
+    let pdf = lopdf::Document::load_mem(bytes)?;
+    Ok(annots_in(&pdf))
 }
 
 /// All annotations in `path`.
@@ -229,15 +585,22 @@ fn annots_in(pdf: &lopdf::Document) -> AnnotsInFile {
             continue;
         };
         let mut geom: Option<PageGeom> = None;
-        for entry in list {
+        // This page's, and their dictionaries, to convert together.
+        let first = out.foreign.len();
+        let mut dicts: Vec<&lopdf::Dictionary> = Vec::new();
+        for (slot, entry) in list.iter().enumerate() {
             let Ok((_, obj)) = pdf.dereference(entry) else {
                 continue;
             };
             let Ok(dict) = obj.as_dict() else { continue };
-            if let Ok(payload) = dict.get(b"SheafAnnot") {
-                if let Some(a) = from_json(pdf_text(payload).as_bytes()) {
-                    out.sheaf.entry(i as u32).or_default().push(a);
-                }
+            if let Some(a) = sheaf_mark(dict) {
+                out.sheaf.entry(i as u32).or_default().push(a);
+                continue;
+            }
+            // A companion of one of ours is part of it. Anything else,
+            // including a mark this build can't read, is listed as another
+            // tool's.
+            if dict.has(PART.as_bytes()) && is_ours(pdf, entry) {
                 continue;
             }
             let subtype = dict
@@ -269,6 +632,17 @@ fn annots_in(pdf: &lopdf::Document) -> AnnotsInFile {
                 y: rect[3],
             });
             let text = |key: &[u8]| dict.get(key).map(pdf_text).unwrap_or_default();
+            let name_of = |key: &[u8]| -> Option<String> {
+                let (_, o) = pdf.dereference(dict.get(key).ok()?).ok()?;
+                Some(thread_name(o.as_dict().ok()?))
+            };
+            let state = match (text(b"StateModel"), text(b"State")) {
+                (_, s) if s.is_empty() => None,
+                // Acrobat's default model.
+                (m, s) if m.is_empty() => Some((crate::annot::REVIEW.to_string(), s)),
+                (m, s) => Some((m, s)),
+            };
+            dicts.push(dict);
             out.foreign.push(ForeignAnnot {
                 page: i as u32,
                 subtype,
@@ -276,7 +650,41 @@ fn annots_in(pdf: &lopdf::Document) -> AnnotsInFile {
                 contents: text(b"Contents"),
                 modified: text(b"M"),
                 rect: Box2::from_corners(p, q),
+                name: thread_name(dict),
+                parent: name_of(b"IRT"),
+                grouped: dict
+                    .get(b"RT")
+                    .ok()
+                    .and_then(|o| o.as_name().ok())
+                    .is_some_and(|n| n == b"Group"),
+                state,
+                created: text(b"CreationDate"),
+                slot,
+                hidden: dict
+                    .get(b"F")
+                    .ok()
+                    .and_then(|f| f.as_i64().ok())
+                    .is_some_and(|f| f & 2 != 0),
+                color: dict
+                    .get(b"C")
+                    .ok()
+                    .and_then(|c| pdf.dereference(c).ok())
+                    .and_then(|(_, c)| c.as_array().ok())
+                    .filter(|c| c.len() == 3)
+                    .map(|c| {
+                        let v = |i: usize| {
+                            (c[i].as_float().unwrap_or(0.0).clamp(0.0, 1.0) * 255.0).round() as u8
+                        };
+                        [v(0), v(1), v(2)]
+                    }),
+                mark: None,
             });
+        }
+        if let Some(g) = geom {
+            let marks = crate::import::convert_page(pdf, &dicts, &g, Default::default());
+            for (f, m) in out.foreign[first..].iter_mut().zip(marks) {
+                f.mark = m.ok().map(Box::new);
+            }
         }
     }
     out
@@ -336,6 +744,131 @@ mod tests {
     use super::*;
     use lopdf::{Object, Stream, dictionary};
 
+    #[test]
+    fn their_threads_read_with_states_and_groups() {
+        use lopdf::{Object, Stream, dictionary};
+        let mut pdf = lopdf::Document::with_version("1.7");
+        let pages_id = pdf.new_object_id();
+        let content = pdf.add_object(Stream::new(dictionary! {}, b"".to_vec()));
+        let rect = || Object::Array(vec![10.into(), 10.into(), 20.into(), 20.into()]);
+        let text = |s: &str| Object::string_literal(s);
+        let parent = pdf.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "Highlight", "Rect" => rect(), "NM" => text("p"),
+        });
+        let accepted = pdf.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "Text", "Rect" => rect(), "IRT" => parent,
+            "State" => text("Accepted"), "StateModel" => text("Review"), "F" => 30,
+        });
+        // No /StateModel: Review, as Acrobat reads it.
+        let completed = pdf.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "Text", "Rect" => rect(), "IRT" => parent,
+            "State" => text("Completed"),
+        });
+        let part = pdf.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "StrikeOut", "Rect" => rect(), "IRT" => parent,
+            "RT" => Object::Name(b"Group".to_vec()),
+        });
+        let list: Vec<Object> = [parent, accepted, completed, part]
+            .into_iter()
+            .map(Object::Reference)
+            .collect();
+        let page = pdf.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages_id, "Contents" => content,
+            "MediaBox" => Object::Array(vec![0.into(), 0.into(), 612.into(), 792.into()]),
+            "Annots" => list,
+        });
+        pdf.objects.insert(
+            pages_id,
+            Object::Dictionary(
+                dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 },
+            ),
+        );
+        let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        pdf.trailer.set("Root", catalog);
+        let found = annots_in(&pdf).foreign;
+        assert_eq!(found.len(), 4);
+        assert_eq!(found[0].name, "p");
+        assert_eq!(found[0].parent, None);
+        assert_eq!(
+            found[1].state,
+            Some(("Review".to_string(), "Accepted".to_string()))
+        );
+        assert_eq!(found[1].parent.as_deref(), Some("p"));
+        assert_eq!(found[2].state.as_ref().unwrap().0, "Review");
+        assert!(found[3].grouped && !found[1].grouped);
+    }
+
+    #[test]
+    fn a_companion_follows_its_mark() {
+        use lopdf::{Object, Stream, dictionary};
+        let mut pdf = lopdf::Document::with_version("1.7");
+        let pages_id = pdf.new_object_id();
+        let content = pdf.add_object(Stream::new(dictionary! {}, b"".to_vec()));
+        let rect = || Object::Array(vec![10.into(), 10.into(), 20.into(), 20.into()]);
+        let ours = Annot {
+            id: crate::annot::AnnotId(5),
+            kind: crate::annot::AnnotKind::Note {
+                pos: Pt { x: 1.0, y: 2.0 },
+            },
+            color: [1, 2, 3],
+            opacity: 1.0,
+            stroke: 1.0,
+            author: "me".into(),
+            contents: String::new(),
+            modified: String::new(),
+            created: String::new(),
+            fill: None,
+            dashed: false,
+            cloudy: false,
+            name: String::new(),
+        };
+        let geom = PageGeom {
+            media: [0.0, 0.0, 612.0, 792.0],
+            rotate: 0,
+        };
+        let main = crate::annot::to_pdf(&ours, &geom, &mut pdf).main;
+        let main = pdf.add_object(main);
+        let part = pdf.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "Caret", "Rect" => rect(),
+            "IRT" => main, PART => true,
+        });
+        // A mark from a newer sheaf, and its companion.
+        let unknown = pdf.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "StrikeOut", "Rect" => rect(),
+            "SheafAnnot" => Object::string_literal(r#"{"id":6,"kind":{"Future":{}}}"#),
+        });
+        let unknown_part = pdf.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "Caret", "Rect" => rect(),
+            "IRT" => unknown, PART => true,
+        });
+        let list: Vec<Object> = [main, part, unknown, unknown_part]
+            .into_iter()
+            .map(Object::Reference)
+            .collect();
+        let page = pdf.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages_id, "Contents" => content,
+            "MediaBox" => Object::Array(vec![0.into(), 0.into(), 612.into(), 792.into()]),
+            "Annots" => list.clone(),
+        });
+        pdf.objects.insert(
+            pages_id,
+            Object::Dictionary(
+                dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 },
+            ),
+        );
+        let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        pdf.trailer.set("Root", catalog);
+
+        let mine: Vec<bool> = list.iter().map(|e| is_ours(&pdf, e)).collect();
+        assert_eq!(mine, vec![true, true, false, false]);
+        let found = annots_in(&pdf);
+        assert_eq!(found.sheaf[&0], vec![ours]);
+        // The newer sheaf's mark and its companion are listed like another
+        // tool's, and kept.
+        let subtypes: Vec<&str> = found.foreign.iter().map(|f| f.subtype.as_str()).collect();
+        assert_eq!(subtypes, vec!["StrikeOut", "Caret"]);
+    }
+
     /// One page carrying a third-party sticky note, a link (not a comment),
     /// a popup (not a comment), and one of ours.
     #[test]
@@ -372,14 +905,21 @@ mod tests {
             author: "me".into(),
             contents: "mine".into(),
             modified: String::new(),
+            created: String::new(),
+            fill: None,
+            dashed: false,
+            cloudy: false,
+            name: String::new(),
         };
-        let (dict, _) = crate::annot::to_pdf(
+        let dict = crate::annot::to_pdf(
             &ours,
             &PageGeom {
                 media: [0.0, 0.0, 612.0, 792.0],
                 rotate: 0,
             },
-        );
+            &mut pdf,
+        )
+        .main;
         let mine = pdf.add_object(dict);
         let page = pdf.add_object(dictionary! {
             "Type" => "Page",

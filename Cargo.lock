@@ -6449,6 +6449,7 @@ name = "sheaf-app"
 version = "0.1.0-alpha.1"
 dependencies = [
  "anyhow",
+ "chrono",
  "embed-resource",
  "env_logger",
  "futures",
@@ -6467,6 +6468,7 @@ dependencies = [
  "sheaf-core",
  "sheaf-doc",
  "sheaf-image",
+ "sheaf-instance",
  "sheaf-ocr",
  "sheaf-ops",
  "sheaf-plugin",
@@ -6474,6 +6476,7 @@ dependencies = [
  "sheaf-render",
  "sheaf-ui",
  "smallvec",
+ "tempfile",
  "unicode-segmentation",
  "zip 9.0.2",
 ]
@@ -6502,6 +6505,7 @@ name = "sheaf-core"
 version = "0.1.0-alpha.1"
 dependencies = [
  "serde",
+ "twox-hash",
 ]
 
 [[package]]
@@ -6510,11 +6514,13 @@ version = "0.1.0-alpha.1"
 dependencies = [
  "anyhow",
  "env_logger",
+ "fastrand",
  "flate2",
  "im",
  "image",
  "log",
  "lopdf",
+ "quick-xml",
  "regex",
  "serde",
  "serde_json",
@@ -6537,6 +6543,21 @@ dependencies = [
  "serde_json",
  "sheaf-progress",
  "tiff",
+]
+
+[[package]]
+name = "sheaf-instance"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "anyhow",
+ "futures",
+ "libc",
+ "log",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "uds_windows",
+ "windows 0.61.3",
 ]
 
 [[package]]
@@ -6566,6 +6587,7 @@ name = "sheaf-ops"
 version = "0.1.0-alpha.1"
 dependencies = [
  "anyhow",
+ "fastrand",
  "image",
  "log",
  "lopdf",
@@ -6578,6 +6600,7 @@ dependencies = [
  "sheaf-ocr",
  "sheaf-progress",
  "sheaf-render",
+ "toml 0.9.12+spec-1.1.0",
 ]
 
 [[package]]
@@ -6606,7 +6629,7 @@ dependencies = [
 
 [[package]]
 name = "sheaf-plugin-api"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "wasi 0.14.7+wasi-0.2.4",
  "wit-bindgen 0.62.0",
@@ -7545,6 +7568,12 @@ checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
 dependencies = [
  "core_maths",
 ]
+
+[[package]]
+name = "twox-hash"
+version = "2.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2"
 
 [[package]]
 name = "typed-path"

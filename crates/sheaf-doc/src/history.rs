@@ -1,13 +1,25 @@
 //! How much undo history to keep.
+//!
+//! History is a tree of versions, each with the edits that made it (see
+//! `model::Document`). A policy decides how many snapshots of the
+//! document to keep; a version whose snapshot is dropped is rebuilt by
+//! replaying edits when it's needed. The versions themselves (their edits)
+//! are kept up to [`MAX_VERSIONS`].
+
+/// Versions kept, with or without snapshots. Past this, versions on other
+/// branches go first, then the oldest before the saved one.
+pub const MAX_VERSIONS: usize = 1000;
 
 /// What a policy gets to look at. All byte figures are estimates.
 #[derive(Debug, Clone)]
 pub struct HistoryStats {
-    /// Number of versions currently held (including the current one).
+    /// Snapshots currently held (the current version's included).
     pub versions: usize,
-    /// Index of the current version.
+    /// Index of the current version's snapshot: the last.
     pub cursor: usize,
-    /// Estimated bytes each version holds that its predecessor doesn't.
+    /// Estimated bytes each snapshot holds that its parent's doesn't, in
+    /// the order they'd be dropped: those that may be first, then those
+    /// that must stay.
     pub marginal_bytes: Vec<usize>,
     /// Bytes of source files referenced only by versions newer than the
     /// cursor (i.e. inserts that have been undone).
@@ -21,8 +33,9 @@ impl HistoryStats {
 }
 
 pub trait HistoryPolicy: Send + Sync {
-    /// How many of the oldest versions to drop. The document never drops the
-    /// current version regardless of what this returns.
+    /// How many snapshots to drop, from the front of `marginal_bytes`. The
+    /// document never drops more than it may (the current version's, the
+    /// opened one's and saved ones' stay).
     fn trim(&self, stats: &HistoryStats) -> usize;
 }
 

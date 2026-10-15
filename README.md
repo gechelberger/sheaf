@@ -28,6 +28,13 @@ spends its effort on PDF features instead.
 
 From the command line, `sheaf one.pdf two.pdf three.pdf` opens three windows.
 
+**One sheaf at a time.** Opening a file while sheaf is running, from the
+file manager or with `sheaf file.pdf`, hands it to the running sheaf
+instead of starting another: a file that's already open comes forward, and
+the rest open in windows of their own. Each user on a machine has their
+own. `sheaf --new-instance` runs a separate sheaf beside it, which doesn't
+remember window layout or recent files.
+
 ### Command line
 
 Some work runs without a window. `sheaf <subcommand> …` runs it headless,
@@ -42,6 +49,8 @@ sheaf export binder.pdf -f tiff --tiff bw -o binder.tif
 sheaf-cli export binder.pdf -f text -o binder.txt
 sheaf scan photos/*.jpg -o receipts.pdf --mode bw --ocr
 sheaf remove-blanks scans.pdf -o clean.pdf --rejects removed.pdf
+sheaf comments summary binder.pdf -l pages --summary stamps
+sheaf comments csv binder.pdf -c number,page,author,text --author "Pat Smith" > pat.csv
 ```
 
 | Subcommand | Does |
@@ -52,6 +61,7 @@ sheaf remove-blanks scans.pdf -o clean.pdf --rejects removed.pdf
 | `remove-blanks` | Blank, and "intentionally left blank", pages out of a PDF, as Document > Find Blank Pages…. Prints each page found and whether it goes; `--dry-run` writes nothing; `--rejects` keeps the removed pages in a file of their own, bookmarked "p. 4 — blank". Nearly blank pages (a signature) stay unless `--nearly-blank`; `--sensitivity strict\|normal\|lenient`, `--keep-intentional`, `--pages` |
 | `scan` | Photos or scans of paper to a clean PDF: finds the page in the photo and straightens it, turns it upright, levels the text, evens out shadows and color casts. `--mode color\|gray\|bw`, `--page letter\|a4\|original`, `--dpi`, `--ocr` (searchable text that lines up with the page), `--no-crop`/`--no-deskew`/… to skip a step, `--drop-blanks` to leave out blank pages, `--flatten-curl` for curled or bent pages (UVDoc model; `scripts/fetch-ocr-data.sh --uvdoc`) |
 | `images-to-pdf` | JPEG, PNG, TIFF (every page), BMP, GIF and WebP files to one PDF, a page each: `--page original\|letter\|a4`, `--margin`, `--dpi` |
+| `comments` | A PDF's comments, as File > Comments: `summary` (a PDF; `-l pages` puts each page beside its numbered list), `csv` (`-c` picks the columns), `text`, or `export` (XFDF or FDF, by `-o`'s extension or `--format`), to stdout unless `-o`. `import file.pdf data.xfdf…` brings comments from FDF, XFDF or other PDFs into a copy (`-o`; default "<name> - imported.pdf"), updating those it has by name. Filter and sort as the Comments panel does: `--pages 3-10`, `--type`, `--author`, `--status` (each repeats), `--checked`/`--unchecked`, `--summary stamps\|notes`, `--search`, `--sort page\|author\|date\|type\|color` |
 
 ## Why
 
@@ -139,8 +149,8 @@ Tier 1 platforms gate every release and run the perf budgets in CI.
 | Document edits | **lopdf** (or our own object layer) | PDFium's write API is limited (esp. outlines). Structural edits — page tree, bookmarks, annotations — are done on the raw object graph and saved incrementally. The renderer re-loads from the edited bytes. |
 | Rendering strategy | **Tiled, async, cached** | Viewport requests tiles at the current zoom; a worker pool renders them off the UI thread; LRU cache keyed by `(page, zoom, tile)`. Low-res preview tile first, then full-res. This is the single biggest "feels fast" lever. |
 | Text / OCR | PDFium text extraction. OCR is a **core feature** behind an `OcrEngine` trait with two engines compiled in by default: **Tesseract 5** (built from source, linked statically) and **PaddleOCR PP-OCRv5** on ONNX Runtime (`oar-ocr`, with Microsoft's runtime library loaded on demand from `ocr/lib`). | Both engines are native C/C++, so OCR can't live in a WASM plugin; the trait keeps engines swappable, and plugins get OCR as a host capability. Judged on scanned tax forms, not purity. |
-| Save model | Incremental update by default; "Save As (rewrite)" optional | Preserves originals, fast saves on large files. Clean rewrite available for size reduction / "Export Clean Copy". |
-| Undo | Command pattern over the document model | Every edit is a reversible `Edit` enum; undo stack is per-document. |
+| Save model | Incremental update by default; "Save As (rewrite)" optional | Preserves originals, fast saves on large files. Clean rewrite available for size reduction / "Export Clean Copy". After anything is removed (a page, a mark, a reply, a bookmark, OCR text replaced) the next save is a full rewrite, so what was removed isn't left in an earlier revision; undoing back to what was saved goes back to incremental. No save or copy carries a page it doesn't keep: links, named destinations, the open action, form fields, tags and article threads that pointed at one are dropped or pruned. |
+| Undo | A tree of versions, each with the edits that made it | Every edit is an `Edit` command. A version keeps a snapshot (cheap, structure-shared) and the commands from its parent; undo, redo and jumps move between versions, an edit after undo starts a branch instead of discarding, and a trimmed snapshot is rebuilt by replaying commands. Per-document. |
 
 ### Efficiency principles
 
@@ -163,6 +173,7 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 | Thumbnails sidebar (lazy, virtualized) | ✅ |
 | Bookmarks (outline) sidebar | ✅ |
 | Text search (find in document) | ✅ progressive; ~6 ms/page |
+| Select and copy text | ✅ Select tool (V): drag over text, or double-click a word; Ctrl+C copies it. Recognized (OCR) text works before it's saved. Press U with text selected to highlight it |
 | Pattern search (regex: SSNs, EINs, amounts, dates) — separate tool from Find, shared engine with redaction | ✅ Patterns panel, Ctrl+Shift+F |
 | User-defined patterns: add, save, and delete presets; several date formats built in | ✅ `patterns.json`; right-click a preset |
 | Multiple documents, one window each | ✅ |
@@ -170,11 +181,12 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 | Page labels (display) | ✅ status bar and thumbnails; View > Page Navigation > Go to Page (Ctrl+Shift+N) takes a label or number |
 | Rulers, grid, guides | ✅ View > Rulers (Ctrl+R), Grid (Ctrl+U); drag from a ruler for a guide |
 | Split view (same document, two places) | ✅ View > Split (Ctrl+\\); F6 switches pane |
-| Attachments panel | ✅ View > Panels > Attachments (Ctrl+Alt+6): open (PDFs in sheaf, others with the system program after a warning) or save out |
+| Attachments panel | ✅ View > Panels > Attachments (Ctrl+Alt+6): open (PDFs in sheaf, others with the system program after a warning) or save out. **Attach File** (Shift+J from Stamp) puts a file on the page behind a push pin, paperclip, graph or tag; it's embedded when you save, and double-clicking the icon opens it. Flattening keeps the icon and drops the file, as Acrobat does |
 | Open PDF Portfolios (browse and extract embedded files) | ✅ opens on its cover sheet with the Attachments panel: folders, metadata columns, open/save |
 | Recent files | ✅ File > Open Recent (last 10, shared by every window) |
 | Document Properties | ✅ File > Properties (Alt+Enter): description, security, fonts |
 | Layers (OCG) panel | ✅ View > Panels > Layers (Ctrl+Alt+7): show or hide for viewing; never saved |
+| History panel | ✅ View > Panels > History (Ctrl+Alt+8): every version since the file opened, who made it and when, and its edits in words; click (or Up/Down) to go back to any version; edits undone and then replaced stay as a branch you can go into |
 | Configurable toolbar: any command or plugin command, docked to any edge or floating | ✅ View > Customize Toolbar…, or right-click a menu item, palette row or toolbar button; `toolbar.json` |
 
 ### Page organization
@@ -201,7 +213,8 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 |---|---|
 | Create / rename / delete / nest bookmarks | ✅ |
 | Move bookmark **with its pages** | ✅ Shift+drag |
-| Colorize bookmarks | ✅ per bookmark; Document > Color Bookmarks by Level…. PDFlyer colors by populated vs empty and, separately, by status; both 📋 ([Pending](ROADMAP.md#pdflyer-parity-gaps)) |
+| Colorize bookmarks | ✅ per bookmark; Document > Color Bookmarks by Level…; colors and bold/italic from the file (Acrobat's, PDFlyer's) are kept. PDFlyer colors by populated vs empty; that's 📋 ([Pending](ROADMAP.md#pdflyer-parity-gaps)) |
+| **Set Status** (PDFlyer) | ✅ Document > Set Status, or right-click a bookmark: colors and styles it, borders each of its pages, and stamps them with the status and your initials and date; Set Status Again repeats the last one, Reset Status takes it off (the stamps too, if you say so). One undo step each |
 | Bookmark from page range | ✅ Document > Bookmarks from Pages…: one per page, titled from a template (`Page <<label>>`), optionally under a new parent |
 | Bookmark pattern matches | ✅ Patterns panel > Bookmark matches: one per match, pointing at it |
 | Target sheets / auto-bookmark from scan separators | ❓ |
@@ -209,17 +222,23 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 ### Markup & annotation
 | Feature | Status |
 |---|---|
-| Sticky notes, highlight, underline, strikethrough | ✅ notes, highlight; underline/strikethrough 📋 |
-| Free text, shapes (rect, ellipse, line, arrow, polygon) | ✅ polygon 📋 |
+| Sticky notes, highlight, underline, strikethrough | ✅ also squiggly. Drag across text (or select it, then press the tool's key: U highlights); Shift+U cycles highlight, underline, strikethrough, squiggly. Each tool keeps its own color, as Acrobat's do: yellow notes and highlights, red strikethroughs, drawings and tickmarks, blue text edits, until you pick another for it; with the Select tool, the swatches recolor the selected marks |
+| Text edits: replace or insert text (Acrobat's) | ✅ Text Edits (E): drag across text and type the replacement, or click between characters and type what to insert. Written as Acrobat writes them (a Caret, with the StrikeOut grouped under it); the Comments panel reads Replace “x” with “y” |
+| Free text, shapes (rect, ellipse, line, arrow, polygon) | ✅ also polyline, cloud (Q: a cloudy polygon; any rectangle, ellipse or polygon can be made cloudy) and callout (a text box with a leader; Shift+X from the text box). Polygons: click each corner, double-click or Enter finishes, Backspace takes one off. Shift+D cycles the drawing tools. Every handle drags: corners, vertices, a callout's box, knee and point |
 | Ink / freehand | ✅ |
-| Stamps (built-in + custom) | ✅ tickmark library; custom 📋 |
+| Edit placed marks: move, resize, restyle | ✅ Drag to move (Ctrl+drag under any tool), handles to resize (Shift keeps the shape, or snaps a line to 45°), Shift+click to select several. A properties bar sets color, fill, opacity, line width, dashes, arrowheads at either end and text size; each change is one undo step |
+| Copy and paste marks | ✅ Ctrl+C, Ctrl+V (offset), Ctrl+Alt+V (in place), across documents too |
+| Stamps (built-in + custom) | ✅ tickmark library; a stamp library of your own (Stamps panel, Ctrl+Alt+9; Stamp tool J): stamps from images (transparency kept) or PDF pages, in collections, with rename and remove; Recent and Favorites; dynamic stamps (Approved, Reviewed, Received, Prepared) with your initials or name and the date, and dynamic text over a stamp of your own. Collections export and import as PDFs, the way Acrobat keeps custom stamps |
 | **Tickmarks** (PDFlyer): quick-stamp library, keyboard-driven | ✅ |
-| **Connectors** (PDFlyer): linked markers that jump between pages | ✅ pairs saved as Link annotations, so they jump in Acrobat too. PDFlyer's are label *groups* (1–50, A–ZZ) with Prev/Next and "all pages with / without"; groups are 📋 ([Pending](ROADMAP.md#pdflyer-parity-gaps)) |
-| **Calculator tape** (PDFlyer): 10-key calc, tape placed as annotation | ✅ Calculator panel (Ctrl+Alt+4) |
-| Comments list / review panel, status, replies | ✅ Comments panel (Ctrl+Alt+5) lists ours and third-party; status/replies 📋 |
+| **Connectors** (PDFlyer): linked markers that jump between pages | ✅ label groups as in PDFlyer (1–50, A–ZZ): the tool keeps its label, so each click adds to the group (Shift+I starts a new one); clicking one goes to the next. Saved as Link annotations that walk the group in page order, so they jump in Acrobat too. Previous/Next ([ and ], or right-click) and "pages with / without" work for tickmarks and stamps as well |
+| **Calculator tape** (PDFlyer): 10-key calc, tape placed as annotation | ✅ Calculator panel (Ctrl+Alt+4), in PDFlyer's format: sections numbered `1-1`, `1-2`… `1-T`, titles, subtotal (Space) and total (Enter), grand total (Shift+Enter), notes on rows (double-click; Ctrl+T dates them), memory (G H J K L), 00 and 000, change sign (S), decimals (D), insert and delete rows with the totals worked out again. Double-click a placed tape to edit it; turn it, resize it, hide its numbers or titles, and color its paper. **Pick from page** (a sheaf extension): click a number on the page to add it, or Shift+drag over a box for all of them, with a tickmark beside each if you like; it reads recognized (OCR) text too |
+| Comments list / review panel, status, replies | ✅ Comments panel (Ctrl+Alt+5) lists ours and third-party, in threads. Reply (R; Ctrl+Enter sends), set a status (right-click: None, Accepted, Rejected, Cancelled, Completed, with its history), checkmark (Shift+K), on anyone's comments. Written as Acrobat writes them, and Acrobat's replies to our marks stay attached across saves. Filter by type, author, status, color, checkmark and pages (what's filtered out is hidden on the page too; Show All undoes it), sort by page, author, date, type or color, and PDFlyer's Stamp Summary and Note Summary as presets. Other tools' comments can be deleted (one undo step; gone from the file at save). View > Show Comments hides them all |
+| Comment summary and export | ✅ File > Comments, or the panel's Export menu: what the panel lists, filtered and sorted as it is, as a summary PDF (the comments numbered and threaded; or each page beside its list, with the numbers on the page), a CSV (columns chosen in the Export menu: number, page, page label, type, author, dates, status, checked, color, text, reply-to) or text. `sheaf comments` |
+| Import / export comments (FDF, XFDF) | ✅ File > Comments > Import… takes FDF, XFDF or another PDF's comments: one that's here already (by its `/NM`) is updated, the rest added, as one undo step, and kinds sheaf can't hold are listed. Export XFDF or FDF of what the panel lists, or (panel's Export menu) what's selected. `sheaf comments import`/`export` |
+| Edit other tools' comments | ✅ Another tool's note, highlight, shape, line, ink, text box, callout, text edit or stamp becomes a sheaf mark when it's edited: drag it, double-click it (or F2 in the panel) to edit its text, or right-click > Make Editable in the Comments panel. It keeps its name, so its replies stay with it, and a save puts it where it was |
 | Flatten annotations | ✅ File > Export Flattened Copy… (links and form fields kept) |
 | Export Clean Copy (strip annots, notes, tapes, stamps, attachments) | ✅ File > Export Clean Copy; keeps links, form fields, bookmarks |
-| Measurement tools (distance, area, perimeter, scale) | 📋 |
+| Measurement tools (distance, area, perimeter, scale) | ✅ Tools > Measure: Distance (Ctrl+Shift+D, a drag), Perimeter (Ctrl+Shift+P) and Area (Ctrl+Shift+A, corner by corner, as Polyline and Polygon). The scale bar takes a scale as typed ("1 in = 10 ft", "1/8 in = 1 ft", "1:100") and the decimals; Calibrate (Ctrl+Shift+C) is a line of known length, then its real length. The status bar shows the measurement while drawing; Shift keeps to 45°, and points snap to the grid and guides when they show. Written as Acrobat's dimension annotations (`/Measure`), with the value on the mark; the comment CSV has Measurement and Scale columns |
 
 ### Content editing
 | Feature | Status |
@@ -342,13 +361,17 @@ scripts/fetch-ocr-data.sh        # Tesseract language data + PaddleOCR models �
                                  #   (--uvdoc adds the curled-page model scan cleanup can use)
 scripts/build-plugins.sh         # the bundled plugins (plugins/) → target/plugins/
 cargo run -p sheaf-app           # the GPUI window
+                                 #   (debug builds don't hand files to a running
+                                 #   sheaf unless SHEAF_SINGLE_INSTANCE=1)
 ```
 
 **Plugins.** sheaf runs WebAssembly plugins (the `plugins` feature, on by
 default; `--no-default-features` leaves out wasmtime too). The bundled
 plugins build for `wasm32-wasip2`, which `rust-toolchain.toml` installs;
-debug builds pick them up from `target/plugins`. Writing your own:
-[`docs/plugins.md`](docs/plugins.md).
+debug builds pick them up from `target/plugins`. The API is
+`sheaf:plugin` 0.3, which has every kind of mark and a plugin's own
+section of `settings.toml`; plugins built for 0.2 still load. Writing
+your own: [`docs/plugins.md`](docs/plugins.md).
 
 **OCR engines and build time.** Both engines are on by default. The first
 build compiles Tesseract 5 and Leptonica from source (CMake and a C++17
@@ -474,21 +497,44 @@ Notes:
 
 ## Configuration
 
-sheaf keeps its files in the platform config directory: `~/.config/sheaf`
-on Linux, `%APPDATA%\sheaf` on Windows, `~/Library/Application Support/sheaf`
-on macOS (`SHEAF_CONFIG_DIR` overrides).
+sheaf keeps what you choose in the platform config directory:
+`~/.config/sheaf` on Linux, `%APPDATA%\sheaf` on Windows (which roams with
+your profile), `~/Library/Application Support/sheaf` on macOS. What it
+remembers for itself goes in a local state directory: `~/.local/state/sheaf`,
+`%LOCALAPPDATA%\sheaf\state`, `~/Library/Application Support/sheaf/state`.
+`SHEAF_CONFIG_DIR` overrides both (state goes in its `state/`).
 
-- `settings.json` — written by the app: dock layout (which panels sit where,
-  tab order, sizes, open state), window placement, and the OCR options under
-  `"ocr"`: `engine` (`"tesseract"` or `"oar"`), `dpi` (150–600, default
-  300), `skip_pages_with_text`, `tesseract.lang` (e.g. `"eng+deu"`, each
-  needing a `.traineddata` file), `tesseract.tessdata_dir` and
-  `oar.{det,rec,dict,textline_ori,doc_ori}` to point at your own data or
-  models, `oar.model_set` (`"en"` or `"multi"`), and
-  `oar.use_doc_orientation`. The Recognize Text dialog edits the common ones.
+- `settings.toml` — your preferences, edited by hand; there's no settings
+  view yet. Edit > Open Settings File opens it, writing one with every
+  setting explained if there isn't one. sheaf only reads it, again whenever a
+  window comes forward; a mistake shows in a banner with its line, and only
+  that setting falls back to its default.
+  - `[identity]`: `name` (the author of your comments and marks; your user
+    name otherwise) and `initials`.
+  - `[ocr]`: what the Recognize Text dialog doesn't choose:
+    `tessdata_dir` for your own Tesseract data, `det`, `rec`, `dict`,
+    `textline_ori` and `doc_ori` for your own PaddleOCR models, `psm`, and
+    `use_doc_orientation`.
+  - `[stamps]`: `size` (how tall a stamp goes down, in points; 40), and
+    `date_format` and `time_format` for dynamic stamps (strftime codes;
+    `%m/%d/%Y` and `%-I:%M %p`).
+  - `[plugins.<id>]`: a plugin's own settings, whatever it documents; only
+    that plugin reads them (as JSON, through API 0.3). A key its manifest
+    doesn't name is pointed out in Plugins → Manage Plugins….
+- `state.json` (state directory) — written by the app: window placement,
+  dock layout (which panels sit where, tab order, sizes, open state), and
+  each dialog's last choices, among them the OCR engine, `dpi`, language and
+  scope; recent stamps; the comment CSV's columns; the last measuring scale;
+  each markup tool's color (`tool_colors`, by tool: `"strikeout": [0, 0, 0]`).
+  Safe to delete; a copy that doesn't parse is set aside as
+  `state.json.bad`. Only the sheaf that owns the instance writes it.
+- `recent.json` (state directory) — File > Open Recent.
 - `patterns.json` — the Patterns panel's presets, seeded from the built-ins on
   first run. Edit, delete, or add them from the panel (right-click a chip;
   "+ Save…" stores the current pattern) or by hand.
+- `stamps/` — your stamp collections, a PDF each with a stamp per page
+  (an Acrobat custom-stamp file is the same shape), and `favorites.json`.
+  Recent stamps are in `state.json`.
 - `marks.json` — extra tickmark sets and stamps for the markup toolbar:
   `{ "tickmarks": [{ "name": "Audit", "marks": ["Σ", "◊"] }], "stamps": ["PBC"] }`.
 - `plugins/` — installed plugins, one folder each (see

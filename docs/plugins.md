@@ -1,6 +1,6 @@
 # Writing sheaf plugins
 
-Status: API `sheaf:plugin@0.2.1`, 2026-10-14. Design notes live in
+Status: API `sheaf:plugin@0.3.0` (0.2 still served), 2026-10-15. Design notes live in
 [`todos/plugins.md`](../todos/plugins.md).
 
 A sheaf plugin is a WebAssembly component plus a manifest. It can add
@@ -39,7 +39,7 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
-sheaf-plugin-api = "0.2"   # or { path = ".../sheaf/crates/sheaf-plugin-api" }
+sheaf-plugin-api = "0.3"   # or { path = ".../sheaf/crates/sheaf-plugin-api" }
 
 [profile.release]
 opt-level = "s"
@@ -82,7 +82,7 @@ sheaf_plugin_api::export!(MyPlugin);
 id = "my-plugin"
 name = "My Plugin"
 version = "0.1.0"
-api = "^0.2"
+api = "^0.3"
 homepage = "https://example.com/my-plugin"
 
 [[commands]]
@@ -111,7 +111,8 @@ a plugin to someone else, zip those (at the top level or in one folder) and
 rename the zip to `name.sheafplugin`; **Install from File…** takes it.
 
 Other languages work too: anything that builds a WASI 0.2 component for the
-`plugin` world in [`wit/sheaf.wit`](../wit/sheaf.wit) (C with wit-bindgen,
+`plugin` world in [`wit/sheaf.wit`](../wit/sheaf.wit) (the 0.2 world, still
+served, is in [`wit/0.2`](../wit/0.2/sheaf.wit)) (C with wit-bindgen,
 Go with TinyGo, JavaScript with ComponentizeJS, …).
 
 ## The manifest
@@ -125,13 +126,14 @@ running any plugin code.
 | `name`, `description` | Shown in the plugin manager. |
 | `homepage` | Optional `https://` URL (docs, source, changelog), linked from the plugin manager. |
 | `version` | Semver of the plugin. |
-| `api` | Semver requirement on the API, e.g. `"^0.2"`. sheaf refuses a plugin whose range it doesn't satisfy. |
+| `api` | Semver requirement on the API, e.g. `"^0.3"`. sheaf serves 0.3 and 0.2, and refuses a plugin whose range takes neither. |
 | `[[commands]]` | `id`; `label` (`&` marks the menu mnemonic); `icon`, an SVG in the plugin folder such as `"icons/scan.svg"` (see [Icons](#icons)); `help`, a sentence or two of plain text shown in tooltips and the command palette. Optional: `keywords` (more words the palette finds it by), `category` (palette prefix; defaults to `name`), `menu` (a path like `"Tools/Workpapers"`; menus and submenus are created as needed), `keys` (a default binding in `keymap.json` syntax; the user's keymap overrides it), `keys-context` (where `keys` applies, as a keymap context such as `"DocView && !TextInput"`; by default anywhere in the window, text fields included, so give single-key bindings a context), `when` (what must hold for it to run, all of: `"document"` a document is open, `"selection"` an annotation is selected, `"pages"` pages are selected in the thumbnails, `"region"` a region is Shift+dragged; menus and the palette grey the command out otherwise, and sheaf decides without running plugin code). `icon` and `help` are required. |
 | `[[panels]]` | `id`, `label`. Each gets a dock tab and a **View → Plugin Panels** entry. |
 | `events` | Document events to receive: any of `"opened"`, `"edited"`, `"saved"`, `"selection-changed"`, `"closed"`, `"region"` (the region the user Shift+drags on a page, live while dragging, and its clearing). |
 | `[[presets]]` | `name`, `regex`: pattern-search presets shown (read-only) in the Patterns panel. |
 | `[marks]` | `tickmarks = [{ name, marks = ["Σ", …] }]` and `stamps = ["PBC", …]` for the markup toolbar. |
 | `[permissions]` | `read = ["~/Documents/Clients"]`, `write = [...]`: absolute paths or `~/…`. `network = ["api.example.com"]`: hosts the plugin may make HTTP requests to (`"*.example.com"` includes subdomains, `"host:8080"` limits the port). See [Trust model](#trust-model). |
+| `preferences` | The keys the plugin reads from its section of `settings.toml` (see `storage`), e.g. `["target", "round"]`. A key there that isn't listed is reported in the plugin manager as a likely typo. Leave it out and nothing is checked. |
 
 ### Icons
 
@@ -174,6 +176,22 @@ each bookmark's page and position),
 `annotations(page)`, `selection`, `current-page`. Ids are opaque and stable
 while the document is open; they aren't page numbers. With no document open,
 `path` is none and the lists are empty.
+
+**Marks** (`annot` in `types`) under 0.3 are every kind sheaf has:
+highlight, underline, strike-out, squiggly, replace (a suggested
+replacement) and insert, note, reply and status (threaded by `name`),
+free-text and callout, square, ellipse, line (with `arrow-start`),
+polygon, polyline and ink, tickmark, connector, page-stamp, text-stamp
+and page-border, file-attachment, measure (distance, perimeter or area
+with its scale), and tape. Each has its `fill`, `dashed`, `cloudy`,
+`created`, `modified` and `name` (its `/NM`). Dates and the name are the
+host's: they're ignored when you add or update a mark. An update replaces
+what you send, so read a mark, change it and send it back.
+
+A mark's author is the user when you leave it empty, and `<<name>>`,
+`<<initials>>`, `<<date>>` and `<<time>>` in its text (and in a text
+stamp's) are filled in as dynamic stamps fill them: write
+`"Reviewed <<initials>> <<date>>"` and never ask who the user is.
 
 **`text`**: `page-text`, `pattern-search(page, regex)`,
 `search(page, query, match-case)`, `text-boxes(page, rect)` and
@@ -229,6 +247,20 @@ and returns its words with boxes. It doesn't change the document.
 the JSON the user puts in `<config>/plugin-data/<id>/settings.json` (`"{}"`
 when there is none). Uninstalling keeps this data.
 
+`preferences()` (0.3) is the plugin's own section of the user's
+`settings.toml`, as JSON (`"{}"` when there is none):
+
+```toml
+[plugins.currency-convert]
+target = "EUR"
+round = 2
+```
+
+It's read when the call starts and stays the same for the whole call, even
+if the user saves the file meanwhile. A plugin reads only its own section,
+and needs no permission for it. Declare its keys in the manifest
+(`preferences`) so a misspelled one is pointed out.
+
 **`progress`** (0.2.1): for long commands. `task(label, total, unit)` shows
 in the document's status bar as "label: 12 of 300 pages…" with a progress
 strip; `set`, `inc` and `set-total` move it, `message` replaces the line,
@@ -247,7 +279,7 @@ for p in &pages {
 }
 ```
 
-A plugin using it declares `api = "^0.2.1"`.
+A plugin using it declares `api = "^0.2.1"` or later.
 
 **`log`**: `log(level, message)` goes to sheaf's log with the plugin id.
 
@@ -278,6 +310,16 @@ call's limit. There are no raw sockets.
   `plugins/subtotal` does.
 
 ## Versioning
+
+**0.3.0** (2026-10-15) has every kind of mark sheaf has, and their new
+fields (`fill`, `dashed`, `cloudy`, `arrow-start`, `created`, `modified`,
+`name`); and `storage.preferences`. Records and variants grew, which isn't
+backward compatible, so it's a minor bump while 0.x. sheaf still serves
+0.2: a 0.2 plugin links to the 0.2 world, sees only the kinds 0.2 had (a
+newer mark isn't in `annotations`), and an update it makes keeps the
+fields it can't see. Rebuild against SDK 0.3 and set `api = "^0.3"` to
+get the rest.
+
 
 The WIT package `sheaf:plugin` follows semver, and the SDK crate's version
 is the package's version. Additive changes (new interfaces or functions)

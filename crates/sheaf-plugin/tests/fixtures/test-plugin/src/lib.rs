@@ -164,6 +164,36 @@ impl Guest for TestPlugin {
                 }
             }
             "settings" => Err(storage::settings()),
+            "prefs" => Err(storage::preferences()),
+            // API 0.3: the kinds on page 1 ("polygon:dashed,measure") into
+            // storage as "kinds", and a filled, dashed polygon whose text
+            // names the user.
+            "marks" => {
+                use sheaf_plugin_api::types::{AnnotKind, PageAnnot, Pt, Rgb};
+                let p = document::pages().first().map(|p| p.id).ok_or("no pages")?;
+                let kinds: Vec<String> = document::annotations(p)
+                    .iter()
+                    .map(|a| {
+                        let k = match &a.kind {
+                            AnnotKind::Polygon(_) => "polygon",
+                            AnnotKind::Measure(_) => "measure",
+                            AnnotKind::Highlight(_) => "highlight",
+                            _ => "other",
+                        };
+                        if a.dashed { format!("{k}:dashed") } else { k.to_string() }
+                    })
+                    .collect();
+                let mut poly = sheaf_plugin_api::annot(AnnotKind::Polygon(vec![
+                    Pt { x: 10.0, y: 10.0 },
+                    Pt { x: 60.0, y: 10.0 },
+                    Pt { x: 60.0, y: 60.0 },
+                ]));
+                poly.fill = Some(Rgb { r: 255, g: 0, b: 0 });
+                poly.dashed = true;
+                poly.contents = "Checked by <<initials>>".into();
+                edits::submit("Add polygon", &[Edit::AnnotAdd(PageAnnot { page: p, annot: poly })]);
+                storage::set("kinds", &kinds.join(","))
+            }
             "events" => Err(storage::get("events").unwrap_or_default()),
             "write-file" => {
                 let path = args_json.unwrap_or_default();

@@ -29,7 +29,7 @@ use sheaf_ui::text_area::{TextArea, TextAreaEvent};
 use sheaf_ui::text_input::{TextInput, TextInputEvent};
 use sheaf_ui::theme;
 
-use crate::markup_tools::{Drag, Tool, arrow_head, rotate_pt, stroke_canvas};
+use crate::markup_tools::{Drag, Tool, arrow_head, rotate_pt, stroke_canvas, stroke_canvas_dashed};
 pub(crate) use crate::pane::Zoom;
 use crate::pane::{Layout, LayoutSpec, MARGIN, PageMode, Pane, Spread};
 use crate::{ClearGuides, FullScreen, GoToPage, ReadMode, ToggleGrid, ToggleRulers};
@@ -41,14 +41,17 @@ use sheaf_render::{
     Job, OutlineItem, Rect, RenderHandle, RenderRequest, Rendered, SearchEvent, SearchHit,
 };
 
+use crate::comments_panel::ExportKind;
 use crate::{
-    CancelOcr, CloseSearch, DeletePage, DuplicatePages, ExportCleanCopy, ExportFlattened,
-    ExtractPages, Find, FirstPage, InsertPdf, LastPage, LineDown, LineUp, NewBookmark, NextPage,
-    NextPane, PrevPage, Redo, RotatePageCcw, RotatePageCw, RotateViewCcw, RotateViewCw, Save,
-    SaveAs, ScreenDown, ScreenUp, SearchNext, SearchPrev, SelectAllPages, SinglePage,
-    SinglePageContinuous, SplitView, ToggleCoverPage, ToolArrow, ToolConnector, ToolEllipse,
-    ToolFreeText, ToolHighlight, ToolInk, ToolLine, ToolNote, ToolSelect, ToolSquare, ToolTick,
-    TwoUp, TwoUpContinuous, Undo, ZoomActual, ZoomFitPage, ZoomFitWidth, ZoomIn, ZoomOut,
+    CancelOcr, CloseSearch, CopySelection, CycleTextMarkup, DeletePage, DuplicatePages,
+    ExportCleanCopy, ExportFlattened, ExtractPages, Find, FirstPage, InsertPdf, LastPage, LineDown,
+    LineUp, NewBookmark, NextPage, NextPane, PasteMarks, PasteMarksInPlace, PrevPage, Redo,
+    RotatePageCcw, RotatePageCw, RotateViewCcw, RotateViewCw, Save, SaveAs, ScreenDown, ScreenUp,
+    SearchNext, SearchPrev, SelectAllPages, SinglePage, SinglePageContinuous, SplitView,
+    ToggleCheckmark, ToggleComments, ToggleCoverPage, ToolArrow, ToolConnector, ToolEllipse,
+    ToolFreeText, ToolHighlight, ToolInk, ToolLine, ToolNote, ToolSelect, ToolSquare, ToolSquiggly,
+    ToolStamp, ToolStrikeOut, ToolTextEdit, ToolTick, ToolUnderline, TwoUp, TwoUpContinuous, Undo,
+    ZoomActual, ZoomFitPage, ZoomFitWidth, ZoomIn, ZoomOut,
 };
 
 pub const KEY_CONTEXT: &str = "DocView";
@@ -148,12 +151,50 @@ pub(crate) struct Doc {
     pub(crate) outline_rows: Vec<(OutlineId, u16, Option<usize>)>,
     // Markup tool state (see markup_tools.rs).
     pub(crate) drag: Option<Drag>,
-    pub(crate) selected_annot: Option<(PageId, AnnotId)>,
+    /// The marks selected, in the order picked. The last is the one the
+    /// handles and the text editor are on ([`Doc::selected_annot`]).
+    pub(crate) selected_marks: Vec<(PageId, AnnotId)>,
+    /// What the Comments panel shows (and so the page): filter and sort.
+    pub(crate) comment_filter: crate::comments_panel::CommentFilter,
+    /// View > Hide Comments.
+    pub(crate) comments_hidden: bool,
+    /// The panel's view, and what it was made from.
+    pub(crate) comment_view: Option<(
+        crate::comments_panel::ViewKey,
+        Arc<crate::comments_panel::CommentView>,
+    )>,
+    /// Our marks the comment filter hides on the page.
+    pub(crate) hidden_marks: HashSet<AnnotId>,
+    /// Other tools' comments sheaf has hidden in the engines: (source, page
+    /// in it, slot in its /Annots).
+    pub(crate) foreign_hidden: HashSet<(SourceId, u32, usize)>,
+    /// Bumped when `foreign_annots` changes.
+    pub(crate) foreign_generation: u64,
+    /// Text selected with the Select tool (see text_select.rs).
+    pub(crate) text_sel: Option<crate::text_select::TextSel>,
+    pub(crate) text_drag: Option<crate::text_select::TextDrag>,
+    /// Pages' characters, as read for selecting text, with what they were
+    /// read from.
+    pub(crate) page_chars:
+        HashMap<PageId, (crate::text_select::CharsKey, Arc<sheaf_doc::PageChars>)>,
+    /// Pages whose characters the engine is reading.
+    pub(crate) chars_loading: HashSet<PageId>,
     pub(crate) annot_editor: Option<AnnotEditor>,
-    pub(crate) pending_connector: Option<crate::markup_tools::PendingConnector>,
-    /// Comments other tools left in the primary file (read-only).
-    pub(crate) foreign_annots: Vec<sheaf_doc::file::ForeignAnnot>,
+    /// A polygon, polyline or cloud being drawn (see shapes.rs).
+    pub(crate) poly: Option<crate::shapes::PolyDraft>,
+    /// The scale new measurements take (see `measure_tools`).
+    pub(crate) measure_scale: sheaf_doc::measure::Scale,
+    pub(crate) calibrate: crate::measure_tools::Calibrate,
+    /// "Pages with" or "without" a group of marks (see groups.rs).
+    pub(crate) group_list: Option<crate::groups::GroupList>,
+    /// The right-click menu on a mark, where it was opened.
+    pub(crate) mark_menu: Option<gpui::Point<gpui::Pixels>>,
+    /// Comments other tools left in the files the pages come from
+    /// (read-only), with the source each is in.
+    pub(crate) foreign_annots: Vec<(SourceId, sheaf_doc::file::ForeignAnnot)>,
     pub(crate) selected_foreign: Option<usize>,
+    /// Another tool's comment being dragged, made ours when it's let go.
+    pub(crate) adopting: Option<usize>,
     /// Files embedded in the primary file, and its portfolio schema if it
     /// is one (see attachments_panel.rs). `facts_loaded` once read.
     pub(crate) attachments: Vec<sheaf_doc::attachments::Attachment>,
@@ -165,9 +206,13 @@ pub(crate) struct Doc {
     pub(crate) layers_hidden: HashSet<sheaf_doc::layers::LayerId>,
     pub(crate) layers_default: HashSet<sheaf_doc::layers::LayerId>,
     pub(crate) layers_generation: u64,
-    /// Pages of the primary file whose sheaf-written marks PDFium is told
-    /// not to draw; repeated when its renderer is reopened.
-    pub(crate) sheaf_pages: Vec<u32>,
+    /// The primary file's marks that sheaf draws itself, as `/NM`s by page
+    /// index: PDFium is told not to draw them, again whenever its renderer
+    /// is reopened.
+    pub(crate) drawn_marks: Vec<(u32, Vec<String>)>,
+    /// Bookmark colors and styles from the file, when they arrived before
+    /// the outline did.
+    pub(crate) pending_outline_styles: Option<Vec<sheaf_doc::file::OutlineStyle>>,
     /// Every page's label (from the model), and the version it's for.
     pub(crate) labels: std::cell::RefCell<(u64, Option<std::sync::Arc<Vec<String>>>)>,
     /// With two panes: the top pane's share of the height.
@@ -176,7 +221,82 @@ pub(crate) struct Doc {
     pub(crate) split_drag: bool,
 }
 
+/// What an inserted or replacing file brings besides its pages, read on
+/// a background thread: sheaf's own marks (which the edit carries in),
+/// other tools' comments, and its bookmarks' colors and styles.
+#[derive(Default)]
+pub(crate) struct Incoming {
+    pub marks: HashMap<u32, Vec<sheaf_doc::Annot>>,
+    pub foreign: Vec<sheaf_doc::file::ForeignAnnot>,
+    pub outline_styles: Vec<sheaf_doc::file::OutlineStyle>,
+}
+
+impl Incoming {
+    pub(crate) fn read(path: &std::path::Path) -> Incoming {
+        match sheaf_doc::file::read_open(path, None) {
+            Ok((annots, facts)) => Incoming {
+                marks: annots.sheaf,
+                foreign: annots.foreign,
+                outline_styles: facts.outline_styles,
+            },
+            Err(e) => {
+                log::warn!("reading marks in {}: {e:#}", path.display());
+                Incoming::default()
+            }
+        }
+    }
+
+    /// The marks, as `Edit::InsertPages` and `ReplacePages` carry them.
+    pub(crate) fn edit_marks(&self) -> Vec<(u32, Vec<sheaf_doc::Annot>)> {
+        self.marks.iter().map(|(i, l)| (*i, l.clone())).collect()
+    }
+}
+
 impl Doc {
+    /// The mark picked last, if any: the one with handles.
+    pub(crate) fn selected_annot(&self) -> Option<(PageId, AnnotId)> {
+        self.selected_marks.last().copied()
+    }
+
+    /// Select just this mark, or nothing.
+    pub(crate) fn select_mark(&mut self, mark: Option<(PageId, AnnotId)>) {
+        self.selected_marks = mark.into_iter().collect();
+    }
+
+    /// Shift+click: add the mark to the selection, or take it out.
+    pub(crate) fn toggle_mark(&mut self, mark: (PageId, AnnotId)) {
+        match self.selected_marks.iter().position(|m| *m == mark) {
+            Some(i) => {
+                self.selected_marks.remove(i);
+            }
+            None => self.selected_marks.push(mark),
+        }
+    }
+
+    /// The selected marks themselves, with their pages.
+    pub(crate) fn selected_mark_list(&self) -> Vec<(PageId, sheaf_doc::Annot)> {
+        let st = self.model.state();
+        self.selected_marks
+            .iter()
+            .filter_map(|(p, id)| {
+                let a = st.annots_on(*p)?.iter().find(|a| a.id == *id)?.clone();
+                Some((*p, a))
+            })
+            .collect()
+    }
+
+    /// After `source`'s pages came in with `incoming`: PDFium stops drawing
+    /// the marks sheaf now draws, and the file's other comments are listed.
+    pub(crate) fn take_in(&mut self, source: SourceId, incoming: Incoming) {
+        if !incoming.marks.is_empty()
+            && let Some(handle) = self.handles.get(&source)
+        {
+            drop(handle.hide_annots(marks_by_page(&incoming.marks)));
+        }
+        self.foreign_annots
+            .extend(incoming.foreign.into_iter().map(|f| (source, f)));
+        self.foreign_generation += 1;
+    }
     pub(crate) fn primary(&self) -> &RenderHandle {
         &self.handles[&self.model.primary()]
     }
@@ -211,6 +331,15 @@ impl Doc {
 
     /// Display index of the primary source's page `index`, if it's still in
     /// the document (search hits are reported in source pages).
+    /// Where page `index` of `source` is shown, if it is.
+    pub(crate) fn index_of_page_in(&self, source: SourceId, index: u32) -> Option<usize> {
+        self.model
+            .state()
+            .pages
+            .iter()
+            .position(|p| p.source == source && p.index == index)
+    }
+
     pub(crate) fn index_of_source_page(&self, index: u32) -> Option<usize> {
         let primary = self.model.primary();
         self.model
@@ -433,7 +562,18 @@ pub struct DocView {
     pub(crate) pattern: Option<crate::pattern_panel::PatternSearch>,
     pub(crate) initial_pattern: Option<String>,
     pub(crate) calc: Option<crate::calc_panel::CalcTape>,
+    /// Focus to give the calculator's entry next frame (a note finished).
+    pub(crate) pending_calc_focus: Option<Entity<sheaf_ui::text_input::TextInput>>,
     pub(crate) comments: Option<crate::comments_panel::Comments>,
+    pub(crate) history: Option<crate::history_panel::History>,
+    /// The icon the Attach File tool gives.
+    pub(crate) attach_icon: String,
+    /// The Connector tool's label; None for the next unused one.
+    pub(crate) connector_label: Option<String>,
+    pub(crate) stamps: Option<crate::stamps_panel::StampsPanel>,
+    /// The stamp the Stamp tool places.
+    pub(crate) stamp_choice: Option<sheaf_ops::stamps::StampRef>,
+    pub(crate) pending_history_focus: bool,
     /// A Recognize Text run in progress (see ocr_run.rs).
     pub(crate) ocr: Option<crate::ocr_run::OcrRun>,
     /// A background job in progress: Export Pages, Split (see jobs.rs).
@@ -445,6 +585,9 @@ pub struct DocView {
     #[cfg_attr(not(feature = "plugins"), allow(dead_code))]
     pub(crate) plugin_run: Option<(String, sheaf_ops::Tracker)>,
     pub(crate) pending_comments_focus: bool,
+    /// The Measure tools' scale bar, and whether to focus it next frame.
+    pub(crate) measure_bar: Option<crate::measure_tools::MeasureBar>,
+    pub(crate) pending_measure_focus: bool,
     pub(crate) initial_query: Option<String>,
     pub(crate) search_started: Option<Instant>,
     pub(crate) selftest_save: Option<PathBuf>,
@@ -461,16 +604,21 @@ pub struct DocView {
     pub(crate) selftest_ocr: Option<PathBuf>,
     /// Password the file needs, once known.
     password: Option<String>,
-    /// Dev: open the inline editor on this page's last mark next frame.
-    pending_edit_last: Option<PageId>,
+    /// Open the inline editor on this page's last mark next frame (a text
+    /// edit just placed; dev hooks).
+    pub(crate) pending_edit_last: Option<PageId>,
     /// Recovery data found when opening, until the user has been asked.
     pending_recovery: Option<sheaf_doc::recovery::Recovery>,
     autosave: Option<Task<()>>,
     /// When the edits since the last sidecar write began.
     autosave_since: Option<Instant>,
     pub(crate) tool: Tool,
-    pub(crate) tool_color: [u8; 3],
     pub(crate) tick_glyph: String,
+    /// The Select tool is over text (the pointer is an I-beam).
+    pub(crate) text_hover: bool,
+    /// Where the pointer last was over a page: page, point, and how near
+    /// counts as on text.
+    pub(crate) last_hover: Option<(PageId, sheaf_doc::Pt, f32)>,
     /// Set while a plugin's edits are applied, so its own edits aren't
     /// reported back to it.
     pub(crate) edit_source: Option<String>,
@@ -540,12 +688,21 @@ impl DocView {
             pattern: None,
             initial_pattern: None,
             calc: None,
+            pending_calc_focus: None,
             comments: None,
             ocr: None,
             job: None,
             blank_review: None,
             plugin_run: None,
             pending_comments_focus: false,
+            measure_bar: None,
+            pending_measure_focus: false,
+            history: None,
+            connector_label: None,
+            attach_icon: "PushPin".into(),
+            stamps: None,
+            stamp_choice: None,
+            pending_history_focus: false,
             initial_query: None,
             search_started: None,
             selftest_save: None,
@@ -562,8 +719,9 @@ impl DocView {
             autosave: None,
             autosave_since: None,
             tool: Tool::Select,
-            tool_color: [255, 230, 0],
             tick_glyph: "✓".into(),
+            text_hover: false,
+            last_hover: None,
             edit_source: None,
             region: None,
             presentation: Default::default(),
@@ -686,8 +844,10 @@ impl DocView {
             page_sizes: None,
             bytes,
             password: self.password.clone(),
+            data: Some(sheaf_doc::SourceData(handle.data())),
         };
-        let model = Document::new(source, &[], sheaf_doc::history::default_policy());
+        let mut model = Document::new(source, &[], sheaf_doc::history::default_policy());
+        model.set_author(crate::prefs::get(cx).identity.name());
         let opened = self.path.clone();
         cx.defer(move |cx| crate::recent::add(&opened, cx));
         let mut handles = HashMap::new();
@@ -723,11 +883,29 @@ impl DocView {
             outline_menu: None,
             outline_rows: Vec::new(),
             drag: None,
-            selected_annot: None,
+            selected_marks: Vec::new(),
+            comment_filter: Default::default(),
+            comments_hidden: false,
+            comment_view: None,
+            hidden_marks: HashSet::new(),
+            foreign_hidden: HashSet::new(),
+            foreign_generation: 0,
+            text_sel: None,
+            text_drag: None,
+            page_chars: HashMap::new(),
+            chars_loading: HashSet::new(),
             annot_editor: None,
-            pending_connector: None,
+            poly: None,
+            measure_scale: crate::state::get(cx)
+                .measure_scale
+                .clone()
+                .unwrap_or_default(),
+            calibrate: Default::default(),
+            group_list: None,
+            mark_menu: None,
             foreign_annots: Vec::new(),
             selected_foreign: None,
+            adopting: None,
             labels: std::cell::RefCell::new((u64::MAX, None)),
             attachments: Vec::new(),
             collection: None,
@@ -737,7 +915,8 @@ impl DocView {
             layers_hidden: HashSet::new(),
             layers_default: HashSet::new(),
             layers_generation: 0,
-            sheaf_pages: Vec::new(),
+            drawn_marks: Vec::new(),
+            pending_outline_styles: None,
             split: 0.5,
             split_drag: false,
         }));
@@ -997,7 +1176,10 @@ impl DocView {
                                 t.elapsed()
                             );
                         }
-                        let flat: Vec<FlatOutlineItem> = items.iter().map(flat_item).collect();
+                        let mut flat: Vec<FlatOutlineItem> = items.iter().map(flat_item).collect();
+                        if let Some(styles) = doc.pending_outline_styles.take() {
+                            sheaf_doc::file::style_flat_items(&mut flat, &styles);
+                        }
                         match doc.model.set_initial_outline(&flat) {
                             Ok(()) => {
                                 // Start with the top level expanded.
@@ -1033,7 +1215,6 @@ impl DocView {
     }
 
     /// Apply edits as one undo step; if any fails, none are applied.
-    #[cfg_attr(not(feature = "plugins"), allow(dead_code))]
     pub(crate) fn apply_batch(&mut self, edits: Vec<Edit>, label: &str, cx: &mut Context<Self>) {
         let State::Ready(doc) = &mut self.state else {
             return;
@@ -1120,9 +1301,13 @@ impl DocView {
         cx.notify();
     }
 
-    /// What a plugin command sees of this document.
+    /// What a plugin command sees of this document; `ocr` is the OCR
+    /// choices it runs with.
     #[cfg(feature = "plugins")]
-    pub(crate) fn plugin_context(&self) -> Option<sheaf_plugin::DocContext> {
+    pub(crate) fn plugin_context(
+        &self,
+        ocr: sheaf_ocr::OcrConfig,
+    ) -> Option<sheaf_plugin::DocContext> {
         let State::Ready(doc) = &self.state else {
             return None;
         };
@@ -1140,7 +1325,7 @@ impl DocView {
             selection,
             current_page: doc.page_ref(doc.current_page()).map(|p| p.id),
             text: crate::plugins::text_source(&doc.handles),
-            ocr: Some(crate::plugins::ocr_source(&doc.handles)),
+            ocr: Some(crate::plugins::ocr_source(&doc.handles, ocr)),
             render: Some(crate::plugins::render_source(&doc.handles)),
         })
     }
@@ -1224,16 +1409,16 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return false;
         };
-        if let Some((pid, aid)) = doc.selected_annot
-            && !doc
-                .model
-                .state()
-                .annots_on(pid)
-                .is_some_and(|l| l.iter().any(|a| a.id == aid))
-        {
-            doc.selected_annot = None;
-        }
+        let st = doc.model.state().clone();
+        doc.selected_marks.retain(|(pid, aid)| {
+            st.annots_on(*pid)
+                .is_some_and(|l| l.iter().any(|a| a.id == *aid))
+        });
         let live: HashSet<PageId> = doc.model.state().pages.iter().map(|p| p.id).collect();
+        if doc.text_sel.is_some_and(|s| !live.contains(&s.page)) {
+            doc.text_sel = None;
+        }
+        doc.page_chars.retain(|id, _| live.contains(id));
         let before = doc.selection.len();
         doc.selection.retain(|id| live.contains(id));
         doc.selection.len() != before
@@ -1299,6 +1484,13 @@ impl DocView {
         if let State::Ready(doc) = &mut self.state {
             doc.selection = moving;
             cx.emit(DocEvent::SelectionChanged);
+        }
+    }
+
+    /// Sign the versions made from now on with the name in `settings.toml`.
+    pub(crate) fn sync_author(&mut self, cx: &mut Context<Self>) {
+        if let State::Ready(doc) = &mut self.state {
+            doc.model.set_author(crate::prefs::get(cx).identity.name());
         }
     }
 
@@ -1390,12 +1582,12 @@ impl DocView {
                 .spawn({
                     let path = path.clone();
                     async move {
-                        let strategy = save::save_to_path(&snapshot, &path)?;
+                        let (strategy, notes) = save::save_to_path_noting(&snapshot, &path)?;
                         let bytes = std::fs::metadata(&path)
                             .map(|m| m.len() as usize)
                             .unwrap_or(0);
                         let handle = RenderHandle::open(path.clone(), None)?;
-                        anyhow::Ok((handle, bytes, strategy))
+                        anyhow::Ok((handle, bytes, strategy, notes))
                     }
                 })
                 .await;
@@ -1405,7 +1597,7 @@ impl DocView {
                 };
                 doc.saving = false;
                 let ok = match result {
-                    Ok((handle, bytes, strategy)) => {
+                    Ok((handle, bytes, strategy, notes)) => {
                         let (page_count, first_page) =
                             (handle.info().page_count, handle.info().first_page);
                         let saved = SourceInfo {
@@ -1415,21 +1607,30 @@ impl DocView {
                             page_sizes: None,
                             bytes,
                             password: None,
+                            data: Some(sheaf_doc::SourceData(handle.data())),
                         };
                         let sid = doc.model.rebase_to_saved(saved);
                         // Our marks are now in the file; keep PDFium from drawing them.
-                        let pages: Vec<u32> = doc
-                            .model
-                            .state()
+                        let st = doc.model.state();
+                        let pages: Vec<(u32, Vec<String>)> = st
                             .pages
                             .iter()
                             .enumerate()
-                            .filter(|(_, p)| doc.model.state().annots.contains_key(&p.id))
-                            .map(|(i, _)| i as u32)
+                            .filter_map(|(i, p)| {
+                                let list = st.annots.get(&p.id)?;
+                                Some((i as u32, list.iter().flat_map(|a| a.pdf_names()).collect()))
+                            })
                             .collect();
-                        doc.sheaf_pages = pages.clone();
+                        doc.drawn_marks = pages.clone();
+                        // The saved file's third-party comments, at their
+                        // new page numbers.
+                        doc.foreign_annots.clear();
+                        doc.foreign_generation += 1;
+                        // A new engine: nothing of theirs is hidden in it.
+                        doc.foreign_hidden.retain(|(s, _, _)| *s != sid);
+                        reread_foreign(sid, path.clone(), cx);
                         if !pages.is_empty() {
-                            let rx = handle.hide_sheaf_annots(pages);
+                            let rx = handle.hide_annots(pages);
                             cx.spawn(async move |this, cx| {
                                 let _ = rx.await;
                                 this.update(cx, |view, cx| {
@@ -1452,14 +1653,15 @@ impl DocView {
                         cx.defer(move |cx| crate::recent::add(&saved_path, cx));
                         let was_encrypted = view.password.take().is_some();
                         doc.notice = Some(format!(
-                            "Saved {} ({strategy:?}) in {:?}{}",
+                            "Saved {} ({strategy:?}) in {:?}{}{}",
                             path.display(),
                             t.elapsed(),
                             if was_encrypted {
                                 " — password protection removed"
                             } else {
                                 ""
-                            }
+                            },
+                            notes.iter().map(|n| format!(" — {n}")).collect::<String>()
                         ));
                         if timing {
                             eprintln!(
@@ -1548,7 +1750,19 @@ impl DocView {
                         t.elapsed()
                     );
                 }
-                doc.foreign_annots = foreign;
+                let primary = doc.model.primary();
+                doc.foreign_annots = foreign.into_iter().map(|f| (primary, f)).collect();
+                doc.foreign_generation += 1;
+                if !facts.outline_styles.is_empty() {
+                    if doc.outline_loaded {
+                        if let Err(e) = doc.model.set_initial_outline_styles(&facts.outline_styles)
+                        {
+                            log::warn!("bookmark colors arrived after edits; ignored: {e:#}");
+                        }
+                    } else {
+                        doc.pending_outline_styles = Some(facts.outline_styles.clone());
+                    }
+                }
                 if let Some(ranges) = &facts.label_ranges
                     && let Err(e) = doc.model.set_initial_labels(ranges)
                 {
@@ -1573,19 +1787,19 @@ impl DocView {
                     cx.notify();
                     return;
                 }
-                let pages: Vec<u32> = by_index.keys().copied().collect();
+                let drawn = marks_by_page(&by_index);
                 let n: usize = by_index.values().map(|v| v.len()).sum();
                 match doc.model.set_initial_annots(by_index) {
                     Ok(()) => {
                         if timing {
                             eprintln!(
                                 "[timing] loaded {n} sheaf annotations on {} pages in {:?}",
-                                pages.len(),
+                                drawn.len(),
                                 t.elapsed()
                             );
                         }
-                        doc.sheaf_pages = pages.clone();
-                        let rx = doc.primary().hide_sheaf_annots(pages);
+                        doc.drawn_marks = drawn.clone();
+                        let rx = doc.primary().hide_annots(drawn);
                         doc.touched();
                         cx.spawn(async move |this, cx| {
                             let _ = rx.await;
@@ -1609,16 +1823,22 @@ impl DocView {
     }
 
     /// A new annotation with the document's defaults filled in.
-    pub(crate) fn new_annot(&self, kind: AnnotKind, color: [u8; 3]) -> Annot {
+    /// A new mark by whoever `settings.toml` names (the OS user otherwise).
+    pub(crate) fn new_annot(&self, kind: AnnotKind, color: [u8; 3], cx: &App) -> Annot {
         Annot {
             id: sheaf_doc::AnnotId(0),
             kind,
             color,
             opacity: 1.0,
             stroke: 1.5,
-            author: sheaf_doc::default_author(),
+            author: crate::prefs::get(cx).identity.name(),
             contents: String::new(),
             modified: sheaf_doc::pdf_date_now(),
+            created: sheaf_doc::pdf_date_now(),
+            fill: None,
+            dashed: false,
+            cloudy: false,
+            name: String::new(),
         }
     }
 
@@ -1629,7 +1849,24 @@ impl DocView {
         label: &str,
         cx: &mut Context<Self>,
     ) {
+        let count = |v: &Self| match &v.state {
+            State::Ready(doc) => doc.model.state().annots_on(page).map_or(0, |l| l.len()),
+            _ => 0,
+        };
+        let before = count(self);
         self.apply(Edit::AnnotAdd { page, annot }, label, cx);
+        // The new mark comes in selected, so its properties can be set
+        // straight away.
+        if count(self) > before
+            && let State::Ready(doc) = &mut self.state
+            && let Some(id) = doc
+                .model
+                .state()
+                .annots_on(page)
+                .and_then(|l| l.last().map(|a| a.id))
+        {
+            doc.select_mark(Some((page, id)));
+        }
     }
 
     /// Dev hook: drop one of each mark on page 1 and save to `path`.
@@ -1650,6 +1887,7 @@ impl DocView {
                 }],
             },
             [255, 230, 0],
+            cx,
         );
         hl.opacity = 0.6;
         self.add_annot(p0, hl, "Highlight", cx);
@@ -1658,6 +1896,7 @@ impl DocView {
                 pos: Pt { x: 400.0, y: 60.0 },
             },
             [255, 200, 0],
+            cx,
         );
         note.contents = "A sticky note".into();
         self.add_annot(p0, note, "Note", cx);
@@ -1672,6 +1911,7 @@ impl DocView {
                 size: 12.0,
             },
             [200, 0, 0],
+            cx,
         );
         text.contents = "Free text written by sheaf, wrapped onto a second line.".into();
         self.add_annot(p0, text, "Text", cx);
@@ -1685,6 +1925,7 @@ impl DocView {
                 },
             },
             [0, 120, 255],
+            cx,
         );
         self.add_annot(p0, sq, "Square", cx);
         let tick = self.new_annot(
@@ -1698,6 +1939,7 @@ impl DocView {
                 glyph: "✓".into(),
             },
             [0, 150, 0],
+            cx,
         );
         self.add_annot(p0, tick, "Tickmark", cx);
         let tick2 = self.new_annot(
@@ -1711,6 +1953,7 @@ impl DocView {
                 glyph: "F".into(),
             },
             [200, 0, 0],
+            cx,
         );
         self.add_annot(p0, tick2, "Tickmark", cx);
         let arrow = self.new_annot(
@@ -1718,8 +1961,10 @@ impl DocView {
                 a: Pt { x: 80.0, y: 220.0 },
                 b: Pt { x: 300.0, y: 260.0 },
                 arrow: true,
+                arrow_start: false,
             },
             [0, 120, 255],
+            cx,
         );
         self.add_annot(p0, arrow, "Arrow", cx);
         let mut ink = self.new_annot(
@@ -1734,6 +1979,7 @@ impl DocView {
                 ],
             },
             [160, 60, 220],
+            cx,
         );
         ink.stroke = 2.5;
         self.add_annot(p0, ink, "Pencil", cx);
@@ -1749,6 +1995,7 @@ impl DocView {
                     partner: None,
                 },
                 [220, 40, 40],
+                cx,
             )
         };
         let a = mk(Box2 {
@@ -1780,8 +2027,11 @@ impl DocView {
                     h: 60.0,
                 },
                 size: 10.0,
+                tape: Default::default(),
+                look: Default::default(),
             },
             [20, 20, 20],
+            cx,
         );
         tape.contents = "1,234.50 +\n250.00 +\n84.50 -\n1,400.00 T".into();
         self.add_annot(p0, tape, "Place tape", cx);
@@ -1812,6 +2062,7 @@ impl DocView {
                 pos: Pt { x: 400.0, y: 60.0 },
             },
             [255, 200, 0],
+            cx,
         );
         note.contents = "should not survive".into();
         self.add_annot(p0, note, "Note", cx);
@@ -1826,6 +2077,7 @@ impl DocView {
                 glyph: "✓".into(),
             },
             [0, 150, 0],
+            cx,
         );
         self.add_annot(p0, tick, "Tickmark", cx);
         self.export_clean_to(path, cx);
@@ -1863,6 +2115,7 @@ impl DocView {
                 size: 12.0,
             },
             [200, 0, 0],
+            cx,
         );
         text.contents = "Flattened free text".into();
         self.add_annot(p0, text, "Text", cx);
@@ -1876,6 +2129,7 @@ impl DocView {
                 },
             },
             [0, 120, 255],
+            cx,
         );
         self.add_annot(p0, sq, "Square", cx);
         let tick = self.new_annot(
@@ -1889,6 +2143,7 @@ impl DocView {
                 glyph: "✓".into(),
             },
             [0, 150, 0],
+            cx,
         );
         self.add_annot(p0, tick, "Tickmark", cx);
         self.export_flattened_to(path, cx);
@@ -1984,6 +2239,20 @@ impl DocView {
         };
         doc.notice = Some(format!("Exporting flattened copy to {}…", path.display()));
         let snapshot = doc.model.snapshot();
+        // Flattening keeps an attachment's icon and drops its file, as
+        // Acrobat does: say so.
+        let files = snapshot
+            .state
+            .annots
+            .values()
+            .flatten()
+            .filter(|a| matches!(a.kind, AnnotKind::FileAttachment { .. }))
+            .count()
+            + doc
+                .attachments
+                .iter()
+                .filter(|a| matches!(a.at, sheaf_doc::attachments::AttachmentRef::Annot { .. }))
+                .count();
         let timing = self.timing;
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -2006,9 +2275,15 @@ impl DocView {
                                 );
                             }
                             format!(
-                                "Exported flattened copy to {} ({n} mark{})",
+                                "Exported flattened copy to {} ({n} mark{}){}",
                                 path.display(),
-                                if n == 1 { "" } else { "s" }
+                                if n == 1 { "" } else { "s" },
+                                match files {
+                                    0 => String::new(),
+                                    1 => " — the attachment's icon is kept, its file isn't".into(),
+                                    _ =>
+                                        " — attachments' icons are kept, their files aren't".into(),
+                                }
                             )
                         }
                         Err(e) => format!("Export failed: {e:#}"),
@@ -2126,9 +2401,15 @@ impl DocView {
         else {
             return;
         };
+        let hint = match annot.kind {
+            AnnotKind::Replace { .. } => "Type the replacement; Ctrl+Enter or click away when done",
+            AnnotKind::Insert { .. } => {
+                "Type the text to insert; Ctrl+Enter or click away when done"
+            }
+            _ => "Type a note; Ctrl+Enter or click away when done",
+        };
         let input = cx.new(|cx| {
-            let mut i =
-                TextArea::new("Type a note; Ctrl+Enter or click away when done", cx).rows(3, 10);
+            let mut i = TextArea::new(hint, cx).rows(3, 10);
             i.set_text(annot.contents.clone(), cx);
             i
         });
@@ -2149,7 +2430,7 @@ impl DocView {
             _sub: sub,
             _blur: blur,
         });
-        doc.selected_annot = Some((page, id));
+        doc.select_mark(Some((page, id)));
         cx.notify();
     }
 
@@ -2162,6 +2443,29 @@ impl DocView {
             return;
         };
         let text = ed.input.read(cx).text().to_string();
+        // An insertion with nothing to insert isn't one.
+        if text.trim().is_empty()
+            && let Some(cur) = doc
+                .model
+                .state()
+                .annots_on(ed.page)
+                .and_then(|l| l.iter().find(|a| a.id == ed.id))
+            && matches!(cur.kind, AnnotKind::Insert { .. })
+        {
+            self.apply(
+                Edit::AnnotDelete {
+                    page: ed.page,
+                    id: ed.id,
+                },
+                "Delete text insertion",
+                cx,
+            );
+            self.pending_focus = true;
+            return;
+        }
+        let State::Ready(doc) = &mut self.state else {
+            return;
+        };
         if let Some(cur) = doc
             .model
             .state()
@@ -2261,12 +2565,18 @@ impl DocView {
                         let bytes = std::fs::metadata(&path)
                             .map(|m| m.len() as usize)
                             .unwrap_or(0);
+                        // Pages sheaf made (blank, images) carry nothing more.
+                        let incoming = if bookmarks {
+                            Incoming::read(&path)
+                        } else {
+                            Incoming::default()
+                        };
                         let handle = RenderHandle::open(path, None)?;
-                        anyhow::Ok((handle, bytes))
+                        anyhow::Ok((handle, bytes, incoming))
                     }
                 })
                 .await;
-            let (handle, bytes) = match opened {
+            let (handle, bytes, incoming) = match opened {
                 Ok(v) => v,
                 Err(e) => {
                     this.update(cx, |view, cx| {
@@ -2300,13 +2610,15 @@ impl DocView {
                     page_sizes: None,
                     bytes,
                     password: None,
+                    data: Some(sheaf_doc::SourceData(handle.data())),
                 });
                 doc.handles.insert(sid, handle);
-                let flat: Vec<FlatOutlineItem> = if bookmarks {
+                let mut flat: Vec<FlatOutlineItem> = if bookmarks {
                     outline.iter().map(flat_item).collect()
                 } else {
                     Vec::new()
                 };
+                sheaf_doc::file::style_flat_items(&mut flat, &incoming.outline_styles);
                 let label = format!("Insert {name}");
                 let mut outcome = None;
                 match doc.model.apply(
@@ -2315,11 +2627,13 @@ impl DocView {
                         range: 0..page_count,
                         before,
                         outline: Some(flat),
+                        annots: incoming.edit_marks(),
                     },
                     &label,
                 ) {
                     Ok(out) => {
                         outcome = Some(out.clone());
+                        doc.take_in(sid, incoming);
                         doc.notice = Some(if !bookmarks {
                             // Pages sheaf made (blank, images): name says it all.
                             format!("Inserted {name}")
@@ -3143,12 +3457,55 @@ impl DocView {
     }
 }
 
+/// Each page's marks as the `/NM`s PDFium should hide, by page index.
+pub(crate) fn marks_by_page(
+    by_index: &std::collections::HashMap<u32, Vec<sheaf_doc::Annot>>,
+) -> Vec<(u32, Vec<String>)> {
+    by_index
+        .iter()
+        .map(|(i, list)| (*i, list.iter().flat_map(|a| a.pdf_names()).collect()))
+        .collect()
+}
+
+/// Read `path`'s third-party comments in the background and list them as
+/// `source`'s (after a save, the file's pages have new numbers).
+fn reread_foreign(source: SourceId, path: PathBuf, cx: &mut Context<DocView>) {
+    cx.spawn(async move |this, cx| {
+        let found = cx
+            .background_executor()
+            .spawn(async move { sheaf_doc::file::read_annots(&path, None) })
+            .await;
+        let foreign = match found {
+            Ok(a) => a.foreign,
+            Err(e) => {
+                log::warn!("reading third-party comments: {e:#}");
+                return;
+            }
+        };
+        this.update(cx, |view, cx| {
+            if let State::Ready(doc) = &mut view.state
+                && doc.model.primary() == source
+            {
+                doc.foreign_annots.retain(|(s, _)| *s != source);
+                doc.foreign_annots
+                    .extend(foreign.into_iter().map(|f| (source, f)));
+                doc.foreign_generation += 1;
+                cx.notify();
+            }
+        })
+        .ok();
+    })
+    .detach();
+}
+
 fn flat_item(i: &OutlineItem) -> FlatOutlineItem {
     FlatOutlineItem {
         title: i.title.clone(),
         page: i.page,
         depth: i.depth,
         view: i.view.clone(),
+        color: None,
+        style: Default::default(),
     }
 }
 
@@ -3693,23 +4050,56 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
             theme::PATTERN_HIT_CURRENT,
         ));
     }
+    // Selected text.
+    if let Some(sel) = doc.text_sel.filter(|s| s.page == pl.pref.id)
+        && let Some((_, chars)) = doc.page_chars.get(&sel.page)
+    {
+        let (a, b) = sel.range();
+        page_div = page_div.children(chars.rects(a, b).into_iter().map(|r| {
+            let r = rotate_rect(
+                Rect {
+                    x: r.x,
+                    y: r.y,
+                    w: r.w,
+                    h: r.h,
+                },
+                src,
+                rot,
+            );
+            div()
+                .absolute()
+                .left(px(r.x * k))
+                .top(px(r.y * k))
+                .w(px(r.w * k))
+                .h(px(r.h * k))
+                .bg(theme::SELECTION)
+        }));
+    }
     // A header/footer not yet saved into the file, drawn as it will be.
     page_div = page_div.children(header_footer_elements(doc, pl, k));
-    // Our markup, drawn over the page in the displayed orientation.
-    if let Some(list) = doc.model.state().annots_on(pl.pref.id) {
-        for a in list.iter() {
+    // Our markup, drawn over the page in the displayed orientation, less
+    // what the comment filter or View > Hide Comments hides.
+    if let Some(list) = doc.model.state().annots_on(pl.pref.id)
+        && !doc.comments_hidden
+    {
+        for a in list.iter().filter(|a| !doc.hidden_marks.contains(&a.id)) {
             page_div = page_div.children(annot_elements(a, src, rot, k));
         }
     }
-    // Selection outline, inline editor, drag preview.
-    if let Some((pid, aid)) = doc.selected_annot
-        && pid == pl.pref.id
-        && let Some(a) = doc
-            .model
-            .state()
-            .annots_on(pid)
-            .and_then(|l| l.iter().find(|a| a.id == aid))
-    {
+    // Selection outlines; handles when one mark is selected and nothing is
+    // being dragged.
+    let selected: Vec<sheaf_doc::Annot> = doc
+        .selected_mark_list()
+        .into_iter()
+        .filter(|(pid, a)| {
+            *pid == pl.pref.id
+                && a.thread_parent().is_none()
+                && !doc.comments_hidden
+                && !doc.hidden_marks.contains(&a.id)
+        })
+        .map(|(_, a)| a)
+        .collect();
+    for a in &selected {
         let b = a.bounds();
         let r = rotate_rect(
             Rect {
@@ -3733,6 +4123,26 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
                 .border_color(theme::ACCENT),
         );
     }
+    if let [a] = selected.as_slice()
+        && doc.selected_marks.len() == 1
+        && doc.drag.is_none()
+    {
+        const HANDLE: f32 = 7.0;
+        for (_, q) in crate::markup_tools::handle_spots(a) {
+            let d = rotate_pt(q, src, rot);
+            page_div = page_div.child(
+                div()
+                    .absolute()
+                    .left(px(d.x * k - HANDLE / 2.0))
+                    .top(px(d.y * k - HANDLE / 2.0))
+                    .w(px(HANDLE))
+                    .h(px(HANDLE))
+                    .bg(theme::PAGE)
+                    .border_1()
+                    .border_color(theme::ACCENT),
+            );
+        }
+    }
     if let Some(ed) = &doc.annot_editor
         && ed.page == pl.pref.id
         && let Some(a) = doc
@@ -3741,7 +4151,11 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
             .annots_on(ed.page)
             .and_then(|l| l.iter().find(|a| a.id == ed.id))
     {
-        let b = a.bounds();
+        // Under the mark (a callout's: under its box).
+        let b = match &a.kind {
+            AnnotKind::Callout { rect, .. } => *rect,
+            _ => a.bounds(),
+        };
         let r = rotate_rect(
             Rect {
                 x: b.x,
@@ -3761,8 +4175,8 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
                 .child(ed.input.clone()),
         );
     }
-    if let Some(f) = doc.selected_foreign.and_then(|i| doc.foreign_annots.get(i))
-        && pl.pref.source == doc.model.primary()
+    if let Some((source, f)) = doc.selected_foreign.and_then(|i| doc.foreign_annots.get(i))
+        && pl.pref.source == *source
         && f.page == pl.pref.index
     {
         page_div = page_div.child(crate::comments_panel::foreign_outline(f, src, rot, k));
@@ -3774,10 +4188,10 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
     {
         page_div = page_div.child(preview);
     }
-    if let Some(preview) =
-        DocView::pending_connector_preview(doc, ov.tool_color, pl.pref.id, src, rot, k)
-    {
-        page_div = page_div.child(preview);
+    let [r, g, b] = ov.tool_color;
+    let tool_rgb = rgb(((r as u32) << 16) | ((g as u32) << 8) | b as u32);
+    if let Some(draft) = crate::shapes::draft_preview(doc, tool_rgb, pl.index, src, rot, k) {
+        page_div = page_div.child(draft);
     }
     page_div
 }
@@ -3827,7 +4241,7 @@ impl DocView {
             pattern: self.pattern.as_ref().filter(|p| !p.hits.is_empty()),
             region: self.region.as_ref(),
             tool: self.tool,
-            tool_color: self.tool_color,
+            tool_color: crate::markup_tools::color_of(self.tool, cx),
             grid: self.grid && !full,
             guides: if full { &[] } else { &self.guides },
         };
@@ -3875,12 +4289,14 @@ impl DocView {
                 )
                 .on_mouse_down(
                     gpui::MouseButton::Right,
-                    cx.listener(move |v, _, _, cx| {
+                    cx.listener(move |v, ev: &gpui::MouseDownEvent, _, cx| {
                         if v.presentation == crate::presentation::Presentation::FullScreen {
                             v.turn_page(-1, cx);
                             return;
                         }
-                        v.activate_pane(ix, cx)
+                        v.activate_pane(ix, cx);
+                        // On a mark: its menu.
+                        v.open_mark_menu(ev.position, cx);
                     }),
                 )
                 .on_mouse_move(
@@ -4023,6 +4439,11 @@ impl Render for DocView {
         if let Some(page) = self.pending_edit_last.take() {
             self.start_annot_editor(page, window, cx);
         }
+        // What the comment filter hides on the page, kept current whether
+        // or not the panel is open (cached; cheap when nothing changed).
+        self.comment_view(cx);
+        // Stamp pictures the last frame asked for.
+        crate::stamp_preview::make_wanted(cx);
         if std::mem::take(&mut self.pending_focus) {
             window.focus(&self.focus_handle, cx);
         }
@@ -4041,6 +4462,13 @@ impl Render for DocView {
         let full = presentation == Presentation::FullScreen;
         let search_bar = (!full).then(|| self.render_search_bar(cx)).flatten();
         let goto_bar = (!full).then(|| self.render_goto()).flatten();
+        let props_bar = (!full).then(|| self.render_mark_properties(cx)).flatten();
+        let connector_bar = (!full).then(|| self.render_connector_bar(cx)).flatten();
+        let measure_bar = (!full)
+            .then(|| self.render_measure_bar(window, cx))
+            .flatten();
+        let group_list = self.render_group_list(cx);
+        let mark_menu = self.render_mark_menu(cx);
         let mut body: Option<AnyElement> = None;
         // The status bar: where you are, then the latest notice, which
         // gives way (ellipsis, full text on hover) when space is short.
@@ -4165,11 +4593,15 @@ impl Render for DocView {
                     // Likewise an export or a split.
                 } else if v.cancel_plugin_run(cx) {
                     // And a plugin command that reports progress.
-                } else if v.cancel_tape_placing(cx) || v.cancel_pending_connector(cx) {
-                    // Esc with a tape or connector half-placed just drops it.
+                } else if v.cancel_tape_placing(cx) || v.cancel_shape(cx) || v.close_group_list(cx)
+                {
+                    // Esc with a tape half-placed drops it; then the pages
+                    // list closes.
+                } else if v.clear_text_sel(cx) {
+                    // Then selected text.
                 } else {
                     if let State::Ready(doc) = &mut v.state {
-                        doc.selected_annot = None;
+                        doc.selected_marks.clear();
                         doc.selected_foreign = None;
                         doc.drag = None;
                     }
@@ -4180,7 +4612,41 @@ impl Render for DocView {
                     v.leave_presentation(window, cx);
                 }
             }))
-            .on_action(cx.listener(|v, _: &SearchNext, _, cx| v.search_step(1, cx)))
+            .on_action(cx.listener(|v, _: &SearchNext, _, cx| {
+                // Enter finishes a shape being drawn, else finds the next.
+                if !v.finish_shape(cx) {
+                    v.search_step(1, cx)
+                }
+            }))
+            .on_action(cx.listener(|v, _: &crate::UndoVertex, _, cx| {
+                v.undo_vertex(cx);
+            }))
+            .on_action(
+                cx.listener(|v, _: &crate::ToolPolygon, _, cx| v.set_tool(Tool::Polygon, cx)),
+            )
+            .on_action(
+                cx.listener(|v, _: &crate::ToolPolyline, _, cx| v.set_tool(Tool::Polyline, cx)),
+            )
+            .on_action(cx.listener(|v, _: &crate::ToolCloud, _, cx| v.set_tool(Tool::Cloud, cx)))
+            .on_action(
+                cx.listener(|v, _: &crate::ToolDistance, _, cx| v.set_tool(Tool::Distance, cx)),
+            )
+            .on_action(
+                cx.listener(|v, _: &crate::ToolPerimeter, _, cx| v.set_tool(Tool::Perimeter, cx)),
+            )
+            .on_action(cx.listener(|v, _: &crate::ToolArea, _, cx| v.set_tool(Tool::Area, cx)))
+            .on_action(cx.listener(|v, _: &crate::CalibrateScale, _, cx| v.start_calibrate(cx)))
+            .on_action(
+                cx.listener(|v, _: &crate::ToolCallout, _, cx| v.set_tool(Tool::Callout, cx)),
+            )
+            .on_action(
+                cx.listener(|v, _: &crate::ToolAttachFile, _, cx| v.set_tool(Tool::AttachFile, cx)),
+            )
+            .on_action(cx.listener(|v, _: &crate::CycleStampTools, _, cx| v.cycle_stamp_tools(cx)))
+            .on_action(
+                cx.listener(|v, _: &crate::CycleDrawingTools, _, cx| v.cycle_drawing_tools(cx)),
+            )
+            .on_action(cx.listener(|v, _: &crate::CycleTextTools, _, cx| v.cycle_text_tools(cx)))
             .on_action(cx.listener(|v, _: &SearchPrev, _, cx| v.search_step(-1, cx)))
             .on_action(
                 cx.listener(|v, _: &RotatePageCw, _, cx| v.rotate_current(Rotation::R90, cx)),
@@ -4189,9 +4655,21 @@ impl Render for DocView {
                 cx.listener(|v, _: &RotatePageCcw, _, cx| v.rotate_current(Rotation::R270, cx)),
             )
             .on_action(cx.listener(|v, _: &DeletePage, _, cx| {
-                if !v.delete_selected_annot(cx) {
+                if !v.delete_selected_annot(cx) && !v.delete_selected_foreign(cx) {
                     v.delete_current(cx)
                 }
+            }))
+            .on_action(cx.listener(|v, _: &ToggleComments, _, cx| v.toggle_comments_shown(cx)))
+            .on_action(cx.listener(|v, _: &CopySelection, _, cx| {
+                if !v.copy_text(cx) {
+                    v.copy_marks(cx);
+                }
+            }))
+            .on_action(cx.listener(|v, _: &PasteMarks, _, cx| {
+                v.paste_marks(false, cx);
+            }))
+            .on_action(cx.listener(|v, _: &PasteMarksInPlace, _, cx| {
+                v.paste_marks(true, cx);
             }))
             .on_action(cx.listener(|v, _: &DuplicatePages, _, cx| v.duplicate_current(cx)))
             .on_action(cx.listener(|v, _: &SelectAllPages, _, cx| v.select_all(cx)))
@@ -4199,11 +4677,67 @@ impl Render for DocView {
             .on_action(cx.listener(|v, _: &SaveAs, _, cx| v.save_as(cx)))
             .on_action(cx.listener(|v, _: &ExportCleanCopy, _, cx| v.export_clean_copy_prompt(cx)))
             .on_action(cx.listener(|v, _: &ExportFlattened, _, cx| v.export_flattened_prompt(cx)))
+            .on_action(cx.listener(|v, _: &crate::SummarizeComments, _, cx| {
+                v.export_comments_prompt(
+                    ExportKind::Summary(sheaf_ops::comments::Layout::CommentsOnly),
+                    cx,
+                )
+            }))
+            .on_action(
+                cx.listener(|v, _: &crate::SummarizeCommentsWithPages, _, cx| {
+                    v.export_comments_prompt(
+                        ExportKind::Summary(sheaf_ops::comments::Layout::Pages),
+                        cx,
+                    )
+                }),
+            )
+            .on_action(cx.listener(|v, _: &crate::ExportCommentsCsv, _, cx| {
+                v.export_comments_prompt(ExportKind::Csv, cx)
+            }))
+            .on_action(cx.listener(|v, _: &crate::ExportCommentsText, _, cx| {
+                v.export_comments_prompt(ExportKind::Text, cx)
+            }))
+            .on_action(cx.listener(|v, _: &crate::ExportCommentsXfdf, _, cx| {
+                v.export_comments_prompt(
+                    ExportKind::Data(sheaf_ops::comments::DataFormat::Xfdf, false),
+                    cx,
+                )
+            }))
+            .on_action(cx.listener(|v, _: &crate::ExportCommentsFdf, _, cx| {
+                v.export_comments_prompt(
+                    ExportKind::Data(sheaf_ops::comments::DataFormat::Fdf, false),
+                    cx,
+                )
+            }))
+            .on_action(
+                cx.listener(|v, _: &crate::ImportComments, _, cx| v.import_comments_prompt(cx)),
+            )
             .on_action(cx.listener(|v, _: &ExtractPages, _, cx| v.extract_pages_prompt(cx)))
             .on_action(cx.listener(|v, _: &InsertPdf, _, cx| v.insert_pdf_prompt(cx)))
             .on_action(cx.listener(|v, _: &ToolSelect, _, cx| v.set_tool(Tool::Select, cx)))
             .on_action(cx.listener(|v, _: &ToolNote, _, cx| v.set_tool(Tool::Note, cx)))
-            .on_action(cx.listener(|v, _: &ToolHighlight, _, cx| v.set_tool(Tool::Highlight, cx)))
+            .on_action(
+                cx.listener(|v, _: &ToolHighlight, _, cx| v.markup_tool(Tool::Highlight, cx)),
+            )
+            .on_action(
+                cx.listener(|v, _: &ToolUnderline, _, cx| v.markup_tool(Tool::Underline, cx)),
+            )
+            .on_action(
+                cx.listener(|v, _: &ToolStrikeOut, _, cx| v.markup_tool(Tool::StrikeOut, cx)),
+            )
+            .on_action(cx.listener(|v, _: &ToolSquiggly, _, cx| v.markup_tool(Tool::Squiggly, cx)))
+            .on_action(cx.listener(|v, _: &ToolTextEdit, _, cx| v.markup_tool(Tool::TextEdit, cx)))
+            .on_action(cx.listener(|v, _: &CycleTextMarkup, _, cx| v.cycle_text_markup(cx)))
+            .on_action(cx.listener(|v, _: &ToggleCheckmark, _, cx| v.toggle_checkmark(cx)))
+            .on_action(
+                cx.listener(|v, _: &crate::NextConnectorLabel, _, cx| v.next_unused_label(cx)),
+            )
+            .on_action(cx.listener(|v, _: &crate::GroupNext, _, cx| v.group_step(1, cx)))
+            .on_action(cx.listener(|v, _: &crate::GroupPrev, _, cx| v.group_step(-1, cx)))
+            .on_action(cx.listener(|v, _: &crate::GroupPagesWith, _, cx| v.group_pages(true, cx)))
+            .on_action(
+                cx.listener(|v, _: &crate::GroupPagesWithout, _, cx| v.group_pages(false, cx)),
+            )
             .on_action(cx.listener(|v, _: &ToolFreeText, _, cx| v.set_tool(Tool::FreeText, cx)))
             .on_action(cx.listener(|v, _: &ToolSquare, _, cx| v.set_tool(Tool::Square, cx)))
             .on_action(cx.listener(|v, _: &ToolEllipse, _, cx| v.set_tool(Tool::Ellipse, cx)))
@@ -4211,6 +4745,11 @@ impl Render for DocView {
             .on_action(cx.listener(|v, _: &ToolArrow, _, cx| v.set_tool(Tool::Arrow, cx)))
             .on_action(cx.listener(|v, _: &ToolInk, _, cx| v.set_tool(Tool::Ink, cx)))
             .on_action(cx.listener(|v, _: &ToolTick, _, cx| v.set_tool(Tool::Tick, cx)))
+            .on_action(cx.listener(|v, _: &ToolStamp, _, cx| {
+                v.set_tool(Tool::Stamp, cx);
+                // The workspace shows the Stamps panel too.
+                cx.propagate();
+            }))
             .on_action(cx.listener(|v, _: &ToolConnector, _, cx| v.set_tool(Tool::Connector, cx)))
             .on_action(cx.listener(|v, _: &NewBookmark, window, cx| v.new_bookmark(window, cx)))
             .on_action(cx.listener(|v, _: &Undo, _, cx| v.undo(cx)))
@@ -4232,13 +4771,18 @@ impl Render for DocView {
             .text_color(theme::TEXT_SOFT)
             .children(search_bar)
             .children(goto_bar)
+            .children(props_bar)
+            .children(connector_bar)
+            .children(measure_bar)
             .child(
                 div()
                     .relative()
                     .flex_grow(1.0)
                     .min_h(px(0.0))
                     .children(body)
-                    .children(review),
+                    .children(review)
+                    .children(group_list)
+                    .children(mark_menu),
             )
             .when_some(ocr_progress, |d, frac| {
                 d.child(
@@ -4583,6 +5127,91 @@ fn header_footer_elements(doc: &Doc, pl: &PagePlan, k: f32) -> Vec<AnyElement> {
 /// GPUI elements for one annotation, positioned in page-local logical px.
 /// `src` is the source page size, `rot` the page's extra rotation, `k` logical
 /// px per point.
+/// A polygon's or polyline's outline (a cloud's scallops when it's
+/// cloudy), filled when it's closed and has a fill.
+fn outline_elements(
+    a: &Annot,
+    closed: bool,
+    src: PageSize,
+    rot: Rotation,
+    k: f32,
+    stroke: gpui::Rgba,
+    alpha: u32,
+) -> Vec<AnyElement> {
+    let px_of = |p: Pt| {
+        let q = rotate_pt(p, src, rot);
+        (q.x * k, q.y * k)
+    };
+    let mut path: Vec<(f32, f32)> = if closed && a.cloudy {
+        let outline = sheaf_doc::annot::outline_of(&a.kind).unwrap_or_default();
+        let curves =
+            sheaf_doc::annot::cloud_curves(&outline, sheaf_doc::annot::cloud_step(a.stroke));
+        let mut pts = Vec::new();
+        for [p0, c1, c2, p1] in curves {
+            for i in 0..8 {
+                let t = i as f32 / 8.0;
+                let u = 1.0 - t;
+                pts.push(px_of(Pt {
+                    x: u * u * u * p0.x
+                        + 3.0 * u * u * t * c1.x
+                        + 3.0 * u * t * t * c2.x
+                        + t * t * t * p1.x,
+                    y: u * u * u * p0.y
+                        + 3.0 * u * u * t * c1.y
+                        + 3.0 * u * t * t * c2.y
+                        + t * t * t * p1.y,
+                }));
+            }
+        }
+        pts
+    } else {
+        match &a.kind {
+            AnnotKind::Polygon { points } | AnnotKind::Polyline { points } => {
+                points.iter().map(|p| px_of(*p)).collect()
+            }
+            other => sheaf_doc::annot::outline_of(other)
+                .unwrap_or_default()
+                .into_iter()
+                .map(px_of)
+                .collect(),
+        }
+    };
+    if closed && let Some(&first) = path.first() {
+        path.push(first);
+    }
+    let mut out = Vec::new();
+    if closed && let Some(f) = a.fill {
+        let u = ((f[0] as u32) << 16) | ((f[1] as u32) << 8) | f[2] as u32;
+        out.push(crate::markup_tools::fill_canvas(
+            vec![path.clone()],
+            rgba((u << 8) | alpha),
+            src.rotated(rot),
+            k,
+        ));
+    }
+    out.push(stroke_canvas_dashed(
+        vec![path],
+        stroke,
+        a.stroke * k,
+        a.dashed.then_some(k),
+        src.rotated(rot),
+        k,
+    ));
+    out
+}
+
+/// A text edit's caret, drawn as the file draws it.
+fn caret_element(at: Box2, color: gpui::Rgba, src: PageSize, rot: Rotation, k: f32) -> AnyElement {
+    let tri = sheaf_doc::annot::caret_points(at)
+        .into_iter()
+        .map(|p| {
+            let q = rotate_pt(p, src, rot);
+            (q.x * k, q.y * k)
+        })
+        .collect();
+    crate::markup_tools::fill_canvas(vec![tri], color, src.rotated(rot), k)
+}
+
 pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) -> Vec<AnyElement> {
     let rgb_u32 = ((a.color[0] as u32) << 16) | ((a.color[1] as u32) << 8) | a.color[2] as u32;
     let color = rgb(rgb_u32);
@@ -4647,20 +5276,130 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
                     .into_any_element(),
             );
         }
-        AnnotKind::Square { rect } => {
+        AnnotKind::Square { .. } | AnnotKind::Ellipse { .. } | AnnotKind::Polygon { .. }
+            if a.cloudy =>
+        {
+            out.extend(outline_elements(a, true, src, rot, k, fill, alpha));
+        }
+        AnnotKind::Polygon { .. } | AnnotKind::Polyline { .. } => {
+            let closed = matches!(a.kind, AnnotKind::Polygon { .. });
+            out.extend(outline_elements(a, closed, src, rot, k, fill, alpha));
+        }
+        AnnotKind::Measure {
+            what,
+            points,
+            scale,
+        } => {
+            use sheaf_doc::measure::Measured;
+            let px_of = |p: Pt| {
+                let q = rotate_pt(p, src, rot);
+                (q.x * k, q.y * k)
+            };
+            let mut line: Vec<(f32, f32)> = points.iter().map(|p| px_of(*p)).collect();
+            if *what == Measured::Area && points.len() > 2 {
+                line.push(line[0]);
+            }
+            let mut paths = vec![line];
+            if *what == Measured::Distance
+                && let [first, .., last] = points.as_slice()
+            {
+                let (p0, p1) = (px_of(*first), px_of(*last));
+                let head = (6.0 + a.stroke * 2.0) * k;
+                paths.push(arrow_head(p0, p1, head));
+                paths.push(arrow_head(p1, p0, head));
+            }
+            out.push(stroke_canvas_dashed(
+                paths,
+                fill,
+                a.stroke * k,
+                a.dashed.then_some(k),
+                src.rotated(rot),
+                k,
+            ));
+            if let Some(b) = sheaf_doc::annot::measure_label_box(*what, points, scale) {
+                let size = sheaf_doc::annot::MEASURE_TEXT;
+                out.push(
+                    place(b)
+                        .px(px(2.0 * k))
+                        .whitespace_nowrap()
+                        .text_color(color)
+                        .text_size(px(size * k))
+                        .line_height(px((size + 3.0) * k))
+                        .child(sheaf_doc::measure::label(*what, points, scale))
+                        .into_any_element(),
+                );
+            }
+        }
+        AnnotKind::FileAttachment { pos, icon, .. } => {
+            let at = Box2 {
+                x: pos.x,
+                y: pos.y,
+                w: sheaf_doc::annot::NOTE_SIZE,
+                h: sheaf_doc::annot::NOTE_SIZE,
+            };
+            let paths = sheaf_doc::annot::attachment_icon(icon, at)
+                .into_iter()
+                .map(|path| {
+                    path.into_iter()
+                        .map(|p| {
+                            let q = rotate_pt(p, src, rot);
+                            (q.x * k, q.y * k)
+                        })
+                        .collect()
+                })
+                .collect();
+            out.push(stroke_canvas(paths, fill, 1.5 * k, src.rotated(rot), k));
+        }
+        AnnotKind::Callout {
+            rect,
+            knee,
+            point,
+            size,
+        } => {
+            let px_of = |p: Pt| {
+                let q = rotate_pt(p, src, rot);
+                (q.x * k, q.y * k)
+            };
+            let end = sheaf_doc::annot::callout_end(*rect, *knee);
+            let (e, kn, pt) = (px_of(end), px_of(*knee), px_of(*point));
+            out.push(stroke_canvas(
+                vec![
+                    vec![e, kn, pt],
+                    arrow_head(kn, pt, (6.0 + a.stroke * 2.0) * k),
+                ],
+                fill,
+                a.stroke * k,
+                src.rotated(rot),
+                k,
+            ));
             out.push(
                 place(*rect)
+                    .bg(theme::PAGE)
                     .border(px((a.stroke * k).max(1.0)))
-                    .border_color(color)
+                    .border_color(fill)
+                    .p(px(2.0 * k))
+                    .overflow_hidden()
+                    .text_color(color)
+                    .text_size(px(*size * k))
+                    .line_height(px(*size * 1.2 * k))
+                    .child(a.contents.clone())
                     .into_any_element(),
             );
         }
-        AnnotKind::Ellipse { rect } => {
+        AnnotKind::Square { rect } | AnnotKind::Ellipse { rect } => {
+            let inside = a.fill.map(|f| {
+                let u = ((f[0] as u32) << 16) | ((f[1] as u32) << 8) | f[2] as u32;
+                rgba((u << 8) | alpha)
+            });
             out.push(
                 place(*rect)
                     .border(px((a.stroke * k).max(1.0)))
-                    .border_color(color)
-                    .rounded_full()
+                    .border_color(fill)
+                    .when(a.dashed, |d| d.border_dashed())
+                    .when_some(inside, |d, c| d.bg(c))
+                    .when(matches!(a.kind, AnnotKind::Ellipse { .. }), |d| {
+                        d.rounded_full()
+                    })
                     .into_any_element(),
             );
         }
@@ -4677,48 +5416,103 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
                     .into_any_element(),
             );
         }
-        AnnotKind::Tape { rect, size } => {
-            use sheaf_doc::annot::{TAPE_LINE, TAPE_OP_W, TAPE_PAD, tape_lines};
-            let fs = *size * k;
-            let rows: Vec<AnyElement> = tape_lines(&a.contents)
-                .into_iter()
-                .map(|(v, op)| {
-                    let total = op == "T";
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_end()
-                        .h(px(*size * TAPE_LINE * k))
-                        .when(total, |d| {
-                            d.border_t_1()
-                                .border_color(theme::TAPE_RULE)
-                                .font_weight(gpui::FontWeight::BOLD)
-                        })
-                        .child(div().child(v))
-                        .child(
+        AnnotKind::Tape {
+            rect, size, look, ..
+        } => {
+            use sheaf_doc::annot::{TAPE_LINE, TAPE_PAD, tape_columns};
+            use sheaf_doc::tape::{Row, fmt_amount};
+            let [pr, pg, pb] = look.paper;
+            let paper = rgb(((pr as u32) << 16) | ((pg as u32) << 8) | pb as u32);
+            if look.rotation % 360 != 0 {
+                // GPUI can't turn text: a picture of the tape as the file
+                // draws it.
+                let el = match crate::stamp_preview::tape_picture(a) {
+                    Some(path) => {
+                        place(*rect).child(img(path).size_full().object_fit(ObjectFit::Fill))
+                    }
+                    None => place(*rect)
+                        .bg(paper)
+                        .border_1()
+                        .border_color(theme::TAPE_BORDER),
+                };
+                out.push(el.into_any_element());
+            } else {
+                let tape = a.tape().unwrap_or_default();
+                let (number_w, amount_w, symbol_w, _) = tape_columns(&tape, *size, look);
+                let fs = *size * k;
+                let line_h = *size * TAPE_LINE * k;
+                let rows: Vec<AnyElement> =
+                    look.shown(&tape)
+                        .into_iter()
+                        .map(|(number, l)| {
+                            let total = l.row.is_total();
+                            let body: AnyElement = match &l.row {
+                                Row::Title(t) => div()
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .whitespace_nowrap()
+                                    .child(t.clone())
+                                    .into_any_element(),
+                                row => div()
+                                    .flex()
+                                    .child(div().w(px(amount_w * k)).flex().justify_end().child(
+                                        fmt_amount(row.value().unwrap_or(0.0), look.decimals),
+                                    ))
+                                    .child(
+                                        div()
+                                            .w(px(symbol_w * k))
+                                            .pl(px(*size * 0.3 * k))
+                                            .child(row.symbol()),
+                                    )
+                                    .into_any_element(),
+                            };
                             div()
-                                .w(px(*size * TAPE_OP_W * k))
-                                .pl(px(fs * 0.2))
-                                .child(op),
-                        )
-                        .into_any_element()
-                })
-                .collect();
-            out.push(
-                place(*rect)
-                    .bg(theme::PAGE)
-                    .border_1()
-                    .border_color(theme::TAPE_BORDER)
-                    .p(px(TAPE_PAD * k))
-                    .flex()
-                    .flex_col()
-                    .overflow_hidden()
-                    .text_color(color)
-                    .text_size(px(fs))
-                    .line_height(px(*size * TAPE_LINE * k))
-                    .children(rows)
-                    .into_any_element(),
-            );
+                                .flex()
+                                .items_center()
+                                .h(px(line_h))
+                                .whitespace_nowrap()
+                                .when(total, |d| {
+                                    d.border_t_1()
+                                        .border_color(theme::TAPE_RULE)
+                                        .font_weight(gpui::FontWeight::BOLD)
+                                })
+                                .when(look.numbers, |d| {
+                                    d.child(
+                                        div()
+                                            .w(px(number_w * k))
+                                            .flex_shrink_0()
+                                            .text_color(theme::TAPE_RULE)
+                                            .font_weight(gpui::FontWeight::NORMAL)
+                                            .child(number),
+                                    )
+                                })
+                                .child(body)
+                                .when(!l.note.is_empty(), |d| {
+                                    d.child(
+                                        div()
+                                            .pl(px(*size * 0.4 * k))
+                                            .font_weight(gpui::FontWeight::NORMAL)
+                                            .child(l.note.clone()),
+                                    )
+                                })
+                                .into_any_element()
+                        })
+                        .collect();
+                out.push(
+                    place(*rect)
+                        .bg(paper)
+                        .border_1()
+                        .border_color(theme::TAPE_BORDER)
+                        .p(px(TAPE_PAD * k))
+                        .flex()
+                        .flex_col()
+                        .overflow_hidden()
+                        .text_color(color)
+                        .text_size(px(fs))
+                        .line_height(px(line_h))
+                        .children(rows)
+                        .into_any_element(),
+                );
+            }
         }
         AnnotKind::Connector { rect, label, .. } => {
             out.push(
@@ -4735,24 +5529,144 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
                     .into_any_element(),
             );
         }
+        AnnotKind::Underline { rects }
+        | AnnotKind::StrikeOut { rects }
+        | AnnotKind::Squiggly { rects }
+        | AnnotKind::Replace { rects, .. } => {
+            // A replacement crosses its text out, then shows its caret.
+            let lines = match &a.kind {
+                AnnotKind::Replace { .. } => AnnotKind::StrikeOut {
+                    rects: rects.clone(),
+                },
+                other => other.clone(),
+            };
+            let paths = sheaf_doc::annot::text_line_paths(&lines)
+                .into_iter()
+                .map(|path| {
+                    path.into_iter()
+                        .map(|p| {
+                            let q = rotate_pt(p, src, rot);
+                            (q.x * k, q.y * k)
+                        })
+                        .collect()
+                })
+                .collect();
+            let width = sheaf_doc::annot::text_line_width(rects);
+            out.push(stroke_canvas(paths, fill, width * k, src.rotated(rot), k));
+            if let AnnotKind::Replace { at, .. } = &a.kind {
+                out.push(caret_element(*at, fill, src, rot, k));
+            }
+        }
+        AnnotKind::Insert { at } => out.push(caret_element(*at, fill, src, rot, k)),
+        // In their parent's thread, not on the page.
+        AnnotKind::Reply { .. } | AnnotKind::Status { .. } => {}
+        AnnotKind::PageStamp {
+            rect,
+            stamp,
+            name,
+            text,
+        } => {
+            let el = match crate::stamp_preview::picture(stamp) {
+                Some(path) => place(*rect)
+                    .opacity(a.opacity.clamp(0.0, 1.0))
+                    .child(img(path).size_full().object_fit(ObjectFit::Fill)),
+                // Until its picture is made (a moment), its name in a box.
+                None => place(*rect)
+                    .border_1()
+                    .border_dashed()
+                    .border_color(color)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(color)
+                    .text_size(px((10.0 * k).max(6.0)))
+                    .child(name.clone()),
+            };
+            let el = match text.as_ref().filter(|t| !t.is_empty()) {
+                Some(t) => {
+                    let size = (rect.h * 0.16).clamp(5.0, 24.0);
+                    el.child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .right_0()
+                            .bottom(px(rect.h * 0.08 * k))
+                            .flex()
+                            .justify_center()
+                            .text_color(color)
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_size(px(size * k))
+                            .line_height(px(size * k))
+                            .child(t.clone()),
+                    )
+                }
+                None => el,
+            };
+            out.push(el.into_any_element());
+        }
+        AnnotKind::PageBorder { rect, .. } => out.push(
+            place(*rect)
+                .border(px((a.stroke * k).max(1.0)))
+                .border_color(fill)
+                .into_any_element(),
+        ),
+        AnnotKind::TextStamp { rect, text, .. } => {
+            let lw = sheaf_doc::annot::text_stamp_line(*rect);
+            let mut el = place(*rect)
+                .border(px(lw * k))
+                .border_color(fill)
+                .rounded(px(rect.h * 0.18 * k))
+                .text_color(fill)
+                .font_weight(gpui::FontWeight::BOLD);
+            for (line, size, baseline) in sheaf_doc::annot::text_stamp_lines(*rect, text) {
+                el = el.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .top(px((baseline - rect.y - size * 0.9) * k))
+                        .flex()
+                        .justify_center()
+                        .text_size(px(size * k))
+                        .line_height(px(size * k))
+                        .child(line),
+                );
+            }
+            out.push(el.into_any_element());
+        }
         AnnotKind::Line {
             a: pa,
             b: pb,
             arrow,
+            arrow_start,
         } => {
             let (qa, qb) = (rotate_pt(*pa, src, rot), rotate_pt(*pb, src, rot));
             let (a2, b2) = ((qa.x * k, qa.y * k), (qb.x * k, qb.y * k));
-            let mut paths = vec![vec![a2, b2]];
-            if *arrow {
-                paths.push(arrow_head(a2, b2, (6.0 + a.stroke * 2.0) * k));
-            }
-            out.push(stroke_canvas(
-                paths,
-                color,
+            let head = (6.0 + a.stroke * 2.0) * k;
+            out.push(stroke_canvas_dashed(
+                vec![vec![a2, b2]],
+                fill,
                 a.stroke * k,
+                a.dashed.then_some(k),
                 src.rotated(rot),
                 k,
             ));
+            let mut heads = Vec::new();
+            if *arrow {
+                heads.push(arrow_head(a2, b2, head));
+            }
+            if *arrow_start {
+                heads.push(arrow_head(b2, a2, head));
+            }
+            if !heads.is_empty() {
+                out.push(stroke_canvas(
+                    heads,
+                    fill,
+                    a.stroke * k,
+                    src.rotated(rot),
+                    k,
+                ));
+            }
         }
         AnnotKind::Ink { paths } => {
             let polylines: Vec<Vec<(f32, f32)>> = paths
@@ -4766,10 +5680,11 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
                         .collect()
                 })
                 .collect();
-            out.push(stroke_canvas(
+            out.push(stroke_canvas_dashed(
                 polylines,
-                color,
+                fill,
                 a.stroke * k,
+                a.dashed.then_some(k),
                 src.rotated(rot),
                 k,
             ));
@@ -4882,6 +5797,7 @@ mod tests {
             target: None,
             view: None,
             color: None,
+            style: Default::default(),
             children: children.into(),
         }
     }

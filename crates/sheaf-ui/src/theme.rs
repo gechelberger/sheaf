@@ -180,8 +180,6 @@ pub const PATTERN_HIT: Rgba = hexa(0x6aa6ff70);
 pub const PATTERN_HIT_CURRENT: Rgba = hexa(0xd040d0a0);
 /// The current pattern hit's row in the Patterns panel.
 pub const PATTERN_ROW_CURRENT: Rgba = hex(0x4a2f6f);
-/// The highlighter tool's preview while dragging.
-pub const HIGHLIGHT_PREVIEW: Rgba = hexa(0xffe60060);
 /// The bookmark ribbon on a thumbnail.
 pub const BOOKMARK: Rgba = hex(0xe0a000);
 

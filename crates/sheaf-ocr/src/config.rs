@@ -1,4 +1,6 @@
-//! User settings for OCR, stored under `"ocr"` in `settings.json`.
+//! OCR options. The app remembers the Recognize Text dialog's choices in
+//! `state.json` under `"ocr"`; the paths and tuning set by hand come from
+//! `[ocr]` in `settings.toml` (`sheaf_ops::prefs::OcrPrefs`).
 
 use std::path::PathBuf;
 

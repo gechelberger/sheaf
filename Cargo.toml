@@ -8,6 +8,7 @@ members = [
     "crates/sheaf-ops",
     "crates/sheaf-image",
     "crates/sheaf-cli",
+    "crates/sheaf-instance",
     "crates/sheaf-doc",
     "crates/sheaf-render",
     "crates/sheaf-ui",
@@ -37,6 +38,7 @@ sheaf-progress = { path = "crates/sheaf-progress" }
 sheaf-ops = { path = "crates/sheaf-ops" }
 sheaf-image = { path = "crates/sheaf-image" }
 sheaf-cli = { path = "crates/sheaf-cli" }
+sheaf-instance = { path = "crates/sheaf-instance" }
 
 # GPUI is pre-1.0 and only published sporadically; track Zed main at a pinned rev.
 # Bump ZED_REV deliberately — breaking changes are routine.

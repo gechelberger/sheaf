@@ -1,0 +1,22 @@
+id = "test-plugin"
+name = "Test Plugin"
+version = "0.1.0"
+api = "^0.2.1"
+events = ["opened", "edited", "closed"]
+
+[[commands]]
+id = "count"
+label = "Count"
+icon = "icons/bookmark.svg"
+help = "Counts with progress for the host tests."
+
+[[commands]]
+id = "bookmark"
+label = "Bookmark Pages"
+icon = "icons/bookmark.svg"
+help = "Bookmark pages for the host tests."
+menu = "Tools/Test"
+
+[[panels]]
+id = "matches"
+label = "Matches"

@@ -136,6 +136,12 @@ pub fn annot(kind: AnnotKind) -> Annot {
         stroke: 1.5,
         author: String::new(),
         contents: String::new(),
+        fill: None,
+        dashed: false,
+        cloudy: false,
+        created: String::new(),
+        modified: String::new(),
+        name: String::new(),
     }
 }
 

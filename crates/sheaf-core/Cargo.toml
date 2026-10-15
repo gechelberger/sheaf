@@ -6,3 +6,6 @@ license.workspace = true
 
 [dependencies]
 serde.workspace = true
+# xxh3-128: sheaf's quick checksum (content-addressed cache names, the
+# names of comments without /NM). MIT, like sheaf.
+twox-hash = { version = "2.1", default-features = false, features = ["xxhash3_128"] }

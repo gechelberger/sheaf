@@ -46,7 +46,7 @@ pub fn strip_stamps(snap: &Snapshot, progress: &dyn Progress) -> Result<Vec<Deri
     let mut done = 0;
     for (sid, pages) in by_source {
         let info = snap.source(sid).context("unknown source")?;
-        let file = sheaf_doc::file::load_pdf(&info.path, info.password.as_deref())?;
+        let file = sheaf_doc::file::load_source(info)?;
         let objs: Vec<_> = file.get_pages().into_values().collect();
         let mut keep = Vec::new();
         for (id, index) in pages {
@@ -78,6 +78,7 @@ pub fn strip_stamps(snap: &Snapshot, progress: &dyn Progress) -> Result<Vec<Deri
                 page_sizes: Some(sizes),
                 bytes: bytes.len(),
                 password: None,
+                data: None,
             },
             pages: keep
                 .iter()
@@ -119,7 +120,7 @@ pub fn watermark(
     let mut done = 0;
     for (sid, pages) in by_source {
         let info = snap.source(sid).context("unknown source")?;
-        let file = sheaf_doc::file::load_pdf(&info.path, info.password.as_deref())?;
+        let file = sheaf_doc::file::load_source(info)?;
         let objs: Vec<_> = file.get_pages().into_values().collect();
         let mut keep = Vec::new();
         for (id, index, draw, rot) in pages {
@@ -156,6 +157,7 @@ pub fn watermark(
                 page_sizes: Some(sizes),
                 bytes: bytes.len(),
                 password: None,
+                data: None,
             },
             pages: keep
                 .iter()
@@ -176,7 +178,7 @@ pub fn current_watermark(snap: &Snapshot, behind: bool) -> Option<sheaf_doc::wat
     }
     for (sid, indexes) in by_source {
         let info = snap.source(sid)?;
-        let file = sheaf_doc::file::load_pdf(&info.path, info.password.as_deref()).ok()?;
+        let file = sheaf_doc::file::load_source(info).ok()?;
         let objs: Vec<_> = file.get_pages().into_values().collect();
         for i in indexes {
             if let Some(d) = objs

@@ -3,8 +3,9 @@
 ///
 /// Versioning: semver on this package. The host keeps serving the previous
 /// minor/major world when it moves on (N-1), so a plugin built against an
-/// older API keeps loading.
-package sheaf:plugin@0.2.1;
+/// older API keeps loading. 0.3 has every kind of mark and their new
+/// fields, and the plugin's preferences; 0.2 is still served.
+package sheaf:plugin@0.3.0;
 
 /// Shared data types. Ids are opaque and stable for the life of an open
 /// document; they are not page numbers.
@@ -67,8 +68,16 @@ interface types {
         groups: list<option<string>>,
     }
 
-    record line-shape { a: pt, b: pt, arrow: bool }
+    record line-shape {
+        a: pt,
+        b: pt,
+        /// An arrowhead at `b`.
+        arrow: bool,
+        /// An arrowhead at `a`.
+        arrow-start: bool,
+    }
     record text-box { rect: box2, size: f32 }
+    /// A tickmark from the library: what it shows.
     record stamp-shape { rect: box2, glyph: string }
     record connector-shape {
         rect: box2,
@@ -76,6 +85,35 @@ interface types {
         /// Set by the host; ignored in edits.
         partner: option<annot-id>,
     }
+
+    /// A suggested replacement (Acrobat's Replace Text): `struck` over
+    /// `rects` is crossed out, and a caret at `at` carries the new text
+    /// (the mark's `contents`).
+    record replace-shape { rects: list<box2>, struck: string, at: box2 }
+    /// A review state set on the comment named `parent`: `model` "Review"
+    /// (state None, Accepted, Rejected, Cancelled or Completed) or
+    /// "Marked" (Marked or Unmarked).
+    record status-shape { parent: string, model: string, state: string }
+    /// A stamp from the library: `stamp` names its one-page PDF in the
+    /// cache, `name` is what the library calls it, `text` its filled-in
+    /// dynamic text.
+    record page-stamp-shape { rect: box2, stamp: string, name: string, text: option<string> }
+    /// A text stamp in a frame; `status` when Set Status placed it.
+    record text-stamp-shape { rect: box2, text: string, status: bool }
+    /// A border round a page, as Set Status draws it.
+    record page-border-shape { rect: box2, status: string }
+    /// A text box with a leader line through `knee` to an arrow at `point`.
+    record callout-shape { rect: box2, knee: pt, point: pt, size: f32 }
+    /// A file behind an icon: `file` names its bytes in the cache.
+    record attachment-shape { pos: pt, icon: string, file: string, name: string, size: u64 }
+
+    enum measured { distance, perimeter, area }
+    /// `page` `page-unit` on the page stands for `real` `unit`; values show
+    /// `precision` decimals.
+    record scale { page: f64, page-unit: string, real: f64, unit: string, precision: u8 }
+    /// A measurement: what `points` come to at `scale` (a distance has
+    /// two).
+    record measure-shape { what: measured, points: list<pt>, scale: scale }
 
     variant annot-kind {
         highlight(list<box2>),
@@ -88,6 +126,22 @@ interface types {
         stamp(stamp-shape),
         connector(connector-shape),
         tape(text-box),
+        underline(list<box2>),
+        strike-out(list<box2>),
+        squiggly(list<box2>),
+        replace(replace-shape),
+        insert(box2),
+        /// A reply (`contents`) to the comment named here.
+        reply(string),
+        status(status-shape),
+        page-stamp(page-stamp-shape),
+        text-stamp(text-stamp-shape),
+        page-border(page-border-shape),
+        polygon(list<pt>),
+        polyline(list<pt>),
+        callout(callout-shape),
+        file-attachment(attachment-shape),
+        measure(measure-shape),
     }
 
     record annot {
@@ -100,7 +154,20 @@ interface types {
         stroke: f32,
         /// Empty means the user's name.
         author: string,
+        /// Its text. `<<name>>`, `<<initials>>`, `<<date>>` and `<<time>>`
+        /// are filled in by the host, as dynamic stamps are.
         contents: string,
+        /// The inside's color, for kinds with one.
+        fill: option<rgb>,
+        dashed: bool,
+        /// A cloudy border, for rectangles, ellipses and polygons.
+        cloudy: bool,
+        /// PDF dates. Set by the host; ignored in edits (a change is now).
+        created: string,
+        modified: string,
+        /// What it's called in threads and in the file (`/NM`); replies
+        /// name their comment by it. Set by the host; ignored in edits.
+        name: string,
     }
 
     record move-pages { ids: list<page-id>, before: option<page-id> }
@@ -325,6 +392,10 @@ interface storage {
     /// The plugin's settings: the JSON in its `settings.json`, which the
     /// user edits. "{}" when there is none.
     settings: func() -> string;
+    /// The plugin's own section of the user's `settings.toml`
+    /// (`[plugins.<id>]`), as JSON: "{}" when there is none. Read when the
+    /// call started, so it stays the same for the whole call.
+    preferences: func() -> string;
 }
 
 /// Changes to the document. Each `submit` becomes one undo step, applied

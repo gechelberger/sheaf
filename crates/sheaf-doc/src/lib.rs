@@ -7,19 +7,27 @@
 
 pub mod annot;
 pub mod attachments;
+pub mod describe;
+pub mod exchange;
 pub mod file;
 pub mod generated;
 pub mod history;
 pub mod images;
+pub mod import;
 pub mod incremental;
+pub(crate) mod kept;
 pub mod labels;
 pub mod layers;
+pub mod measure;
 pub mod model;
+pub mod page_chars;
 pub mod portfolio;
 pub mod properties;
 pub mod recovery;
 pub mod save;
+pub mod stamp_lib;
 pub mod stamps;
+pub mod tape;
 pub mod text_layer;
 pub mod watermark;
 
@@ -29,6 +37,8 @@ pub use annot::{Annot, AnnotId, AnnotKind, Box2, PageGeom, Pt, default_author, p
 pub use history::{AllOf, FixedCount, HistoryPolicy, HistoryStats, MemoryBudget};
 pub use model::{
     DocState, Document, Edit, EditOutcome, FlatOutlineItem, JobId, NewOutlineItem, OutlineId,
-    OutlineNode, PageId, PageRef, Rebase, Snapshot, SourceId, SourceInfo,
+    OutlineNode, PageId, PageRef, Rebase, Saved, Snapshot, SourceData, SourceId, SourceInfo, Step,
+    TextStyle, VersionId, VersionView,
 };
+pub use page_chars::{Glyph, PageChars};
 pub use text_layer::{OcrWord, TextHit, TextLayer};

@@ -18,18 +18,37 @@ an image element does not inherit the parent element's color.
 | [select](select/icon.svg) | Select | `ToolSelect` |
 | [note](note/icon.svg) | Sticky note | `ToolNote` |
 | [highlight](highlight/icon.svg) | Highlight | `ToolHighlight` |
+| [underline](underline/icon.svg) | Underline | `ToolUnderline` |
+| [strikethrough](strikethrough/icon.svg) | Strikethrough | `ToolStrikeOut` |
+| [squiggly](squiggly/icon.svg) | Squiggly | `ToolSquiggly` |
+| [text-edit](text-edit/icon.svg) | Text edits | `ToolTextEdit` |
 | [text](text/icon.svg) | Text | `ToolFreeText` |
 | [rectangle](rectangle/icon.svg) | Rectangle | `ToolSquare` |
 | [ellipse](ellipse/icon.svg) | Ellipse | `ToolEllipse` |
 | [line](line/icon.svg) | Line | `ToolLine` |
 | [arrow](arrow/icon.svg) | Arrow | `ToolArrow` |
+| [polygon](polygon/icon.svg) | Polygon | `ToolPolygon` |
+| [polyline](polyline/icon.svg) | Polyline | `ToolPolyline` |
+| [cloud](cloud/icon.svg) | Cloud | `ToolCloud` |
+| [callout](callout/icon.svg) | Callout | `ToolCallout` |
+| [distance](distance/icon.svg) | Distance tool | `ToolDistance` |
+| [perimeter](perimeter/icon.svg) | Perimeter tool | `ToolPerimeter` |
+| [area](area/icon.svg) | Area tool | `ToolArea` |
+| [calibrate](calibrate/icon.svg) | Calibrate scale | `CalibrateScale` |
 | [pencil](pencil/icon.svg) | Pencil | `ToolInk` |
 | [tick](tick/icon.svg) | Tickmark | `ToolTick` |
+| [stamp](stamp/icon.svg) | Stamp | `ToolStamp` |
+| [attach-file](attach-file/icon.svg) | Attach file | `ToolAttachFile` |
 | [connector](connector/icon.svg) | Connector | `ToolConnector` |
 | [rotate-right](rotate-right/icon.svg) | Rotate clockwise | `RotatePageCw` |
 | [rotate-left](rotate-left/icon.svg) | Rotate counterclockwise | `RotatePageCcw` |
 | [undo](undo/icon.svg) | Undo | `Undo` |
 | [redo](redo/icon.svg) | Redo | `Redo` |
+| [copy](copy/icon.svg) | Copy | `CopySelection` |
+| [paste](paste/icon.svg) | Paste | `PasteMarks` |
+| [paste-in-place](paste-in-place/icon.svg) | Paste in place | `PasteMarksInPlace` |
+| [reply](reply/icon.svg) | Reply to comment | `ReplyToComment` |
+| [checkmark](checkmark/icon.svg) | Checkmark comment | `ToggleCheckmark` |
 | [open](open/icon.svg) | Open PDF | `OpenFile` |
 | [save](save/icon.svg) | Save | `Save` |
 | [insert-blank](insert-blank/icon.svg) | Insert blank pages | `InsertBlankPages` |
@@ -46,6 +65,13 @@ an image element does not inherit the parent element's color.
 | [fit-page](fit-page/icon.svg) | Fit page | `ZoomFitPage` |
 | [bookmark](bookmark/icon.svg) | New bookmark | `NewBookmark` |
 | [flatten](flatten/icon.svg) | Export flattened copy | `ExportFlattened` |
+| [summarize-comments](summarize-comments/icon.svg) | Summarize comments | `SummarizeComments` |
+| [summarize-with-pages](summarize-with-pages/icon.svg) | Summarize comments with pages | `SummarizeCommentsWithPages` |
+| [export-comments-csv](export-comments-csv/icon.svg) | Export comments as CSV | `ExportCommentsCsv` |
+| [export-comments-text](export-comments-text/icon.svg) | Export comments as text | `ExportCommentsText` |
+| [import-comments](import-comments/icon.svg) | Import comments | `ImportComments` |
+| [export-xfdf](export-xfdf/icon.svg) | Export comments as XFDF | `ExportCommentsXfdf` |
+| [export-fdf](export-fdf/icon.svg) | Export comments as FDF | `ExportCommentsFdf` |
 | [export-clean](export-clean/icon.svg) | Export clean copy | `ExportCleanCopy` |
 | [about](about/icon.svg) | About sheaf | `About` |
 | [quit](quit/icon.svg) | Quit | `Quit` |
@@ -87,6 +113,8 @@ an image element does not inherit the parent element's color.
 | [print](print/icon.svg) | Print | `Print` |
 | [properties](properties/icon.svg) | Document properties | `DocumentProperties` |
 | [clear-recent](clear-recent/icon.svg) | Clear recent files | `ClearRecent` |
+| [settings](settings/icon.svg) | Open settings file | `OpenSettingsFile` |
+| [history](history/icon.svg) | History | `ShowHistory` |
 | [pattern-search](pattern-search/icon.svg) | Pattern search | `ShowPatterns` |
 | [single-page](single-page/icon.svg) | Single page | `SinglePage` |
 | [single-page-continuous](single-page-continuous/icon.svg) | Single page continuous | `SinglePageContinuous` |

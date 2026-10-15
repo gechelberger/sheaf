@@ -5,7 +5,6 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, LazyLock, RwLock};
 
 use gpui::{AssetSource, SharedString};
@@ -49,6 +48,10 @@ const FILES: &[(&str, &[u8])] = icons![
     "duplicate-pages",
     "ellipse",
     "export-clean",
+    "export-fdf",
+    "export-xfdf",
+    "export-comments-csv",
+    "export-comments-text",
     "export-pages",
     "extract-pages",
     "find",
@@ -62,6 +65,7 @@ const FILES: &[(&str, &[u8])] = icons![
     "header-footer",
     "grid",
     "highlight",
+    "history",
     "insert-blank",
     "insert-image",
     "insert-pdf",
@@ -97,6 +101,7 @@ const FILES: &[(&str, &[u8])] = icons![
     "save-as",
     "save",
     "select-all-pages",
+    "settings",
     "select",
     "single-page-continuous",
     "single-page",
@@ -108,6 +113,28 @@ const FILES: &[(&str, &[u8])] = icons![
     "tick",
     "two-up-continuous",
     "two-up",
+    "copy",
+    "paste",
+    "paste-in-place",
+    "underline",
+    "strikethrough",
+    "summarize-comments",
+    "import-comments",
+    "summarize-with-pages",
+    "squiggly",
+    "text-edit",
+    "reply",
+    "checkmark",
+    "stamp",
+    "polygon",
+    "polyline",
+    "cloud",
+    "callout",
+    "distance",
+    "perimeter",
+    "area",
+    "calibrate",
+    "attach-file",
     "undo",
     "watermark",
     "zoom-in",
@@ -122,9 +149,10 @@ static PLUGIN_ICONS: LazyLock<RwLock<HashMap<String, Arc<[u8]>>>> = LazyLock::ne
 /// isn't drawn from GPUI's cache of the old one.
 #[cfg_attr(not(feature = "plugins"), allow(dead_code))]
 pub fn add_plugin_icon(plugin: &str, command: &str, svg: Vec<u8>) -> String {
-    let mut h = DefaultHasher::new();
-    svg.hash(&mut h);
-    let path = format!("plugin-icons/{plugin}/{command}-{:016x}.svg", h.finish());
+    let path = format!(
+        "plugin-icons/{plugin}/{command}-{}.svg",
+        sheaf_core::checksum_hex(&svg)
+    );
     if let Ok(mut icons) = PLUGIN_ICONS.write() {
         icons.insert(path.clone(), svg.into());
     }

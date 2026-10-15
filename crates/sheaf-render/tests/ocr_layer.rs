@@ -11,7 +11,8 @@ use std::sync::Arc;
 
 use lopdf::{Document as Pdf, Object, Stream, dictionary};
 use sheaf_core::{PageIndex, PageSize, Rotation};
-use sheaf_doc::{Box2, Document, Edit, FixedCount, OcrWord, SourceInfo, TextLayer};
+use sheaf_doc::text_layer::rotate_box;
+use sheaf_doc::{Box2, Document, Edit, FixedCount, OcrWord, PageChars, Pt, SourceInfo, TextLayer};
 use sheaf_render::Renderer;
 use sheaf_render::pdfium::PdfiumEngine;
 
@@ -97,6 +98,7 @@ fn check(rotate: i64, upright: Rotation) {
             page_sizes: None,
             bytes: 0,
             password: None,
+            data: None,
         },
         &[],
         Box::new(FixedCount(10)),
@@ -137,10 +139,11 @@ fn check(rotate: i64, upright: Rotation) {
         upright,
         "test",
     );
+    let unsaved = PageChars::from_layer(&layer);
     model
         .apply(
             Edit::SetTextLayers {
-                layers: vec![(page, Arc::new(layer))],
+                layers: vec![(page, Arc::new(layer.clone()))],
             },
             "ocr",
         )
@@ -172,6 +175,50 @@ fn check(rotate: i64, upright: Rotation) {
     assert!(
         close(r.x, hello.x) && close(r.right(), world.right()),
         "{ctx}: phrase hit {r:?}"
+    );
+
+    // Selecting text: the saved page's characters read the same, and a
+    // point on "W" is just before it.
+    let chars = PageChars::from_engine(
+        engine
+            .page_chars(PageIndex(0))
+            .unwrap()
+            .into_iter()
+            .map(|(c, r)| {
+                (
+                    c,
+                    r.map(|r| Box2 {
+                        x: r.x,
+                        y: r.y,
+                        w: r.w,
+                        h: r.h,
+                    }),
+                )
+            })
+            .collect(),
+        rendered,
+    );
+    assert_eq!(chars.text(0, chars.len()).trim(), "Hello World", "{ctx}");
+    let on_w = Pt {
+        x: world.x + 2.0,
+        y: world.y + 6.0,
+    };
+    let at = chars.boundary_at(on_w, 0.0).expect("on the text");
+    assert_eq!(chars.text(at, chars.len()).trim(), "World", "{ctx}");
+    // Before the save, the layer's characters are where PDFium puts them.
+    assert_eq!(unsaved.text(0, unsaved.len()), "Hello World", "{ctx}");
+    let w_of = |c: &PageChars| {
+        c.glyphs
+            .iter()
+            .find(|g| g.ch == 'W')
+            .and_then(|g| g.rect)
+            .unwrap()
+    };
+    let saved_w = w_of(&chars);
+    let unsaved_w = rotate_box(w_of(&unsaved), layer.page, upright);
+    assert!(
+        close(saved_w.x, unsaved_w.x) && close(saved_w.right(), unsaved_w.right()),
+        "{ctx}: W at {saved_w:?} saved, {unsaved_w:?} unsaved"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

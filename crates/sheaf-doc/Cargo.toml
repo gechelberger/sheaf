@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+# Random mark ids, so copies of a file never hand out the same one.
+fastrand = "2"
 sheaf-core.workspace = true
 lopdf.workspace = true
 anyhow.workspace = true
@@ -17,6 +19,10 @@ regex.workspace = true
 # Image pages: decoding and G4 come from sheaf-image; Flate is ours.
 sheaf-image.workspace = true
 flate2 = "1"
+# Stamps from images keep their transparency (a soft mask).
+image.workspace = true
+# XFDF, comments as XML (M9 slice 18).
+quick-xml = "0.41"
 
 [dev-dependencies]
 image.workspace = true

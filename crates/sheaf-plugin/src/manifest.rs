@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result, bail};
 use serde::Deserialize;
 
-use crate::API_VERSION;
+use crate::{API_PREVIOUS, API_VERSION};
 
 /// Namespaces built-in actions use; a plugin id can't take one, so its
 /// command ids (`<plugin>::<command>`) never collide with an action name.
@@ -79,6 +79,29 @@ pub struct Manifest {
     pub events: Vec<EventKind>,
     #[serde(default)]
     pub permissions: Permissions,
+    /// The keys its `[plugins.<id>]` section of `settings.toml` may hold
+    /// (API 0.3's `storage.preferences`), so sheaf can point out a typo.
+    /// Empty: it doesn't say, and nothing is checked.
+    #[serde(default)]
+    pub preferences: Vec<String>,
+}
+
+impl Manifest {
+    /// Keys in `section` (the plugin's preferences) that its manifest
+    /// doesn't name: most likely typos. None checked when it names none.
+    pub fn unknown_preferences<'a>(
+        &self,
+        section: impl IntoIterator<Item = &'a String>,
+    ) -> Vec<String> {
+        if self.preferences.is_empty() {
+            return Vec::new();
+        }
+        section
+            .into_iter()
+            .filter(|k| !self.preferences.contains(k))
+            .cloned()
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -330,9 +353,9 @@ impl Manifest {
         {
             bail!("homepage {url:?} must be an https:// URL");
         }
-        if !self.api.matches(&API_VERSION) {
+        if !self.api.matches(&API_VERSION) && !self.api.matches(&API_PREVIOUS) {
             bail!(
-                "built for API {}, but this sheaf provides {API_VERSION}",
+                "built for API {}, but this sheaf provides {API_VERSION} (and {API_PREVIOUS})",
                 self.api
             );
         }

@@ -1,7 +1,7 @@
 id = "test-plugin"
 name = "Test Plugin"
 version = "0.1.0"
-api = "^0.2.1"
+api = "^0.3"
 events = ["opened", "edited", "closed"]
 
 [[commands]]
@@ -16,6 +16,18 @@ label = "Bookmark Pages"
 icon = "icons/bookmark.svg"
 help = "Bookmark pages for the host tests."
 menu = "Tools/Test"
+
+[[commands]]
+id = "marks"
+label = "Marks"
+icon = "icons/bookmark.svg"
+help = "Reads the marks on page 1 and adds a polygon, for the host tests."
+
+[[commands]]
+id = "prefs"
+label = "Preferences"
+icon = "icons/bookmark.svg"
+help = "Reports its preferences, for the host tests."
 
 [[panels]]
 id = "matches"

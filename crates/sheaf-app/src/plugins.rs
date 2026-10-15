@@ -65,7 +65,7 @@ impl Global for PluginHost {}
 
 /// Where plugins are installed.
 pub fn dir() -> PathBuf {
-    crate::settings::config_dir().join("plugins")
+    sheaf_ops::dirs::config_dir().join("plugins")
 }
 
 /// Where the plugins that ship with sheaf are: `SHEAF_BUNDLED_PLUGINS` if set, else
@@ -185,7 +185,7 @@ fn copy_tree(from: &Path, to: &Path) -> Result<()> {
 }
 
 /// `<config>/plugins.json`: which plugins are off and what each may reach.
-/// Its own file so windows saving `settings.json` can't clobber it.
+/// Its own file, apart from the state sheaf remembers for itself.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PluginState {
@@ -238,7 +238,7 @@ fn is_empty(p: &Permissions) -> bool {
 
 impl PluginState {
     fn path() -> PathBuf {
-        crate::settings::config_dir().join("plugins.json")
+        sheaf_ops::dirs::config_dir().join("plugins.json")
     }
 
     pub fn load() -> Self {
@@ -278,7 +278,7 @@ impl PluginState {
 
 /// Where a plugin's `storage` lives.
 fn data_dir(id: &str) -> PathBuf {
-    crate::settings::config_dir().join("plugin-data").join(id)
+    sheaf_ops::dirs::config_dir().join("plugin-data").join(id)
 }
 
 /// Install any new bundled plugins, then discover, register and start
@@ -386,6 +386,15 @@ fn start(id: &str, cx: &mut App) {
         .into_iter()
         .map(|e| format!("{id}: {e}"))
         .collect();
+    // A setting in its section of settings.toml that it doesn't name.
+    if let Some(section) = crate::prefs::get(cx).plugins.get(id) {
+        for key in m.unknown_preferences(section.keys()) {
+            problems.push(format!(
+                "{id}: settings.toml [plugins.{id}] has `{key}`, which it doesn't read (it reads {})",
+                m.preferences.join(", ")
+            ));
+        }
+    }
     let host = cx.global_mut::<PluginHost>();
     if let Err(e) = host.load(id) {
         problems.push(format!("{id}: {e:#}"));
@@ -895,8 +904,8 @@ fn to_box(r: sheaf_render::Rect) -> sheaf_doc::Box2 {
 }
 
 /// OCR for plugins: one page at a time through `sheaf_ocr::job`, with the
-/// user's engine and settings.
-struct EngineOcr(HashMap<SourceId, RenderHandle>);
+/// user's engine and options as they were when the plugin started.
+struct EngineOcr(HashMap<SourceId, RenderHandle>, sheaf_ocr::OcrConfig);
 
 impl sheaf_plugin::OcrSource for EngineOcr {
     fn recognize(
@@ -907,7 +916,7 @@ impl sheaf_plugin::OcrSource for EngineOcr {
         dpi: Option<u32>,
     ) -> Result<sheaf_doc::TextLayer> {
         use sheaf_ocr::{OcrEvent, OcrPage, OcrRequest, PageSource};
-        let mut config = crate::settings::Settings::load().ocr;
+        let mut config = self.1.clone();
         if let Some(l) = language {
             sheaf_ocr::set_language(config.engine, &mut config, &l);
         }
@@ -995,8 +1004,117 @@ pub fn render_source(
     Arc::new(EngineRender(handles.clone()))
 }
 
-pub fn ocr_source(handles: &HashMap<SourceId, RenderHandle>) -> Arc<dyn sheaf_plugin::OcrSource> {
-    Arc::new(EngineOcr(handles.clone()))
+/// Marks a plugin adds without an author are the user's.
+/// Who the user is, and the date and time now, as dynamic stamps write
+/// them: what a plugin's marks are signed and filled in with.
+struct Signer {
+    name: String,
+    initials: String,
+    date: String,
+    time: String,
+}
+
+impl Signer {
+    fn now(prefs: &sheaf_ops::prefs::Prefs) -> Signer {
+        let now = chrono::Local::now();
+        Signer {
+            name: prefs.identity.name(),
+            initials: prefs.identity.initials(),
+            date: now.format(prefs.stamps.date_format()).to_string(),
+            time: now.format(prefs.stamps.time_format()).to_string(),
+        }
+    }
+
+    fn fill(&self, text: &mut String) {
+        if text.contains("<<") {
+            *text =
+                sheaf_ops::stamps::fill(text, &self.name, &self.initials, &self.date, &self.time);
+        }
+    }
+}
+
+/// A plugin's marks with no author are the user's, and `<<name>>`,
+/// `<<initials>>`, `<<date>>` and `<<time>>` in their text are filled in,
+/// as dynamic stamps are: the plugin never sees who the user is.
+fn sign_marks(edits: &mut [sheaf_doc::Edit], me: &Signer) {
+    let sign = |a: &mut sheaf_doc::Annot| {
+        if a.author.is_empty() {
+            a.author = me.name.clone();
+        }
+        me.fill(&mut a.contents);
+        if let sheaf_doc::AnnotKind::TextStamp { text, .. } = &mut a.kind {
+            me.fill(text);
+        }
+    };
+    for e in edits {
+        match e {
+            sheaf_doc::Edit::AnnotAdd { annot, .. }
+            | sheaf_doc::Edit::AnnotUpdate { annot, .. } => sign(annot),
+            sheaf_doc::Edit::ConnectorAdd { a, b } => {
+                sign(&mut a.1);
+                sign(&mut b.1);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A plugin rewrites a mark from what its API shows it. Every plugin's
+/// update keeps the mark's creation date, name and a tape's rows and look,
+/// which no API shows; a 0.2 plugin's (`api02`) keeps its fill, dashes,
+/// cloud and start arrowhead too, which 0.2 can't say.
+fn keep_unseen(edits: &mut [sheaf_doc::Edit], st: &sheaf_doc::DocState, api02: bool) {
+    for e in edits {
+        let sheaf_doc::Edit::AnnotUpdate { page, annot } = e else {
+            continue;
+        };
+        let Some(was) = st
+            .annots_on(*page)
+            .and_then(|l| l.iter().find(|a| a.id == annot.id))
+        else {
+            continue;
+        };
+        annot.name = was.name.clone();
+        annot.created = was.created.clone();
+        if api02 {
+            annot.fill = was.fill;
+            annot.dashed = was.dashed;
+            annot.cloudy = was.cloudy;
+        }
+        if api02
+            && let (
+                sheaf_doc::AnnotKind::Line { arrow_start, .. },
+                sheaf_doc::AnnotKind::Line {
+                    arrow_start: before,
+                    ..
+                },
+            ) = (&mut annot.kind, &was.kind)
+        {
+            *arrow_start = *before;
+        }
+        // A tape's look; and its rows, unless the plugin changed its text.
+        if let (
+            sheaf_doc::AnnotKind::Tape { tape, look, .. },
+            sheaf_doc::AnnotKind::Tape {
+                tape: tape_before,
+                look: look_before,
+                ..
+            },
+        ) = (&mut annot.kind, &was.kind)
+        {
+            *look = look_before.clone();
+            if annot.contents == was.contents {
+                *tape = tape_before.clone();
+            }
+        }
+    }
+}
+
+pub fn ocr_source(
+    handles: &HashMap<SourceId, RenderHandle>,
+    config: sheaf_ocr::OcrConfig,
+) -> Arc<dyn sheaf_plugin::OcrSource> {
+    Arc::new(EngineOcr(handles.clone(), config))
 }
 
 pub fn text_source(handles: &HashMap<SourceId, RenderHandle>) -> Arc<dyn TextSource> {
@@ -1044,7 +1162,7 @@ impl Ui for AppUi {
 
 /// Pattern presets for `patterns.presets`: the user's, then plugins'.
 fn presets(cx: &App) -> Vec<sheaf_plugin::Preset> {
-    let mut out: Vec<sheaf_plugin::Preset> = crate::patterns::load()
+    let mut out: Vec<sheaf_plugin::Preset> = crate::patterns::list(cx)
         .into_iter()
         .map(|p| sheaf_plugin::Preset {
             name: p.name,
@@ -1130,10 +1248,14 @@ pub fn run(
     let tracker = matches!(call, Call::Command { .. } | Call::PanelAction { .. })
         .then(sheaf_ops::Tracker::new);
     let ctx = CallContext {
-        doc: doc.as_ref().and_then(|d| d.read(cx).plugin_context()),
+        doc: doc
+            .as_ref()
+            .and_then(|d| d.read(cx).plugin_context(crate::prefs::ocr_config(cx))),
         ui: Some(Arc::new(AppUi(ui_tx))),
         presets: presets(cx),
         progress: tracker.clone(),
+        // Its own settings, as they are now, for the whole call.
+        preferences: crate::prefs::get(cx).plugin_json(plugin_id),
     };
     let what = call.to_string();
     let region_call = matches!(
@@ -1218,7 +1340,18 @@ pub fn run(
                         let left = d.notice().filter(|n| *n != running).map(str::to_string);
                         let mut last = None;
                         d.edit_source = Some(plugin_id.clone());
-                        for b in out.batches {
+                        let me = Signer::now(&crate::prefs::get(cx));
+                        // A 0.2 plugin can't see the newer fields, so an
+                        // update keeps them.
+                        let api02 = cx
+                            .global::<PluginHost>()
+                            .manifest(&plugin_id)
+                            .is_some_and(|m| !m.api.matches(&sheaf_plugin::API_VERSION));
+                        for mut b in out.batches {
+                            sign_marks(&mut b.edits, &me);
+                            if let crate::docview::State::Ready(doc) = &d.state {
+                                keep_unseen(&mut b.edits, doc.model.state(), api02);
+                            }
                             d.apply_batch(b.edits, &b.label, cx);
                             last = Some(b.label);
                         }
@@ -1535,5 +1668,126 @@ mod tests {
         assert!(install_bundled(&from, &dest).is_empty());
         assert_eq!(installed(&dest, "e").as_deref(), Some("1.1.0"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_plugin_update_keeps_what_it_cant_see() {
+        use sheaf_doc::{Annot, AnnotId, AnnotKind, Document, Edit, FixedCount, Pt, SourceInfo};
+        let mut d = Document::new(
+            SourceInfo {
+                path: "a.pdf".into(),
+                page_count: 1,
+                first_page: sheaf_core::PageSize {
+                    width: 612.0,
+                    height: 792.0,
+                },
+                page_sizes: None,
+                bytes: 0,
+                password: None,
+                data: None,
+            },
+            &[],
+            Box::new(FixedCount(10)),
+        );
+        let page = d.page(0).unwrap().id;
+        let line = Annot {
+            id: AnnotId(1),
+            kind: AnnotKind::Line {
+                a: Pt { x: 0.0, y: 0.0 },
+                b: Pt { x: 10.0, y: 0.0 },
+                arrow: true,
+                arrow_start: true,
+            },
+            color: [0, 0, 0],
+            opacity: 1.0,
+            stroke: 1.0,
+            author: "me".into(),
+            contents: String::new(),
+            modified: "D:1".into(),
+            created: "D:0".into(),
+            fill: None,
+            dashed: true,
+            cloudy: false,
+            name: String::new(),
+        };
+        d.apply(Edit::AnnotAdd { page, annot: line }, "Line")
+            .unwrap();
+        let mut placed = d.state().annots_on(page).unwrap()[0].clone();
+        // What a 0.2 plugin hands back: the styles it can't see are lost.
+        let mut back = placed.clone();
+        back.contents = "checked".into();
+        back.dashed = false;
+        back.created = "D:2".into();
+        if let AnnotKind::Line { arrow_start, .. } = &mut back.kind {
+            *arrow_start = false;
+        }
+        let mut edits = vec![Edit::AnnotUpdate { page, annot: back }];
+        keep_unseen(&mut edits, d.state(), true);
+        let Edit::AnnotUpdate { annot, .. } = &edits[0] else {
+            panic!()
+        };
+        placed.contents = "checked".into();
+        placed.modified = annot.modified.clone();
+        assert_eq!(*annot, placed);
+        // A 0.3 plugin sees them, so what it says goes; but not the
+        // creation date, which no plugin sets.
+        let mut back = placed.clone();
+        back.dashed = false;
+        back.created = "D:2".into();
+        let mut edits = vec![Edit::AnnotUpdate { page, annot: back }];
+        keep_unseen(&mut edits, d.state(), false);
+        let Edit::AnnotUpdate { annot, .. } = &edits[0] else {
+            panic!()
+        };
+        assert!(!annot.dashed);
+        assert_eq!(annot.created, "D:0");
+    }
+
+    #[test]
+    fn a_plugins_text_is_signed_like_a_dynamic_stamp() {
+        use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, Edit, PageId};
+        let me = Signer {
+            name: "Pat Q. Smith".into(),
+            initials: "PQS".into(),
+            date: "10/15/2026".into(),
+            time: "9:00 AM".into(),
+        };
+        let stamp = Annot {
+            id: AnnotId(0),
+            kind: AnnotKind::TextStamp {
+                rect: Box2 {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 9.0,
+                    h: 9.0,
+                },
+                text: "REVIEWED\n<<initials>> <<date>>".into(),
+                status: false,
+            },
+            color: [0, 0, 0],
+            opacity: 1.0,
+            stroke: 1.0,
+            author: String::new(),
+            contents: "Checked by <<name>> at <<time>>".into(),
+            modified: String::new(),
+            created: String::new(),
+            fill: None,
+            dashed: false,
+            cloudy: false,
+            name: String::new(),
+        };
+        let mut edits = vec![Edit::AnnotAdd {
+            page: PageId(1),
+            annot: stamp,
+        }];
+        sign_marks(&mut edits, &me);
+        let Edit::AnnotAdd { annot, .. } = &edits[0] else {
+            panic!()
+        };
+        assert_eq!(annot.author, "Pat Q. Smith");
+        assert_eq!(annot.contents, "Checked by Pat Q. Smith at 9:00 AM");
+        assert!(
+            matches!(&annot.kind, AnnotKind::TextStamp { text, .. } if text == "REVIEWED\nPQS 10/15/2026")
+        );
     }
 }

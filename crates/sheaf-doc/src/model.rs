@@ -38,6 +38,23 @@ pub struct SourceInfo {
     /// The password the file was opened with, if it needed one. Saves
     /// decrypt with it; the written file is not re-encrypted.
     pub password: Option<String>,
+    /// The file's bytes as read when it was opened, when the opener kept
+    /// them (the app does, sharing the renderer's copy). Saves read these,
+    /// not the path: after a save in place the path holds the new file, and
+    /// a version from before the save still means the old one. Without
+    /// them, the path is read (a cached file sheaf made, which never
+    /// changes; or a headless run).
+    pub data: Option<SourceData>,
+}
+
+/// A file's bytes, shared (an `Arc`, cheap to clone).
+#[derive(Clone)]
+pub struct SourceData(pub Arc<Vec<u8>>);
+
+impl std::fmt::Debug for SourceData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SourceData({} bytes)", self.0.len())
+    }
 }
 
 impl SourceInfo {
@@ -67,7 +84,23 @@ pub struct OutlineNode {
     /// Where on `target` it lands; None is the top of the page.
     pub view: Option<DestView>,
     pub color: Option<[u8; 3]>,
+    pub style: TextStyle,
     pub children: Vector<OutlineNode>,
+}
+
+/// How a bookmark's title is drawn (its `/F`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TextStyle {
+    #[serde(default)]
+    pub bold: bool,
+    #[serde(default)]
+    pub italic: bool,
+}
+
+impl TextStyle {
+    pub fn is_plain(&self) -> bool {
+        !self.bold && !self.italic
+    }
 }
 
 /// A bookmark as read from a file: pre-order with depth.
@@ -79,6 +112,12 @@ pub struct FlatOutlineItem {
     /// Where on `page` it lands (see [`OutlineNode::view`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view: Option<DestView>,
+    /// `/C` and `/F`, which PDFium's outline leaves out (see
+    /// `file::style_flat_items`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<[u8; 3]>,
+    #[serde(default, skip_serializing_if = "TextStyle::is_plain")]
+    pub style: TextStyle,
 }
 
 /// One bookmark of a subtree inserted by [`Edit::OutlineInsertTree`], in
@@ -110,6 +149,10 @@ pub struct DocState {
     pub labels: Option<Vector<crate::labels::LabelSpec>>,
     /// The header/footer (with Bates numbers) sheaf draws on pages.
     pub header_footer: Option<Arc<crate::stamps::HeaderFooter>>,
+    /// Other tools' comments deleted in sheaf, by page and name
+    /// (`ForeignAnnot::name`). A save leaves them, and their own replies,
+    /// out of the file.
+    pub removed_comments: im::HashMap<PageId, im::OrdSet<String>>,
 }
 
 impl DocState {
@@ -153,20 +196,49 @@ impl DocState {
             .find_map(|(page, list)| list.iter().find(|a| a.id == id).map(|a| (*page, a)))
     }
 
-    /// The label for the next connector pair: one past the highest numeric
-    /// label in use.
+    /// The first connector label (1–50, then A–ZZ) no connector uses yet;
+    /// past those, one more than the highest number.
     pub fn next_connector_label(&self) -> String {
-        let max = self
+        let used: HashSet<&str> = self
             .annots
             .values()
             .flatten()
             .filter_map(|a| match &a.kind {
-                AnnotKind::Connector { label, .. } => label.trim().parse::<u32>().ok(),
+                AnnotKind::Connector { label, .. } => Some(label.as_str()),
                 _ => None,
             })
+            .collect();
+        if let Some(free) = crate::annot::connector_labels().find(|l| !used.contains(l.as_str())) {
+            return free;
+        }
+        let max = used
+            .iter()
+            .filter_map(|l| l.trim().parse::<u32>().ok())
             .max()
             .unwrap_or(0);
         (max + 1).to_string()
+    }
+
+    /// Every mark in `group` (see `annot::group_of`), in document order:
+    /// by page, then down the page, then across. With each, its page's
+    /// position.
+    pub fn group_members(&self, group: &crate::annot::Group) -> Vec<(usize, PageId, Annot)> {
+        let mut out = Vec::new();
+        for (i, p) in self.pages.iter().enumerate() {
+            let mut on_page: Vec<&Annot> = self
+                .annots
+                .get(&p.id)
+                .into_iter()
+                .flatten()
+                .filter(|a| crate::annot::group_of(&a.kind).as_ref() == Some(group))
+                .collect();
+            on_page.sort_by(|a, b| {
+                let (ba, bb) = (a.bounds(), b.bounds());
+                ba.y.total_cmp(&bb.y).then(ba.x.total_cmp(&bb.x))
+            });
+            out.extend(on_page.into_iter().map(|a| (i, p.id, a.clone())));
+        }
+        out
     }
 
     pub fn index_of(&self, id: PageId) -> Option<usize> {
@@ -239,6 +311,10 @@ pub enum Edit {
         range: Range<u32>,
         before: Option<PageId>,
         outline: Option<Vec<FlatOutlineItem>>,
+        /// sheaf's own marks in the file, by source page index. They come
+        /// in on the new pages with fresh ids (see `import_marks`).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        annots: Vec<(u32, Vec<Annot>)>,
     },
     /// Copies inserted directly after each original.
     DuplicatePages {
@@ -251,6 +327,10 @@ pub enum Edit {
         ids: Vec<PageId>,
         source: SourceId,
         range: Range<u32>,
+        /// sheaf's own marks on the replacement pages, by source page
+        /// index; added beside the marks the kept pages already have.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        annots: Vec<(u32, Vec<Annot>)>,
     },
     OutlineInsert {
         parent: Option<OutlineId>,
@@ -301,6 +381,8 @@ pub enum Edit {
             with = "double_option"
         )]
         view: Option<Option<DestView>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        style: Option<TextStyle>,
     },
     /// Delete a bookmark and its subtree.
     OutlineDelete {
@@ -321,6 +403,12 @@ pub enum Edit {
     AnnotDelete {
         page: PageId,
         id: AnnotId,
+    },
+    /// Delete other tools' comments from a page, by name; a save leaves
+    /// them out. Our replies and statuses in their threads go too.
+    CommentsDelete {
+        page: PageId,
+        names: Vec<String>,
     },
     /// Add both ends of a connector pair in one step. Ids are assigned by the
     /// document and each end's `partner` is pointed at the other.
@@ -400,12 +488,84 @@ pub struct EditOutcome {
     pub bookmarks_added: usize,
 }
 
+/// A version's place in the history tree. Ids aren't reused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct VersionId(pub u64);
+
+/// One edit as applied, with what it takes to apply it again exactly: the
+/// id counters it started from and the seed its mark ids came from. So a
+/// replay hands out the same page, bookmark and mark ids as the first time.
+#[derive(Debug, Clone)]
+pub struct Step {
+    pub edit: Edit,
+    ids: Ids,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Ids {
+    next_page: u64,
+    next_outline: u64,
+    seed: u64,
+}
+
+/// A save that wrote a version.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Saved {
+    pub path: PathBuf,
+    /// PDF date string.
+    pub at: String,
+}
+
+/// A node of the history tree: a version of the document, and the edits
+/// that made it from its parent (the edge into it). See `todos/m9.md`,
+/// decision 16.
 struct Version {
+    parent: Option<VersionId>,
+    /// Oldest first.
+    children: Vec<VersionId>,
+    /// The child redo goes to: the one last left by undo, or made last.
+    redo_to: Option<VersionId>,
     label: String,
-    state: DocState,
+    author: String,
+    /// When it was made: a PDF date string.
+    at: String,
+    /// The edits from the parent; empty for the root. A job's later
+    /// batches add to its version's steps.
+    steps: Vec<Step>,
+    /// Sources registered since the parent (inserted files), which the
+    /// steps refer to.
+    sources: Vec<SourceId>,
+    /// The state, unless trimming dropped it; then a jump rebuilds it by
+    /// replaying the steps from the nearest ancestor that kept one.
+    state: Option<DocState>,
     marginal_bytes: usize,
     /// The job that produced this version, if it may still amend it.
     job: Option<JobId>,
+    /// Saves that wrote it, oldest first.
+    saves: Vec<Saved>,
+}
+
+/// A version as the History panel shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VersionView {
+    pub id: VersionId,
+    pub label: String,
+    pub author: String,
+    /// PDF date string.
+    pub at: String,
+    /// What its edits did, a line each.
+    pub edits: Vec<String>,
+    pub saves: Vec<Saved>,
+    pub current: bool,
+    /// The version the file on disk holds.
+    pub saved: bool,
+    /// Past the current version: undone, and reachable with redo.
+    pub undone: bool,
+    /// First versions of other branches from here: edits that were undone
+    /// and then replaced by others.
+    pub branches: Vec<VersionId>,
+    /// Its snapshot was dropped to save memory; jumping there replays it.
+    pub replays: bool,
 }
 
 /// Everything a save needs, detached from the document so it can run on
@@ -424,6 +584,10 @@ pub struct Snapshot {
     pub header_footer_dirty: bool,
     /// Pages whose markup differs from what's in the primary file.
     pub annots_dirty: HashSet<PageId>,
+    /// Something in the primary file is gone from the document (see
+    /// `Document::removes_content`): only a full rewrite takes it out of
+    /// the file.
+    pub removes_content: bool,
 }
 
 impl Snapshot {
@@ -435,18 +599,27 @@ impl Snapshot {
 pub struct Document {
     sources: HashMap<SourceId, Arc<SourceInfo>>,
     primary: SourceId,
-    history: Vec<Version>,
-    cursor: usize,
-    saved: Option<usize>,
+    versions: HashMap<VersionId, Version>,
+    root: VersionId,
+    cursor: VersionId,
+    /// The version the primary file on disk holds, if any.
+    saved: Option<VersionId>,
+    next_version: u64,
+    /// Sources registered since the last version was made, for the next.
+    unlogged_sources: Vec<SourceId>,
+    /// Who makes the versions from now on (the app sets it).
+    author: String,
+    /// Where mark ids come from: reseeded for every step (see [`Step`]).
+    rng: fastrand::Rng,
     next_page: u64,
     next_outline: u64,
     next_source: u32,
     policy: Box<dyn HistoryPolicy>,
-    next_annot: u64,
     next_job: u64,
     /// Outline as it exists in the primary file on disk.
     saved_outline: Vector<OutlineNode>,
     saved_labels: Option<Vector<crate::labels::LabelSpec>>,
+    saved_removed: im::HashMap<PageId, im::OrdSet<String>>,
     /// The header/footer already drawn into the primary file's pages.
     baked_header_footer: Option<Arc<crate::stamps::HeaderFooter>>,
     /// Markup as it exists in the primary file on disk.
@@ -464,17 +637,22 @@ impl Document {
         let mut doc = Self {
             sources: HashMap::new(),
             primary: source,
-            history: Vec::new(),
-            cursor: 0,
-            saved: Some(0),
+            versions: HashMap::new(),
+            root: VersionId(0),
+            cursor: VersionId(0),
+            saved: Some(VersionId(0)),
+            next_version: 1,
+            unlogged_sources: Vec::new(),
+            author: crate::annot::default_author(),
+            rng: fastrand::Rng::new(),
             next_page: 0,
             next_outline: 0,
             next_source: 1,
             policy,
-            next_annot: 1,
             next_job: 1,
             saved_outline: Vector::new(),
             saved_labels: None,
+            saved_removed: im::HashMap::new(),
             baked_header_footer: None,
             saved_annots: im::HashMap::new(),
         };
@@ -490,20 +668,49 @@ impl Document {
         let by_index: Vec<PageId> = pages.iter().map(|p| p.id).collect();
         let outline = doc.outline_from_flat(outline, &by_index);
         doc.saved_outline = outline.clone();
-        doc.history.push(Version {
-            label: "Open".into(),
-            state: DocState {
-                pages,
-                outline,
-                annots: im::HashMap::new(),
-                text_layers: im::HashMap::new(),
-                labels: None,
-                header_footer: None,
+        doc.versions.insert(
+            VersionId(0),
+            Version {
+                parent: None,
+                children: Vec::new(),
+                redo_to: None,
+                label: "Open".into(),
+                author: String::new(),
+                at: crate::annot::pdf_date_now(),
+                steps: Vec::new(),
+                sources: vec![source],
+                state: Some(DocState {
+                    pages,
+                    outline,
+                    annots: im::HashMap::new(),
+                    text_layers: im::HashMap::new(),
+                    removed_comments: im::HashMap::new(),
+                    labels: None,
+                    header_footer: None,
+                }),
+                marginal_bytes: 0,
+                job: None,
+                saves: Vec::new(),
             },
-            marginal_bytes: 0,
-            job: None,
-        });
+        );
         doc
+    }
+
+    /// Who the versions made from now on are by.
+    pub fn set_author(&mut self, name: impl Into<String>) {
+        self.author = name.into();
+    }
+
+    /// Edits are only loaded into the opened version before any edit.
+    fn opened_state_mut(&mut self, what: &str) -> Result<&mut DocState> {
+        if self.versions.len() != 1 {
+            bail!("{what} can only be loaded before editing");
+        }
+        Ok(self
+            .versions
+            .get_mut(&self.root)
+            .and_then(|v| v.state.as_mut())
+            .expect("the opened version keeps its state"))
     }
 
     pub fn primary(&self) -> SourceId {
@@ -518,8 +725,15 @@ impl Document {
         self.sources.iter().map(|(k, v)| (*k, v))
     }
 
-    /// Register another file so its pages can be inserted.
+    /// Register another file so its pages can be inserted. The next
+    /// version records it, with the edit that uses it.
     pub fn add_source(&mut self, info: SourceInfo) -> SourceId {
+        let id = self.register_source(info);
+        self.unlogged_sources.push(id);
+        id
+    }
+
+    fn register_source(&mut self, info: SourceInfo) -> SourceId {
         let id = SourceId(self.next_source);
         self.next_source += 1;
         self.sources.insert(id, Arc::new(info));
@@ -537,12 +751,15 @@ impl Document {
 
     /// The outline also arrives after open. Only valid before any edit.
     pub fn set_initial_outline(&mut self, outline: &[FlatOutlineItem]) -> Result<()> {
-        if self.history.len() != 1 {
-            bail!("outline can only be set before editing");
-        }
-        let by_index: Vec<PageId> = self.history[0].state.pages.iter().map(|p| p.id).collect();
-        self.history[0].state.outline = self.outline_from_flat(outline, &by_index);
-        self.saved_outline = self.history[0].state.outline.clone();
+        let by_index: Vec<PageId> = self
+            .opened_state_mut("the outline")?
+            .pages
+            .iter()
+            .map(|p| p.id)
+            .collect();
+        let outline = self.outline_from_flat(outline, &by_index);
+        self.opened_state_mut("the outline")?.outline = outline.clone();
+        self.saved_outline = outline;
         Ok(())
     }
 
@@ -560,45 +777,36 @@ impl Document {
         mut hf: crate::stamps::HeaderFooter,
         indexes: Option<Vec<usize>>,
     ) -> Result<()> {
-        if self.history.len() != 1 {
-            bail!("the header/footer can only be set before editing");
-        }
-        let ids: Vec<PageId> = self.history[0].state.pages.iter().map(|p| p.id).collect();
+        let st = self.opened_state_mut("the header/footer")?;
+        let ids: Vec<PageId> = st.pages.iter().map(|p| p.id).collect();
         hf.pages = indexes.map(|ix| ix.iter().filter_map(|&i| ids.get(i).copied()).collect());
         let hf = Some(Arc::new(hf));
-        self.history[0].state.header_footer = hf.clone();
+        st.header_footer = hf.clone();
         self.baked_header_footer = hf;
         Ok(())
     }
 
     /// The file's page labels, read after open: ranges by page index.
     pub fn set_initial_labels(&mut self, ranges: &[crate::labels::LabelRange]) -> Result<()> {
-        if self.history.len() != 1 {
-            bail!("page labels can only be set before editing");
-        }
-        let ids: Vec<PageId> = self.history[0].state.pages.iter().map(|p| p.id).collect();
+        let st = self.opened_state_mut("page labels")?;
+        let ids: Vec<PageId> = st.pages.iter().map(|p| p.id).collect();
         let specs: Vector<_> = crate::labels::to_specs(ranges, &ids).into_iter().collect();
         let specs = (!specs.is_empty()).then_some(specs);
-        self.history[0].state.labels = specs.clone();
+        st.labels = specs.clone();
         self.saved_labels = specs;
         Ok(())
     }
 
     pub fn set_initial_annots(&mut self, by_index: HashMap<u32, Vec<Annot>>) -> Result<()> {
-        if self.history.len() != 1 {
-            bail!("annotations can only be loaded before editing");
-        }
-        let ids: Vec<PageId> = self.history[0].state.pages.iter().map(|p| p.id).collect();
+        let st = self.opened_state_mut("annotations")?;
+        let ids: Vec<PageId> = st.pages.iter().map(|p| p.id).collect();
         let mut map = im::HashMap::new();
         for (index, list) in by_index {
             if let Some(&pid) = ids.get(index as usize) {
-                for a in &list {
-                    self.next_annot = self.next_annot.max(a.id.0 + 1);
-                }
                 map.insert(pid, list.into_iter().collect());
             }
         }
-        self.history[0].state.annots = map.clone();
+        st.annots = map.clone();
         self.saved_annots = map;
         Ok(())
     }
@@ -616,17 +824,77 @@ impl Document {
                 dirty.insert(*pid);
             }
         }
+        // A changed connector changes its group's cycle of /Dest: every
+        // page with one of its label is written again.
+        let labels: HashSet<&str> = dirty
+            .iter()
+            .flat_map(|pid| cur.get(pid).into_iter().chain(self.saved_annots.get(pid)))
+            .flatten()
+            .filter_map(|a| match &a.kind {
+                AnnotKind::Connector { label, .. } => Some(label.as_str()),
+                _ => None,
+            })
+            .collect();
+        if !labels.is_empty() {
+            for (pid, list) in cur.iter() {
+                if list.iter().any(|a| {
+                    matches!(&a.kind, AnnotKind::Connector { label, .. } if labels.contains(label.as_str()))
+                }) {
+                    dirty.insert(*pid);
+                }
+            }
+        }
+        // Other tools' comments deleted (or brought back) since.
+        let removed = &self.state().removed_comments;
+        for pid in removed.keys().chain(self.saved_removed.keys()) {
+            if removed.get(pid) != self.saved_removed.get(pid) {
+                dirty.insert(*pid);
+            }
+        }
         dirty
     }
 
-    pub fn fresh_annot_id(&mut self) -> AnnotId {
-        let id = AnnotId(self.next_annot);
-        self.next_annot += 1;
-        id
+    /// Bookmark colors and styles read from the file (which PDFium's
+    /// outline leaves out), matched to the loaded bookmarks in pre-order by
+    /// title. Only before any edit, like the other `set_initial_*`.
+    pub fn set_initial_outline_styles(
+        &mut self,
+        styles: &[crate::file::OutlineStyle],
+    ) -> Result<()> {
+        if styles.is_empty() {
+            return Ok(());
+        }
+        fn walk(
+            nodes: &Vector<OutlineNode>,
+            styles: &mut std::slice::Iter<crate::file::OutlineStyle>,
+        ) -> Vector<OutlineNode> {
+            nodes
+                .iter()
+                .map(|n| {
+                    let mut n = n.clone();
+                    if let Some(s) = styles.next()
+                        && s.title.trim() == n.title.trim()
+                    {
+                        n.color = s.color;
+                        n.style = s.style;
+                    }
+                    n.children = walk(&n.children, styles);
+                    n
+                })
+                .collect()
+        }
+        let st = self.opened_state_mut("bookmark styles")?;
+        let styled = walk(&st.outline, &mut styles.iter());
+        st.outline = styled.clone();
+        self.saved_outline = styled;
+        Ok(())
     }
 
     pub fn state(&self) -> &DocState {
-        &self.history[self.cursor].state
+        self.versions[&self.cursor]
+            .state
+            .as_ref()
+            .expect("the current version keeps its state")
     }
 
     pub fn snapshot(&self) -> Snapshot {
@@ -638,7 +906,54 @@ impl Document {
             labels_dirty: self.state().labels != self.saved_labels,
             header_footer_dirty: self.header_footer_dirty(),
             annots_dirty: self.annots_dirty_pages(),
+            removes_content: self.removes_content(),
         }
+    }
+
+    /// Whether something in the primary file is gone from the document: a
+    /// page (deleted, or shown from another source now, as a crop makes
+    /// it), a mark or reply, another tool's comment, a bookmark. An
+    /// incremental save would keep it in the file's earlier revision (M9
+    /// bug 14). Undoing back to what was saved clears it.
+    pub fn removes_content(&self) -> bool {
+        let st = self.state();
+        if let Some(primary) = self.sources.get(&self.primary) {
+            let shown: HashSet<u32> = st
+                .pages
+                .iter()
+                .filter(|p| p.source == self.primary)
+                .map(|p| p.index)
+                .collect();
+            if (0..primary.page_count).any(|i| !shown.contains(&i)) {
+                return true;
+            }
+        }
+        let marks: HashSet<AnnotId> = st.annots.values().flatten().map(|a| a.id).collect();
+        if self
+            .saved_annots
+            .values()
+            .flatten()
+            .any(|a| !marks.contains(&a.id))
+        {
+            return true;
+        }
+        let deleted_since = st.removed_comments.iter().any(|(pid, names)| {
+            let before = self.saved_removed.get(pid);
+            names.iter().any(|n| !before.is_some_and(|b| b.contains(n)))
+        });
+        if deleted_since {
+            return true;
+        }
+        fn ids(nodes: &Vector<OutlineNode>, out: &mut HashSet<OutlineId>) {
+            for n in nodes {
+                out.insert(n.id);
+                ids(&n.children, out);
+            }
+        }
+        let (mut now, mut before) = (HashSet::new(), HashSet::new());
+        ids(&st.outline, &mut now);
+        ids(&self.saved_outline, &mut before);
+        before.iter().any(|id| !now.contains(id))
     }
 
     /// After a successful save of the current version to a file described by
@@ -647,13 +962,29 @@ impl Document {
     /// the view doesn't flicker. Older versions still reference the old
     /// sources, so undo across a save keeps working. Rotation deltas and OCR
     /// layers are now baked into the file, so they reset to nothing.
+    ///
+    /// The content is the same, so this re-expresses the version in place
+    /// rather than making a new one: a save is a mark on the version, not
+    /// an edit. Saved versions keep their snapshots (see `trim`), so
+    /// nothing is ever replayed across a save.
     pub fn rebase_to_saved(&mut self, saved: SourceInfo) -> SourceId {
-        let id = self.add_source(saved);
+        let path = saved.path.clone();
+        let id = self.register_source(saved);
         self.primary = id;
-        let v = &mut self.history[self.cursor];
-        v.state.text_layers = im::HashMap::new();
-        v.state.pages = v
+        let v = self
+            .versions
+            .get_mut(&self.cursor)
+            .expect("current version");
+        v.saves.push(Saved {
+            path,
+            at: crate::annot::pdf_date_now(),
+        });
+        let st = v
             .state
+            .as_mut()
+            .expect("the current version keeps its state");
+        st.text_layers = im::HashMap::new();
+        st.pages = st
             .pages
             .iter()
             .enumerate()
@@ -664,10 +995,12 @@ impl Document {
                 rotation: Rotation::R0,
             })
             .collect();
-        self.saved_outline = self.history[self.cursor].state.outline.clone();
-        self.saved_annots = self.history[self.cursor].state.annots.clone();
-        self.saved_labels = self.history[self.cursor].state.labels.clone();
-        self.baked_header_footer = self.history[self.cursor].state.header_footer.clone();
+        let st = self.state().clone();
+        self.saved_outline = st.outline;
+        self.saved_annots = st.annots;
+        self.saved_removed = st.removed_comments;
+        self.saved_labels = st.labels;
+        self.baked_header_footer = st.header_footer;
         self.saved = Some(self.cursor);
         id
     }
@@ -712,47 +1045,89 @@ impl Document {
     }
 
     pub fn can_undo(&self) -> bool {
-        self.cursor > 0
+        self.versions[&self.cursor].parent.is_some()
     }
 
     pub fn can_redo(&self) -> bool {
-        self.cursor + 1 < self.history.len()
+        self.redo_target().is_some()
     }
 
     /// Label of the edit that `undo` would revert.
     pub fn undo_label(&self) -> Option<&str> {
-        self.can_undo()
-            .then(|| self.history[self.cursor].label.as_str())
+        let v = &self.versions[&self.cursor];
+        v.parent.map(|_| v.label.as_str())
     }
 
     pub fn redo_label(&self) -> Option<&str> {
-        self.can_redo()
-            .then(|| self.history[self.cursor + 1].label.as_str())
+        self.redo_target()
+            .map(|id| self.versions[&id].label.as_str())
+    }
+
+    /// Where redo goes: the child last left by undo (or made last).
+    fn redo_target(&self) -> Option<VersionId> {
+        let v = &self.versions[&self.cursor];
+        v.redo_to
+            .filter(|c| v.children.contains(c))
+            .or_else(|| v.children.last().copied())
     }
 
     pub fn undo(&mut self) -> Option<&str> {
-        if !self.can_undo() {
+        let from = self.cursor;
+        let parent = self.versions[&from].parent?;
+        if let Err(e) = self.ensure_state(parent) {
+            log::warn!("undo: {e:#}");
             return None;
         }
-        self.cursor -= 1;
-        Some(self.history[self.cursor + 1].label.as_str())
+        self.versions.get_mut(&parent).expect("parent").redo_to = Some(from);
+        self.cursor = parent;
+        Some(self.versions[&from].label.as_str())
     }
 
     pub fn redo(&mut self) -> Option<&str> {
-        if !self.can_redo() {
+        let to = self.redo_target()?;
+        if let Err(e) = self.ensure_state(to) {
+            log::warn!("redo: {e:#}");
             return None;
         }
-        self.cursor += 1;
-        Some(self.history[self.cursor].label.as_str())
+        self.cursor = to;
+        Some(self.versions[&to].label.as_str())
     }
 
-    /// Apply an edit as a new version. Versions after the cursor are discarded.
+    /// Make `id` the current version, as undo and redo do: not an edit,
+    /// so jumping back and forth is free. Redo from any version on the way
+    /// to it then leads toward it.
+    pub fn jump(&mut self, id: VersionId) -> Result<()> {
+        if !self.versions.contains_key(&id) {
+            bail!("that version is no longer kept");
+        }
+        self.ensure_state(id)?;
+        let mut child = id;
+        while let Some(parent) = self.versions[&child].parent {
+            self.versions.get_mut(&parent).expect("parent").redo_to = Some(child);
+            child = parent;
+        }
+        self.cursor = id;
+        Ok(())
+    }
+
+    pub fn current_version(&self) -> VersionId {
+        self.cursor
+    }
+
+    /// The edits that made version `id` from its parent, and the sources
+    /// that came in with them: the edge into it, which is what a merge
+    /// would replay (`todos/file-contention.md`).
+    pub fn edge(&self, id: VersionId) -> Option<(&[Step], &[SourceId])> {
+        let v = self.versions.get(&id)?;
+        Some((&v.steps, &v.sources))
+    }
+
     pub fn apply(&mut self, edit: Edit, label: impl Into<String>) -> Result<EditOutcome> {
-        let (state, outcome) = self.compute(self.state().clone(), edit)?;
+        let (state, outcome, step) = self.step(self.state().clone(), edit)?;
         if state == *self.state() {
             return Ok(outcome);
         }
-        self.push_version(state, label.into(), None);
+        self.push(state, label.into(), vec![step], None);
         Ok(outcome)
     }
 
@@ -766,18 +1141,20 @@ impl Document {
     ) -> Result<EditOutcome> {
         let mut state = self.state().clone();
         let mut total = EditOutcome::default();
+        let mut steps = Vec::with_capacity(edits.len());
         for (i, edit) in edits.into_iter().enumerate() {
-            let (next, out) = self
-                .compute(state, edit)
+            let (next, out, step) = self
+                .step(state, edit)
                 .with_context(|| format!("edit {} of batch", i + 1))?;
             state = next;
+            steps.push(step);
             total.pages_removed += out.pages_removed;
             total.pages_added += out.pages_added;
             total.bookmarks_removed += out.bookmarks_removed;
             total.bookmarks_added += out.bookmarks_added;
         }
         if state != *self.state() {
-            self.push_version(state, label.into(), None);
+            self.push(state, label.into(), steps, None);
         }
         Ok(total)
     }
@@ -789,37 +1166,39 @@ impl Document {
         id
     }
 
-    /// Like [`apply`](Self::apply), but when the current version is the
-    /// newest, was produced by `job`, and isn't the saved one, the edit
-    /// amends it in place instead of pushing a new version. The first batch
-    /// of a job pushes; later batches amend, so the whole job is one undo
-    /// step. A save or an unrelated edit in between ends the chain, and the
-    /// rest of the job becomes a second step.
+    /// Like [`apply`](Self::apply), but when the current version was made
+    /// by `job`, has nothing after it, and isn't the saved one, the edit
+    /// joins it instead of making a new version. The first batch of a job
+    /// makes a version; later batches join it, so the whole job is one
+    /// undo step. A save, an undo or an unrelated edit in between ends the
+    /// chain, and the rest of the job becomes another step.
     pub fn apply_in_job(
         &mut self,
         job: JobId,
         edit: Edit,
         label: impl Into<String>,
     ) -> Result<EditOutcome> {
-        let (state, outcome) = self.compute(self.state().clone(), edit)?;
-        let amend = self.history[self.cursor].job == Some(job)
-            && self.cursor + 1 == self.history.len()
+        let (state, outcome, step) = self.step(self.state().clone(), edit)?;
+        let current = &self.versions[&self.cursor];
+        let amend = current.job == Some(job)
+            && current.children.is_empty()
             && self.saved != Some(self.cursor);
         if amend {
-            let marginal_bytes = match self.cursor.checked_sub(1) {
-                Some(prev) => Self::marginal(&self.history[prev].state, &state),
-                None => 0,
-            };
-            let v = &mut self.history[self.cursor];
-            v.state = state;
+            let marginal_bytes = current
+                .parent
+                .and_then(|p| self.versions[&p].state.as_ref())
+                .map_or(0, |prev| Self::marginal(prev, &state));
+            let v = self.versions.get_mut(&self.cursor).expect("current");
+            v.state = Some(state);
             v.label = label.into();
+            v.steps.push(step);
             v.marginal_bytes = marginal_bytes;
             self.trim();
         } else {
             if state == *self.state() {
                 return Ok(outcome);
             }
-            self.push_version(state, label.into(), Some(job));
+            self.push(state, label.into(), vec![step], Some(job));
         }
         Ok(outcome)
     }
@@ -828,64 +1207,329 @@ impl Document {
     /// user hasn't undone it or edited past it. Meaningful once the job has
     /// applied its first batch.
     pub fn job_is_current(&self, job: JobId) -> bool {
-        self.history[self.cursor].job == Some(job)
+        self.versions[&self.cursor].job == Some(job)
     }
 
-    /// Whether the user has undone `job`'s version (it sits in the redo
-    /// branch). An unrelated edit after the job does not count.
+    /// Whether the user has undone `job`'s version: it's past the current
+    /// version, reachable by redo. An unrelated edit after the job doesn't
+    /// count.
     pub fn job_is_undone(&self, job: JobId) -> bool {
-        self.history[self.cursor + 1..]
-            .iter()
-            .any(|v| v.job == Some(job))
+        let mut stack = self.versions[&self.cursor].children.clone();
+        while let Some(id) = stack.pop() {
+            let v = &self.versions[&id];
+            if v.job == Some(job) {
+                return true;
+            }
+            stack.extend(v.children.iter().copied());
+        }
+        false
     }
 
-    fn push_version(&mut self, state: DocState, label: String, job: Option<JobId>) {
-        self.history.truncate(self.cursor + 1);
-        if let Some(s) = self.saved
-            && s > self.cursor
-        {
-            self.saved = None;
+    /// Run `edit` on `state` as a new step, recording the id counters and a
+    /// fresh seed for its mark ids, so a replay hands out the same ids.
+    fn step(&mut self, state: DocState, edit: Edit) -> Result<(DocState, EditOutcome, Step)> {
+        let ids = Ids {
+            next_page: self.next_page,
+            next_outline: self.next_outline,
+            seed: fastrand::u64(..),
+        };
+        self.rng = fastrand::Rng::with_seed(ids.seed);
+        let (state, out) = self.compute(state, edit.clone())?;
+        Ok((state, out, Step { edit, ids }))
+    }
+
+    /// Run a recorded step again, exactly as the first time.
+    fn replay_step(&mut self, state: DocState, step: &Step) -> Result<DocState> {
+        let (page, outline) = (self.next_page, self.next_outline);
+        self.next_page = step.ids.next_page;
+        self.next_outline = step.ids.next_outline;
+        self.rng = fastrand::Rng::with_seed(step.ids.seed);
+        let result = self.compute(state, step.edit.clone()).map(|(s, _)| s);
+        // Counters only grow; leave them as they were before the replay.
+        self.next_page = self.next_page.max(page);
+        self.next_outline = self.next_outline.max(outline);
+        result
+    }
+
+    /// Make sure version `id` has its state, replaying its steps (and its
+    /// ancestors') from the nearest ancestor that kept one.
+    fn ensure_state(&mut self, id: VersionId) -> Result<()> {
+        if self.versions[&id].state.is_some() {
+            return Ok(());
         }
-        let marginal_bytes = Self::marginal(&self.history[self.cursor].state, &state);
-        self.history.push(Version {
-            label,
-            state,
-            marginal_bytes,
-            job,
-        });
-        self.cursor += 1;
+        let mut path = vec![id];
+        let mut at = id;
+        let base = loop {
+            let parent = self.versions[&at]
+                .parent
+                .context("no version to replay from")?;
+            if self.versions[&parent].state.is_some() {
+                break parent;
+            }
+            path.push(parent);
+            at = parent;
+        };
+        let mut state = self.versions[&base].state.clone().expect("base state");
+        for v in path.iter().rev() {
+            let steps = self.versions[v].steps.clone();
+            for step in &steps {
+                state = self
+                    .replay_step(state, step)
+                    .with_context(|| format!("replaying {:?}", self.versions[v].label))?;
+            }
+        }
+        self.versions.get_mut(&id).expect("version").state = Some(state);
+        Ok(())
+    }
+
+    /// A new version after the current one, with the edits that made it.
+    /// The versions that were after the current one stay, as a branch.
+    fn push(&mut self, state: DocState, label: String, steps: Vec<Step>, job: Option<JobId>) {
+        let id = VersionId(self.next_version);
+        self.next_version += 1;
+        let parent = self.cursor;
+        let marginal_bytes = self.versions[&parent]
+            .state
+            .as_ref()
+            .map_or(0, |prev| Self::marginal(prev, &state));
+        let p = self.versions.get_mut(&parent).expect("parent");
+        p.children.push(id);
+        p.redo_to = Some(id);
+        self.versions.insert(
+            id,
+            Version {
+                parent: Some(parent),
+                children: Vec::new(),
+                redo_to: None,
+                label,
+                author: self.author.clone(),
+                at: crate::annot::pdf_date_now(),
+                steps,
+                sources: std::mem::take(&mut self.unlogged_sources),
+                state: Some(state),
+                marginal_bytes,
+                job,
+                saves: Vec::new(),
+            },
+        );
+        self.cursor = id;
         self.trim();
     }
 
+    /// Versions that must keep their snapshots: the opened one (every
+    /// replay starts somewhere), the current one, and every saved one (a
+    /// save re-expressed it in place, so it can't be replayed).
+    fn keeps_snapshot(&self, id: VersionId) -> bool {
+        id == self.root
+            || id == self.cursor
+            || Some(id) == self.saved
+            || !self.versions[&id].saves.is_empty()
+    }
+
+    /// The versions from the opened one to the current one.
+    fn line(&self) -> Vec<VersionId> {
+        let mut line = vec![self.cursor];
+        while let Some(p) = self.versions[line.last().expect("nonempty")].parent {
+            line.push(p);
+        }
+        line.reverse();
+        line
+    }
+
+    /// Snapshots the policy may drop, in the order to drop them: versions
+    /// off the current line first (other branches, undone ones), then the
+    /// current line's, oldest first.
+    fn droppable(&self) -> Vec<VersionId> {
+        let line: HashSet<VersionId> = self.line().into_iter().collect();
+        let mut ids: Vec<VersionId> = self
+            .versions
+            .iter()
+            .filter(|(id, v)| v.state.is_some() && !self.keeps_snapshot(**id))
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort_by_key(|id| (line.contains(id), *id));
+        ids
+    }
+
     fn trim(&mut self) {
-        let stats = self.stats();
-        let n = self.policy.trim(&stats).min(self.cursor);
-        if n > 0 {
-            self.history.drain(0..n);
-            self.cursor -= n;
-            self.saved = self.saved.and_then(|s| s.checked_sub(n));
+        let droppable = self.droppable();
+        let stats = self.stats_for(&droppable);
+        let n = self.policy.trim(&stats).min(droppable.len());
+        for id in &droppable[..n] {
+            self.versions.get_mut(id).expect("version").state = None;
+        }
+        self.prune();
+    }
+
+    /// Keep the tree to [`crate::history::MAX_VERSIONS`]: drop versions on
+    /// other branches, oldest first, then the oldest versions before the
+    /// saved one. Edits back to the last save always stay (a later merge
+    /// replays them).
+    fn prune(&mut self) {
+        let max = crate::history::MAX_VERSIONS;
+        while self.versions.len() > max {
+            let line: HashSet<VersionId> = self.line().into_iter().collect();
+            let leaf = self
+                .versions
+                .iter()
+                .filter(|(id, v)| {
+                    v.children.is_empty() && !line.contains(id) && Some(**id) != self.saved
+                })
+                .map(|(id, _)| *id)
+                .min();
+            let Some(leaf) = leaf else { break };
+            self.remove_version(leaf);
+        }
+        // Then move the root forward along the line, up to the saved
+        // version (or the current one when the saved one is elsewhere).
+        let line = self.line();
+        let stop = self
+            .saved
+            .and_then(|s| line.iter().position(|v| *v == s))
+            .unwrap_or(line.len() - 1);
+        let mut i = 0;
+        while self.versions.len() > max && i < stop {
+            let next = line[i + 1];
+            if self.ensure_state(next).is_err() {
+                break;
+            }
+            let old = line[i];
+            for sibling in self.versions[&old].children.clone() {
+                if sibling != next {
+                    self.remove_subtree(sibling);
+                }
+            }
+            self.versions.remove(&old);
+            let new_root = self.versions.get_mut(&next).expect("next");
+            new_root.parent = None;
+            self.root = next;
+            i += 1;
         }
     }
 
-    pub fn stats(&self) -> HistoryStats {
-        let current: HashSet<SourceId> = self.history[..=self.cursor]
-            .iter()
-            .flat_map(|v| v.state.pages.iter().map(|p| p.source))
-            .collect();
-        let undone_source_bytes = self.history[self.cursor + 1..]
-            .iter()
-            .flat_map(|v| v.state.pages.iter().map(|p| p.source))
-            .collect::<HashSet<_>>()
-            .difference(&current)
-            .filter_map(|s| self.sources.get(s))
-            .map(|s| s.bytes)
-            .sum();
-        HistoryStats {
-            versions: self.history.len(),
-            cursor: self.cursor,
-            marginal_bytes: self.history.iter().map(|v| v.marginal_bytes).collect(),
-            undone_source_bytes,
+    fn remove_version(&mut self, id: VersionId) {
+        if let Some(v) = self.versions.remove(&id)
+            && let Some(p) = v.parent
+            && let Some(parent) = self.versions.get_mut(&p)
+        {
+            parent.children.retain(|c| *c != id);
+            if parent.redo_to == Some(id) {
+                parent.redo_to = None;
+            }
         }
+        if self.saved == Some(id) {
+            self.saved = None;
+        }
+    }
+
+    fn remove_subtree(&mut self, id: VersionId) {
+        let mut stack = vec![id];
+        while let Some(v) = stack.pop() {
+            if let Some(version) = self.versions.get(&v) {
+                stack.extend(version.children.iter().copied());
+            }
+            self.remove_version(v);
+        }
+    }
+
+    fn stats_for(&self, droppable: &[VersionId]) -> HistoryStats {
+        let mut kept: Vec<VersionId> = self
+            .versions
+            .iter()
+            .filter(|(id, v)| v.state.is_some() && !droppable.contains(id))
+            .map(|(id, _)| *id)
+            .collect();
+        // The current version's last.
+        kept.sort_by_key(|id| (*id == self.cursor, *id));
+        let marginal_bytes: Vec<usize> = droppable
+            .iter()
+            .chain(&kept)
+            .map(|id| self.versions[id].marginal_bytes)
+            .collect();
+        HistoryStats {
+            versions: marginal_bytes.len(),
+            cursor: marginal_bytes.len() - 1,
+            marginal_bytes,
+            undone_source_bytes: 0,
+        }
+    }
+
+    /// Snapshots kept, and their estimated bytes (droppable ones first).
+    pub fn stats(&self) -> HistoryStats {
+        self.stats_for(&self.droppable())
+    }
+
+    /// How many versions the history holds, with or without snapshots.
+    pub fn version_count(&self) -> usize {
+        self.versions.len()
+    }
+
+    fn view(&self, id: VersionId, shown_child: Option<VersionId>, undone: bool) -> VersionView {
+        let v = &self.versions[&id];
+        let before = v.parent.and_then(|p| self.versions[&p].state.as_ref());
+        VersionView {
+            id,
+            label: v.label.clone(),
+            author: v.author.clone(),
+            at: v.at.clone(),
+            edits: v
+                .steps
+                .iter()
+                .map(|s| crate::describe::describe(&s.edit, before))
+                .collect(),
+            saves: v.saves.clone(),
+            current: id == self.cursor,
+            saved: Some(id) == self.saved,
+            undone,
+            branches: v
+                .children
+                .iter()
+                .copied()
+                .filter(|c| Some(*c) != shown_child)
+                .collect(),
+            replays: v.state.is_none(),
+        }
+    }
+
+    /// The history as the panel lists it: from the oldest version kept to
+    /// the current one, then on along redo.
+    pub fn timeline(&self) -> Vec<VersionView> {
+        let line = self.line();
+        let mut out: Vec<VersionView> = line
+            .iter()
+            .enumerate()
+            .map(|(i, id)| {
+                let next = line.get(i + 1).copied().or_else(|| self.redo_target());
+                self.view(*id, next, false)
+            })
+            .collect();
+        let mut at = self.redo_target();
+        while let Some(id) = at {
+            let v = &self.versions[&id];
+            let next = v
+                .redo_to
+                .filter(|c| v.children.contains(c))
+                .or_else(|| v.children.last().copied());
+            out.push(self.view(id, next, true));
+            at = next;
+        }
+        out
+    }
+
+    /// The versions of a branch, from its first along its newest edits.
+    pub fn branch(&self, start: VersionId) -> Vec<VersionView> {
+        let mut out = Vec::new();
+        let mut at = Some(start);
+        while let Some(id) = at.filter(|id| self.versions.contains_key(id)) {
+            let v = &self.versions[&id];
+            let next = v
+                .redo_to
+                .filter(|c| v.children.contains(c))
+                .or_else(|| v.children.last().copied());
+            out.push(self.view(id, next, id != self.cursor));
+            at = next;
+        }
+        out
     }
 
     /// Rough bytes `new` holds that `old` doesn't share.
@@ -958,6 +1602,7 @@ impl Document {
                 target: item.target,
                 view: item.target.and(item.view.clone()),
                 color: None,
+                style: TextStyle::default(),
                 children: Vector::new(),
             };
             stack.push((item.depth, node));
@@ -993,7 +1638,8 @@ impl Document {
                 title: item.title.clone(),
                 target: item.page.and_then(|p| by_index.get(p as usize).copied()),
                 view: item.view.clone(),
-                color: None,
+                color: item.color,
+                style: item.style,
                 children: Vector::new(),
             };
             stack.push((item.depth, node));
@@ -1068,6 +1714,7 @@ impl Document {
                 for id in &set {
                     st.annots.remove(id);
                     st.text_layers.remove(id);
+                    st.removed_comments.remove(id);
                 }
                 let (outline, removed) = cascade_delete(&st.outline, &set);
                 st.outline = outline;
@@ -1078,6 +1725,7 @@ impl Document {
                 range,
                 before,
                 outline,
+                annots,
             } => {
                 let info = self.sources.get(&source).context("unknown source")?.clone();
                 if range.end > info.page_count {
@@ -1114,6 +1762,14 @@ impl Document {
                     st.outline = merged;
                     out.bookmarks_added = added;
                 }
+                let incoming = annots
+                    .into_iter()
+                    .filter_map(|(index, list)| {
+                        let page = *by_index.get(index as usize)?;
+                        (page != PageId(u64::MAX)).then_some((page, list))
+                    })
+                    .collect();
+                import_marks(&mut self.rng, &mut st, incoming);
             }
             Edit::DuplicatePages { ids } => {
                 let set: HashSet<PageId> = ids.into_iter().collect();
@@ -1123,10 +1779,14 @@ impl Document {
                     if set.contains(&p.id) {
                         let copy = self.fresh_page_id();
                         if let Some(list) = st.annots.get(&p.id).cloned() {
+                            let mut taken = HashSet::new();
                             let list: Vector<Annot> = list
                                 .into_iter()
                                 .map(|mut a| {
-                                    a.id = self.fresh_annot_id();
+                                    a.id = fresh_annot_id(&mut self.rng, &st, &mut taken);
+                                    // The copy isn't the comment replies
+                                    // elsewhere are to.
+                                    a.name.clear();
                                     a
                                 })
                                 .collect();
@@ -1141,7 +1801,12 @@ impl Document {
                 }
                 st.pages = pages;
             }
-            Edit::ReplacePages { ids, source, range } => {
+            Edit::ReplacePages {
+                ids,
+                source,
+                range,
+                annots,
+            } => {
                 let info = self.sources.get(&source).context("unknown source")?.clone();
                 if range.end > info.page_count {
                     bail!("range exceeds source page count");
@@ -1149,6 +1814,8 @@ impl Document {
                 let mut replacements = range.clone();
                 let mut last_pos = None;
                 let mut extra_old = HashSet::new();
+                // Which page now shows each replacement, for its marks.
+                let mut shown_by: HashMap<u32, PageId> = HashMap::new();
                 let pos = st.page_positions();
                 let mut pages = st.pages.clone();
                 for id in &ids {
@@ -1166,6 +1833,7 @@ impl Document {
                                     rotation: Rotation::R0,
                                 },
                             );
+                            shown_by.insert(index, *id);
                             last_pos = Some(i);
                         }
                         None => {
@@ -1176,15 +1844,17 @@ impl Document {
                 // Extra replacements go after the last replaced page.
                 let at = last_pos.map(|i| i + 1).unwrap_or(pages.len());
                 for (k, index) in replacements.enumerate() {
+                    let id = self.fresh_page_id();
                     pages.insert(
                         at + k,
                         PageRef {
-                            id: self.fresh_page_id(),
+                            id,
                             source,
                             index,
                             rotation: Rotation::R0,
                         },
                     );
+                    shown_by.insert(index, id);
                     out.pages_added += 1;
                 }
                 if !extra_old.is_empty() {
@@ -1194,11 +1864,20 @@ impl Document {
                         .filter(|p| !extra_old.contains(&p.id))
                         .copied()
                         .collect();
+                    for id in &extra_old {
+                        st.annots.remove(id);
+                        st.text_layers.remove(id);
+                    }
                     let (outline, removed) = cascade_delete(&st.outline, &extra_old);
                     st.outline = outline;
                     out.bookmarks_removed = removed;
                 }
                 st.pages = pages;
+                let incoming = annots
+                    .into_iter()
+                    .filter_map(|(index, list)| Some((*shown_by.get(&index)?, list)))
+                    .collect();
+                import_marks(&mut self.rng, &mut st, incoming);
             }
             Edit::OutlineInsert {
                 parent,
@@ -1213,6 +1892,7 @@ impl Document {
                     view: target.and(view),
                     target,
                     color: None,
+                    style: TextStyle::default(),
                     children: Vector::new(),
                 };
                 st.outline = outline_insert(&st.outline, parent, after, node)?;
@@ -1273,6 +1953,7 @@ impl Document {
                                 text_layers: st.text_layers.clone(),
                                 labels: st.labels.clone(),
                                 header_footer: st.header_footer.clone(),
+                                removed_comments: st.removed_comments.clone(),
                             };
                             let prev_node = flat[..my_pos]
                                 .iter()
@@ -1305,6 +1986,7 @@ impl Document {
                 target,
                 color,
                 view,
+                style,
             } => {
                 let updated = outline_update(&st.outline, id, |n| {
                     if let Some(t) = &title {
@@ -1326,6 +2008,9 @@ impl Document {
                     if let Some(c) = color {
                         n.color = c;
                     }
+                    if let Some(s) = style {
+                        n.style = s;
+                    }
                 });
                 st.outline = updated.context("bookmark not found")?;
             }
@@ -1339,7 +2024,7 @@ impl Document {
                 if st.index_of(page).is_none() {
                     bail!("page not found");
                 }
-                annot.id = self.fresh_annot_id();
+                annot.id = fresh_annot_id(&mut self.rng, &st, &mut HashSet::new());
                 let mut list = st.annots.get(&page).cloned().unwrap_or_default();
                 list.push_back(annot);
                 st.annots.insert(page, list);
@@ -1368,21 +2053,44 @@ impl Document {
                     .position(|a| a.id == id)
                     .context("annotation not found")?;
                 let removed = list.remove(i);
+                // Its thread goes with it: replies and statuses, and theirs.
+                let mut gone = vec![removed.name()];
+                while let Some(name) = gone.pop() {
+                    let (thread, rest): (Vector<Annot>, Vector<Annot>) = list
+                        .into_iter()
+                        .partition(|a| a.thread_parent() == Some(name.as_str()));
+                    gone.extend(thread.iter().map(Annot::name));
+                    list = rest;
+                }
                 if list.is_empty() {
                     st.annots.remove(&page);
                 } else {
                     st.annots.insert(page, list);
                 }
-                // The other end of a connector is meaningless alone.
-                if let Some(pid) = removed.partner()
-                    && let Some((ppage, _)) = st.find_annot(pid)
-                {
-                    let mut plist = st.annots.get(&ppage).cloned().unwrap_or_default();
-                    plist.retain(|a| a.id != pid);
-                    if plist.is_empty() {
-                        st.annots.remove(&ppage);
+                // A connector is one of a group by label: the others stay
+                // (M9 decision 8).
+            }
+            Edit::CommentsDelete { page, names } => {
+                if st.index_of(page).is_none() {
+                    bail!("page not found");
+                }
+                let mut set = st.removed_comments.get(&page).cloned().unwrap_or_default();
+                set.extend(names.iter().cloned());
+                st.removed_comments.insert(page, set);
+                // Our replies and statuses to them, and to those.
+                if let Some(mut list) = st.annots.get(&page).cloned() {
+                    let mut gone = names;
+                    while let Some(name) = gone.pop() {
+                        let (thread, rest): (Vector<Annot>, Vector<Annot>) = list
+                            .into_iter()
+                            .partition(|a| a.thread_parent() == Some(name.as_str()));
+                        gone.extend(thread.iter().map(Annot::name));
+                        list = rest;
+                    }
+                    if list.is_empty() {
+                        st.annots.remove(&page);
                     } else {
-                        st.annots.insert(ppage, plist);
+                        st.annots.insert(page, list);
                     }
                 }
             }
@@ -1393,8 +2101,9 @@ impl Document {
                 if st.index_of(page_a).is_none() || st.index_of(page_b).is_none() {
                     bail!("page not found");
                 }
-                a.id = self.fresh_annot_id();
-                b.id = self.fresh_annot_id();
+                let mut taken = HashSet::new();
+                a.id = fresh_annot_id(&mut self.rng, &st, &mut taken);
+                b.id = fresh_annot_id(&mut self.rng, &st, &mut taken);
                 if let AnnotKind::Connector { partner, .. } = &mut a.kind {
                     *partner = Some(b.id);
                 }
@@ -1594,6 +2303,47 @@ fn outline_insert(
     }
 }
 
+/// A mark id no mark in `st` has, and not in `taken` (ids handed out
+/// earlier in the same edit, which records this one). Random rather than
+/// counted, so two copies of a file never give different marks the same
+/// `/NM`; 53 bits, so the JSON is exact in any reader. From the step's
+/// seeded `rng`, so a replay gives the same ids.
+fn fresh_annot_id(rng: &mut fastrand::Rng, st: &DocState, taken: &mut HashSet<AnnotId>) -> AnnotId {
+    loop {
+        let id = AnnotId(rng.u64(1..1 << 53));
+        if !taken.contains(&id) && st.find_annot(id).is_none() {
+            taken.insert(id);
+            return id;
+        }
+    }
+}
+
+/// Marks that came with pages from another file, onto their new pages in
+/// `st`. They get fresh ids (the file's could clash with ours), and a
+/// connector keeps its partner only if the partner came too.
+fn import_marks(rng: &mut fastrand::Rng, st: &mut DocState, incoming: Vec<(PageId, Vec<Annot>)>) {
+    let mut taken = HashSet::new();
+    let mut ids = HashMap::new();
+    for (_, list) in &incoming {
+        for a in list {
+            ids.insert(a.id, fresh_annot_id(rng, st, &mut taken));
+        }
+    }
+    for (page, list) in incoming {
+        let mut on_page = st.annots.get(&page).cloned().unwrap_or_default();
+        for mut a in list {
+            a.id = ids[&a.id];
+            if let AnnotKind::Connector { partner, .. } = &mut a.kind {
+                *partner = partner.and_then(|p| ids.get(&p).copied());
+            }
+            on_page.push_back(a);
+        }
+        if !on_page.is_empty() {
+            st.annots.insert(page, on_page);
+        }
+    }
+}
+
 /// Remove nodes targeting deleted pages, promoting their children.
 fn cascade_delete(
     nodes: &Vector<OutlineNode>,
@@ -1719,6 +2469,7 @@ mod tests {
             page_sizes: None,
             bytes: 1000,
             password: None,
+            data: None,
         }
     }
 
@@ -1730,6 +2481,8 @@ mod tests {
                 page: *p,
                 depth: *d,
                 view: None,
+                color: None,
+                style: Default::default(),
             })
             .collect()
     }
@@ -1874,6 +2627,7 @@ mod tests {
                         ("A3", Some(1), 1),
                         ("D", Some(2), 0),
                     ])),
+                    annots: Vec::new(),
                 },
                 "insert",
             )
@@ -1921,6 +2675,7 @@ mod tests {
                 ids: vec![p3],
                 source: s,
                 range: 0..2,
+                annots: Vec::new(),
             },
             "replace",
         )
@@ -1964,6 +2719,7 @@ mod tests {
                 target: None,
                 color: Some(Some([255, 0, 0])),
                 view: None,
+                style: None,
             },
             "e",
         )
@@ -2044,8 +2800,150 @@ mod tests {
         );
     }
 
+    fn rotate(d: &mut Document, page: usize, label: &str) {
+        d.apply(
+            Edit::RotatePages {
+                ids: vec![id_at(d, page)],
+                by: Rotation::R90,
+            },
+            label,
+        )
+        .unwrap();
+    }
+
     #[test]
-    fn history_trims_oldest() {
+    fn an_edit_after_undo_keeps_the_old_branch() {
+        let mut d = doc();
+        rotate(&mut d, 0, "a");
+        rotate(&mut d, 1, "b");
+        rotate(&mut d, 2, "c");
+        d.undo();
+        d.undo();
+        rotate(&mut d, 3, "d");
+        let line: Vec<String> = d.timeline().iter().map(|v| v.label.clone()).collect();
+        assert_eq!(line, vec!["Open", "a", "d"]);
+        let a = &d.timeline()[1];
+        assert_eq!(a.branches.len(), 1, "b and c are still there");
+        let b = a.branches[0];
+        assert_eq!(
+            d.branch(b)
+                .iter()
+                .map(|v| v.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b", "c"]
+        );
+        d.jump(b).unwrap();
+        assert_eq!(d.page(1).unwrap().rotation, Rotation::R90);
+        assert_eq!(d.page(3).unwrap().rotation, Rotation::R0);
+        assert_eq!(d.redo(), Some("c"));
+        // Undo to a, and redo now follows the branch last visited.
+        d.undo();
+        d.undo();
+        assert_eq!(d.redo_label(), Some("b"));
+    }
+
+    #[test]
+    fn jumps_go_back_and_forth_freely() {
+        let mut d = doc();
+        for i in 0..10 {
+            rotate(&mut d, i % 6, &format!("r{i}"));
+        }
+        let states: Vec<(VersionId, DocState)> = d
+            .timeline()
+            .iter()
+            .map(|v| v.id)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|id| {
+                d.jump(id).unwrap();
+                (id, d.state().clone())
+            })
+            .collect();
+        let last = states.last().unwrap().0;
+        d.jump(states[2].0).unwrap();
+        assert_eq!(*d.state(), states[2].1);
+        assert!(d.timeline()[3].undone);
+        d.jump(last).unwrap();
+        assert_eq!(*d.state(), states.last().unwrap().1);
+        assert_eq!(d.timeline().len(), 11);
+    }
+
+    /// Every version, rebuilt by replaying its edits, is the state it was
+    /// when it was made: over random edit sequences, with almost every
+    /// snapshot dropped.
+    #[test]
+    fn replaying_the_log_rebuilds_every_version() {
+        for seed in 0..20 {
+            let mut rng = fastrand::Rng::with_seed(seed);
+            let mut d = Document::new(
+                src(6),
+                &flat(&[("A", Some(0), 0), ("B", Some(3), 0)]),
+                Box::new(FixedCount(2)),
+            );
+            let other = d.add_source(src(4));
+            let mut made: Vec<(VersionId, DocState)> = Vec::new();
+            for step in 0..25 {
+                let n = d.page_count();
+                let page =
+                    |rng: &mut fastrand::Rng, d: &Document| d.page(rng.usize(..n)).unwrap().id;
+                let edit = match rng.u8(..8) {
+                    0 => Edit::RotatePages {
+                        ids: vec![page(&mut rng, &d)],
+                        by: Rotation::R90,
+                    },
+                    1 if n > 2 => Edit::DeletePages {
+                        ids: vec![page(&mut rng, &d)],
+                    },
+                    2 => Edit::InsertPages {
+                        source: other,
+                        range: 0..rng.u32(1..4),
+                        before: Some(page(&mut rng, &d)),
+                        outline: Some(flat(&[("A", Some(0), 0), ("X", Some(1), 0)])),
+                        annots: vec![(0, vec![square(1)]), (1, vec![connector(2, 3)])],
+                    },
+                    3 => Edit::DuplicatePages {
+                        ids: vec![page(&mut rng, &d)],
+                    },
+                    4 => Edit::AnnotAdd {
+                        page: page(&mut rng, &d),
+                        annot: square(0),
+                    },
+                    5 => Edit::OutlineInsert {
+                        parent: None,
+                        after: None,
+                        title: format!("b{step}"),
+                        target: Some(page(&mut rng, &d)),
+                        view: None,
+                    },
+                    6 => Edit::MovePages {
+                        ids: vec![page(&mut rng, &d)],
+                        before: None,
+                    },
+                    _ => {
+                        // Go back a little first, so the tree branches.
+                        if rng.bool() {
+                            d.undo();
+                        }
+                        Edit::RotatePages {
+                            ids: vec![page(&mut rng, &d)],
+                            by: Rotation::R180,
+                        }
+                    }
+                };
+                if d.apply(edit, format!("e{step}")).is_ok() {
+                    made.push((d.current_version(), d.state().clone()));
+                }
+            }
+            assert!(d.stats().versions < made.len(), "snapshots were dropped");
+            for (id, want) in &made {
+                d.jump(*id).unwrap();
+                assert_eq!(d.state(), want, "seed {seed}, {id:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn history_trims_snapshots_and_replays_them() {
         let mut d = Document::new(src(3), &[], Box::new(FixedCount(3)));
         for i in 0..5 {
             d.apply(
@@ -2057,13 +2955,21 @@ mod tests {
             )
             .unwrap();
         }
+        // Three snapshots (the opened version's, the current one's and one
+        // more); all six versions, with their edits.
         assert_eq!(d.stats().versions, 3);
-        assert_eq!(d.undo_label(), Some("r4"));
-        d.undo();
-        d.undo();
+        assert_eq!(d.version_count(), 6);
+        // Undo goes all the way back, replaying what was dropped.
+        for i in (0..5).rev() {
+            assert_eq!(d.undo(), Some(format!("r{i}").as_str()));
+            assert_eq!(d.page(0).unwrap().rotation.degrees(), (i * 90) % 360);
+        }
         assert!(!d.can_undo());
-        // The saved version was trimmed away, so we're dirty everywhere.
-        assert!(d.is_dirty());
+        assert!(!d.is_dirty(), "the opened version is the saved one");
+        for _ in 0..5 {
+            d.redo();
+        }
+        assert_eq!(d.page(0).unwrap().rotation, Rotation::R90);
     }
 
     #[test]
@@ -2105,7 +3011,7 @@ mod tests {
     }
 
     #[test]
-    fn connector_pair_links_and_deletes_together() {
+    fn a_connector_pair_is_a_group_of_two() {
         use crate::annot::{AnnotKind, Box2};
         let mut d = doc();
         let (p0, p2) = (id_at(&d, 0), id_at(&d, 2));
@@ -2127,6 +3033,11 @@ mod tests {
             author: "t".into(),
             contents: String::new(),
             modified: String::new(),
+            created: String::new(),
+            fill: None,
+            dashed: false,
+            cloudy: false,
+            name: String::new(),
         };
         assert_eq!(d.state().next_connector_label(), "1");
         d.apply(
@@ -2143,14 +3054,244 @@ mod tests {
         assert_eq!(b.partner(), Some(a.id));
         assert_eq!(d.state().find_annot(b.id).map(|(p, _)| p), Some(p2));
         assert_eq!(d.state().next_connector_label(), "2");
-        // Deleting one end removes the other.
+        // Deleting one end leaves the other: a group of one (decision 8).
         d.apply(Edit::AnnotDelete { page: p2, id: b.id }, "rm")
             .unwrap();
-        assert!(d.state().annots_on(p0).is_none());
+        assert_eq!(d.state().annots_on(p0).unwrap().len(), 1);
         assert!(d.state().annots_on(p2).is_none());
         d.undo();
         assert_eq!(d.state().annots_on(p0).unwrap().len(), 1);
         assert_eq!(d.state().annots_on(p2).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_group_runs_by_page_then_down_the_page() {
+        use crate::annot::{AnnotKind, Box2, Group};
+        let mut d = doc();
+        let (p0, p1) = (d.page(0).unwrap().id, d.page(1).unwrap().id);
+        let tick = |glyph: &str, y: f32| {
+            mark(
+                0,
+                AnnotKind::Stamp {
+                    rect: Box2 {
+                        x: 10.0,
+                        y,
+                        w: 20.0,
+                        h: 20.0,
+                    },
+                    glyph: glyph.into(),
+                },
+            )
+        };
+        for (page, glyph, y) in [
+            (p1, "✓", 300.0),
+            (p1, "✓", 100.0),
+            (p0, "✓", 500.0),
+            (p0, "✗", 50.0),
+        ] {
+            d.apply(
+                Edit::AnnotAdd {
+                    page,
+                    annot: tick(glyph, y),
+                },
+                "t",
+            )
+            .unwrap();
+        }
+        let order: Vec<(usize, f32)> = d
+            .state()
+            .group_members(&Group::Tickmark("✓".into()))
+            .iter()
+            .map(|(i, _, a)| (*i, a.bounds().y))
+            .collect();
+        assert_eq!(order, [(0, 500.0), (1, 100.0), (1, 300.0)]);
+    }
+
+    fn mark(id: u64, kind: crate::annot::AnnotKind) -> Annot {
+        Annot {
+            id: AnnotId(id),
+            kind,
+            color: [255, 0, 0],
+            opacity: 1.0,
+            stroke: 1.0,
+            author: "t".into(),
+            contents: String::new(),
+            modified: String::new(),
+            created: String::new(),
+            fill: None,
+            dashed: false,
+            cloudy: false,
+            name: String::new(),
+        }
+    }
+
+    fn square(id: u64) -> Annot {
+        use crate::annot::{AnnotKind, Box2};
+        mark(
+            id,
+            AnnotKind::Square {
+                rect: Box2 {
+                    x: 1.0,
+                    y: 1.0,
+                    w: 5.0,
+                    h: 5.0,
+                },
+            },
+        )
+    }
+
+    fn connector(id: u64, partner: u64) -> Annot {
+        use crate::annot::{AnnotKind, Box2};
+        mark(
+            id,
+            AnnotKind::Connector {
+                rect: Box2 {
+                    x: 1.0,
+                    y: 1.0,
+                    w: 22.0,
+                    h: 22.0,
+                },
+                label: "1".into(),
+                partner: Some(AnnotId(partner)),
+            },
+        )
+    }
+
+    #[test]
+    fn bookmark_styles_arriving_after_the_outline_are_matched_by_title() {
+        use crate::file::OutlineStyle;
+        let mut d = doc();
+        let style = |title: &str, bold| OutlineStyle {
+            title: title.into(),
+            color: Some([0, 0, 255]),
+            style: TextStyle {
+                bold,
+                italic: false,
+            },
+        };
+        // In pre-order: A, A1, A2, B, C. The third doesn't match its title.
+        d.set_initial_outline_styles(&[
+            style("A", true),
+            style("A1", false),
+            style("Not A2", false),
+            style("B", false),
+        ])
+        .unwrap();
+        let flat = d.state().outline_flat();
+        let by = |t: &str| flat.iter().find(|(_, n)| n.title == t).unwrap().1.clone();
+        assert!(by("A").style.bold);
+        assert_eq!(by("A1").color, Some([0, 0, 255]));
+        assert_eq!(by("A2").color, None);
+        assert_eq!(by("B").color, Some([0, 0, 255]));
+        assert_eq!(by("C").color, None);
+        // Loaded, not edited: nothing to save.
+        assert!(!d.is_dirty());
+    }
+
+    #[test]
+    fn inserted_pages_bring_their_marks_with_fresh_ids() {
+        let mut d = doc();
+        let mine = d.apply(
+            Edit::AnnotAdd {
+                page: id_at(&d, 0),
+                annot: square(0),
+            },
+            "add",
+        );
+        assert!(mine.is_ok());
+        let sid = d.add_source(src(3));
+        d.apply(
+            Edit::InsertPages {
+                source: sid,
+                range: 0..2,
+                before: None,
+                outline: None,
+                annots: vec![
+                    // Page 0: a square and one end of a pair whose other end
+                    // is on page 1; page 2 isn't inserted.
+                    (0, vec![square(1), connector(2, 3)]),
+                    (1, vec![connector(3, 2), connector(4, 9)]),
+                    (2, vec![square(5)]),
+                ],
+            },
+            "insert",
+        )
+        .unwrap();
+        let (new0, new1) = (id_at(&d, 6), id_at(&d, 7));
+        let on0 = d.state().annots_on(new0).unwrap().clone();
+        let on1 = d.state().annots_on(new1).unwrap().clone();
+        assert_eq!((on0.len(), on1.len()), (2, 2));
+        let all: Vec<AnnotId> = on0.iter().chain(on1.iter()).map(|a| a.id).collect();
+        // Fresh ids, none of the file's, all distinct.
+        assert!(all.iter().all(|id| id.0 > 9), "{all:?}");
+        let unique: HashSet<_> = all.iter().collect();
+        assert_eq!(unique.len(), 4);
+        // The pair still points at each other; a partner left behind is dropped.
+        assert_eq!(on0[1].partner(), Some(on1[0].id));
+        assert_eq!(on1[0].partner(), Some(on0[1].id));
+        assert_eq!(on1[1].partner(), None);
+        // Undo takes them away with the pages.
+        d.undo();
+        assert!(d.state().annots_on(new0).is_none());
+    }
+
+    #[test]
+    fn replacing_pages_drops_the_marks_of_pages_removed() {
+        let mut d = doc();
+        let (p1, p2) = (id_at(&d, 1), id_at(&d, 2));
+        for p in [p1, p2] {
+            d.apply(
+                Edit::AnnotAdd {
+                    page: p,
+                    annot: square(0),
+                },
+                "add",
+            )
+            .unwrap();
+        }
+        let sid = d.add_source(src(1));
+        d.apply(
+            Edit::ReplacePages {
+                ids: vec![p1, p2],
+                source: sid,
+                range: 0..1,
+                annots: vec![(0, vec![square(7)])],
+            },
+            "replace",
+        )
+        .unwrap();
+        // p1 keeps its mark and gains the replacement's; p2 is gone, and so
+        // are its marks.
+        assert_eq!(d.state().annots_on(p1).unwrap().len(), 2);
+        assert!(d.state().annots.get(&p2).is_none());
+    }
+
+    #[test]
+    fn mark_ids_are_random_and_distinct() {
+        let mut d = doc();
+        let p = id_at(&d, 0);
+        for _ in 0..50 {
+            d.apply(
+                Edit::AnnotAdd {
+                    page: p,
+                    annot: square(0),
+                },
+                "add",
+            )
+            .unwrap();
+        }
+        let ids: Vec<u64> = d
+            .state()
+            .annots_on(p)
+            .unwrap()
+            .iter()
+            .map(|a| a.id.0)
+            .collect();
+        let unique: HashSet<_> = ids.iter().collect();
+        assert_eq!(unique.len(), 50);
+        assert!(ids.iter().all(|&id| id > 0 && id < 1 << 53));
+        // Not handed out in order, as two copies of a file would.
+        assert_ne!(ids, (ids[0]..ids[0] + 50).collect::<Vec<_>>());
     }
 
     #[test]
@@ -2174,6 +3315,11 @@ mod tests {
             author: "t".into(),
             contents: String::new(),
             modified: String::new(),
+            created: String::new(),
+            fill: None,
+            dashed: false,
+            cloudy: false,
+            name: String::new(),
         };
         d.apply(
             Edit::AnnotAdd {
@@ -2357,6 +3503,7 @@ mod tests {
                 ids: vec![copy],
                 source: other,
                 range: 0..1,
+                annots: Vec::new(),
             },
             "replace",
         )
@@ -2661,6 +3808,11 @@ mod tests {
             author: "me".into(),
             contents: String::new(),
             modified: "D:20261013000000".into(),
+            created: String::new(),
+            fill: None,
+            dashed: false,
+            cloudy: false,
+            name: String::new(),
         };
         let edits = vec![
             Edit::MovePages {
@@ -2676,6 +3828,7 @@ mod tests {
                 range: 0..3,
                 before: Some(PageId(4)),
                 outline: Some(flat(&[("X", Some(0), 0)])),
+                annots: Vec::new(),
             },
             Edit::OutlineEdit {
                 id: OutlineId(3),
@@ -2683,6 +3836,7 @@ mod tests {
                 target: Some(None),
                 color: Some(Some([1, 2, 3])),
                 view: None,
+                style: None,
             },
             Edit::ConnectorAdd {
                 a: (PageId(0), annot.clone()),
@@ -2705,6 +3859,7 @@ mod tests {
                 target: Some(None),
                 color: None,
                 view: None,
+                style: None,
             }
         );
     }

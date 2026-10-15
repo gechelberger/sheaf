@@ -162,12 +162,13 @@ impl DocView {
                         let bytes = std::fs::metadata(&path)
                             .map(|m| m.len() as usize)
                             .unwrap_or(0);
-                        anyhow::Ok((RenderHandle::open(path, None)?, bytes))
+                        let incoming = crate::docview::Incoming::read(&path);
+                        anyhow::Ok((RenderHandle::open(path, None)?, bytes, incoming))
                     }
                 })
                 .await;
             this.update(cx, |v, cx| {
-                let (handle, bytes) = match opened {
+                let (handle, bytes, incoming) = match opened {
                     Ok(h) => h,
                     Err(e) => {
                         v.set_notice(format!("Replace failed: {e:#}"), cx);
@@ -185,6 +186,7 @@ impl DocView {
                     page_sizes: None,
                     bytes,
                     password: None,
+                    data: Some(sheaf_doc::SourceData(handle.data())),
                 });
                 let sizes_rx = handle.page_sizes();
                 doc.handles.insert(sid, handle);
@@ -195,10 +197,12 @@ impl DocView {
                         ids,
                         source: sid,
                         range: range.clone(),
+                        annots: incoming.edit_marks(),
                     },
                     &label,
                 ) {
                     Ok(out) => {
+                        doc.take_in(sid, incoming);
                         doc.touched();
                         v.after_model_change(label, out, cx);
                         v.set_notice(

@@ -1,13 +1,60 @@
-//! Pattern-search presets, user-editable. Kept in `patterns.json` next to
-//! `settings.json`, seeded from the built-in list the first time so the
-//! defaults can be renamed, changed, or deleted like any other entry.
+//! Pattern-search presets, user-editable. Kept in `patterns.json` in the
+//! config folder, seeded from the built-in list the first time so the
+//! defaults can be renamed, changed, or deleted like any other entry. Every
+//! window shares one list ([`Presets`]), re-read when a window comes
+//! forward if the file was edited by hand.
 //! Patterns are deliberately permissive: a scan should over-match slightly
 //! rather than miss a 9-digit SSN typed with spaces.
 
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
+use gpui::{App, Global};
 use serde::{Deserialize, Serialize};
+
+/// The presets every window shows, and the file's stamp when last read or
+/// written.
+pub struct Presets {
+    list: Vec<Preset>,
+    stamp: Option<crate::prefs::Stamp>,
+}
+impl Global for Presets {}
+
+pub fn init(cx: &mut App) {
+    let list = load();
+    cx.set_global(Presets {
+        list,
+        stamp: crate::prefs::stamp(&path()),
+    });
+}
+
+/// The presets, in order.
+pub fn list(cx: &App) -> Vec<Preset> {
+    cx.global::<Presets>().list.clone()
+}
+
+/// Change the shared list and save it; every window shows the change.
+pub fn update(cx: &mut App, f: impl FnOnce(&mut Vec<Preset>)) -> Result<()> {
+    let presets = cx.global_mut::<Presets>();
+    f(&mut presets.list);
+    let saved = save(&presets.list);
+    presets.stamp = crate::prefs::stamp(&path());
+    cx.refresh_windows();
+    saved
+}
+
+/// Re-read `patterns.json` if it was changed outside sheaf.
+pub fn reload_if_changed(cx: &mut App) {
+    let now = crate::prefs::stamp(&path());
+    if now == cx.global::<Presets>().stamp {
+        return;
+    }
+    let list = load();
+    let presets = cx.global_mut::<Presets>();
+    presets.list = list;
+    presets.stamp = now;
+    cx.refresh_windows();
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Preset {
@@ -43,7 +90,7 @@ pub fn defaults() -> Vec<Preset> {
 }
 
 pub fn path() -> PathBuf {
-    crate::settings::config_dir().join("patterns.json")
+    sheaf_ops::dirs::config_dir().join("patterns.json")
 }
 
 /// The saved presets; the defaults (written out) when there's no file yet.
@@ -60,7 +107,9 @@ pub fn load() -> Vec<Preset> {
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let d = defaults();
-            if let Err(e) = save(&d) {
+            if crate::instance::owns_state()
+                && let Err(e) = save(&d)
+            {
                 log::warn!("seeding {}: {e:#}", path.display());
             }
             d
