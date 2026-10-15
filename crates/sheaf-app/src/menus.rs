@@ -131,8 +131,12 @@ fn builtin_menus() -> Vec<(&'static str, Vec<Item>)> {
                 item("Export &Flattened Copy…", ExportFlattened),
                 item("Export Pa&ges…", ExportPages),
                 Item::Sub(
-                    "Export Co&mments",
+                    "Co&mments",
                     vec![
+                        item("&Import…", ImportComments),
+                        item("Export &XFDF…", ExportCommentsXfdf),
+                        item("Export &FDF…", ExportCommentsFdf),
+                        sep(),
                         item("&Summary…", SummarizeComments),
                         item("Summary with &Pages…", SummarizeCommentsWithPages),
                         item("&CSV…", ExportCommentsCsv),

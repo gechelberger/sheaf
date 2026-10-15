@@ -82,7 +82,7 @@ use crate::annot::{Annot, Box2, PART, PageGeom, Pt, from_json};
 use crate::model::{FlatOutlineItem, TextStyle};
 
 /// The mark an annotation dictionary carries, if this build can read it.
-fn sheaf_mark(dict: &lopdf::Dictionary) -> Option<Annot> {
+pub(crate) fn sheaf_mark(dict: &lopdf::Dictionary) -> Option<Annot> {
     from_json(pdf_text(dict.get(b"SheafAnnot").ok()?).as_bytes())
 }
 
@@ -145,6 +145,9 @@ pub struct ForeignAnnot {
     pub hidden: bool,
     /// `/C`, when it's RGB.
     pub color: Option<[u8; 3]>,
+    /// What it is as one of our marks, when sheaf can hold it: what
+    /// editing it makes it (M9 decision 5). Read when the file is.
+    pub mark: Option<Box<Annot>>,
 }
 
 /// The names deleting `removed` takes off a page: those, and every
@@ -583,6 +586,9 @@ fn annots_in(pdf: &lopdf::Document) -> AnnotsInFile {
             continue;
         };
         let mut geom: Option<PageGeom> = None;
+        // This page's, and their dictionaries, to convert together.
+        let first = out.foreign.len();
+        let mut dicts: Vec<&lopdf::Dictionary> = Vec::new();
         for (slot, entry) in list.iter().enumerate() {
             let Ok((_, obj)) = pdf.dereference(entry) else {
                 continue;
@@ -637,6 +643,7 @@ fn annots_in(pdf: &lopdf::Document) -> AnnotsInFile {
                 (m, s) if m.is_empty() => Some((crate::annot::REVIEW.to_string(), s)),
                 (m, s) => Some((m, s)),
             };
+            dicts.push(dict);
             out.foreign.push(ForeignAnnot {
                 page: i as u32,
                 subtype,
@@ -671,7 +678,14 @@ fn annots_in(pdf: &lopdf::Document) -> AnnotsInFile {
                         };
                         [v(0), v(1), v(2)]
                     }),
+                mark: None,
             });
+        }
+        if let Some(g) = geom {
+            let marks = crate::import::convert_page(pdf, &dicts, &g, Default::default());
+            for (f, m) in out.foreign[first..].iter_mut().zip(marks) {
+                f.mark = m.ok().map(Box::new);
+            }
         }
     }
     out
@@ -807,6 +821,7 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            name: String::new(),
         };
         let geom = PageGeom {
             media: [0.0, 0.0, 612.0, 792.0],
@@ -895,6 +910,7 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            name: String::new(),
         };
         let dict = crate::annot::to_pdf(
             &ours,

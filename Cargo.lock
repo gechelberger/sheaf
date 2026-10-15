@@ -6519,6 +6519,7 @@ dependencies = [
  "image",
  "log",
  "lopdf",
+ "quick-xml",
  "regex",
  "serde",
  "serde_json",

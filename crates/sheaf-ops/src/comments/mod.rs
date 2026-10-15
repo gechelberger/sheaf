@@ -213,7 +213,9 @@ impl Comment {
 
 /// Every comment on the page `pref`: our marks, then the other tools'
 /// that are on it (`foreign`, indexes into `foreign_all`), less those
-/// deleted in sheaf and their threads, which come back second.
+/// deleted in sheaf and their threads, and those one of our marks has
+/// taken the place of (made editable) with their grouped parts, which
+/// come back second.
 pub fn comments_on(
     st: &DocState,
     foreign_all: &[(SourceId, ForeignAnnot)],
@@ -250,7 +252,7 @@ pub fn comments_on(
         .iter()
         .filter_map(|&i| foreign_all.get(i).map(|(_, f)| (i, f)))
         .collect();
-    let gone = match st.removed_comments.get(&page) {
+    let mut gone = match st.removed_comments.get(&page) {
         Some(removed) => sheaf_doc::file::removed_with_threads(
             theirs
                 .iter()
@@ -259,6 +261,13 @@ pub fn comments_on(
         ),
         None => HashSet::new(),
     };
+    let ours: HashSet<&str> = out.iter().map(|c| c.name.as_str()).collect();
+    for (_, f) in &theirs {
+        let part_of_ours = f.grouped && f.parent.as_deref().is_some_and(|p| ours.contains(p));
+        if ours.contains(f.name.as_str()) || part_of_ours {
+            gone.insert(f.name.clone());
+        }
+    }
     let mut deleted = Vec::new();
     for (i, f) in theirs {
         if gone.contains(&f.name) {
@@ -743,6 +752,87 @@ pub fn open(
     let (doc, foreign) = crate::open::open_with_foreign(path, password)?;
     let primary = doc.primary();
     Ok((doc, foreign.into_iter().map(|f| (primary, f)).collect()))
+}
+
+/// A comments data file's format.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DataFormat {
+    Xfdf,
+    Fdf,
+}
+
+impl DataFormat {
+    pub fn extension(self) -> &'static str {
+        match self {
+            DataFormat::Xfdf => "xfdf",
+            DataFormat::Fdf => "fdf",
+        }
+    }
+
+    /// By a file's extension.
+    pub fn of(path: &Path) -> Option<DataFormat> {
+        match path.extension()?.to_str()?.to_lowercase().as_str() {
+            "xfdf" | "xml" => Some(DataFormat::Xfdf),
+            "fdf" => Some(DataFormat::Fdf),
+            _ => None,
+        }
+    }
+}
+
+/// `items` (a listing's, or a selection) as a data file: each with its
+/// thread, as the listing has them.
+pub fn export_data(
+    snap: &sheaf_doc::Snapshot,
+    foreign: &[(SourceId, ForeignAnnot)],
+    items: &[Item],
+    format: DataFormat,
+) -> Result<Vec<u8>> {
+    let ours: Vec<(PageId, AnnotId)> = items
+        .iter()
+        .filter_map(|i| match *i {
+            Item::Ours(p, a) => Some((p, a)),
+            Item::Foreign(_) => None,
+        })
+        .collect();
+    let theirs: Vec<usize> = items
+        .iter()
+        .filter_map(|i| match *i {
+            Item::Foreign(f) => Some(f),
+            Item::Ours(..) => None,
+        })
+        .collect();
+    let comments =
+        sheaf_doc::exchange::gather(&snap.state, &snap.sources, foreign, &ours, &theirs)?;
+    match format {
+        DataFormat::Xfdf => sheaf_doc::exchange::xfdf::write(&comments),
+        DataFormat::Fdf => sheaf_doc::exchange::fdf::write(&comments),
+    }
+}
+
+/// Every comment a listing shows, replies and statuses included.
+pub fn items(listing: &Listing) -> Vec<Item> {
+    listing
+        .threads()
+        .flat_map(|t| t.entries.iter().map(|e| e.comment.item))
+        .collect()
+}
+
+/// The comments in an FDF, XFDF or PDF file (`bytes`) as the edits that
+/// bring them into `snap`, matched by `/NM` (see
+/// `sheaf_doc::exchange::import`). `password` opens a PDF.
+pub fn import_data(
+    snap: &sheaf_doc::Snapshot,
+    foreign: &[(SourceId, ForeignAnnot)],
+    bytes: &[u8],
+    password: Option<&str>,
+) -> Result<sheaf_doc::exchange::Imported> {
+    let comments = sheaf_doc::exchange::read(bytes, password)?;
+    Ok(sheaf_doc::exchange::import(
+        &snap.state,
+        &snap.sources,
+        foreign,
+        &comments,
+    ))
 }
 
 /// A column of the CSV export.

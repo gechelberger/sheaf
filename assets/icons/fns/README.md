@@ -65,6 +65,9 @@ an image element does not inherit the parent element's color.
 | [summarize-with-pages](summarize-with-pages/icon.svg) | Summarize comments with pages | `SummarizeCommentsWithPages` |
 | [export-comments-csv](export-comments-csv/icon.svg) | Export comments as CSV | `ExportCommentsCsv` |
 | [export-comments-text](export-comments-text/icon.svg) | Export comments as text | `ExportCommentsText` |
+| [import-comments](import-comments/icon.svg) | Import comments | `ImportComments` |
+| [export-xfdf](export-xfdf/icon.svg) | Export comments as XFDF | `ExportCommentsXfdf` |
+| [export-fdf](export-fdf/icon.svg) | Export comments as FDF | `ExportCommentsFdf` |
 | [export-clean](export-clean/icon.svg) | Export clean copy | `ExportCleanCopy` |
 | [about](about/icon.svg) | About sheaf | `About` |
 | [quit](quit/icon.svg) | Quit | `Quit` |

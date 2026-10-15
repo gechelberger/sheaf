@@ -8,10 +8,12 @@
 pub mod annot;
 pub mod attachments;
 pub mod describe;
+pub mod exchange;
 pub mod file;
 pub mod generated;
 pub mod history;
 pub mod images;
+pub mod import;
 pub mod incremental;
 pub mod labels;
 pub mod layers;

@@ -80,6 +80,28 @@ pub fn info(id: &str) -> Option<Info> {
             "Save the comments the Comments panel shows as plain text, numbered and threaded.",
             &["txt", "export", "list", "note summary"],
         ),
+        "docview::ImportComments" => (
+            "import-comments",
+            "Bring in comments from an FDF or XFDF file, or another PDF. One that's here already (by its name) is updated, the rest are added, all as one undo step; kinds sheaf can't hold are listed.",
+            &[
+                "fdf",
+                "xfdf",
+                "data file",
+                "merge",
+                "acrobat",
+                "import data file",
+            ],
+        ),
+        "docview::ExportCommentsXfdf" => (
+            "export-xfdf",
+            "Save the comments the Comments panel shows as XFDF, which Acrobat and other tools import.",
+            &["xfdf", "xml", "data file", "export data file", "acrobat"],
+        ),
+        "docview::ExportCommentsFdf" => (
+            "export-fdf",
+            "Save the comments the Comments panel shows as FDF, which Acrobat and other tools import.",
+            &["fdf", "data file", "export data file", "acrobat"],
+        ),
         "workspace::CombineFiles" => (
             "combine-files",
             "Make one PDF from several PDFs and images, choosing which pages of each, with a bookmark per file.",

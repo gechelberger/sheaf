@@ -866,6 +866,11 @@ pub struct Annot {
     /// rectangle, ellipse or polygon.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cloudy: bool,
+    /// The `/NM` it came with when it was another tool's comment (made
+    /// editable, or imported), kept so the replies to it still find it.
+    /// Empty for one made in sheaf: see [`Annot::name`].
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
 }
 
 impl Annot {
@@ -937,8 +942,14 @@ impl Annot {
         }
     }
 
+    /// What it's called in threads and in the file (`/NM`): the name it
+    /// came with, else `sheaf:<id>`.
     pub fn name(&self) -> String {
-        format!("sheaf:{}", self.id.0)
+        if self.name.is_empty() {
+            format!("sheaf:{}", self.id.0)
+        } else {
+            self.name.clone()
+        }
     }
 
     /// Whether a click at `p` lands on the mark: on the stroke for lines
@@ -1486,6 +1497,19 @@ fn border_style(a: &Annot) -> Dictionary {
     bs
 }
 
+/// `/RD`: how far in from `/Rect` (`outer`) the box `inner` is, on each
+/// side, so readers find the shape's own box.
+fn inner_box(outer: [f32; 4], inner: [f32; 4]) -> Object {
+    let [llx, lly, urx, ury] = outer;
+    let [x0, y0, x1, y1] = inner;
+    Object::Array(
+        [x0 - llx, y0 - lly, urx - x1, ury - y1]
+            .iter()
+            .map(|v| Object::Real(v.max(0.0)))
+            .collect(),
+    )
+}
+
 /// Content operators that set the stroke: color, width, and dashes.
 fn stroke_ops(a: &Annot) -> String {
     let mut ops = format!(" {} {:.2} w", color_ops(a.color, false), a.stroke);
@@ -1533,6 +1557,7 @@ fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
         h: bounds.h + 2.0 * pad,
     };
     let rect = geom.box_to_user(padded);
+    let rect_user = rect;
     let [llx, lly, urx, ury] = rect;
 
     // Appearance content is drawn in user space, so it works for any /Rotate;
@@ -1629,6 +1654,7 @@ fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
         }
         AnnotKind::Replace { at, .. } | AnnotKind::Insert { at } => {
             dict.set("Subtype", Object::Name(b"Caret".to_vec()));
+            dict.set("RD", inner_box(rect_user, geom.box_to_user(*at)));
             dict.set("C", color_arr);
             dict.set("Sy", Object::Name(b"None".to_vec()));
             let [p0, p1, p2] = caret_points(*at).map(up);
@@ -1714,6 +1740,7 @@ fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
         }
         AnnotKind::FreeText { rect, size } => {
             dict.set("Subtype", Object::Name(b"FreeText".to_vec()));
+            dict.set("RD", inner_box(rect_user, geom.box_to_user(*rect)));
             dict.set(
                 "DA",
                 pdf_text_string(&format!("{HELV} {size} Tf {}", color_ops(c, true))),
@@ -1765,6 +1792,7 @@ fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
                 content.push_str(&format!(" {}", color_ops(f, true)));
             }
             let b = geom.box_to_user(*rect);
+            dict.set("RD", inner_box(rect_user, b));
             if a.cloudy {
                 dict.set("BE", cloudy_style());
                 content.push_str(&cloud_ops(&a.kind, a.stroke, &up));
@@ -2539,6 +2567,7 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            name: String::new(),
         };
         let mut pdf = lopdf::Document::with_version("1.7");
         let Written { main: dict, .. } = to_pdf(&a, &geom(0), &mut pdf);
@@ -2588,6 +2617,7 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            name: String::new(),
         }
     }
 

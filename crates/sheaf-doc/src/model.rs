@@ -1733,6 +1733,9 @@ impl Document {
                                 .into_iter()
                                 .map(|mut a| {
                                     a.id = fresh_annot_id(&mut self.rng, &st, &mut taken);
+                                    // The copy isn't the comment replies
+                                    // elsewhere are to.
+                                    a.name.clear();
                                     a
                                 })
                                 .collect();
@@ -2983,6 +2986,7 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            name: String::new(),
         };
         assert_eq!(d.state().next_connector_label(), "1");
         d.apply(
@@ -3066,6 +3070,7 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            name: String::new(),
         }
     }
 
@@ -3263,6 +3268,7 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            name: String::new(),
         };
         d.apply(
             Edit::AnnotAdd {
@@ -3755,6 +3761,7 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            name: String::new(),
         };
         let edits = vec![
             Edit::MovePages {

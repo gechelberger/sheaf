@@ -282,6 +282,7 @@ pub fn annot_from_wit(a: w::Annot) -> Annot {
         fill: None,
         dashed: false,
         cloudy: false,
+        name: String::new(),
     }
 }
 
@@ -484,6 +485,7 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            name: String::new(),
         };
         let back = annot_from_wit(annot_to_wit(&a).unwrap());
         assert_eq!(

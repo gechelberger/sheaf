@@ -19,7 +19,7 @@ use sheaf_core::PageSize;
 use sheaf_doc::annot::{MARKED, REVIEW, REVIEW_STATES};
 use sheaf_doc::{Annot, AnnotId, AnnotKind, PageId, file::ForeignAnnot};
 use sheaf_ops::comments::{
-    self, Column, Comment, Layout, Sort, Summary, foreign_text, ours_text, parse_pages,
+    self, Column, Comment, DataFormat, Layout, Sort, Summary, foreign_text, ours_text, parse_pages,
     status_words, subtype_label, thread_status, threads,
 };
 pub use sheaf_ops::comments::{CommentFilter, Item, fmt_pdf_date, kind_label};
@@ -81,6 +81,8 @@ pub enum ExportKind {
     Summary(Layout),
     Csv,
     Text,
+    /// XFDF or FDF: what the panel lists, or (`true`) what's selected.
+    Data(DataFormat, bool),
 }
 
 impl ExportKind {
@@ -89,6 +91,7 @@ impl ExportKind {
             ExportKind::Summary(_) => "pdf",
             ExportKind::Csv => "csv",
             ExportKind::Text => "txt",
+            ExportKind::Data(f, _) => f.extension(),
         }
     }
 }
@@ -469,6 +472,10 @@ impl DocView {
     /// F2 / double-click: edit the selected mark's text in place (a
     /// reply's in the reply box).
     fn edit_selected_comment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(Item::Foreign(ix)) = self.selected_item() {
+            self.edit_foreign(ix, window, cx);
+            return;
+        }
         let State::Ready(doc) = &self.state else {
             return;
         };
@@ -931,7 +938,9 @@ impl DocView {
                                 f.created.clone(),
                                 // Their comments, not their replies.
                                 depth == 0,
-                                false,
+                                // Made ours to be edited, when sheaf can
+                                // hold it (a reply only if it's the user's).
+                                f.mark.is_some() && (depth == 0 || f.author == me),
                             )
                         }
                     };
@@ -1349,6 +1358,7 @@ impl DocView {
                     v.export_comments_prompt(kind, cx);
                 }))
         };
+        let has_selection = self.selected_item().is_some();
         let chosen = csv_columns(cx);
         let columns = Column::ALL.iter().enumerate().map(|(i, &c)| {
             let on = chosen.contains(&c);
@@ -1402,6 +1412,15 @@ impl DocView {
                         ))
                         .child(entry(2, "CSV…", ExportKind::Csv))
                         .child(entry(3, "Text…", ExportKind::Text))
+                        .child(entry(4, "XFDF…", ExportKind::Data(DataFormat::Xfdf, false)))
+                        .child(entry(5, "FDF…", ExportKind::Data(DataFormat::Fdf, false)))
+                        .when(has_selection, |d| {
+                            d.child(entry(
+                                6,
+                                "Selected as XFDF…",
+                                ExportKind::Data(DataFormat::Xfdf, true),
+                            ))
+                        })
                         .child(
                             div()
                                 .px_3()
@@ -1439,6 +1458,7 @@ impl DocView {
             .unwrap_or("document");
         let suggested = match kind {
             ExportKind::Summary(Layout::Pages) => format!("{stem} - comments with pages.pdf"),
+            ExportKind::Data(..) => format!("{stem}.{}", kind.extension()),
             _ => format!("{stem} - comments.{}", kind.extension()),
         };
         let rx = crate::file_dialog::save(cx, &dir, Some(&suggested));
@@ -1469,6 +1489,12 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
+        let selected: Vec<Item> = doc
+            .selected_marks
+            .iter()
+            .map(|&(p, a)| Item::Ours(p, a))
+            .chain(doc.selected_foreign.map(Item::Foreign))
+            .collect();
         doc.notice = Some(format!("Writing comments to {}…", path.display()));
         let snapshot = doc.model.snapshot();
         let foreign = doc.foreign_annots.clone();
@@ -1493,10 +1519,21 @@ impl DocView {
                                 comments::text(&listing, labels.as_deref(), &title, cf.sort)
                                     .into_bytes()
                             }
+                            ExportKind::Data(format, only_selected) => {
+                                let items = if only_selected {
+                                    selected.clone()
+                                } else {
+                                    comments::items(&listing)
+                                };
+                                comments::export_data(&snapshot, &foreign, &items, format)?
+                            }
                         };
                         std::fs::write(&path, bytes)
                             .map_err(|e| anyhow::anyhow!("writing {}: {e}", path.display()))?;
-                        anyhow::Ok(listing.count)
+                        anyhow::Ok(match kind {
+                            ExportKind::Data(_, true) => selected.len(),
+                            _ => listing.count,
+                        })
                     }
                 })
                 .await;
@@ -1512,6 +1549,76 @@ impl DocView {
                     });
                 }
                 cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// File > Comments > Import: ask for the file, then bring its comments
+    /// in.
+    pub(crate) fn import_comments_prompt(&mut self, cx: &mut Context<Self>) {
+        let rx = crate::file_dialog::open_filtered(
+            cx,
+            gpui::PathPromptOptions {
+                files: true,
+                directories: false,
+                multiple: false,
+                prompt: Some("Import Comments".into()),
+            },
+            crate::file_dialog::Filter::Comments,
+        );
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = rx.await
+                && let Some(path) = paths.into_iter().next()
+            {
+                this.update(cx, |view, cx| view.import_comments_from(path, cx))
+                    .ok();
+            }
+        })
+        .detach();
+    }
+
+    /// Bring in the comments in the FDF, XFDF or PDF file at `path`, as
+    /// one undo step: one here already by name is updated, the rest added.
+    pub fn import_comments_from(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
+        let State::Ready(doc) = &mut self.state else {
+            return;
+        };
+        doc.notice = Some(format!("Reading comments from {}…", path.display()));
+        let snapshot = doc.model.snapshot();
+        let foreign = doc.foreign_annots.clone();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn({
+                    let path = path.clone();
+                    async move {
+                        let bytes = std::fs::read(&path)?;
+                        comments::import_data(&snapshot, &foreign, &bytes, None)
+                    }
+                })
+                .await;
+            this.update(cx, |view, cx| {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                match result {
+                    Ok(got) => {
+                        let summary = got.summary();
+                        if !got.edits.is_empty() {
+                            view.apply_batch(
+                                got.edits,
+                                &format!("Import comments from {name}"),
+                                cx,
+                            );
+                        }
+                        view.set_notice(format!("Imported from {name}: {summary}"), cx);
+                    }
+                    Err(e) => view.set_notice(format!("Import failed: {e:#}"), cx),
+                }
             })
             .ok();
         })
@@ -1538,6 +1645,24 @@ impl DocView {
                 .on_click(cx.listener(move |v, _, window, cx| v.start_reply(item, window, cx)))
                 .into_any_element(),
         ];
+        // Another tool's comment that sheaf can hold: make it a mark, to
+        // move, resize and restyle.
+        if let Item::Foreign(ix) = item
+            && self
+                .foreign_mark(ix)
+                .is_some_and(|(_, m)| m.thread_parent().is_none())
+        {
+            items.push(
+                entry(("cm-adopt", 0), "Make Editable".into())
+                    .on_click(cx.listener(move |v, _, _, cx| {
+                        if let Some(cm) = &mut v.comments {
+                            cm.menu = None;
+                        }
+                        v.adopt_foreign(ix, |_| {}, "Make comment editable", cx);
+                    }))
+                    .into_any_element(),
+            );
+        }
         if !thread_part {
             items.push(
                 entry(
@@ -1856,6 +1981,7 @@ mod tests {
                     slot: 0,
                     hidden: false,
                     color: None,
+                    mark: None,
                 },
             )
         };

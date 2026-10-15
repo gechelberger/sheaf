@@ -4,6 +4,7 @@
 //!
 //! Each file opens in its own window.
 
+mod adopt;
 mod assets;
 mod attach;
 mod attachments_panel;
@@ -122,6 +123,9 @@ actions!(
         SummarizeCommentsWithPages,
         ExportCommentsCsv,
         ExportCommentsText,
+        ExportCommentsXfdf,
+        ExportCommentsFdf,
+        ImportComments,
         ExtractPages,
         CancelOcr,
         SinglePage,

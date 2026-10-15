@@ -190,6 +190,8 @@ pub(crate) struct Doc {
     /// (read-only), with the source each is in.
     pub(crate) foreign_annots: Vec<(SourceId, sheaf_doc::file::ForeignAnnot)>,
     pub(crate) selected_foreign: Option<usize>,
+    /// Another tool's comment being dragged, made ours when it's let go.
+    pub(crate) adopting: Option<usize>,
     /// Files embedded in the primary file, and its portfolio schema if it
     /// is one (see attachments_panel.rs). `facts_loaded` once read.
     pub(crate) attachments: Vec<sheaf_doc::attachments::Attachment>,
@@ -892,6 +894,7 @@ impl DocView {
             mark_menu: None,
             foreign_annots: Vec::new(),
             selected_foreign: None,
+            adopting: None,
             labels: std::cell::RefCell::new((u64::MAX, None)),
             attachments: Vec::new(),
             collection: None,
@@ -1823,6 +1826,7 @@ impl DocView {
             fill: None,
             dashed: false,
             cloudy: false,
+            name: String::new(),
         }
     }
 
@@ -4670,6 +4674,21 @@ impl Render for DocView {
             .on_action(cx.listener(|v, _: &crate::ExportCommentsText, _, cx| {
                 v.export_comments_prompt(ExportKind::Text, cx)
             }))
+            .on_action(cx.listener(|v, _: &crate::ExportCommentsXfdf, _, cx| {
+                v.export_comments_prompt(
+                    ExportKind::Data(sheaf_ops::comments::DataFormat::Xfdf, false),
+                    cx,
+                )
+            }))
+            .on_action(cx.listener(|v, _: &crate::ExportCommentsFdf, _, cx| {
+                v.export_comments_prompt(
+                    ExportKind::Data(sheaf_ops::comments::DataFormat::Fdf, false),
+                    cx,
+                )
+            }))
+            .on_action(
+                cx.listener(|v, _: &crate::ImportComments, _, cx| v.import_comments_prompt(cx)),
+            )
             .on_action(cx.listener(|v, _: &ExtractPages, _, cx| v.extract_pages_prompt(cx)))
             .on_action(cx.listener(|v, _: &InsertPdf, _, cx| v.insert_pdf_prompt(cx)))
             .on_action(cx.listener(|v, _: &ToolSelect, _, cx| v.set_tool(Tool::Select, cx)))

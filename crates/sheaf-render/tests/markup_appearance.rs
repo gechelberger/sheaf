@@ -67,6 +67,7 @@ fn mark(kind: AnnotKind, color: [u8; 3]) -> Annot {
         fill: None,
         dashed: false,
         cloudy: false,
+        name: String::new(),
     }
 }
 

@@ -213,7 +213,7 @@ bug fixes ✅ → edit history ✅ → editing marks ✅ → text selection ✅ 
 markup ✅ →
 replies and status ✅ → comment filters ✅ → stamps ✅ → connector groups ✅ → Set
 Status ✅ → tape format ✅ → tape from page text ✅ → shapes ✅ → file attachments ✅ →
-summary and CSV ✅ → FDF/XFDF → measurement → plugin API 0.3 and docs →
+summary and CSV ✅ → FDF/XFDF ✅ → measurement → plugin API 0.3 and docs →
 deleting means deleted (added 2026-10-14 from M11 planning: deleted pages
 stayed in saved files; it must land before v0.5).
 

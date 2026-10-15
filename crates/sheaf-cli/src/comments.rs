@@ -1,5 +1,7 @@
-//! `sheaf comments`: a file's comments as a summary PDF, CSV or text, as
-//! the Comments panel's Export menu writes them.
+//! `sheaf comments`: a file's comments as a summary PDF, CSV, text, XFDF
+//! or FDF, as the Comments panel's Export menu writes them; and comments
+//! from a data file or another PDF brought into it, as File > Import
+//! Comments does.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -7,7 +9,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, bail};
 use clap::{Args, Subcommand, ValueEnum};
 use sheaf_doc::annot::REVIEW_STATES;
-use sheaf_ops::comments::{self, Column, CommentFilter, Layout, Sort, Summary};
+use sheaf_ops::comments::{self, Column, CommentFilter, DataFormat, Layout, Sort, Summary};
 
 #[derive(Args)]
 #[command(about = "Summarize or list a PDF's comments")]
@@ -24,6 +26,50 @@ enum What {
     Csv(CsvArgs),
     /// The list as plain text.
     Text(TextArgs),
+    /// The comments as XFDF or FDF, for Acrobat or another tool.
+    Export(ExportArgs),
+    /// Comments from FDF, XFDF or another PDF into a copy of the file:
+    /// those it has already (by name) are updated, the rest added.
+    Import(ImportArgs),
+}
+
+#[derive(Args)]
+struct ExportArgs {
+    #[command(flatten)]
+    common: Common,
+    /// Where to write it (default: standard output). Its extension
+    /// (.xfdf, .fdf) picks the format unless --format does.
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+    #[arg(short, long, value_enum)]
+    format: Option<FormatArg>,
+}
+
+#[derive(Args)]
+struct ImportArgs {
+    /// The PDF to bring the comments into.
+    input: PathBuf,
+    /// FDF, XFDF or PDF files with the comments.
+    #[arg(required = true)]
+    from: Vec<PathBuf>,
+    /// Where to write the result (default: beside the input,
+    /// "<name> - imported.pdf").
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+    #[arg(long)]
+    password: Option<String>,
+    /// The password of a PDF the comments come from.
+    #[arg(long)]
+    from_password: Option<String>,
+    /// Replace the output file if it's there.
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum FormatArg {
+    Xfdf,
+    Fdf,
 }
 
 #[derive(Args)]
@@ -230,6 +276,24 @@ pub fn run(args: CommentsArgs, _quiet: bool) -> anyhow::Result<()> {
             let out = comments::csv(&listing, labels.as_deref(), &columns);
             write_out(a.output.as_deref(), out.as_bytes())
         }
+        What::Export(a) => {
+            let format = match (a.format, a.output.as_deref().and_then(DataFormat::of)) {
+                (Some(FormatArg::Xfdf), _) => DataFormat::Xfdf,
+                (Some(FormatArg::Fdf), _) => DataFormat::Fdf,
+                (None, Some(f)) => f,
+                (None, None) => DataFormat::Xfdf,
+            };
+            let o = a.common.open()?;
+            let listing = comments::list(o.doc.state(), &o.foreign, &o.filter, &o.needle);
+            let out = comments::export_data(
+                &o.doc.snapshot(),
+                &o.foreign,
+                &comments::items(&listing),
+                format,
+            )?;
+            write_out(a.output.as_deref(), &out)
+        }
+        What::Import(a) => import(a),
         What::Text(a) => {
             let o = a.common.open()?;
             let listing = comments::list(o.doc.state(), &o.foreign, &o.filter, &o.needle);
@@ -243,6 +307,35 @@ pub fn run(args: CommentsArgs, _quiet: bool) -> anyhow::Result<()> {
             write_out(a.output.as_deref(), out.as_bytes())
         }
     }
+}
+
+fn import(a: ImportArgs) -> anyhow::Result<()> {
+    let output = a.output.clone().unwrap_or_else(|| {
+        let stem = sheaf_ops::export::stem_of(&a.input);
+        a.input.with_file_name(format!("{stem} - imported.pdf"))
+    });
+    if output.exists() && !a.force {
+        bail!("{} already exists (--force replaces)", output.display());
+    }
+    let (mut doc, foreign) = comments::open(&a.input, a.password.as_deref())?;
+    for from in &a.from {
+        let bytes = std::fs::read(from).with_context(|| format!("reading {}", from.display()))?;
+        let got = comments::import_data(
+            &doc.snapshot(),
+            &foreign,
+            &bytes,
+            a.from_password.as_deref(),
+        )
+        .with_context(|| from.display().to_string())?;
+        eprintln!("{}: {}", from.display(), got.summary());
+        if !got.edits.is_empty() {
+            doc.apply_batch(got.edits, "Import comments")?;
+        }
+    }
+    sheaf_doc::save::save_to_path(&doc.snapshot(), &output)
+        .with_context(|| format!("writing {}", output.display()))?;
+    println!("{}", output.display());
+    Ok(())
 }
 
 fn summary(a: SummaryArgs) -> anyhow::Result<()> {

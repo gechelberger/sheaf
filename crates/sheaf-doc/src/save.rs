@@ -1074,7 +1074,7 @@ pub(crate) fn write_page_annots<'a>(
 ) -> PageAnnotsWritten {
     // Our marks as the file has them now, by object, so other tools'
     // replies to them can follow them to the objects this writes.
-    let before: HashMap<ObjectId, String> = page
+    let mut before: HashMap<ObjectId, String> = page
         .get(b"Annots")
         .ok()
         .and_then(|a| pdf.dereference(a).ok())
@@ -1099,6 +1099,39 @@ pub(crate) fn write_page_annots<'a>(
     // so do their replies to our marks that are gone.
     let annots: Vec<&Annot> = annots.collect();
     let writing: std::collections::HashSet<String> = annots.iter().map(|a| a.name()).collect();
+    // Another tool's comment that one of our marks now is (made editable
+    // in sheaf, or imported over it) gives way to it, with the parts
+    // grouped under it (`/RT /Group`, which the mark draws itself); its
+    // replies follow it as they follow our marks.
+    let mut replaced = std::collections::HashSet::new();
+    for e in &list {
+        if let Ok(id) = e.as_reference()
+            && let Ok(d) = pdf.get_dictionary(id)
+            && let name = crate::file::thread_name(d)
+            && writing.contains(&name)
+        {
+            before.insert(id, name);
+            replaced.insert(id);
+        }
+    }
+    list.retain(|e| {
+        let Ok(id) = e.as_reference() else {
+            return true;
+        };
+        let Ok(d) = pdf.get_dictionary(id) else {
+            return true;
+        };
+        let grouped_under_replaced = d
+            .get(b"RT")
+            .ok()
+            .and_then(|o| o.as_name().ok())
+            .is_some_and(|n| n == b"Group")
+            && d.get(b"IRT")
+                .ok()
+                .and_then(|o| o.as_reference().ok())
+                .is_some_and(|irt| replaced.contains(&irt));
+        !(writing.contains(&crate::file::thread_name(d)) || grouped_under_replaced)
+    });
     let mut removed = removed.cloned().unwrap_or_default();
     removed.extend(before.values().filter(|n| !writing.contains(*n)).cloned());
     if !removed.is_empty() {
@@ -1915,6 +1948,7 @@ mod tests {
                 fill: None,
                 dashed: false,
                 cloudy: false,
+                name: String::new(),
             };
             model
                 .apply(
@@ -2109,6 +2143,7 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            name: String::new(),
         }
     }
 
@@ -2350,6 +2385,134 @@ mod tests {
             assert_eq!(
                 reply.parent.as_deref(),
                 Some(ours[0].name().as_str()),
+                "incremental {incremental}"
+            );
+        }
+    }
+
+    /// A page with another tool's square ("sq", with Pat's reply), and an
+    /// Acrobat replace-text edit (Caret "c1", its StrikeOut grouped under it).
+    fn file_with_their_shapes(dir: &Path) -> std::path::PathBuf {
+        let a_path = make_pdf(dir, "a.pdf", "A", 1, &[]);
+        let mut pdf = Pdf::load(&a_path).unwrap();
+        let page0 = pdf.get_pages()[&1];
+        let square = pdf.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "Square",
+            "Rect" => vec![100.into(), 100.into(), 200.into(), 150.into()],
+            "NM" => Object::string_literal("sq"), "T" => Object::string_literal("Pat"),
+            "C" => vec![0.into(), 0.into(), 1.into()], "BS" => dictionary! { "W" => 2 },
+        });
+        let reply = pdf.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "Text",
+            "Rect" => vec![100.into(), 100.into(), 120.into(), 120.into()],
+            "IRT" => square, "NM" => Object::string_literal("sq-reply"),
+            "T" => Object::string_literal("Pat"), "Contents" => Object::string_literal("Why?"),
+        });
+        let caret = pdf.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "Caret",
+            "Rect" => vec![300.into(), 300.into(), 306.into(), 312.into()],
+            "NM" => Object::string_literal("c1"), "Contents" => Object::string_literal("the"),
+        });
+        let strike = pdf.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "StrikeOut",
+            "Rect" => vec![306.into(), 300.into(), 330.into(), 312.into()],
+            "QuadPoints" => vec![306.into(), 312.into(), 330.into(), 312.into(), 306.into(), 300.into(), 330.into(), 300.into()],
+            "IRT" => caret, "RT" => "Group", "NM" => Object::string_literal("c1-strike"),
+        });
+        pdf.get_dictionary_mut(page0).unwrap().set(
+            "Annots",
+            vec![square.into(), reply.into(), caret.into(), strike.into()],
+        );
+        let path = dir.join("shapes.pdf");
+        pdf.save(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_comment_made_ours_takes_its_place_and_keeps_its_replies() {
+        let dir = tempdir();
+        let path = file_with_their_shapes(&dir);
+        let found = crate::file::read_annots(&path, None).unwrap();
+        let mark = |name: &str| {
+            *found
+                .foreign
+                .iter()
+                .find(|f| f.name == name)
+                .unwrap()
+                .mark
+                .clone()
+                .unwrap()
+        };
+        let mut square = mark("sq");
+        assert_eq!(square.color, [0, 0, 255]);
+        square.kind = square.kind.translated(10.0, 0.0);
+        let replace = mark("c1");
+        assert!(matches!(
+            replace.kind,
+            crate::annot::AnnotKind::Replace { .. }
+        ));
+        // The strikeout is part of the replacement, not a mark of its own.
+        assert!(
+            found
+                .foreign
+                .iter()
+                .find(|f| f.name == "c1-strike")
+                .unwrap()
+                .mark
+                .is_none()
+        );
+        for incremental in [true, false] {
+            let bytes = std::fs::read(&path).unwrap();
+            let mut model = opened(&path, bytes.len());
+            let p0 = model.page(0).unwrap().id;
+            for annot in [square.clone(), replace.clone()] {
+                model
+                    .apply(Edit::AnnotAdd { page: p0, annot }, "adopt")
+                    .unwrap();
+            }
+            let out = if incremental {
+                crate::incremental::incremental(&model.snapshot()).unwrap()
+            } else {
+                rewrite(&model.snapshot()).unwrap()
+            };
+            let list = page_annots(&out);
+            let subtypes: Vec<String> = list
+                .iter()
+                .map(|(_, d)| crate::import::subtype(d))
+                .collect();
+            // Theirs are gone; ours (a Caret with its own StrikeOut) are
+            // there instead, and Pat's reply.
+            assert_eq!(
+                subtypes.iter().filter(|s| *s == "Square").count(),
+                1,
+                "{subtypes:?}"
+            );
+            assert_eq!(subtypes.iter().filter(|s| *s == "StrikeOut").count(), 1);
+            let (sq_obj, sq) = list
+                .iter()
+                .find(|(_, d)| crate::import::subtype(d) == "Square")
+                .unwrap();
+            assert!(sq.has(b"SheafAnnot"));
+            assert_eq!(crate::file::thread_name(sq), "sq");
+            let (_, reply) = list
+                .iter()
+                .find(|(_, d)| crate::file::thread_name(d) == "sq-reply")
+                .unwrap();
+            assert_eq!(reply.get(b"IRT").unwrap().as_reference().unwrap(), *sq_obj);
+            // Read back, the square is ours, named as it was, and the reply
+            // is still in its thread.
+            let again = crate::file::read_annots_mem(&out).unwrap();
+            let ours = &again.sheaf[&0];
+            assert!(ours.iter().any(|a| a.name == "sq" && a.kind == square.kind));
+            assert!(ours.iter().any(|a| a.name == "c1"));
+            let names: Vec<(&str, Option<&str>)> = again
+                .foreign
+                .iter()
+                .map(|f| (f.name.as_str(), f.parent.as_deref()))
+                .collect();
+            assert_eq!(
+                names,
+                [("sq-reply", Some("sq"))],
                 "incremental {incremental}"
             );
         }
@@ -2713,6 +2876,7 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            name: String::new(),
         };
         let replace = mk(
             AnnotKind::Replace {
@@ -2870,6 +3034,7 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            name: String::new(),
         };
         model
             .apply(
@@ -3016,6 +3181,7 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            name: String::new(),
         };
         for pg in [p0, p1, p2] {
             model
@@ -3136,6 +3302,7 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            name: String::new(),
         };
         model
             .apply(
@@ -3277,6 +3444,7 @@ mod tests {
                         fill: None,
                         dashed: false,
                         cloudy: false,
+                        name: String::new(),
                     },
                 },
                 "tick",
@@ -3306,6 +3474,7 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            name: String::new(),
         };
         model
             .apply(
@@ -3569,6 +3738,7 @@ mod tests {
                             fill: None,
                             dashed: false,
                             cloudy: false,
+                            name: String::new(),
                         },
                     },
                     "a",
@@ -3812,6 +3982,7 @@ mod tests {
                         fill: None,
                         dashed: false,
                         cloudy: false,
+                        name: String::new(),
                     },
                 },
                 "a",
@@ -3886,6 +4057,7 @@ mod tests {
                         fill: None,
                         dashed: false,
                         cloudy: false,
+                        name: String::new(),
                     },
                 },
                 "sq",
@@ -4263,6 +4435,7 @@ mod tests {
                         fill: None,
                         dashed: false,
                         cloudy: false,
+                        name: String::new(),
                     },
                 },
                 "sq",

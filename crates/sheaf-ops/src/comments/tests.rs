@@ -25,6 +25,7 @@ fn mark(kind: AnnotKind, contents: &str) -> Annot {
         fill: None,
         dashed: false,
         cloudy: false,
+        name: String::new(),
     }
 }
 
@@ -222,6 +223,7 @@ fn theirs(
             slot: 0,
             hidden: false,
             color: Some([0, 0, 255]),
+            mark: None,
         },
     )
 }

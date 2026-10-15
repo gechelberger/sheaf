@@ -532,6 +532,7 @@ impl DocView {
         if let State::Ready(doc) = &mut self.state {
             doc.text_sel = None;
             doc.text_drag = None;
+            doc.adopting = None;
         }
         // Hit areas of a few screen pixels, whatever the zoom.
         let tolerance = 4.0 / k.max(0.01);
@@ -621,6 +622,35 @@ impl DocView {
                     current: p,
                     path: Vec::new(),
                     moving,
+                    resize: None,
+                    shift: false,
+                });
+                cx.notify();
+                return;
+            }
+            // Another tool's comment: selected by a click, made ours when
+            // it's dragged or double-clicked (see `adopt`).
+            if let Some(ix) = self.foreign_at(page_id, p, tolerance) {
+                if ev.click_count >= 2 && self.tool == Tool::Select {
+                    self.edit_foreign(ix, window, cx);
+                    return;
+                }
+                let Some((_, mark)) = self.foreign_mark(ix) else {
+                    return;
+                };
+                let State::Ready(doc) = &mut self.state else {
+                    return;
+                };
+                doc.select_mark(None);
+                doc.selected_foreign = Some(ix);
+                doc.adopting = Some(ix);
+                doc.drag = Some(Drag {
+                    page,
+                    page_id,
+                    start: p,
+                    current: p,
+                    path: Vec::new(),
+                    moving: vec![mark],
                     resize: None,
                     shift: false,
                 });
@@ -777,6 +807,7 @@ impl DocView {
             return;
         };
         let Some(drag) = doc.drag.take() else { return };
+        let adopting = doc.adopting.take();
         let page_id = drag.page_id;
         let (a, b) = (drag.start, drag.current);
         if let Some(r) = &drag.resize {
@@ -789,6 +820,22 @@ impl DocView {
                         annot: changed,
                     },
                     "Resize annotation",
+                    cx,
+                );
+            }
+            return;
+        }
+        if let Some(ix) = adopting {
+            // Another tool's comment, moved: ours now, where it was let go.
+            let (dx, dy) = (b.x - a.x, b.y - a.y);
+            if dx.abs() >= 0.5 || dy.abs() >= 0.5 {
+                self.adopt_foreign(
+                    ix,
+                    |m| {
+                        m.kind = translate(&m.kind, dx, dy);
+                        m.modified = sheaf_doc::pdf_date_now();
+                    },
+                    "Move annotation",
                     cx,
                 );
             }
@@ -1454,6 +1501,9 @@ impl DocView {
                 a.author = me.clone();
                 a.created = now.clone();
                 a.modified = now.clone();
+                // A copy is a comment of its own, not the one its replies
+                // are to.
+                a.name.clear();
                 Edit::AnnotAdd { page, annot: a }
             })
             .collect();
@@ -1774,6 +1824,7 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            name: String::new(),
         }
     }
 
