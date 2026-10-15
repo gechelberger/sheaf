@@ -488,6 +488,41 @@ a lock file, merge later), are in
   version's commands back to the last save, which a merge would replay.
   Slice 18's comment import is a manual merge path.
 
+### Agent panel (Claude and Codex)
+
+A chat panel where the user works with an AI agent on the open document,
+like Zed's external agents. sheaf launches the agent (Claude Code or
+Codex), and the agent handles sign-in with the user's own subscription;
+sheaf takes no API keys and never sees a credential. The agent sees the
+document, its edit history, and every command with its help text, plugin
+commands included. It runs commands and edits live, with the user's
+approval. Each approved call is one version in the history, and a whole
+turn can be reverted. Decisions and research (2026-10-14) are in
+[`todos/agent.md`](todos/agent.md).
+- **Placement:** its own milestone, one of the last.
+- **Overlap:**
+  - M6 plugin host API. The agent's read tools are the WIT `document`,
+    `text` and `render` interfaces, and its edits are the same `Edit`
+    batches.
+  - M9 slice 4 edit history (done): versions, edits in words, jumps.
+  - M9 slice 1: `sheaf mcp` reaches the running sheaf through the
+    single-instance socket.
+  - M15 batch actions. Both need commands that take arguments instead of
+    a dialog. Until a command has them, the agent opens its dialog
+    pre-filled, so this needn't wait for M15.
+  - `todos/plugin-queue.md` skipped "Ask Claude" as a plugin (2026-10-13)
+    because AI belongs in core; this is that feature.
+  - Foxit's AI Assistant runs commands from chat
+    ([prior-art/foxit.md §3.13](docs/prior-art/foxit.md#313-ai-assistant-ch-15-subscription-only)).
+- **Open:**
+  - Whether Anthropic allows subscription sign-in through the
+    `claude-agent-acp` adapter. If not, Claude runs through Claude Code's
+    own headless mode instead of ACP.
+  - Limiting each agent to sheaf's tools: both come with shell and file
+    tools of their own.
+  - Client data leaving the machine: IRC §7216 consent and a firm-wide
+    off switch in `settings.toml`.
+
 ## Not planned
 
 - **XFA forms.** Dynamic XFA is deprecated and effectively Adobe-only.

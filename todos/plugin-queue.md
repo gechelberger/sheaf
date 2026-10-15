@@ -117,7 +117,8 @@ render API (see API additions).
   on demand or on save. Interesting for the API (see "user-picked files"
   below) but unlikely to be used.
 - **Ask Claude** (2026-10-13): questions and figure extraction over the open
-  document. AI should be a core feature instead (not in `ROADMAP.md` yet).
+  document. AI should be a core feature instead: the agent panel, under
+  Pending in `ROADMAP.md` since 2026-10-14 ([`agent.md`](agent.md)).
 - **CCH Workpaper Manager / Engagement integration** (2026-10-13): no
   known interface to build against.
 - **Scan Cleanup** (2026-10-13): blank pages, separators, orientation. Belongs
