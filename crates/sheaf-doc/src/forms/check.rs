@@ -29,17 +29,10 @@ use anyhow::{Context, Result};
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId};
 use quick_xml::events::{BytesStart, Event};
 
+use super::read::{FormClass, MAX_DEPTH, MAX_NAME, MAX_NAMES, MAX_NODES};
 use crate::attachments::resolve;
 use crate::file::pdf_text;
 
-/// How deep the field tree may go (M10 proposal 8).
-const MAX_DEPTH: usize = 32;
-/// Field tree nodes read before the rest is left unread.
-const MAX_NODES: usize = 100_000;
-/// The longest full name read, in bytes, and all of them together. Real
-/// ones are under 2 KiB, and a parent's name is in each of its kids'.
-const MAX_NAME: usize = 64 << 10;
-const MAX_NAMES: usize = 64 << 20;
 /// How much of a widget's name, read up its `/Parent` chain, a finding
 /// keeps.
 const SHOWN_NAME: usize = 256;
@@ -149,12 +142,8 @@ impl Report {
     /// "AcroForm", "hybrid" (with an XFA copy), "XFA-only" (dynamic, or
     /// with no AcroForm fields) or "no form".
     pub fn class(&self) -> &'static str {
-        match &self.xfa {
-            Some(x) if x.dynamic || self.fields == 0 => "XFA-only",
-            Some(_) => "hybrid",
-            None if self.fields > 0 => "AcroForm",
-            None => "no form",
-        }
+        let dynamic = self.xfa.as_ref().is_some_and(|x| x.dynamic);
+        FormClass::of(self.xfa.is_some(), dynamic, self.fields).label()
     }
 }
 

@@ -201,6 +201,8 @@ pub(crate) struct Doc {
     pub(crate) collection: Option<sheaf_doc::portfolio::Collection>,
     pub(crate) attachment_selected: Option<usize>,
     pub(crate) facts_loaded: bool,
+    /// The forms in the document's files (see form_bar.rs).
+    pub(crate) forms: crate::form_bar::Forms,
     /// Optional content groups and which are hidden (see layers_panel.rs).
     pub(crate) layers: Vec<sheaf_doc::layers::Layer>,
     pub(crate) layers_hidden: HashSet<sheaf_doc::layers::LayerId>,
@@ -223,12 +225,13 @@ pub(crate) struct Doc {
 
 /// What an inserted or replacing file brings besides its pages, read on
 /// a background thread: sheaf's own marks (which the edit carries in),
-/// other tools' comments, and its bookmarks' colors and styles.
+/// other tools' comments, its bookmarks' colors and styles, and its form.
 #[derive(Default)]
 pub(crate) struct Incoming {
     pub marks: HashMap<u32, Vec<sheaf_doc::Annot>>,
     pub foreign: Vec<sheaf_doc::file::ForeignAnnot>,
     pub outline_styles: Vec<sheaf_doc::file::OutlineStyle>,
+    pub form: sheaf_doc::forms::FileForm,
 }
 
 impl Incoming {
@@ -238,6 +241,7 @@ impl Incoming {
                 marks: annots.sheaf,
                 foreign: annots.foreign,
                 outline_styles: facts.outline_styles,
+                form: facts.form,
             },
             Err(e) => {
                 log::warn!("reading marks in {}: {e:#}", path.display());
@@ -296,6 +300,9 @@ impl Doc {
         self.foreign_annots
             .extend(incoming.foreign.into_iter().map(|f| (source, f)));
         self.foreign_generation += 1;
+        self.forms
+            .incoming
+            .insert(source, Arc::new(incoming.form.facts));
     }
     pub(crate) fn primary(&self) -> &RenderHandle {
         &self.handles[&self.model.primary()]
@@ -911,6 +918,7 @@ impl DocView {
             collection: None,
             attachment_selected: None,
             facts_loaded: false,
+            forms: Default::default(),
             layers: Vec::new(),
             layers_hidden: HashSet::new(),
             layers_default: HashSet::new(),
@@ -1778,6 +1786,7 @@ impl DocView {
                 doc.attachments = facts.attachments;
                 doc.collection = facts.collection;
                 doc.set_layers(facts.layers);
+                doc.take_form(&facts.form);
                 doc.facts_loaded = true;
                 if doc.collection.is_some() {
                     doc.open_portfolio();
@@ -4460,6 +4469,7 @@ impl Render for DocView {
         use crate::presentation::Presentation;
         let presentation = self.presentation;
         let full = presentation == Presentation::FullScreen;
+        let form_bar = (!full).then(|| self.render_form_bar(cx)).flatten();
         let search_bar = (!full).then(|| self.render_search_bar(cx)).flatten();
         let goto_bar = (!full).then(|| self.render_goto()).flatten();
         let props_bar = (!full).then(|| self.render_mark_properties(cx)).flatten();
@@ -4769,6 +4779,7 @@ impl Render for DocView {
                 theme::RAISED
             })
             .text_color(theme::TEXT_SOFT)
+            .children(form_bar)
             .children(search_bar)
             .children(goto_bar)
             .children(props_bar)

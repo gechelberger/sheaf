@@ -87,6 +87,21 @@ pub struct SearchHit {
     pub groups: Vec<Option<String>>,
 }
 
+/// What kind of form a document has, as PDFium tells (M10 proposal 19).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FormType {
+    /// No `/AcroForm`.
+    #[default]
+    None,
+    /// An AcroForm with no XFA.
+    AcroForm,
+    /// XFA beside the AcroForm (a hybrid form, or a static XFA one).
+    XfaForeground,
+    /// XFA that is the form: `/NeedsRendering`. The pages are a
+    /// placeholder.
+    XfaFull,
+}
+
 /// Progress of a document-wide search, streamed as pages are scanned.
 #[derive(Debug)]
 pub enum SearchEvent {
@@ -100,6 +115,8 @@ pub enum SearchEvent {
 /// Synchronous engine interface. Implementations may block.
 pub trait Renderer {
     fn page_count(&self) -> u32;
+    /// The document's form, as the engine classes it.
+    fn form_type(&self) -> FormType;
     fn page_size(&self, page: PageIndex) -> Result<PageSize>;
     fn page_sizes(&self) -> Result<Vec<PageSize>>;
     /// The bookmark tree, flattened in pre-order.
@@ -355,6 +372,15 @@ pub mod pdfium {
     impl Renderer for PdfiumEngine {
         fn page_count(&self) -> u32 {
             self.doc.pages().len() as u32
+        }
+
+        fn form_type(&self) -> FormType {
+            match self.doc.form().map(|f| f.form_type()) {
+                Some(PdfFormType::Acrobat) => FormType::AcroForm,
+                Some(PdfFormType::XfaForeground) => FormType::XfaForeground,
+                Some(PdfFormType::XfaFull) => FormType::XfaFull,
+                Some(PdfFormType::None) | None => FormType::None,
+            }
         }
 
         fn page_size(&self, page: PageIndex) -> Result<PageSize> {
@@ -888,6 +914,9 @@ pub mod pdfium {
 #[derive(Debug)]
 pub struct DocInfo {
     pub page_count: u32,
+    /// The kind of form it has: the app shows the XFA-only bar from this
+    /// until the field model is read.
+    pub form_type: FormType,
     /// Size of page 0, used as the layout estimate until all sizes arrive.
     pub first_page: PageSize,
     /// Wall time to read, parse, and size the first page.
@@ -1000,6 +1029,7 @@ impl RenderHandle {
                 let info = engine.page_size(PageIndex(0)).map(|first_page| {
                     let info = DocInfo {
                         page_count: engine.page_count(),
+                        form_type: engine.form_type(),
                         first_page,
                         open_time: t.elapsed(),
                     };

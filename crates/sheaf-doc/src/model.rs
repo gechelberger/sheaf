@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use sheaf_core::{DestView, PageSize, Rotation};
 
 use crate::annot::{Annot, AnnotId, AnnotKind};
+use crate::forms::{Field, FieldId, Widget};
 use crate::history::{HistoryPolicy, HistoryStats};
 use crate::text_layer::TextLayer;
 
@@ -153,6 +154,12 @@ pub struct DocState {
     /// (`ForeignAnnot::name`). A save leaves them, and their own replies,
     /// out of the file.
     pub removed_comments: im::HashMap<PageId, im::OrdSet<String>>,
+    /// The form's terminal fields (M10 proposal 8): the primary file's,
+    /// read at open. Inserted files' come in with M10 slice 4.
+    pub fields: im::OrdMap<FieldId, Field>,
+    /// Their widgets, per page, each page's in `/Annots` order: they move
+    /// and go with their page.
+    pub widgets: im::HashMap<PageId, Vector<Widget>>,
 }
 
 impl DocState {
@@ -179,6 +186,10 @@ impl DocState {
 
     pub fn annots_on(&self, page: PageId) -> Option<&Vector<Annot>> {
         self.annots.get(&page)
+    }
+
+    pub fn widgets_on(&self, page: PageId) -> Option<&Vector<Widget>> {
+        self.widgets.get(&page)
     }
 
     pub fn text_layer(&self, page: PageId) -> Option<&Arc<TextLayer>> {
@@ -584,6 +595,9 @@ pub struct Snapshot {
     pub header_footer_dirty: bool,
     /// Pages whose markup differs from what's in the primary file.
     pub annots_dirty: HashSet<PageId>,
+    /// Fields that differ from what's in the primary file (see
+    /// `Document::fields_dirty`).
+    pub fields_dirty: HashSet<FieldId>,
     /// Something in the primary file is gone from the document (see
     /// `Document::removes_content`): only a full rewrite takes it out of
     /// the file.
@@ -624,6 +638,10 @@ pub struct Document {
     baked_header_footer: Option<Arc<crate::stamps::HeaderFooter>>,
     /// Markup as it exists in the primary file on disk.
     saved_annots: im::HashMap<PageId, Vector<Annot>>,
+    /// Fields as they are in the primary file on disk: their values for
+    /// dirty tracking.
+    saved_fields: im::OrdMap<FieldId, Field>,
+    next_field: u64,
 }
 
 impl Document {
@@ -655,6 +673,8 @@ impl Document {
             saved_removed: im::HashMap::new(),
             baked_header_footer: None,
             saved_annots: im::HashMap::new(),
+            saved_fields: im::OrdMap::new(),
+            next_field: 0,
         };
         let pages: Vector<PageRef> = (0..primary.page_count)
             .map(|index| PageRef {
@@ -687,6 +707,8 @@ impl Document {
                     removed_comments: im::HashMap::new(),
                     labels: None,
                     header_footer: None,
+                    fields: im::OrdMap::new(),
+                    widgets: im::HashMap::new(),
                 }),
                 marginal_bytes: 0,
                 job: None,
@@ -811,6 +833,52 @@ impl Document {
         Ok(())
     }
 
+    /// The primary file's form, read after open (`forms::read`): its
+    /// fields keep their ids, and their widgets go to the pages they're on
+    /// by index. Only before any edit, like the other `set_initial_*`.
+    pub fn set_initial_fields(&mut self, form: &crate::forms::FileForm) -> Result<()> {
+        let primary = self.primary;
+        let st = self.opened_state_mut("form fields")?;
+        let ids: Vec<PageId> = st.pages.iter().map(|p| p.id).collect();
+        let fields: im::OrdMap<FieldId, Field> = form
+            .fields
+            .iter()
+            .map(|f| {
+                let mut f = f.clone();
+                f.source = primary;
+                (f.id, f)
+            })
+            .collect();
+        let mut widgets = im::HashMap::new();
+        for (&index, list) in &form.widgets {
+            if let Some(&pid) = ids.get(index as usize) {
+                widgets.insert(pid, list.iter().cloned().collect());
+            }
+        }
+        let next = fields.keys().next_back().map_or(0, |id| id.0 + 1);
+        st.fields = fields.clone();
+        st.widgets = widgets;
+        self.saved_fields = fields;
+        self.next_field = self.next_field.max(next);
+        Ok(())
+    }
+
+    /// Fields that differ from what's in the primary file: changed, added
+    /// or gone.
+    pub fn fields_dirty(&self) -> HashSet<FieldId> {
+        let cur = &self.state().fields;
+        if cur.ptr_eq(&self.saved_fields) {
+            return HashSet::new();
+        }
+        let mut dirty: HashSet<FieldId> = cur
+            .iter()
+            .filter(|(id, f)| self.saved_fields.get(id) != Some(f))
+            .map(|(id, _)| *id)
+            .collect();
+        dirty.extend(self.saved_fields.keys().filter(|id| !cur.contains_key(id)));
+        dirty
+    }
+
     fn annots_dirty_pages(&self) -> HashSet<PageId> {
         let cur = &self.state().annots;
         let mut dirty = HashSet::new();
@@ -906,6 +974,7 @@ impl Document {
             labels_dirty: self.state().labels != self.saved_labels,
             header_footer_dirty: self.header_footer_dirty(),
             annots_dirty: self.annots_dirty_pages(),
+            fields_dirty: self.fields_dirty(),
             removes_content: self.removes_content(),
         }
     }
@@ -998,6 +1067,7 @@ impl Document {
         let st = self.state().clone();
         self.saved_outline = st.outline;
         self.saved_annots = st.annots;
+        self.saved_fields = st.fields;
         self.saved_removed = st.removed_comments;
         self.saved_labels = st.labels;
         self.baked_header_footer = st.header_footer;
@@ -1545,6 +1615,12 @@ impl Document {
         if !old.annots.ptr_eq(&new.annots) {
             bytes += new.annots.values().map(|l| l.len() * 256).sum::<usize>();
         }
+        if !old.widgets.ptr_eq(&new.widgets) {
+            bytes += new.widgets.values().map(|l| l.len() * 256).sum::<usize>();
+        }
+        if !old.fields.ptr_eq(&new.fields) {
+            bytes += new.fields.len() * 256;
+        }
         if !old.text_layers.ptr_eq(&new.text_layers) {
             bytes += new
                 .text_layers
@@ -1715,6 +1791,7 @@ impl Document {
                     st.annots.remove(id);
                     st.text_layers.remove(id);
                     st.removed_comments.remove(id);
+                    st.widgets.remove(id);
                 }
                 let (outline, removed) = cascade_delete(&st.outline, &set);
                 st.outline = outline;
@@ -1820,8 +1897,10 @@ impl Document {
                 let mut pages = st.pages.clone();
                 for id in &ids {
                     let i = *pos.get(id).context("page to replace not found")?;
-                    // The page shows different content now; its OCR is stale.
+                    // The page shows different content now; its OCR is
+                    // stale, and its widgets aren't on it.
                     st.text_layers.remove(id);
+                    st.widgets.remove(id);
                     match replacements.next() {
                         Some(index) => {
                             pages.set(
@@ -1954,6 +2033,8 @@ impl Document {
                                 labels: st.labels.clone(),
                                 header_footer: st.header_footer.clone(),
                                 removed_comments: st.removed_comments.clone(),
+                                fields: st.fields.clone(),
+                                widgets: st.widgets.clone(),
                             };
                             let prev_node = flat[..my_pos]
                                 .iter()
@@ -2526,6 +2607,74 @@ mod tests {
             .unwrap()
             .1
             .id
+    }
+
+    #[test]
+    fn form_fields_follow_their_pages() {
+        let form = crate::forms::read(&crate::forms::fixture::every_kind().pdf);
+        let mut d = Document::new(src(2), &[], Box::new(FixedCount(10)));
+        d.set_initial_fields(&form).unwrap();
+        let (p1, p2) = (id_at(&d, 0), id_at(&d, 1));
+        let st = d.state();
+        assert_eq!(st.fields.len(), 9);
+        assert!(st.fields.values().all(|f| f.source == d.primary()));
+        let on = |d: &Document, p: PageId| d.state().widgets_on(p).map_or(0, |w| w.len());
+        assert_eq!((on(&d, p1), on(&d, p2)), (6, 4));
+        assert!(d.fields_dirty().is_empty() && d.snapshot().fields_dirty.is_empty());
+        // Moving a page carries its widgets; deleting it takes them, and
+        // undo brings them back.
+        d.apply(
+            Edit::MovePages {
+                ids: vec![p2],
+                before: Some(p1),
+            },
+            "move",
+        )
+        .unwrap();
+        assert_eq!(on(&d, p2), 4);
+        assert!(d.set_initial_fields(&form).is_err());
+        d.apply(Edit::DeletePages { ids: vec![p2] }, "delete")
+            .unwrap();
+        assert_eq!((on(&d, p2), d.state().fields.len()), (0, 9));
+        d.undo();
+        assert_eq!(on(&d, p2), 4);
+        // A replaced page shows another page, without them.
+        let other = d.add_source(src(1));
+        d.apply(
+            Edit::ReplacePages {
+                ids: vec![p1],
+                source: other,
+                range: 0..1,
+                annots: Vec::new(),
+            },
+            "replace",
+        )
+        .unwrap();
+        assert_eq!(on(&d, p1), 0);
+        // Nothing changed a field.
+        assert!(d.fields_dirty().is_empty());
+    }
+
+    #[test]
+    fn fields_dirty_compares_with_the_saved_form() {
+        let form = crate::forms::read(&crate::forms::fixture::every_kind().pdf);
+        let mut d = Document::new(src(2), &[], Box::new(FixedCount(10)));
+        d.set_initial_fields(&form).unwrap();
+        // A field changed, one gone and one added, as edits will do.
+        let (changed, gone, added) = (FieldId(0), FieldId(1), FieldId(99));
+        let st = d.opened_state_mut("test").unwrap();
+        let mut f = st.fields.get(&changed).unwrap().clone();
+        f.value = Some(crate::forms::Value::Text("Bo Ng".into()));
+        st.fields.insert(changed, f.clone());
+        st.fields.remove(&gone);
+        f.id = added;
+        st.fields.insert(added, f);
+        let want = HashSet::from([changed, gone, added]);
+        assert_eq!(d.fields_dirty(), want);
+        assert_eq!(d.snapshot().fields_dirty, want);
+        // Saved, they're what's in the file.
+        d.rebase_to_saved(src(2));
+        assert!(d.fields_dirty().is_empty() && d.snapshot().fields_dirty.is_empty());
     }
 
     #[test]

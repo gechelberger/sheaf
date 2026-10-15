@@ -32,3 +32,5 @@ quick-xml = "0.41"
 [dev-dependencies]
 image.workspace = true
 env_logger.workspace = true
+# Random field trees for the form reader (M10 slice 2).
+proptest = { version = "1", default-features = false, features = ["std"] }

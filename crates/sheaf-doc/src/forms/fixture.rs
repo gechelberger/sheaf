@@ -575,6 +575,39 @@ impl Form {
     }
 }
 
+/// Rows down a page, 30 pt apart.
+pub fn row(i: usize) -> Rect {
+    let top = 700.0 - 30.0 * i as f32;
+    [72.0, top - 20.0, 272.0, top]
+}
+
+/// Two pages with one of every kind of field, filled where it can be,
+/// under `form1[0]` as Designer names them: on page 1 `name[0]` (filled),
+/// `empty[0]`, check boxes `on[0]` and `off[0]`, and the radio group
+/// `pick[0]` (its second button on); on page 2 a combo box `state[0]`, a
+/// list box `kind[0]` (both filled), a push button `print[0]` and the
+/// signature field `sig[0]`.
+pub fn every_kind() -> Form {
+    let mut f = Form::new(2);
+    let name = f.text("name[0]", 0, row(0));
+    f.fill(name, "Ann Lee");
+    let empty = f.text("empty[0]", 0, row(1));
+    let on = f.check_box("on[0]", 0, row(2), true);
+    let off = f.check_box("off[0]", 0, row(3), false);
+    let radio = f.radio("pick[0]", 0, &[row(4), row(5)], Some(1));
+    let combo = f.choice("state[0]", 1, row(0), &["CA", "NY"], true);
+    f.fill(combo, "NY");
+    let list = f.choice("kind[0]", 1, row(1), &["W-2", "1099"], false);
+    f.fill(list, "1099");
+    let button = f.push_button("print[0]", 1, row(2), "Print");
+    let sig = f.signature("sig[0]", 1, row(3));
+    f.group(
+        "form1[0]",
+        &[name, empty, on, off, radio, combo, list, button, sig],
+    );
+    f
+}
+
 /// `bytes` with an incremental update appended: `change` edits a copy of
 /// each object in `ids` (and anything it adds) in the new revision.
 pub fn append_revision(bytes: &[u8], ids: &[ObjectId], change: impl FnOnce(&mut Pdf)) -> Vec<u8> {

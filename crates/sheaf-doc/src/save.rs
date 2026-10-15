@@ -93,6 +93,8 @@ fn subset(model: &Snapshot, ids: &[PageId], outline: bool) -> Option<Snapshot> {
     annots.retain(|id, _| keep.contains(id));
     let mut text_layers = model.state.text_layers.clone();
     text_layers.retain(|id, _| keep.contains(id));
+    let mut widgets = model.state.widgets.clone();
+    widgets.retain(|id, _| keep.contains(id));
     Some(Snapshot {
         state: DocState {
             pages,
@@ -114,6 +116,8 @@ fn subset(model: &Snapshot, ids: &[PageId], outline: bool) -> Option<Snapshot> {
                 r.retain(|id, _| keep.contains(id));
                 r
             },
+            fields: model.state.fields.clone(),
+            widgets,
         },
         primary: model.primary,
         sources: model.sources.clone(),
@@ -121,6 +125,7 @@ fn subset(model: &Snapshot, ids: &[PageId], outline: bool) -> Option<Snapshot> {
         labels_dirty: true,
         header_footer_dirty: model.header_footer_dirty,
         annots_dirty: HashSet::new(),
+        fields_dirty: HashSet::new(),
         removes_content: false,
     })
 }

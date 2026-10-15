@@ -8,7 +8,8 @@
 //! - `{"type": "text"}`: type text into whatever has focus.
 //! - `{"click": [x, y]}`, `{"drag": [x1, y1, x2, y2], "shift": true}`: in
 //!   window coordinates (logical px); `"right": true` clicks the right
-//!   button. `{"hover": [x, y]}` only moves.
+//!   button. `{"hover": [x, y]}` only moves. `{"scroll": [x, y, dy]}`
+//!   turns the wheel there by `dy` px (negative goes down).
 //! - `{"drag_page": [x1, y1, x2, y2], "page": 0, "shift": true}`: in page
 //!   points (the page as the file draws it), on page index `page`.
 //!   `{"hover_page": [x, y], "page": 0}` only moves there, as a pointer
@@ -20,7 +21,7 @@
 //!   two minutes) until `<script>.go` contains that name, so a harness can
 //!   take a screenshot first.
 //! - `{"dump": "outline" | "notice" | "selection" | "annots" | "pages" | "panels" |
-//!   "plugins" | "region" | "view" | "layout" | "toolbar" | "focus"}`: print state as `SCRIPT <what>: …` lines.
+//!   "plugins" | "region" | "view" | "layout" | "toolbar" | "focus" | "form"}`: print state as `SCRIPT <what>: …` lines.
 //! - `{"quit": true}`
 //!
 //! File pickers can't be driven; set `SHEAF_SCRIPT_PICK=<path>` and every
@@ -35,7 +36,8 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     App, AppContext as _, AsyncApp, Keystroke, Modifiers, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PlatformInput, WindowHandle, point, px,
+    MouseMoveEvent, MouseUpEvent, PlatformInput, ScrollDelta, ScrollWheelEvent, TouchPhase,
+    WindowHandle, point, px,
 };
 use serde_json::Value;
 
@@ -214,6 +216,22 @@ async fn run_step(
     } else {
         coords("hover")
     };
+    if let Some(c) = coords("scroll").filter(|c| c.len() == 3) {
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.dispatch_event(
+                PlatformInput::ScrollWheel(ScrollWheelEvent {
+                    position: point(px(c[0]), px(c[1])),
+                    delta: ScrollDelta::Pixels(point(px(0.0), px(c[2]))),
+                    modifiers: Modifiers::default(),
+                    touch_phase: TouchPhase::Moved,
+                }),
+                cx,
+            );
+        })
+        .map_err(|e| e.to_string())?;
+        pause(cx, 100).await;
+        return Ok(());
+    }
     if let Some(c) = hover_at {
         cx.update_window(handle.into(), |_, window, cx| {
             window.dispatch_event(
@@ -407,6 +425,21 @@ impl Workspace {
         let st = d.model.state();
         match what {
             "notice" => eprintln!("SCRIPT notice: {:?}", d.notice),
+            "form" => {
+                let widgets: usize = st.widgets.values().map(|w| w.len()).sum();
+                eprintln!(
+                    "SCRIPT form: {} fields, {widgets} widgets; bar {:?}",
+                    st.fields.len(),
+                    d.form_bar()
+                );
+                match &d.forms.primary {
+                    Some(facts) => eprintln!("SCRIPT form: {facts}"),
+                    None => eprintln!("SCRIPT form: not read yet"),
+                }
+                for (source, facts) in &d.forms.incoming {
+                    eprintln!("SCRIPT form: source {} {facts}", source.0);
+                }
+            }
             "selection" => eprintln!(
                 "SCRIPT selection: {:?}",
                 view.selected_text().map(|(_, text, _)| text)

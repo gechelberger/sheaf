@@ -298,6 +298,8 @@ pub struct FileFacts {
     /// Each bookmark's color and style, in pre-order; empty when none has
     /// either (see [`outline_styles`]).
     pub outline_styles: Vec<OutlineStyle>,
+    /// The form: its fields and widgets, and what sheaf shows about it.
+    pub form: crate::forms::FileForm,
 }
 
 /// A bookmark's `/C` and `/F`, which PDFium's outline doesn't carry.
@@ -396,6 +398,7 @@ pub fn facts_in(pdf: &lopdf::Document) -> FileFacts {
         collection: crate::portfolio::collection(pdf),
         layers: crate::layers::layers_in(pdf),
         outline_styles: outline_styles(pdf),
+        form: crate::forms::read(pdf),
     }
 }
 
@@ -541,9 +544,15 @@ pub fn read_annots(path: impl AsRef<Path>, password: Option<&str>) -> Result<Ann
 
 /// Decode a PDF text string: UTF-16BE with BOM, else PDFDoc/Latin-1.
 pub fn pdf_text(o: &lopdf::Object) -> String {
-    let Ok(bytes) = o.as_str() else {
-        return String::new();
-    };
+    match o.as_str() {
+        Ok(bytes) => pdf_text_bytes(bytes),
+        Err(_) => String::new(),
+    }
+}
+
+/// [`pdf_text`] for a string's bytes (or a stream's, which hold text the
+/// same way).
+pub fn pdf_text_bytes(bytes: &[u8]) -> String {
     if bytes.starts_with(&[0xFE, 0xFF]) {
         let units: Vec<u16> = bytes[2..]
             .chunks(2)

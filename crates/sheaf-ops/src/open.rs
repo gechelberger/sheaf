@@ -9,8 +9,8 @@ use sheaf_doc::{Document, FlatOutlineItem, SourceInfo};
 use sheaf_render::Renderer;
 use sheaf_render::pdfium::PdfiumEngine;
 
-/// `path` as a document: its pages, bookmarks, page labels and sheaf's
-/// own marks, as the app shows them on open.
+/// `path` as a document: its pages, bookmarks, page labels, sheaf's own
+/// marks and the form's fields, as the app shows them on open.
 pub fn open(path: &Path, password: Option<&str>) -> Result<Document> {
     Ok(open_with_foreign(path, password)?.0)
 }
@@ -31,6 +31,9 @@ pub fn open_with_foreign(
     }
     if let Some((hf, scope)) = facts.header_footer {
         doc.set_initial_header_footer(hf, scope)?;
+    }
+    if !facts.form.fields.is_empty() || !facts.form.widgets.is_empty() {
+        doc.set_initial_fields(&facts.form)?;
     }
     Ok((doc, annots.foreign))
 }
