@@ -243,6 +243,20 @@ pub fn convert(
         "FileAttachment" if opts.files => attachment(pdf, dict, rect).ok_or_else(unsupported)?,
         _ => return Err(unsupported()),
     };
+    // A dimension with a scale is a measurement (decision 9). Its value
+    // leads its text, as Acrobat writes it; sheaf draws that itself.
+    let mut contents = text(b"Contents");
+    let kind = match (measured(dict), scale(pdf, dict), kind) {
+        (Some(what), Some(scale), AnnotKind::Line { a, b, .. }) => {
+            measure(what, vec![a, b], scale, &mut contents)
+        }
+        (
+            Some(what),
+            Some(scale),
+            AnnotKind::Polyline { points } | AnnotKind::Polygon { points },
+        ) => measure(what, points, scale, &mut contents),
+        (_, _, kind) => kind,
+    };
     let fillable = kind.fillable();
     Ok(Annot {
         id: AnnotId(0),
@@ -256,7 +270,7 @@ pub fn convert(
             .clamp(0.0, 1.0),
         stroke,
         author: text(b"T"),
-        contents: text(b"Contents"),
+        contents,
         modified: text(b"M"),
         created: text(b"CreationDate"),
         fill: color_of(pdf, dict, b"IC").filter(|_| fillable),
@@ -271,6 +285,45 @@ pub fn convert(
             .is_some_and(|s| s == b"C"),
         name: thread_name(dict),
     })
+}
+
+/// What a dimension annotation measures, by its `/IT`.
+fn measured(dict: &Dictionary) -> Option<crate::measure::Measured> {
+    use crate::measure::Measured;
+    match dict.get(b"IT").ok()?.as_name().ok()? {
+        b"LineDimension" => Some(Measured::Distance),
+        b"PolyLineDimension" => Some(Measured::Perimeter),
+        b"PolygonDimension" => Some(Measured::Area),
+        _ => None,
+    }
+}
+
+/// Its `/Measure` as a scale.
+fn scale(pdf: &Pdf, dict: &Dictionary) -> Option<crate::measure::Scale> {
+    let (_, m) = pdf.dereference(dict.get(b"Measure").ok()?).ok()?;
+    crate::measure::scale_of(pdf, m.as_dict().ok()?)
+}
+
+/// A measurement of `points`; the value its text starts with comes off,
+/// since sheaf draws and writes it from the points.
+fn measure(
+    what: crate::measure::Measured,
+    points: Vec<Pt>,
+    scale: crate::measure::Scale,
+    contents: &mut String,
+) -> AnnotKind {
+    let first = contents.lines().next().unwrap_or_default().trim();
+    if !first.is_empty() && first.ends_with(scale.unit.as_str()) {
+        *contents = contents
+            .split_once('\n')
+            .map(|(_, rest)| rest.trim_start().to_string())
+            .unwrap_or_default();
+    }
+    AnnotKind::Measure {
+        what,
+        points,
+        scale: Box::new(scale),
+    }
 }
 
 /// A stamp: its appearance as one of ours, in the cache, when it has one

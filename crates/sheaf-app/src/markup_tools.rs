@@ -47,6 +47,12 @@ pub enum Tool {
     AttachFile,
     /// PDFlyer connector: two clicks place a linked pair of markers.
     Connector,
+    /// Measure between two points (a drag).
+    Distance,
+    /// Measure along a path (corner by corner).
+    Perimeter,
+    /// Measure inside a shape (corner by corner).
+    Area,
 }
 
 impl Tool {
@@ -73,6 +79,9 @@ impl Tool {
             Tool::Callout => "Callout",
             Tool::AttachFile => "Attach File",
             Tool::Connector => "Connector",
+            Tool::Distance => "Distance",
+            Tool::Perimeter => "Perimeter",
+            Tool::Area => "Area",
         }
     }
 
@@ -120,10 +129,13 @@ impl Tool {
             Tool::Callout => Box::new(ToolCallout),
             Tool::AttachFile => Box::new(ToolAttachFile),
             Tool::Connector => Box::new(ToolConnector),
+            Tool::Distance => Box::new(ToolDistance),
+            Tool::Perimeter => Box::new(ToolPerimeter),
+            Tool::Area => Box::new(ToolArea),
         }
     }
 
-    pub const ALL: [Tool; 21] = [
+    pub const ALL: [Tool; 24] = [
         Tool::Select,
         Tool::Note,
         Tool::Highlight,
@@ -145,6 +157,9 @@ impl Tool {
         Tool::Stamp,
         Tool::AttachFile,
         Tool::Connector,
+        Tool::Distance,
+        Tool::Perimeter,
+        Tool::Area,
     ];
 }
 
@@ -198,7 +213,9 @@ pub fn handle_spots(a: &Annot) -> Vec<(Spot, Pt)> {
             _ => Vec::new(),
         },
         Handles::Vertices => match &a.kind {
-            AnnotKind::Polygon { points } | AnnotKind::Polyline { points } => points
+            AnnotKind::Polygon { points }
+            | AnnotKind::Polyline { points }
+            | AnnotKind::Measure { points, .. } => points
                 .iter()
                 .enumerate()
                 .map(|(i, p)| (Spot::Vertex(i), *p))
@@ -304,7 +321,9 @@ pub fn reshaped(r: &Resize, p: Pt, shift: bool) -> Annot {
             };
         }
         Spot::Vertex(i) => match &mut out.kind {
-            AnnotKind::Polygon { points } | AnnotKind::Polyline { points } => {
+            AnnotKind::Polygon { points }
+            | AnnotKind::Polyline { points }
+            | AnnotKind::Measure { points, .. } => {
                 if let Some(v) = points.get_mut(i) {
                     *v = p;
                 }
@@ -544,9 +563,21 @@ impl DocView {
             return;
         };
         let mark = self.mark_at(page_id, p, tolerance);
+        // A measurement's points snap to the grid and guides, or (Shift)
+        // keep to 45° from the last corner.
+        let p = if self.tool.measures().is_some() {
+            let from = match &self.state {
+                State::Ready(doc) => doc.poly.as_ref().and_then(|d| d.points.last().copied()),
+                _ => None,
+            };
+            self.measure_point(page, p, from, ev.modifiers.shift, k)
+        } else {
+            p
+        };
         // Shift+click on a mark adds it to the selection (or takes it out);
-        // Shift+drag elsewhere selects a region, whatever the tool.
-        if ev.modifiers.shift {
+        // Shift+drag elsewhere selects a region, whatever the tool (but a
+        // Measure tool, where Shift keeps to 45°).
+        if ev.modifiers.shift && self.tool.measures().is_none() {
             if self.tool == Tool::Select
                 && let Some(a) = &mark
                 && let State::Ready(doc) = &mut self.state
@@ -721,7 +752,7 @@ impl DocView {
             }
             Tool::Stamp => self.place_stamp(page_id, p, cx),
             Tool::AttachFile => self.attach_file_at(page_id, p, cx),
-            Tool::Polygon | Tool::Polyline | Tool::Cloud => {
+            Tool::Polygon | Tool::Polyline | Tool::Cloud | Tool::Perimeter | Tool::Area => {
                 self.add_vertex(page, page_id, p, ev.click_count, cx)
             }
             Tool::Connector => self.place_connector(page_id, p, cx),
@@ -761,7 +792,7 @@ impl DocView {
             if let Some(page_id) = page_id {
                 self.hover_page(page_id, p, 4.0 / k.max(0.01), cx);
             }
-            self.shape_hover(page, p, cx);
+            self.shape_hover(page, p, ev.modifiers.shift, k, cx);
             return;
         }
         if ev.pressed_button != Some(MouseButton::Left) {
@@ -785,6 +816,16 @@ impl DocView {
         drag.shift = ev.modifiers.shift;
         if tool == Tool::Ink {
             drag.path.push(p);
+        }
+        if tool == Tool::Distance && drag.moving.is_empty() && drag.resize.is_none() {
+            let (start, shift) = (drag.start, drag.shift);
+            let end = self.measure_point(page, p, Some(start), shift, k);
+            if let State::Ready(doc) = &mut self.state
+                && let Some(drag) = &mut doc.drag
+            {
+                drag.current = end;
+            }
+            self.measure_notice(sheaf_doc::measure::Measured::Distance, &[start, end], cx);
         }
         cx.notify();
     }
@@ -881,7 +922,8 @@ impl DocView {
         match tool {
             Tool::Select | Tool::TextEdit => {}
             Tool::Callout => self.place_callout(page_id, a, b, cx),
-            Tool::Polygon | Tool::Polyline | Tool::Cloud => {}
+            Tool::Distance => self.finish_distance(page_id, a, b, cx),
+            Tool::Polygon | Tool::Polyline | Tool::Cloud | Tool::Perimeter | Tool::Area => {}
             Tool::Highlight | Tool::Underline | Tool::StrikeOut | Tool::Squiggly => {
                 if too_small {
                     return;
@@ -1254,7 +1296,35 @@ impl DocView {
                 })
             }
             Tool::Note | Tool::Tick | Tool::Stamp | Tool::AttachFile | Tool::Connector => None,
-            Tool::Polygon | Tool::Polyline | Tool::Cloud => None,
+            Tool::Polygon | Tool::Polyline | Tool::Cloud | Tool::Perimeter | Tool::Area => None,
+            Tool::Distance => {
+                let m = Annot {
+                    id: sheaf_doc::AnnotId(0),
+                    kind: AnnotKind::Measure {
+                        what: sheaf_doc::measure::Measured::Distance,
+                        points: vec![a, b],
+                        scale: Box::new(doc.measure_scale.clone()),
+                    },
+                    color,
+                    opacity: 1.0,
+                    stroke: 1.0,
+                    author: String::new(),
+                    contents: String::new(),
+                    modified: String::new(),
+                    created: String::new(),
+                    fill: None,
+                    dashed: false,
+                    cloudy: false,
+                    name: String::new(),
+                };
+                Some(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .children(crate::docview::annot_elements(&m, src, rot, k))
+                        .into_any_element(),
+                )
+            }
             Tool::Callout => {
                 let (pa, pb) = (rotate_pt(a, src, rot), rotate_pt(b, src, rot));
                 Some(stroke_canvas(

@@ -31,6 +31,10 @@ an image element does not inherit the parent element's color.
 | [polyline](polyline/icon.svg) | Polyline | `ToolPolyline` |
 | [cloud](cloud/icon.svg) | Cloud | `ToolCloud` |
 | [callout](callout/icon.svg) | Callout | `ToolCallout` |
+| [distance](distance/icon.svg) | Distance tool | `ToolDistance` |
+| [perimeter](perimeter/icon.svg) | Perimeter tool | `ToolPerimeter` |
+| [area](area/icon.svg) | Area tool | `ToolArea` |
+| [calibrate](calibrate/icon.svg) | Calibrate scale | `CalibrateScale` |
 | [pencil](pencil/icon.svg) | Pencil | `ToolInk` |
 | [tick](tick/icon.svg) | Tickmark | `ToolTick` |
 | [stamp](stamp/icon.svg) | Stamp | `ToolStamp` |

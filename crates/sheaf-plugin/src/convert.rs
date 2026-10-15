@@ -205,7 +205,8 @@ pub fn annot_to_wit(a: &Annot) -> Option<w::Annot> {
         | AnnotKind::Polygon { .. }
         | AnnotKind::Polyline { .. }
         | AnnotKind::Callout { .. }
-        | AnnotKind::FileAttachment { .. } => return None,
+        | AnnotKind::FileAttachment { .. }
+        | AnnotKind::Measure { .. } => return None,
     };
     Some(w::Annot {
         id: a.id.0,

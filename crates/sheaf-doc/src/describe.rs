@@ -148,6 +148,7 @@ fn noun(kind: &AnnotKind) -> String {
         AnnotKind::Polyline { .. } => "a polyline".into(),
         AnnotKind::Callout { .. } => "a callout".into(),
         AnnotKind::FileAttachment { name, .. } => format!("attachment {name}"),
+        AnnotKind::Measure { what, .. } => format!("a {} measurement", what.label().to_lowercase()),
         AnnotKind::Reply { .. } => "a reply".into(),
         AnnotKind::Status { .. } => "a status".into(),
     }

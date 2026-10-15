@@ -1,10 +1,11 @@
-//! Drawing polygons, polylines and clouds a vertex at a time, and placing
+//! Drawing polygons, polylines and clouds a vertex at a time (and the
+//! Perimeter and Area measurements, see `measure_tools`), and placing
 //! callouts. Click each vertex; double-click or Enter finishes, Backspace
 //! takes the last one off, Esc drops the shape. The Cloud tool (Q) draws a
 //! polygon with a cloudy border. A callout is a press where it points and
 //! a drag to where its text goes.
 
-use gpui::{AnyElement, Context};
+use gpui::{AnyElement, Context, prelude::*};
 use sheaf_core::{PageSize, Rotation};
 use sheaf_doc::{AnnotKind, Box2, PageId, Pt};
 
@@ -18,6 +19,8 @@ pub struct PolyDraft {
     pub points: Vec<Pt>,
     /// Where the pointer is, for the line to it.
     pub hover: Option<Pt>,
+    /// A measurement being drawn: what it measures.
+    pub measure: Option<sheaf_doc::measure::Measured>,
 }
 
 /// A callout's text box, from its size.
@@ -41,12 +44,14 @@ impl DocView {
             self.finish_shape(cx);
             return;
         }
+        let measure = self.tool.measures();
         // A click on another page starts over there.
         let draft = doc.poly.get_or_insert(PolyDraft {
             page,
             page_id,
             points: Vec::new(),
             hover: None,
+            measure,
         });
         if draft.page_id != page_id {
             *draft = PolyDraft {
@@ -54,6 +59,7 @@ impl DocView {
                 page_id,
                 points: Vec::new(),
                 hover: None,
+                measure,
             };
         }
         draft.points.push(p);
@@ -66,15 +72,38 @@ impl DocView {
         cx.notify();
     }
 
-    /// The pointer moved over a page with no button down.
-    pub(crate) fn shape_hover(&mut self, page: usize, p: Pt, cx: &mut Context<Self>) {
+    /// The pointer moved over a page with no button down: the line to it
+    /// follows, and a measurement shows what it would come to.
+    pub(crate) fn shape_hover(
+        &mut self,
+        page: usize,
+        p: Pt,
+        shift: bool,
+        k: f32,
+        cx: &mut Context<Self>,
+    ) {
+        let (last, measure) = match &self.state {
+            State::Ready(doc) => match &doc.poly {
+                Some(d) if d.page == page => (d.points.last().copied(), d.measure),
+                _ => return,
+            },
+            _ => return,
+        };
+        let p = match measure {
+            Some(_) => self.measure_point(page, p, last, shift, k),
+            None => p,
+        };
+        let mut so_far = Vec::new();
         if let State::Ready(doc) = &mut self.state
             && let Some(d) = &mut doc.poly
-            && d.page == page
         {
             d.hover = Some(p);
-            cx.notify();
+            so_far = d.points.iter().copied().chain([p]).collect();
         }
+        if let Some(what) = measure {
+            self.measure_notice(what, &so_far, cx);
+        }
+        cx.notify();
     }
 
     /// Backspace: the last vertex off. False when no shape is being drawn.
@@ -128,16 +157,21 @@ impl DocView {
                 points.push(p);
             }
         }
-        let closed = tool != Tool::Polyline;
+        let closed = !matches!(tool, Tool::Polyline | Tool::Perimeter);
         if points.len() < if closed { 3 } else { 2 } {
             doc.notice = Some("Too few corners for a shape".into());
             cx.notify();
             return true;
         }
-        let kind = if closed {
-            AnnotKind::Polygon { points }
-        } else {
-            AnnotKind::Polyline { points }
+        let scale = Box::new(doc.measure_scale.clone());
+        let kind = match (d.measure, closed) {
+            (Some(what), _) => AnnotKind::Measure {
+                what,
+                points,
+                scale,
+            },
+            (None, true) => AnnotKind::Polygon { points },
+            (None, false) => AnnotKind::Polyline { points },
         };
         let mut a = self.new_annot(kind, self.tool_color, cx);
         a.cloudy = tool == Tool::Cloud;
@@ -229,6 +263,40 @@ pub(crate) fn draft_preview(
     let d = doc.poly.as_ref()?;
     if d.page != page {
         return None;
+    }
+    if let Some(what) = d.measure {
+        let points: Vec<Pt> = d.points.iter().chain(d.hover.iter()).copied().collect();
+        let mut m = sheaf_doc::Annot {
+            id: sheaf_doc::AnnotId(0),
+            kind: AnnotKind::Measure {
+                what,
+                points,
+                scale: Box::new(doc.measure_scale.clone()),
+            },
+            color: [
+                (color.r * 255.0) as u8,
+                (color.g * 255.0) as u8,
+                (color.b * 255.0) as u8,
+            ],
+            opacity: 1.0,
+            stroke: 1.0,
+            author: String::new(),
+            contents: String::new(),
+            modified: String::new(),
+            created: String::new(),
+            fill: None,
+            dashed: false,
+            cloudy: false,
+            name: String::new(),
+        };
+        m.dashed = true;
+        return Some(
+            gpui::div()
+                .absolute()
+                .inset_0()
+                .children(crate::docview::annot_elements(&m, src, rot, k))
+                .into_any_element(),
+        );
     }
     let pts: Vec<(f32, f32)> = d
         .points

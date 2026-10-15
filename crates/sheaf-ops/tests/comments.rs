@@ -304,3 +304,40 @@ fn the_csv_numbers_replies_under_their_comment() {
         ]
     );
 }
+
+#[test]
+fn a_measurement_shows_its_value_and_lists_it() {
+    use sheaf_doc::measure::{Measured, Scale};
+    let dir = scratch("measure");
+    let (mut doc, foreign) = opened(&dir);
+    let p0 = doc.state().pages[0].id;
+    let feet = Scale {
+        page: 1.0,
+        page_unit: "in".into(),
+        real: 10.0,
+        unit: "ft".into(),
+        precision: 2,
+    };
+    let m = mark(
+        AnnotKind::Measure {
+            what: Measured::Distance,
+            points: vec![Pt { x: 100.0, y: 300.0 }, Pt { x: 244.0, y: 300.0 }],
+            scale: Box::new(feet),
+        },
+        [0, 0, 255],
+        "",
+    );
+    doc.apply(Edit::AnnotAdd { page: p0, annot: m }, "measure")
+        .unwrap();
+    // Two inches at 1 in = 10 ft: drawn on the page with its value.
+    let printed = sheaf_doc::save::print_pdf(&doc.snapshot(), &[p0], true).unwrap();
+    let text = engine(printed).page_text(PageIndex(0)).unwrap();
+    assert!(text.contains("20.00 ft"), "{text}");
+    let listing = comments::list(doc.state(), &foreign, &CommentFilter::default(), "");
+    let out = comments::csv(
+        &listing,
+        None,
+        &[Column::Type, Column::Measurement, Column::Scale],
+    );
+    assert!(out.contains("Distance,20.00 ft,1 in = 10 ft"), "{out}");
+}

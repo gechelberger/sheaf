@@ -307,6 +307,16 @@ fn builtin_menus() -> Vec<(&'static str, Vec<Item>)> {
                 item("Cloud", ToolCloud),
                 item("Callout", ToolCallout),
                 item("&Pencil", ToolInk),
+                Item::Sub(
+                    "Measure",
+                    vec![
+                        item("&Distance", ToolDistance),
+                        item("&Perimeter", ToolPerimeter),
+                        item("&Area", ToolArea),
+                        sep(),
+                        item("&Calibrate Scale", CalibrateScale),
+                    ],
+                ),
                 sep(),
                 item("Tic&kmark", ToolTick),
                 item("Sta&mp", ToolStamp),

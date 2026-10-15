@@ -546,6 +546,26 @@ pub fn info(id: &str) -> Option<Info> {
             "Press where it points and drag to where its text goes, then type.",
             &["leader", "text box", "label"],
         ),
+        "tools::ToolDistance" => (
+            "distance",
+            "Measure between two points: drag from one to the other. Shift keeps it to 45°; the scale is in the bar under the toolbar.",
+            &["measure", "length", "ruler", "dimension", "scale"],
+        ),
+        "tools::ToolPerimeter" => (
+            "perimeter",
+            "Measure along a path: click each point; double-click or Enter finishes.",
+            &["measure", "length", "path", "dimension"],
+        ),
+        "tools::ToolArea" => (
+            "area",
+            "Measure the area inside a shape: click each corner; double-click or Enter finishes.",
+            &["measure", "square feet", "polygon", "dimension"],
+        ),
+        "tools::CalibrateScale" => (
+            "calibrate",
+            "Set the measuring scale from the page: draw a line along something of known length, then type how long it really is.",
+            &["scale", "measure", "set scale", "units"],
+        ),
         "tools::CycleDrawingTools" => (
             "rectangle",
             "Switch to the next drawing tool: rectangle, ellipse, line, arrow, polyline, polygon, cloud, pencil.",

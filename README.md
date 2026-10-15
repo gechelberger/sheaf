@@ -238,7 +238,7 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 | Edit other tools' comments | ✅ Another tool's note, highlight, shape, line, ink, text box, callout, text edit or stamp becomes a sheaf mark when it's edited: drag it, double-click it (or F2 in the panel) to edit its text, or right-click > Make Editable in the Comments panel. It keeps its name, so its replies stay with it, and a save puts it where it was |
 | Flatten annotations | ✅ File > Export Flattened Copy… (links and form fields kept) |
 | Export Clean Copy (strip annots, notes, tapes, stamps, attachments) | ✅ File > Export Clean Copy; keeps links, form fields, bookmarks |
-| Measurement tools (distance, area, perimeter, scale) | 📋 |
+| Measurement tools (distance, area, perimeter, scale) | ✅ Tools > Measure: Distance (Ctrl+Shift+D, a drag), Perimeter (Ctrl+Shift+P) and Area (Ctrl+Shift+A, corner by corner, as Polyline and Polygon). The scale bar takes a scale as typed ("1 in = 10 ft", "1/8 in = 1 ft", "1:100") and the decimals; Calibrate (Ctrl+Shift+C) is a line of known length, then its real length. The status bar shows the measurement while drawing; Shift keeps to 45°, and points snap to the grid and guides when they show. Written as Acrobat's dimension annotations (`/Measure`), with the value on the mark; the comment CSV has Measurement and Scale columns |
 
 ### Content editing
 | Feature | Status |

@@ -35,6 +35,7 @@ mod keymap;
 mod labels_dialog;
 mod layers_panel;
 mod markup_tools;
+mod measure_tools;
 mod menus;
 mod ocr_dialog;
 mod ocr_run;
@@ -170,6 +171,10 @@ actions!(
         ToolCloud,
         ToolCallout,
         ToolAttachFile,
+        ToolDistance,
+        ToolPerimeter,
+        ToolArea,
+        CalibrateScale,
         CycleStampTools,
         CycleDrawingTools,
         CycleTextTools,
@@ -524,6 +529,10 @@ fn main() {
             KeyBinding::new("j", ToolStamp, doc_keys),
             KeyBinding::new("shift-j", CycleStampTools, doc_keys),
             KeyBinding::new("q", ToolCloud, doc_keys),
+            KeyBinding::new("ctrl-shift-d", ToolDistance, doc_keys),
+            KeyBinding::new("ctrl-shift-p", ToolPerimeter, doc_keys),
+            KeyBinding::new("ctrl-shift-a", ToolArea, doc_keys),
+            KeyBinding::new("ctrl-shift-c", CalibrateScale, doc_keys),
             KeyBinding::new("x", ToolFreeText, doc_keys),
             KeyBinding::new("shift-x", CycleTextTools, doc_keys),
             KeyBinding::new("shift-d", CycleDrawingTools, doc_keys),

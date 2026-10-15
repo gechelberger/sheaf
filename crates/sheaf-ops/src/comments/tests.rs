@@ -85,6 +85,7 @@ fn comment(i: usize, name: &str, parent: Option<&str>, date: &str) -> Comment {
             w: 10.0,
             h: 10.0,
         },
+        measurement: None,
     }
 }
 

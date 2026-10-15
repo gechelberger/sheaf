@@ -225,6 +225,15 @@ pub enum AnnotKind {
         name: String,
         size: u64,
     },
+    /// A measurement (Acrobat's Measure tools): what `points` come to at
+    /// `scale` (see [`crate::measure`]); a distance has two. Its label is
+    /// drawn with it and kept in `contents`.
+    Measure {
+        what: crate::measure::Measured,
+        points: Vec<Pt>,
+        /// Boxed, so every other mark isn't the bigger for it.
+        scale: Box<crate::measure::Scale>,
+    },
 }
 
 /// The icons an attachment can have, as PDF names them.
@@ -373,6 +382,15 @@ impl AnnotKind {
             AnnotKind::Polyline { points } => AnnotKind::Polyline {
                 points: points.iter().map(mp).collect(),
             },
+            AnnotKind::Measure {
+                what,
+                points,
+                scale,
+            } => AnnotKind::Measure {
+                what: *what,
+                points: points.iter().map(mp).collect(),
+                scale: scale.clone(),
+            },
             AnnotKind::Callout {
                 rect,
                 knee,
@@ -499,7 +517,9 @@ impl AnnotKind {
     pub fn handles(&self) -> Handles {
         match self {
             AnnotKind::Line { .. } => Handles::Ends,
-            AnnotKind::Polygon { .. } | AnnotKind::Polyline { .. } => Handles::Vertices,
+            AnnotKind::Polygon { .. } | AnnotKind::Polyline { .. } | AnnotKind::Measure { .. } => {
+                Handles::Vertices
+            }
             AnnotKind::Callout { .. } => Handles::Callout,
             AnnotKind::FreeText { .. }
             | AnnotKind::Square { .. }
@@ -548,6 +568,7 @@ impl AnnotKind {
                 | AnnotKind::Polygon { .. }
                 | AnnotKind::Polyline { .. }
                 | AnnotKind::Callout { .. }
+                | AnnotKind::Measure { .. }
         )
     }
 
@@ -907,6 +928,22 @@ impl Annot {
             AnnotKind::Callout {
                 rect, knee, point, ..
             } => union(&[*rect, Box2::from_corners(*knee, *point)]),
+            AnnotKind::Measure {
+                what,
+                points,
+                scale,
+            } => union(
+                &points
+                    .iter()
+                    .map(|p| Box2 {
+                        x: p.x,
+                        y: p.y,
+                        w: 0.0,
+                        h: 0.0,
+                    })
+                    .chain(measure_label_box(*what, points, scale))
+                    .collect::<Vec<_>>(),
+            ),
             AnnotKind::Note { pos } | AnnotKind::FileAttachment { pos, .. } => Box2 {
                 x: pos.x,
                 y: pos.y,
@@ -983,6 +1020,18 @@ impl Annot {
             }
             AnnotKind::Line { a, b, .. } => near(*a, *b),
             AnnotKind::Polyline { points } => points.windows(2).any(|w| near(w[0], w[1])),
+            // On a line, or its label.
+            AnnotKind::Measure {
+                what,
+                points,
+                scale,
+            } => {
+                let n = points.len();
+                let closed = *what == crate::measure::Measured::Area && n > 2;
+                points.windows(2).any(|w| near(w[0], w[1]))
+                    || (closed && near(points[n - 1], points[0]))
+                    || measure_label_box(*what, points, scale).is_some_and(|b| b.contains(p))
+            }
             // On an edge, or inside when filled.
             AnnotKind::Polygon { points } => {
                 let n = points.len();
@@ -1201,6 +1250,43 @@ pub fn caret_box(x: f32, bottom: f32, h: f32) -> Box2 {
 }
 
 pub const NOTE_SIZE: f32 = 20.0;
+
+/// A measurement's label size, in points.
+pub const MEASURE_TEXT: f32 = 9.0;
+
+/// Where a measurement's label is drawn: over a distance's middle, after a
+/// path's end, on an area's centre.
+pub fn measure_label_box(
+    what: crate::measure::Measured,
+    points: &[Pt],
+    scale: &crate::measure::Scale,
+) -> Option<Box2> {
+    use crate::measure::Measured;
+    let at = crate::measure::label_at(what, points)?;
+    let text = crate::measure::label(what, points, scale);
+    let w = helv_text_width(&text, MEASURE_TEXT, false) + 4.0;
+    let h = MEASURE_TEXT + 3.0;
+    Some(match what {
+        Measured::Distance => Box2 {
+            x: at.x - w / 2.0,
+            y: at.y - h - 2.0,
+            w,
+            h,
+        },
+        Measured::Perimeter => Box2 {
+            x: at.x + 4.0,
+            y: at.y - h / 2.0,
+            w,
+            h,
+        },
+        Measured::Area => Box2 {
+            x: at.x - w / 2.0,
+            y: at.y - h / 2.0,
+            w,
+            h,
+        },
+    })
+}
 /// Diameter of a connector marker, in points.
 pub const CONNECTOR_SIZE: f32 = 22.0;
 /// Tape layout: inner padding (pt), line height (em), operator column (em).
@@ -1849,6 +1935,79 @@ fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
                 }
             }
             content.push_str(if filled { " B" } else { " S" });
+        }
+        AnnotKind::Measure {
+            what,
+            points,
+            scale,
+        } => {
+            use crate::measure::Measured;
+            let subtype: &[u8] = match what {
+                Measured::Distance => b"Line",
+                Measured::Perimeter => b"PolyLine",
+                Measured::Area => b"Polygon",
+            };
+            dict.set("Subtype", Object::Name(subtype.to_vec()));
+            dict.set("IT", Object::Name(what.intent().to_vec()));
+            dict.set("C", color_arr);
+            dict.set("BS", border_style(a));
+            dict.set("Measure", crate::measure::measure_dict(scale));
+            let label = crate::measure::label(*what, points, scale);
+            // The value first, as Acrobat keeps it; then any note.
+            dict.set(
+                "Contents",
+                pdf_text_string(&if a.contents.is_empty() {
+                    label.clone()
+                } else {
+                    format!("{label}\n{}", a.contents)
+                }),
+            );
+            let users: Vec<Pt> = points.iter().map(|p| up(*p)).collect();
+            let coords = |pts: &[Pt]| {
+                Object::Array(
+                    pts.iter()
+                        .flat_map(|u| [Object::Real(u.x), Object::Real(u.y)])
+                        .collect(),
+                )
+            };
+            content.push_str(&stroke_ops(a));
+            match (what, users.as_slice()) {
+                (Measured::Distance, [ua, .., ub]) => {
+                    dict.set("L", coords(&[*ua, *ub]));
+                    let arrow = || Object::Name(b"OpenArrow".to_vec());
+                    dict.set("LE", Object::Array(vec![arrow(), arrow()]));
+                    content.push_str(&format!(
+                        " {:.2} {:.2} m {:.2} {:.2} l S",
+                        ua.x, ua.y, ub.x, ub.y
+                    ));
+                    content.push_str(&arrowhead(*ua, *ub, a.stroke));
+                    content.push_str(&arrowhead(*ub, *ua, a.stroke));
+                }
+                (_, pts) if !pts.is_empty() => {
+                    dict.set("Vertices", coords(pts));
+                    for (i, u) in pts.iter().enumerate() {
+                        let op = if i == 0 { "m" } else { "l" };
+                        content.push_str(&format!(" {:.2} {:.2} {op}", u.x, u.y));
+                    }
+                    if *what == Measured::Area {
+                        content.push_str(" h");
+                    }
+                    content.push_str(" S");
+                }
+                _ => {}
+            }
+            if let Some(b) = measure_label_box(*what, points, scale) {
+                let origin = Pt {
+                    x: b.x + 2.0,
+                    y: b.bottom() - 3.0,
+                };
+                content.push_str(&format!(
+                    " BT {HELV} {MEASURE_TEXT} Tf {} {} {} Tj ET",
+                    color_ops(c, true),
+                    text_matrix(origin),
+                    content_literal(&label)
+                ));
+            }
         }
         AnnotKind::Callout {
             rect,

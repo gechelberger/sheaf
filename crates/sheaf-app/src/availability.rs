@@ -331,6 +331,10 @@ pub fn builtin(id: &str) -> Builtin {
         "tools::ToolPolyline" => (DOC, None, Some(|f| f.tool == Some(Tool::Polyline))),
         "tools::ToolCloud" => (DOC, None, Some(|f| f.tool == Some(Tool::Cloud))),
         "tools::ToolCallout" => (DOC, None, Some(|f| f.tool == Some(Tool::Callout))),
+        "tools::ToolDistance" => (DOC, None, Some(|f| f.tool == Some(Tool::Distance))),
+        "tools::ToolPerimeter" => (DOC, None, Some(|f| f.tool == Some(Tool::Perimeter))),
+        "tools::ToolArea" => (DOC, None, Some(|f| f.tool == Some(Tool::Area))),
+        "tools::CalibrateScale" => (DOC, None, None),
         "tools::ToolAttachFile" => (DOC, None, Some(|f| f.tool == Some(Tool::AttachFile))),
         "tools::CycleStampTools" => (DOC, None, None),
         "tools::CycleDrawingTools" | "tools::CycleTextTools" | "tools::UndoVertex" => {

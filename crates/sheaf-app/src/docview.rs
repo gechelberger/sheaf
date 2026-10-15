@@ -182,6 +182,9 @@ pub(crate) struct Doc {
     pub(crate) annot_editor: Option<AnnotEditor>,
     /// A polygon, polyline or cloud being drawn (see shapes.rs).
     pub(crate) poly: Option<crate::shapes::PolyDraft>,
+    /// The scale new measurements take (see `measure_tools`).
+    pub(crate) measure_scale: sheaf_doc::measure::Scale,
+    pub(crate) calibrate: crate::measure_tools::Calibrate,
     /// "Pages with" or "without" a group of marks (see groups.rs).
     pub(crate) group_list: Option<crate::groups::GroupList>,
     /// The right-click menu on a mark, where it was opened.
@@ -582,6 +585,9 @@ pub struct DocView {
     #[cfg_attr(not(feature = "plugins"), allow(dead_code))]
     pub(crate) plugin_run: Option<(String, sheaf_ops::Tracker)>,
     pub(crate) pending_comments_focus: bool,
+    /// The Measure tools' scale bar, and whether to focus it next frame.
+    pub(crate) measure_bar: Option<crate::measure_tools::MeasureBar>,
+    pub(crate) pending_measure_focus: bool,
     pub(crate) initial_query: Option<String>,
     pub(crate) search_started: Option<Instant>,
     pub(crate) selftest_save: Option<PathBuf>,
@@ -690,6 +696,8 @@ impl DocView {
             blank_review: None,
             plugin_run: None,
             pending_comments_focus: false,
+            measure_bar: None,
+            pending_measure_focus: false,
             history: None,
             connector_label: None,
             attach_icon: "PushPin".into(),
@@ -890,6 +898,11 @@ impl DocView {
             chars_loading: HashSet::new(),
             annot_editor: None,
             poly: None,
+            measure_scale: crate::state::get(cx)
+                .measure_scale
+                .clone()
+                .unwrap_or_default(),
+            calibrate: Default::default(),
             group_list: None,
             mark_menu: None,
             foreign_annots: Vec::new(),
@@ -4453,6 +4466,9 @@ impl Render for DocView {
         let goto_bar = (!full).then(|| self.render_goto()).flatten();
         let props_bar = (!full).then(|| self.render_mark_properties(cx)).flatten();
         let connector_bar = (!full).then(|| self.render_connector_bar(cx)).flatten();
+        let measure_bar = (!full)
+            .then(|| self.render_measure_bar(window, cx))
+            .flatten();
         let group_list = self.render_group_list(cx);
         let mark_menu = self.render_mark_menu(cx);
         let mut body: Option<AnyElement> = None;
@@ -4615,6 +4631,14 @@ impl Render for DocView {
             )
             .on_action(cx.listener(|v, _: &crate::ToolCloud, _, cx| v.set_tool(Tool::Cloud, cx)))
             .on_action(
+                cx.listener(|v, _: &crate::ToolDistance, _, cx| v.set_tool(Tool::Distance, cx)),
+            )
+            .on_action(
+                cx.listener(|v, _: &crate::ToolPerimeter, _, cx| v.set_tool(Tool::Perimeter, cx)),
+            )
+            .on_action(cx.listener(|v, _: &crate::ToolArea, _, cx| v.set_tool(Tool::Area, cx)))
+            .on_action(cx.listener(|v, _: &crate::CalibrateScale, _, cx| v.start_calibrate(cx)))
+            .on_action(
                 cx.listener(|v, _: &crate::ToolCallout, _, cx| v.set_tool(Tool::Callout, cx)),
             )
             .on_action(
@@ -4751,6 +4775,7 @@ impl Render for DocView {
             .children(goto_bar)
             .children(props_bar)
             .children(connector_bar)
+            .children(measure_bar)
             .child(
                 div()
                     .relative()
@@ -5261,6 +5286,51 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
         AnnotKind::Polygon { .. } | AnnotKind::Polyline { .. } => {
             let closed = matches!(a.kind, AnnotKind::Polygon { .. });
             out.extend(outline_elements(a, closed, src, rot, k, fill, alpha));
+        }
+        AnnotKind::Measure {
+            what,
+            points,
+            scale,
+        } => {
+            use sheaf_doc::measure::Measured;
+            let px_of = |p: Pt| {
+                let q = rotate_pt(p, src, rot);
+                (q.x * k, q.y * k)
+            };
+            let mut line: Vec<(f32, f32)> = points.iter().map(|p| px_of(*p)).collect();
+            if *what == Measured::Area && points.len() > 2 {
+                line.push(line[0]);
+            }
+            let mut paths = vec![line];
+            if *what == Measured::Distance
+                && let [first, .., last] = points.as_slice()
+            {
+                let (p0, p1) = (px_of(*first), px_of(*last));
+                let head = (6.0 + a.stroke * 2.0) * k;
+                paths.push(arrow_head(p0, p1, head));
+                paths.push(arrow_head(p1, p0, head));
+            }
+            out.push(stroke_canvas_dashed(
+                paths,
+                fill,
+                a.stroke * k,
+                a.dashed.then_some(k),
+                src.rotated(rot),
+                k,
+            ));
+            if let Some(b) = sheaf_doc::annot::measure_label_box(*what, points, scale) {
+                let size = sheaf_doc::annot::MEASURE_TEXT;
+                out.push(
+                    place(b)
+                        .px(px(2.0 * k))
+                        .whitespace_nowrap()
+                        .text_color(color)
+                        .text_size(px(size * k))
+                        .line_height(px((size + 3.0) * k))
+                        .child(sheaf_doc::measure::label(*what, points, scale))
+                        .into_any_element(),
+                );
+            }
         }
         AnnotKind::FileAttachment { pos, icon, .. } => {
             let at = Box2 {

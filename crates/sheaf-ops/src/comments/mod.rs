@@ -182,6 +182,9 @@ pub struct Comment {
     /// Where it is on its page, in the page's displayed space before
     /// sheaf's rotation.
     pub rect: Box2,
+    /// What a measurement comes to ("12.50 ft"), and its scale ("1 in =
+    /// 10 ft").
+    pub measurement: Option<(String, String)>,
 }
 
 impl Comment {
@@ -246,6 +249,7 @@ pub fn comments_on(
             kind: ours_type(&a.kind).to_string(),
             color: Some(a.color),
             rect: a.bounds(),
+            measurement: measurement_of(&a.kind),
         });
     }
     let theirs: Vec<(usize, &ForeignAnnot)> = foreign
@@ -289,9 +293,17 @@ pub fn comments_on(
             author: f.author.clone(),
             body: f.contents.replace('\n', " "),
             label: subtype_label(&f.subtype).to_string(),
-            kind: subtype_label(&f.subtype).to_string(),
+            kind: f
+                .mark
+                .as_ref()
+                .filter(|m| matches!(m.kind, AnnotKind::Measure { .. }))
+                .map_or_else(
+                    || subtype_label(&f.subtype).to_string(),
+                    |m| ours_type(&m.kind).to_string(),
+                ),
             color: f.color,
             rect: f.rect,
+            measurement: f.mark.as_ref().and_then(|m| measurement_of(&m.kind)),
         });
     }
     (out, deleted)
@@ -591,6 +603,21 @@ pub fn status_words(model: &str, state: &str) -> String {
     }
 }
 
+/// A measurement's value and scale.
+fn measurement_of(kind: &AnnotKind) -> Option<(String, String)> {
+    match kind {
+        AnnotKind::Measure {
+            what,
+            points,
+            scale,
+        } => Some((
+            sheaf_doc::measure::label(*what, points, scale),
+            scale.ratio(),
+        )),
+        _ => None,
+    }
+}
+
 /// A mark's type for the filter and sort: coarser than its label (every
 /// tickmark is a "Tickmark").
 pub fn ours_type(kind: &AnnotKind) -> &'static str {
@@ -619,6 +646,7 @@ pub fn ours_type(kind: &AnnotKind) -> &'static str {
         AnnotKind::Polyline { .. } => "Polyline",
         AnnotKind::Callout { .. } => "Callout",
         AnnotKind::FileAttachment { .. } => "Attachment",
+        AnnotKind::Measure { what, .. } => what.label(),
     }
 }
 
@@ -652,6 +680,15 @@ pub fn kind_label(kind: &AnnotKind) -> String {
         AnnotKind::Polyline { .. } => "Polyline".into(),
         AnnotKind::Callout { .. } => "Callout".into(),
         AnnotKind::FileAttachment { name, .. } => format!("Attachment {name}"),
+        AnnotKind::Measure {
+            what,
+            points,
+            scale,
+        } => format!(
+            "{} {}",
+            what.label(),
+            sheaf_doc::measure::label(*what, points, scale)
+        ),
     }
 }
 
@@ -696,6 +733,18 @@ fn ours_body(a: &Annot) -> String {
             one_line(&a.contents)
         ),
         AnnotKind::Insert { .. } => format!("Insert “{}”", one_line(&a.contents)),
+        AnnotKind::Measure {
+            what,
+            points,
+            scale,
+        } => {
+            let value = sheaf_doc::measure::label(*what, points, scale);
+            if a.contents.is_empty() {
+                value
+            } else {
+                format!("{value} — {}", one_line(&a.contents))
+            }
+        }
         _ => one_line(&a.contents),
     }
 }
@@ -857,10 +906,14 @@ pub enum Column {
     Text,
     /// The number of the comment it replies to.
     ReplyTo,
+    /// What a measurement comes to.
+    Measurement,
+    /// A measurement's scale.
+    Scale,
 }
 
 impl Column {
-    pub const ALL: [Column; 13] = [
+    pub const ALL: [Column; 15] = [
         Column::Number,
         Column::Page,
         Column::PageLabel,
@@ -874,6 +927,8 @@ impl Column {
         Column::Color,
         Column::Text,
         Column::ReplyTo,
+        Column::Measurement,
+        Column::Scale,
     ];
 
     /// What a CSV has with no columns chosen.
@@ -903,6 +958,8 @@ impl Column {
             Column::Color => "Color",
             Column::Text => "Text",
             Column::ReplyTo => "Reply to",
+            Column::Measurement => "Measurement",
+            Column::Scale => "Scale",
         }
     }
 
@@ -1001,6 +1058,16 @@ pub fn csv(listing: &Listing, labels: Option<&[String]>, columns: &[Column]) -> 
                         .unwrap_or_default(),
                     Column::Text => entry_text(c),
                     Column::ReplyTo => l.reply_to.clone(),
+                    Column::Measurement => c
+                        .measurement
+                        .as_ref()
+                        .map(|m| m.0.clone())
+                        .unwrap_or_default(),
+                    Column::Scale => c
+                        .measurement
+                        .as_ref()
+                        .map(|m| m.1.clone())
+                        .unwrap_or_default(),
                 })
                 .collect(),
             &mut out,

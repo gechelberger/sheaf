@@ -18,6 +18,7 @@ pub mod incremental;
 pub(crate) mod kept;
 pub mod labels;
 pub mod layers;
+pub mod measure;
 pub mod model;
 pub mod page_chars;
 pub mod portfolio;

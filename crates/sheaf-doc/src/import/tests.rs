@@ -19,6 +19,17 @@ fn mark(kind: AnnotKind) -> Annot {
     }
 }
 
+/// 1 in = 10 ft, as a calibration would leave it.
+fn feet() -> crate::measure::Scale {
+    crate::measure::Scale {
+        page: 1.0,
+        page_unit: "in".into(),
+        real: 10.0,
+        unit: "ft".into(),
+        precision: 2,
+    }
+}
+
 fn b(x: f32, y: f32, w: f32, h: f32) -> Box2 {
     Box2 { x, y, w, h }
 }
@@ -142,6 +153,21 @@ fn our_own_marks_read_back_as_themselves() {
         }),
         mark(AnnotKind::Insert {
             at: b(150.0, 150.0, 6.0, 9.0),
+        }),
+        mark(AnnotKind::Measure {
+            what: crate::measure::Measured::Distance,
+            points: vec![p(100.0, 400.0), p(300.0, 450.0)],
+            scale: Box::new(feet()),
+        }),
+        mark(AnnotKind::Measure {
+            what: crate::measure::Measured::Perimeter,
+            points: vec![p(100.0, 500.0), p(200.0, 520.0), p(260.0, 600.0)],
+            scale: Box::new(feet()),
+        }),
+        mark(AnnotKind::Measure {
+            what: crate::measure::Measured::Area,
+            points: vec![p(300.0, 600.0), p(400.0, 600.0), p(400.0, 700.0)],
+            scale: Box::new(feet()),
         }),
     ];
     for rotate in [0, 90] {
