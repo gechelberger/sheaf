@@ -38,15 +38,59 @@ fn fnv(bytes: &[u8]) -> u64 {
 
 /// Write `pdf` to the cache (once) and return its path.
 pub fn store(pdf: &[u8]) -> Result<PathBuf> {
-    let dir = cache_dir().join("generated");
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    store_in(&cache_dir().join("generated"), pdf)
+}
+
+/// [`store`], into `dir`.
+fn store_in(dir: &std::path::Path, pdf: &[u8]) -> Result<PathBuf> {
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let path = dir.join(format!("{:016x}-{}.pdf", fnv(pdf), pdf.len()));
-    let same = std::fs::read(&path).is_ok_and(|b| b == pdf);
-    if !same {
-        let tmp = path.with_extension("part");
-        std::fs::write(&tmp, pdf).with_context(|| format!("writing {}", tmp.display()))?;
-        std::fs::rename(&tmp, &path).with_context(|| format!("writing {}", path.display()))?;
+    let same = |path: &PathBuf| std::fs::read(path).is_ok_and(|b| b == pdf);
+    if !same(&path) {
+        write_new(&path, pdf)?;
     }
+    Ok(path)
+}
+
+/// Write `bytes` to `path` by way of a temporary file of this writer's
+/// own, so two writing the same file at once can't trip each other up.
+fn write_new(path: &PathBuf, bytes: &[u8]) -> Result<()> {
+    let tmp = path.with_extension(format!(
+        "{}-{:x}.part",
+        std::process::id(),
+        fastrand::u64(..)
+    ));
+    std::fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        // Another writer finishing first is as good.
+        if !std::fs::read(path).is_ok_and(|b| b == bytes) {
+            return Err(e).with_context(|| format!("writing {}", path.display()));
+        }
+    }
+    Ok(())
+}
+
+/// The cache file named `stem` (what [`stem_of`] gives for a stored file).
+pub fn path_of(stem: &str) -> PathBuf {
+    cache_dir().join("generated").join(format!("{stem}.pdf"))
+}
+
+/// A stored file's name without `.pdf`: how marks refer to one.
+pub fn stem_of(path: &std::path::Path) -> String {
+    path.file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// Write `pdf` to the cache as `stem`, for a file recovered from a saved
+/// document whose original isn't on this machine.
+pub fn store_as(stem: &str, pdf: &[u8]) -> Result<PathBuf> {
+    let path = path_of(stem);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    write_new(&path, pdf)?;
     Ok(path)
 }
 
@@ -91,14 +135,13 @@ mod tests {
 
     #[test]
     fn stores_once_by_content() {
+        // A folder of its own: other tests use the real cache meanwhile.
         let dir = std::env::temp_dir().join(format!("sheaf-gen-{}", std::process::id()));
-        // SAFETY: the only test that reads this variable.
-        unsafe { std::env::set_var("SHEAF_CACHE_DIR", &dir) };
         let a = blank_pdf(612.0, 792.0).unwrap();
         let b = blank_pdf(595.0, 842.0).unwrap();
-        let pa = store(&a).unwrap();
-        assert_eq!(store(&a).unwrap(), pa);
-        let pb = store(&b).unwrap();
+        let pa = store_in(&dir, &a).unwrap();
+        assert_eq!(store_in(&dir, &a).unwrap(), pa);
+        let pb = store_in(&dir, &b).unwrap();
         assert_ne!(pa, pb);
         assert_eq!(std::fs::read(&pa).unwrap(), a);
         let doc = lopdf::Document::load(&pb).unwrap();

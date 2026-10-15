@@ -37,6 +37,8 @@ pub struct State {
     pub combine: sheaf_ops::combine::CombineParams,
     /// Document > Find Blank Pages' last choices.
     pub blanks: sheaf_ops::blank::BlankParams,
+    /// Stamps placed lately, newest first (the Stamps panel's Recent).
+    pub recent_stamps: Vec<sheaf_ops::stamps::StampRef>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -94,7 +96,7 @@ impl Default for DockLayout {
                 size: 220.0,
             },
             right: DockState {
-                panels: vec!["comments".into(), "history".into()],
+                panels: vec!["comments".into(), "history".into(), "stamps".into()],
                 active: 0,
                 open: false,
                 size: 300.0,
@@ -361,6 +363,7 @@ mod tests {
                 keep_intentional: true,
                 ..Default::default()
             },
+            recent_stamps: vec![sheaf_ops::stamps::StampRef::preset("Approved")],
         }
     }
 

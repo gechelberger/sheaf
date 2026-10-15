@@ -29,6 +29,7 @@ an image element does not inherit the parent element's color.
 | [arrow](arrow/icon.svg) | Arrow | `ToolArrow` |
 | [pencil](pencil/icon.svg) | Pencil | `ToolInk` |
 | [tick](tick/icon.svg) | Tickmark | `ToolTick` |
+| [stamp](stamp/icon.svg) | Stamp | `ToolStamp` |
 | [connector](connector/icon.svg) | Connector | `ToolConnector` |
 | [rotate-right](rotate-right/icon.svg) | Rotate clockwise | `RotatePageCw` |
 | [rotate-left](rotate-left/icon.svg) | Rotate counterclockwise | `RotatePageCcw` |

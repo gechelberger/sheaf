@@ -73,6 +73,7 @@ fn build(snap: &Snapshot) -> Result<(usize, Vec<u8>)> {
         std::collections::HashMap::new();
 
     let mut connectors = Vec::new();
+    let mut stamp_forms = crate::save::StampForms::new();
     let mut ocr_objects = None;
     if tree_changed {
         let pages_id = pdf.new_object_id();
@@ -121,7 +122,14 @@ fn build(snap: &Snapshot) -> Result<(usize, Vec<u8>)> {
                 (list, removed) => {
                     let geom = geom_of(&dict, original_rot);
                     let marks = list.into_iter().flatten();
-                    let w = write_page_annots(&mut pdf, &mut dict, marks, removed, &geom);
+                    let w = write_page_annots(
+                        &mut pdf,
+                        &mut dict,
+                        marks,
+                        removed,
+                        &geom,
+                        &mut stamp_forms,
+                    );
                     connectors.extend(w.connectors);
                     for id in w.touched {
                         changed.insert(id, pdf.get_object(id)?.clone());
@@ -187,7 +195,14 @@ fn build(snap: &Snapshot) -> Result<(usize, Vec<u8>)> {
                         (None, None) => strip_sheaf_annots(&pdf, &mut dict),
                         (list, removed) => {
                             let marks = list.into_iter().flatten();
-                            let w = write_page_annots(&mut pdf, &mut dict, marks, removed, &geom);
+                            let w = write_page_annots(
+                                &mut pdf,
+                                &mut dict,
+                                marks,
+                                removed,
+                                &geom,
+                                &mut stamp_forms,
+                            );
                             connectors.extend(w.connectors);
                             for id in w.touched {
                                 changed.insert(id, pdf.get_object(id)?.clone());

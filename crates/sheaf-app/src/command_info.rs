@@ -468,6 +468,22 @@ pub fn info(id: &str) -> Option<Info> {
             "Click to stamp the selected tickmark.",
             &["tickmark", "stamp", "check"],
         ),
+        "tools::ToolStamp" => (
+            "stamp",
+            "Click to place the stamp picked in the Stamps panel: yours, or a dynamic one with your initials and the date.",
+            &[
+                "approved",
+                "reviewed",
+                "signature",
+                "image",
+                "dynamic stamp",
+            ],
+        ),
+        "workspace::ShowStamps" => (
+            "stamp",
+            "Show the Stamps panel: your stamp collections, Recent and Favorites.",
+            &["stamp library", "custom stamps"],
+        ),
         "tools::ToolConnector" => (
             "connector",
             "Click twice to place a linked pair of markers.",

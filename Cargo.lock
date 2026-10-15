@@ -6585,6 +6585,7 @@ name = "sheaf-ops"
 version = "0.1.0-alpha.1"
 dependencies = [
  "anyhow",
+ "fastrand",
  "image",
  "log",
  "lopdf",

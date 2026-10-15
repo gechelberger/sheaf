@@ -88,6 +88,7 @@ pub enum Panel {
     Attachments,
     Layers,
     History,
+    Stamps,
     /// A panel a plugin contributes, by its id without the `plugin:` prefix.
     /// Kept in the layout even while its plugin isn't loaded, so disabling
     /// a plugin doesn't forget where its panel was.
@@ -98,7 +99,7 @@ pub enum Panel {
 const PLUGIN_PANEL_PREFIX: &str = "plugin:";
 
 impl Panel {
-    const ALL: [Panel; 8] = [
+    const ALL: [Panel; 9] = [
         Panel::Thumbnails,
         Panel::Outline,
         Panel::Patterns,
@@ -107,6 +108,7 @@ impl Panel {
         Panel::Attachments,
         Panel::Layers,
         Panel::History,
+        Panel::Stamps,
     ];
 
     /// Stable id for settings and the `--panel` flag.
@@ -120,6 +122,7 @@ impl Panel {
             Panel::Attachments => "attachments".into(),
             Panel::Layers => "layers".into(),
             Panel::History => "history".into(),
+            Panel::Stamps => "stamps".into(),
             Panel::Plugin(id) => format!("{PLUGIN_PANEL_PREFIX}{id}").into(),
         }
     }
@@ -141,6 +144,7 @@ impl Panel {
             Panel::Attachments => "Attachments".into(),
             Panel::Layers => "Layers".into(),
             Panel::History => "History".into(),
+            Panel::Stamps => "Stamps".into(),
             // Plugins name their panels once they can contribute them
             // (M6 slice 3); until then, the id.
             Panel::Plugin(id) => id.clone(),
@@ -531,6 +535,7 @@ impl Workspace {
             Some("attachments") => this.show_panel(Panel::Attachments),
             Some("layers") => this.show_panel(Panel::Layers),
             Some("history") => this.show_panel(Panel::History),
+            Some("stamps") => this.show_panel(Panel::Stamps),
             _ => {}
         }
         if let Some(p) = path {
@@ -2010,6 +2015,7 @@ impl Workspace {
                 Panel::Calc => d.render_calc(wide, window, cx),
                 Panel::Comments => d.render_comments(window, cx),
                 Panel::History => d.render_history(window, cx),
+                Panel::Stamps => d.render_stamps(window, cx),
                 Panel::Attachments => d.render_attachments(window, cx),
                 Panel::Layers => d.render_layers(window, cx),
                 Panel::Plugin(id) => plugin_panel_body(d, &id, window, cx),
@@ -2660,6 +2666,16 @@ impl Render for Workspace {
                 }
                 cx.notify();
             }))
+            .on_action(cx.listener(|ws, _: &crate::ShowStamps, _, cx| {
+                ws.show_panel(Panel::Stamps);
+                cx.notify();
+            }))
+            // J picks the Stamp tool (in the document) and shows where
+            // stamps are picked.
+            .on_action(cx.listener(|ws, _: &crate::ToolStamp, _, cx| {
+                ws.show_panel(Panel::Stamps);
+                cx.notify();
+            }))
             .on_action(cx.listener(|ws, _: &crate::ShowAttachments, _, cx| {
                 ws.show_panel(Panel::Attachments);
                 cx.notify();
@@ -3131,8 +3147,9 @@ mod tests {
             [
                 Panel::Comments,
                 Panel::Plugin("amount-crossref.pairs".into()),
-                // A built-in panel the layout predates joins its dock.
+                // Built-in panels the layout predates join their dock.
                 Panel::History,
+                Panel::Stamps,
                 Panel::Plugin("wp.ticks".into()),
             ]
         );

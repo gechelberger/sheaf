@@ -69,6 +69,31 @@ fn mark(kind: AnnotKind, color: [u8; 3]) -> Annot {
     }
 }
 
+/// A one-page red stamp, 100 × 50, in the generated-file cache; its name.
+fn red_stamp() -> String {
+    let mut pdf = Pdf::with_version("1.5");
+    let pages_id = pdf.new_object_id();
+    let content = pdf.add_object(Stream::new(
+        dictionary! {},
+        b"1 0 0 rg 0 0 100 50 re f".to_vec(),
+    ));
+    let page = pdf.add_object(dictionary! {
+        "Type" => "Page", "Parent" => pages_id, "Contents" => content,
+        "MediaBox" => vec![0.into(), 0.into(), 100.into(), 50.into()],
+    });
+    pdf.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages", "Kids" => vec![Object::Reference(page)], "Count" => 1,
+        }),
+    );
+    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    pdf.trailer.set("Root", catalog);
+    let mut bytes = Vec::new();
+    pdf.save_to(&mut bytes).unwrap();
+    sheaf_doc::generated::stem_of(&sheaf_doc::generated::store(&bytes).unwrap())
+}
+
 fn row(y: f32) -> Box2 {
     Box2 {
         x: 100.0,
@@ -134,6 +159,33 @@ fn check(rotate: i64) {
             },
             PURPLE,
         ),
+        // A red page stamp, 100 × 50, and a blue text stamp's frame.
+        mark(
+            AnnotKind::PageStamp {
+                rect: Box2 {
+                    x: 100.0,
+                    y: 500.0,
+                    w: 100.0,
+                    h: 50.0,
+                },
+                stamp: red_stamp(),
+                name: "Red".into(),
+                text: None,
+            },
+            BLUE,
+        ),
+        mark(
+            AnnotKind::TextStamp {
+                rect: Box2 {
+                    x: 300.0,
+                    y: 500.0,
+                    w: 150.0,
+                    h: 60.0,
+                },
+                text: "APPROVED\nGE 10/14/2026".into(),
+            },
+            BLUE,
+        ),
     ] {
         model
             .apply(Edit::AnnotAdd { page, annot: a }, "mark")
@@ -198,6 +250,31 @@ fn check(rotate: i64) {
         near(px(396.0, 416.0), [255, 255, 255]),
         "{ctx}: beside the caret's tip"
     );
+    // The stamp's page fills its box, upright as shown.
+    assert!(
+        near(px(110.0, 510.0), RED),
+        "{ctx}: page stamp {:?}",
+        px(110.0, 510.0)
+    );
+    assert!(
+        near(px(190.0, 545.0), RED),
+        "{ctx}: page stamp's far corner"
+    );
+    assert!(
+        near(px(210.0, 525.0), [255, 255, 255]),
+        "{ctx}: beside the page stamp"
+    );
+    // The text stamp's frame, at its left edge, and its first line.
+    assert!(
+        near(px(301.0, 530.0), BLUE),
+        "{ctx}: text stamp frame {:?}",
+        px(301.0, 530.0)
+    );
+    let inked = (320..430).any(|x| {
+        let c = px(x as f32, 520.0);
+        c[2] > 150 && c[0] < 120
+    });
+    assert!(inked, "{ctx}: text stamp's first line");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

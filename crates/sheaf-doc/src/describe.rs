@@ -139,6 +139,10 @@ fn noun(kind: &AnnotKind) -> String {
         AnnotKind::Squiggly { .. } => "a squiggly underline".into(),
         AnnotKind::Replace { .. } => "a text replacement".into(),
         AnnotKind::Insert { .. } => "a text insertion".into(),
+        AnnotKind::PageStamp { name, .. } => format!("stamp {name}"),
+        AnnotKind::TextStamp { text, .. } => {
+            format!("stamp {}", text.lines().next().unwrap_or_default())
+        }
         AnnotKind::Reply { .. } => "a reply".into(),
         AnnotKind::Status { .. } => "a status".into(),
     }

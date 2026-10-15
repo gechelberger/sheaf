@@ -19,6 +19,8 @@ regex.workspace = true
 # Image pages: decoding and G4 come from sheaf-image; Flate is ours.
 sheaf-image.workspace = true
 flate2 = "1"
+# Stamps from images keep their transparency (a soft mask).
+image.workspace = true
 
 [dev-dependencies]
 image.workspace = true

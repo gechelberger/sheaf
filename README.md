@@ -224,7 +224,7 @@ Legend: ✅ done · 🔨 in progress · 🎯 MVP · 📋 planned · ❓ undecide
 | Ink / freehand | ✅ |
 | Edit placed marks: move, resize, restyle | ✅ Drag to move (Ctrl+drag under any tool), handles to resize (Shift keeps the shape, or snaps a line to 45°), Shift+click to select several. A properties bar sets color, fill, opacity, line width, dashes, arrowheads at either end and text size; each change is one undo step |
 | Copy and paste marks | ✅ Ctrl+C, Ctrl+V (offset), Ctrl+Alt+V (in place), across documents too |
-| Stamps (built-in + custom) | ✅ tickmark library; custom 📋 |
+| Stamps (built-in + custom) | ✅ tickmark library; a stamp library of your own (Stamps panel, Ctrl+Alt+9; Stamp tool J): stamps from images (transparency kept) or PDF pages, in collections, with rename and remove; Recent and Favorites; dynamic stamps (Approved, Reviewed, Received, Prepared) with your initials or name and the date, and dynamic text over a stamp of your own. Collections export and import as PDFs, the way Acrobat keeps custom stamps |
 | **Tickmarks** (PDFlyer): quick-stamp library, keyboard-driven | ✅ |
 | **Connectors** (PDFlyer): linked markers that jump between pages | ✅ pairs saved as Link annotations, so they jump in Acrobat too. PDFlyer's are label *groups* (1–50, A–ZZ) with Prev/Next and "all pages with / without"; groups are 📋 ([Pending](ROADMAP.md#pdflyer-parity-gaps)) |
 | **Calculator tape** (PDFlyer): 10-key calc, tape placed as annotation | ✅ Calculator panel (Ctrl+Alt+4) |
@@ -506,6 +506,9 @@ remembers for itself goes in a local state directory: `~/.local/state/sheaf`,
     `tessdata_dir` for your own Tesseract data, `det`, `rec`, `dict`,
     `textline_ori` and `doc_ori` for your own PaddleOCR models, `psm`, and
     `use_doc_orientation`.
+  - `[stamps]`: `size` (how tall a stamp goes down, in points; 40), and
+    `date_format` and `time_format` for dynamic stamps (strftime codes;
+    `%m/%d/%Y` and `%-I:%M %p`).
 - `state.json` (state directory) — written by the app: window placement,
   dock layout (which panels sit where, tab order, sizes, open state), and
   each dialog's last choices, among them the OCR engine, `dpi`, language and
@@ -515,6 +518,9 @@ remembers for itself goes in a local state directory: `~/.local/state/sheaf`,
 - `patterns.json` — the Patterns panel's presets, seeded from the built-ins on
   first run. Edit, delete, or add them from the panel (right-click a chip;
   "+ Save…" stores the current pattern) or by hand.
+- `stamps/` — your stamp collections, a PDF each with a stamp per page
+  (an Acrobat custom-stamp file is the same shape), and `favorites.json`.
+  Recent stamps are in `state.json`.
 - `marks.json` — extra tickmark sets and stamps for the markup toolbar:
   `{ "tickmarks": [{ "name": "Audit", "marks": ["Σ", "◊"] }], "stamps": ["PBC"] }`.
 - `plugins/` — installed plugins, one folder each (see

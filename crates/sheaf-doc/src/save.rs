@@ -13,7 +13,7 @@ use anyhow::{Context, Result, bail};
 use im::Vector;
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, StringFormat, dictionary};
 
-use crate::annot::{Annot, AnnotId, AnnotKind, PageGeom, to_pdf};
+use crate::annot::{Annot, AnnotId, AnnotKind, PageGeom};
 use crate::model::{DocState, OutlineNode, PageId, PageRef, Snapshot, SourceId, SourceInfo};
 use crate::text_layer;
 use sheaf_core::{DestView, PageFrame};
@@ -384,6 +384,7 @@ fn build_rewrite(model: &Snapshot, clean: bool) -> Result<Pdf> {
     let mut used: HashSet<ObjectId> = HashSet::new();
     let mut copy_maps: HashMap<SourceId, HashMap<ObjectId, ObjectId>> = HashMap::new();
     let mut connectors = Vec::new();
+    let mut stamp_forms = StampForms::new();
     let mut ocr_objects = None;
     let mut stamp_objects = None;
     let page_ids: Vec<PageId> = state.pages.iter().map(|p| p.id).collect();
@@ -445,7 +446,15 @@ fn build_rewrite(model: &Snapshot, clean: bool) -> Result<Pdf> {
                     let geom = geom_of(&dict, original as i32);
                     let marks = list.into_iter().flatten();
                     connectors.extend(
-                        write_page_annots(&mut pdf, &mut dict, marks, removed, &geom).connectors,
+                        write_page_annots(
+                            &mut pdf,
+                            &mut dict,
+                            marks,
+                            removed,
+                            &geom,
+                            &mut stamp_forms,
+                        )
+                        .connectors,
                     );
                 }
             }
@@ -808,7 +817,7 @@ fn copy_object(
     Ok(new_id)
 }
 
-fn remap(
+pub(crate) fn remap(
     src: &Pdf,
     obj: &Object,
     dst: &mut Pdf,
@@ -1035,6 +1044,10 @@ pub(crate) struct ConnectorRef {
     pub top_left: (f32, f32),
 }
 
+/// Stamp pages imported into the file being written, by stamp, so each is
+/// in it once (see `annot::to_pdf_in`).
+pub(crate) type StampForms = HashMap<String, Option<(ObjectId, sheaf_core::PageSize)>>;
+
 /// What writing a page's marks did besides the page dict.
 pub(crate) struct PageAnnotsWritten {
     /// The connectors written, for `link_connectors`.
@@ -1057,6 +1070,7 @@ pub(crate) fn write_page_annots<'a>(
     annots: impl Iterator<Item = &'a Annot>,
     removed: Option<&im::OrdSet<String>>,
     geom: &PageGeom,
+    forms: &mut StampForms,
 ) -> PageAnnotsWritten {
     // Our marks as the file has them now, by object, so other tools'
     // replies to them can follow them to the objects this writes.
@@ -1131,7 +1145,7 @@ pub(crate) fn write_page_annots<'a>(
         .partition(|a| a.thread_parent().is_some());
     let mut connectors = Vec::new();
     for a in marks {
-        let written = to_pdf(a, geom, pdf);
+        let written = crate::annot::to_pdf_in(a, geom, pdf, forms);
         let rect = rect_of(pdf, &written.main);
         let id = pdf.add_object(Object::Dictionary(written.main));
         list.push(Object::Reference(id));
@@ -1165,7 +1179,7 @@ pub(crate) fn write_page_annots<'a>(
             .partition(|a| named.contains_key(a.thread_parent().unwrap_or_default()));
         let stuck = ready.is_empty();
         for a in if stuck { &waiting } else { &ready } {
-            let mut main = to_pdf(a, geom, pdf).main;
+            let mut main = crate::annot::to_pdf_in(a, geom, pdf, forms).main;
             if let Some((parent, rect)) = a.thread_parent().and_then(|p| named.get(p)).cloned() {
                 main.set("IRT", parent);
                 main.set("Rect", rect);
@@ -2468,6 +2482,123 @@ mod tests {
         // Read back, the reply is in its thread and theirs keeps the name.
         let back = crate::file::read_annots_mem(&out).unwrap();
         assert!(back.foreign.iter().any(|f| f.name == unnamed.name));
+    }
+
+    #[test]
+    fn a_page_stamp_is_written_once_and_recovered_from_the_file() {
+        use crate::annot::{AnnotKind, Box2};
+        // A stamp page of its own, unlike any other test's.
+        let stamp_pdf = {
+            let mut out = Pdf::with_version("1.5");
+            let pages_id = out.new_object_id();
+            let tag = format!("{:x}", fastrand::u64(..));
+            let content = out.add_object(lopdf::Stream::new(
+                dictionary! {},
+                format!("% {tag}\n1 0 0 rg 0 0 100 50 re f").into_bytes(),
+            ));
+            let page = out.add_object(dictionary! {
+                "Type" => "Page", "Parent" => pages_id, "Contents" => content,
+                "MediaBox" => vec![0.into(), 0.into(), 100.into(), 50.into()],
+            });
+            out.objects.insert(
+                pages_id,
+                Object::Dictionary(
+                    dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 },
+                ),
+            );
+            let cat = out.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+            out.trailer.set("Root", cat);
+            let mut b = Vec::new();
+            out.save_to(&mut b).unwrap();
+            b
+        };
+        let path = crate::generated::store(&stamp_pdf).unwrap();
+        let stem = crate::generated::stem_of(&path);
+
+        let dir = tempdir();
+        let a_path = make_pdf(&dir, "a.pdf", "A", 2, &[]);
+        let original = std::fs::read(&a_path).unwrap();
+        let mut model = Document::new(
+            {
+                let mut i = info(&a_path, 2);
+                i.bytes = original.len();
+                i
+            },
+            &[],
+            Box::new(FixedCount(10)),
+        );
+        let stamp = |page| Edit::AnnotAdd {
+            page,
+            annot: thread_mark(
+                AnnotKind::PageStamp {
+                    rect: Box2 {
+                        x: 100.0,
+                        y: 100.0,
+                        w: 100.0,
+                        h: 50.0,
+                    },
+                    stamp: stem.clone(),
+                    name: "Paid".into(),
+                    text: Some("GE 10/14/2026".into()),
+                },
+                "",
+            ),
+        };
+        let (p0, p1) = (model.page(0).unwrap().id, model.page(1).unwrap().id);
+        model.apply(stamp(p0), "stamp").unwrap();
+        model.apply(stamp(p1), "stamp").unwrap();
+        let bytes = crate::incremental::incremental(&model.snapshot()).unwrap();
+        let pdf = Pdf::load_mem(&bytes).unwrap();
+        // Both appearances draw the one imported page.
+        let mut forms = std::collections::HashSet::new();
+        for page in pdf.get_pages().into_values() {
+            let annots = pdf
+                .get_dictionary(page)
+                .unwrap()
+                .get(b"Annots")
+                .unwrap()
+                .as_array()
+                .unwrap();
+            let d = pdf
+                .get_dictionary(annots[0].as_reference().unwrap())
+                .unwrap();
+            let n = d
+                .get(b"AP")
+                .unwrap()
+                .as_dict()
+                .unwrap()
+                .get(b"N")
+                .unwrap()
+                .as_reference()
+                .unwrap();
+            let Object::Stream(ap) = pdf.get_object(n).unwrap() else {
+                panic!()
+            };
+            let xo = ap
+                .dict
+                .get(b"Resources")
+                .unwrap()
+                .as_dict()
+                .unwrap()
+                .get(b"XObject")
+                .unwrap()
+                .as_dict()
+                .unwrap();
+            forms.insert(xo.get(b"SheafStamp").unwrap().as_reference().unwrap());
+            let content = String::from_utf8_lossy(&ap.content).into_owned();
+            assert!(
+                content.contains("/SheafStamp Do") && content.contains("Tj"),
+                "{content}"
+            );
+        }
+        assert_eq!(forms.len(), 1);
+
+        // On a machine without the stamp, it comes back from the file.
+        std::fs::remove_file(&path).unwrap();
+        crate::file::recover_stamps(&pdf);
+        let back = Pdf::load_mem(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(back.get_pages().len(), 1);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

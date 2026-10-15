@@ -35,6 +35,8 @@ pub enum Tool {
     Arrow,
     Ink,
     Tick,
+    /// A stamp from the Stamps panel.
+    Stamp,
     /// PDFlyer connector: two clicks place a linked pair of markers.
     Connector,
 }
@@ -56,6 +58,7 @@ impl Tool {
             Tool::Arrow => "Arrow",
             Tool::Ink => "Pencil",
             Tool::Tick => "Tick",
+            Tool::Stamp => "Stamp",
             Tool::Connector => "Connector",
         }
     }
@@ -97,11 +100,12 @@ impl Tool {
             Tool::Arrow => Box::new(ToolArrow),
             Tool::Ink => Box::new(ToolInk),
             Tool::Tick => Box::new(ToolTick),
+            Tool::Stamp => Box::new(ToolStamp),
             Tool::Connector => Box::new(ToolConnector),
         }
     }
 
-    pub const ALL: [Tool; 15] = [
+    pub const ALL: [Tool; 16] = [
         Tool::Select,
         Tool::Note,
         Tool::Highlight,
@@ -116,6 +120,7 @@ impl Tool {
         Tool::Arrow,
         Tool::Ink,
         Tool::Tick,
+        Tool::Stamp,
         Tool::Connector,
     ];
 }
@@ -640,6 +645,7 @@ impl DocView {
                 );
                 self.add_annot(page_id, a, "Tickmark", cx);
             }
+            Tool::Stamp => self.place_stamp(page_id, p, cx),
             Tool::Connector => {
                 let rect = connector_rect(p);
                 match doc.pending_connector.take() {
@@ -885,7 +891,7 @@ impl DocView {
                 an.stroke = 2.0;
                 self.add_annot(page_id, an, "Pencil", cx);
             }
-            Tool::Note | Tool::Tick | Tool::Connector => {}
+            Tool::Note | Tool::Tick | Tool::Stamp | Tool::Connector => {}
         }
     }
 
@@ -1188,7 +1194,7 @@ impl DocView {
                     _ => el.border_1().border_color(c).into_any_element(),
                 })
             }
-            Tool::Note | Tool::Tick | Tool::Connector => None,
+            Tool::Note | Tool::Tick | Tool::Stamp | Tool::Connector => None,
         }
     }
 

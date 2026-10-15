@@ -119,6 +119,7 @@ const FILES: &[(&str, &[u8])] = icons![
     "text-edit",
     "reply",
     "checkmark",
+    "stamp",
     "undo",
     "watermark",
     "zoom-in",

@@ -399,7 +399,82 @@ pub fn read_open(
     password: Option<&str>,
 ) -> Result<(AnnotsInFile, FileFacts)> {
     let pdf = load_pdf(path.as_ref(), password)?;
-    Ok((annots_in(&pdf), facts_in(&pdf)))
+    let found = annots_in(&pdf);
+    recover_stamps(&pdf);
+    Ok((found, facts_in(&pdf)))
+}
+
+/// Our stamps whose page isn't in this machine's cache (a file from
+/// someone else), made again from their saved appearance.
+pub fn recover_stamps(pdf: &lopdf::Document) {
+    for (_, page_id) in pdf.get_pages() {
+        let Ok(page) = pdf.get_dictionary(page_id) else {
+            continue;
+        };
+        let Some(list) = page
+            .get(b"Annots")
+            .ok()
+            .and_then(|a| pdf.dereference(a).ok())
+            .and_then(|(_, a)| a.as_array().ok())
+        else {
+            continue;
+        };
+        for entry in list {
+            let Some(dict) = pdf
+                .dereference(entry)
+                .ok()
+                .and_then(|(_, o)| o.as_dict().ok())
+            else {
+                continue;
+            };
+            let Some(Annot {
+                kind: crate::annot::AnnotKind::PageStamp { stamp, .. },
+                ..
+            }) = sheaf_mark(dict)
+            else {
+                continue;
+            };
+            if crate::generated::path_of(&stamp).exists() {
+                continue;
+            }
+            // /AP /N → its /Resources /XObject /SheafStamp.
+            let form = dict
+                .get(b"AP")
+                .ok()
+                .and_then(|o| pdf.dereference(o).ok())
+                .and_then(|(_, o)| o.as_dict().ok())
+                .and_then(|ap| ap.get(b"N").ok())
+                .and_then(|n| n.as_reference().ok())
+                .and_then(|n| match pdf.get_object(n) {
+                    Ok(lopdf::Object::Stream(s)) => Some(s.dict.clone()),
+                    _ => None,
+                })
+                .and_then(|n| {
+                    let res = pdf
+                        .dereference(n.get(b"Resources").ok()?)
+                        .ok()?
+                        .1
+                        .as_dict()
+                        .ok()?
+                        .clone();
+                    let xo = pdf
+                        .dereference(res.get(b"XObject").ok()?)
+                        .ok()?
+                        .1
+                        .as_dict()
+                        .ok()?
+                        .clone();
+                    xo.get(b"SheafStamp").ok()?.as_reference().ok()
+                });
+            let made = form
+                .ok_or_else(|| anyhow::anyhow!("no saved appearance"))
+                .and_then(|f| crate::stamp_lib::form_to_pdf(pdf, f))
+                .and_then(|bytes| crate::generated::store_as(&stamp, &bytes));
+            if let Err(e) = made {
+                log::warn!("recovering stamp {stamp}: {e:#}");
+            }
+        }
+    }
 }
 
 /// Annotations sheaf wrote into `path` earlier, keyed by page index.

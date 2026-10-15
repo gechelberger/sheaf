@@ -274,6 +274,28 @@ pub mod pdfium {
         pub fn bytes(&self) -> Arc<Vec<u8>> {
             self.bytes.clone()
         }
+
+        /// A page `width` pixels wide, RGBA, transparent where nothing is
+        /// drawn: a stamp's picture, to lay over another page.
+        pub fn render_transparent(&self, page: PageIndex, width: u32) -> Result<Raster> {
+            let p = self.doc.pages().get(page.0 as i32)?;
+            let w = width.max(1);
+            let h = ((w as f32) * p.height().value / p.width().value.max(1.0))
+                .round()
+                .max(1.0) as u32;
+            let cfg = PdfRenderConfig::new()
+                .set_fixed_size(w as i32, h as i32)
+                .set_format(PdfBitmapFormat::BGRA)
+                .set_reverse_byte_order(false)
+                .set_clear_color(PdfColor::new(255, 255, 255, 0));
+            let bmp = p.render_with_config(&cfg)?;
+            Ok(Raster {
+                width: bmp.width() as u32,
+                height: bmp.height() as u32,
+                format: PixelFormat::Rgba,
+                data: bmp.as_rgba_bytes(),
+            })
+        }
     }
 
     impl Renderer for PdfiumEngine {

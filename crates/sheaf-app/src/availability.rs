@@ -316,6 +316,7 @@ pub fn builtin(id: &str) -> Builtin {
         "tools::ToolInk" => (DOC, None, Some(|f| f.tool == Some(Tool::Ink))),
         "tools::ToolTick" => (DOC, None, Some(|f| f.tool == Some(Tool::Tick))),
         "tools::ToolConnector" => (DOC, None, Some(|f| f.tool == Some(Tool::Connector))),
+        "tools::ToolStamp" => (DOC, None, Some(|f| f.tool == Some(Tool::Stamp))),
         _ => (&[], None, None),
     };
     Builtin {

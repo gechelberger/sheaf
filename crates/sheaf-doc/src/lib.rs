@@ -21,6 +21,7 @@ pub mod portfolio;
 pub mod properties;
 pub mod recovery;
 pub mod save;
+pub mod stamp_lib;
 pub mod stamps;
 pub mod text_layer;
 pub mod watermark;

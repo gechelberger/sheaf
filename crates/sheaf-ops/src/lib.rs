@@ -17,6 +17,7 @@ pub mod pages;
 pub mod prefs;
 pub mod scan;
 pub mod split;
+pub mod stamps;
 
 pub use open::open;
 

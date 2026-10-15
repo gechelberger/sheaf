@@ -58,6 +58,8 @@ mod rulers;
 mod scan_dialog;
 mod script;
 mod split_dialog;
+mod stamp_preview;
+mod stamps_panel;
 mod state;
 mod text_select;
 mod toolbar;
@@ -150,6 +152,7 @@ actions!(
         ToolArrow,
         ToolInk,
         ToolTick,
+        ToolStamp,
         ToolConnector
     ]
 );
@@ -184,6 +187,7 @@ actions!(
         ShowAttachments,
         ShowLayers,
         ShowHistory,
+        ShowStamps,
         CloseDocument,
         OpenFile,
         NewWindow,
@@ -488,6 +492,7 @@ fn main() {
             KeyBinding::new("a", ToolArrow, doc_keys),
             KeyBinding::new("n", ToolInk, doc_keys),
             KeyBinding::new("k", ToolTick, doc_keys),
+            KeyBinding::new("j", ToolStamp, doc_keys),
             KeyBinding::new("i", ToolConnector, doc_keys),
             KeyBinding::new("ctrl-f", Find, doc),
             KeyBinding::new("escape", CloseSearch, doc),
@@ -504,6 +509,7 @@ fn main() {
             KeyBinding::new("ctrl-alt-6", ShowAttachments, ws),
             KeyBinding::new("ctrl-alt-7", ShowLayers, ws),
             KeyBinding::new("ctrl-alt-8", ShowHistory, ws),
+            KeyBinding::new("ctrl-alt-9", ShowStamps, ws),
             // History panel (when it has focus): step through versions.
             KeyBinding::new("up", HistoryPrev, Some(history_panel::KEY_CONTEXT)),
             KeyBinding::new("down", HistoryNext, Some(history_panel::KEY_CONTEXT)),

@@ -21,6 +21,38 @@ pub const FILE: &str = "settings.toml";
 pub struct Prefs {
     pub identity: Identity,
     pub ocr: OcrPrefs,
+    pub stamps: StampPrefs,
+}
+
+/// `[stamps]`: how big stamps go down, and how dynamic stamps write the
+/// date and time.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct StampPrefs {
+    /// Height in points.
+    pub size: Option<f32>,
+    /// `chrono` formats, as in `strftime`.
+    pub date_format: Option<String>,
+    pub time_format: Option<String>,
+}
+
+impl StampPrefs {
+    pub const SIZE: f32 = 40.0;
+    pub const DATE: &str = "%m/%d/%Y";
+    pub const TIME: &str = "%-I:%M %p";
+
+    pub fn size(&self) -> f32 {
+        self.size
+            .filter(|s| *s >= 8.0 && *s <= 400.0)
+            .unwrap_or(Self::SIZE)
+    }
+
+    pub fn date_format(&self) -> &str {
+        self.date_format.as_deref().unwrap_or(Self::DATE)
+    }
+
+    pub fn time_format(&self) -> &str {
+        self.time_format.as_deref().unwrap_or(Self::TIME)
+    }
 }
 
 /// `[ocr]`: what's set by hand rather than chosen in the Recognize Text
@@ -166,6 +198,11 @@ pub fn parse(text: &str) -> (Prefs, Vec<Problem>) {
             textline_ori: r.get("ocr.textline_ori"),
             doc_ori: r.get("ocr.doc_ori"),
             use_doc_orientation: r.get("ocr.use_doc_orientation"),
+        },
+        stamps: StampPrefs {
+            size: r.get("stamps.size"),
+            date_format: r.get("stamps.date_format"),
+            time_format: r.get("stamps.time_format"),
         },
     };
     (prefs, r.finish())
@@ -320,6 +357,16 @@ pub const TEMPLATE: &str = r#"# sheaf settings
 
 # Turn whole pages upright before PaddleOCR reads them (default true).
 # use_doc_orientation = true
+
+[stamps]
+# How tall a stamp is when it's placed, in points (72 to the inch). Any
+# stamp can be resized afterwards.
+# size = 40
+
+# How dynamic stamps write the date and time (strftime codes: %m month,
+# %d day, %Y year, %I hour, %M minute, %p AM/PM).
+# date_format = "%m/%d/%Y"
+# time_format = "%-I:%M %p"
 "#;
 
 #[cfg(test)]

@@ -165,6 +165,24 @@ pub enum AnnotKind {
         model: String,
         state: String,
     },
+    /// A stamp from the library: a PDF page drawn in `rect`. `stamp` names
+    /// its one-page PDF in the generated-file cache (`generated::path_of`),
+    /// `name` is what the library calls it, and `text` (a dynamic stamp's,
+    /// filled in when placed) is drawn over it.
+    PageStamp {
+        rect: Box2,
+        stamp: String,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+    },
+    /// A text stamp in a frame, as Acrobat's dynamic stamps look: the first
+    /// line large ("APPROVED"), the rest small ("GE 10/14/2026"), filled in
+    /// when placed.
+    TextStamp {
+        rect: Box2,
+        text: String,
+    },
 }
 
 /// The review state models (`/StateModel`).
@@ -230,6 +248,21 @@ impl AnnotKind {
             },
             AnnotKind::Insert { at } => AnnotKind::Insert { at: mb(at) },
             AnnotKind::Reply { .. } | AnnotKind::Status { .. } => self.clone(),
+            AnnotKind::PageStamp {
+                rect,
+                stamp,
+                name,
+                text,
+            } => AnnotKind::PageStamp {
+                rect: mb(rect),
+                stamp: stamp.clone(),
+                name: name.clone(),
+                text: text.clone(),
+            },
+            AnnotKind::TextStamp { rect, text } => AnnotKind::TextStamp {
+                rect: mb(rect),
+                text: text.clone(),
+            },
             AnnotKind::Note { pos } => AnnotKind::Note { pos: mp(pos) },
             AnnotKind::FreeText { rect, size } => AnnotKind::FreeText {
                 rect: mb(rect),
@@ -324,6 +357,8 @@ impl AnnotKind {
             | AnnotKind::Ellipse { .. }
             | AnnotKind::Ink { .. }
             | AnnotKind::Stamp { .. }
+            | AnnotKind::PageStamp { .. }
+            | AnnotKind::TextStamp { .. }
             | AnnotKind::Tape { .. } => Handles::Box,
             AnnotKind::Highlight { .. }
             | AnnotKind::Underline { .. }
@@ -450,7 +485,10 @@ impl Annot {
             | AnnotKind::Tape { rect, .. }
             | AnnotKind::Square { rect }
             | AnnotKind::Ellipse { rect } => *rect,
-            AnnotKind::Stamp { rect, .. } | AnnotKind::Connector { rect, .. } => *rect,
+            AnnotKind::Stamp { rect, .. }
+            | AnnotKind::Connector { rect, .. }
+            | AnnotKind::PageStamp { rect, .. }
+            | AnnotKind::TextStamp { rect, .. } => *rect,
             AnnotKind::Line { a, b, .. } => Box2::from_corners(*a, *b),
             AnnotKind::Ink { paths } => paths
                 .iter()
@@ -542,7 +580,79 @@ pub struct Written {
 /// caller adds [`Written::main`] (and the companions) to the page's
 /// `/Annots`.
 pub fn to_pdf(a: &Annot, geom: &PageGeom, pdf: &mut lopdf::Document) -> Written {
-    let (mut main, appearance) = annotation(a, geom);
+    to_pdf_in(a, geom, pdf, &mut std::collections::HashMap::new())
+}
+
+/// [`to_pdf`], with the stamp pages already imported into `pdf` in this
+/// save (by `stamp`), so a stamp used on every page is in the file once.
+pub fn to_pdf_in(
+    a: &Annot,
+    geom: &PageGeom,
+    pdf: &mut lopdf::Document,
+    forms: &mut std::collections::HashMap<String, Option<(lopdf::ObjectId, sheaf_core::PageSize)>>,
+) -> Written {
+    let (mut main, mut appearance) = annotation(a, geom);
+    if let AnnotKind::PageStamp {
+        rect, stamp, name, ..
+    } = &a.kind
+    {
+        let form = *forms.entry(stamp.clone()).or_insert_with(|| {
+            let path = crate::generated::path_of(stamp);
+            let loaded = std::fs::read(&path)
+                .ok()
+                .and_then(|b| lopdf::Document::load_mem(&b).ok());
+            match loaded {
+                Some(src) => crate::stamp_lib::page_form(&src, pdf).ok(),
+                None => {
+                    log::warn!("stamp {name} ({}) isn't on this machine", path.display());
+                    None
+                }
+            }
+        });
+        match form {
+            Some((id, size)) => {
+                // The page fitted into the mark, upright as shown.
+                let up = |p: Pt| geom.to_user(p);
+                let o = up(Pt {
+                    x: rect.x,
+                    y: rect.bottom(),
+                });
+                let u = up(Pt {
+                    x: rect.x + rect.w / size.width.max(0.001),
+                    y: rect.bottom(),
+                });
+                let v = up(Pt {
+                    x: rect.x,
+                    y: rect.bottom() - rect.h / size.height.max(0.001),
+                });
+                let (ex, ey) = ((u.x - o.x, u.y - o.y), (v.x - o.x, v.y - o.y));
+                let mut content = format!(
+                    "q {:.5} {:.5} {:.5} {:.5} {:.3} {:.3} cm /SheafStamp Do Q\n",
+                    ex.0, ex.1, ey.0, ey.1, o.x, o.y
+                )
+                .into_bytes();
+                content.extend_from_slice(&appearance.content);
+                appearance.set_content(content);
+                if let Ok(Object::Dictionary(r)) = appearance.dict.get_mut(b"Resources") {
+                    r.set("XObject", dictionary! { "SheafStamp" => id });
+                }
+            }
+            None => {
+                // Without its page, a box with its name, so it's not lost.
+                let mut content = appearance.content.clone();
+                let [x0, y0, x1, y1] = geom.box_to_user(*rect);
+                content.extend_from_slice(
+                    format!(
+                        " 0.5 g 1 w {x0:.2} {y0:.2} {:.2} {:.2} re S",
+                        x1 - x0,
+                        y1 - y0
+                    )
+                    .as_bytes(),
+                );
+                appearance.set_content(content);
+            }
+        }
+    }
     let ap = pdf.add_object(Object::Stream(appearance));
     main.set("AP", dictionary! { "N" => ap });
     let mut companions = Vec::new();
@@ -1275,6 +1385,96 @@ fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
             }
             dict.set("InkList", Object::Array(ink_list));
         }
+        AnnotKind::PageStamp {
+            rect, name, text, ..
+        } => {
+            dict.set("Subtype", Object::Name(b"Stamp".to_vec()));
+            if a.contents.is_empty() {
+                dict.set("Contents", pdf_text_string(name));
+            }
+            // The page itself goes in when it's written (`to_pdf_in`); a
+            // dynamic stamp's text over it is drawn here.
+            if let Some(t) = text.as_ref().filter(|t| !t.is_empty()) {
+                let size = (rect.h * 0.16).clamp(5.0, 24.0);
+                let width = helv_text_width(t, size, true);
+                let origin = Pt {
+                    x: rect.x + (rect.w - width).max(0.0) / 2.0,
+                    y: rect.bottom() - rect.h * 0.08,
+                };
+                content.push_str(&format!(
+                    " BT {HELV_BOLD} {size:.2} Tf {} {} {} Tj ET",
+                    color_ops(c, true),
+                    text_matrix(origin),
+                    content_literal(t)
+                ));
+            }
+        }
+        AnnotKind::TextStamp { rect, text } => {
+            dict.set("Subtype", Object::Name(b"Stamp".to_vec()));
+            if a.contents.is_empty() {
+                dict.set("Contents", pdf_text_string(text));
+            }
+            // A rounded frame, inset by half its line.
+            let lw = text_stamp_line(*rect);
+            let r = Box2 {
+                x: rect.x + lw / 2.0,
+                y: rect.y + lw / 2.0,
+                w: rect.w - lw,
+                h: rect.h - lw,
+            };
+            let rad = (r.h * 0.18).min(r.w / 2.0);
+            let k = 0.5523 * rad;
+            let pt = |x: f32, y: f32| up(Pt { x, y });
+            let (l, t, rr, b) = (r.x, r.y, r.right(), r.bottom());
+            let segs = [
+                (pt(l + rad, t), None),
+                (pt(rr - rad, t), None),
+                (
+                    pt(rr, t + rad),
+                    Some((pt(rr - rad + k, t), pt(rr, t + rad - k))),
+                ),
+                (pt(rr, b - rad), None),
+                (
+                    pt(rr - rad, b),
+                    Some((pt(rr, b - rad + k), pt(rr - rad + k, b))),
+                ),
+                (pt(l + rad, b), None),
+                (
+                    pt(l, b - rad),
+                    Some((pt(l + rad - k, b), pt(l, b - rad + k))),
+                ),
+                (pt(l, t + rad), None),
+                (
+                    pt(l + rad, t),
+                    Some((pt(l, t + rad - k), pt(l + rad - k, t))),
+                ),
+            ];
+            content.push_str(&format!(" {} {lw:.2} w", color_ops(c, false)));
+            for (i, (p, ctrl)) in segs.iter().enumerate() {
+                match (i, ctrl) {
+                    (0, _) => content.push_str(&format!(" {:.2} {:.2} m", p.x, p.y)),
+                    (_, None) => content.push_str(&format!(" {:.2} {:.2} l", p.x, p.y)),
+                    (_, Some((c1, c2))) => content.push_str(&format!(
+                        " {:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c",
+                        c1.x, c1.y, c2.x, c2.y, p.x, p.y
+                    )),
+                }
+            }
+            content.push_str(" h S");
+            for (line, size, baseline) in text_stamp_lines(*rect, text) {
+                let width = helv_text_width(&line, size, true);
+                let origin = Pt {
+                    x: rect.x + (rect.w - width) / 2.0,
+                    y: baseline,
+                };
+                content.push_str(&format!(
+                    " BT {HELV_BOLD} {size:.2} Tf {} {} {} Tj ET",
+                    color_ops(c, true),
+                    text_matrix(origin),
+                    content_literal(&line)
+                ));
+            }
+        }
         AnnotKind::Stamp { rect, glyph } => {
             dict.set("Subtype", Object::Name(b"Stamp".to_vec()));
             dict.set(
@@ -1373,6 +1573,79 @@ pub fn caret_points(at: Box2) -> [Pt; 3] {
             y: at.bottom(),
         },
     ]
+}
+
+/// A text stamp's frame line, from its height.
+pub fn text_stamp_line(rect: Box2) -> f32 {
+    (rect.h * 0.05).clamp(1.0, 4.0)
+}
+
+/// A text stamp's lines as drawn: (text, size, baseline in displayed
+/// space). The first is large, the rest small, centred as a block.
+pub fn text_stamp_lines(rect: Box2, text: &str) -> Vec<(String, f32, f32)> {
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    let (big, small) = match lines.len() {
+        0 | 1 => (rect.h * 0.5, 0.0),
+        n => (rect.h * 0.38, rect.h * 0.42 / (n - 1) as f32 / 1.15),
+    };
+    let block = big * 1.0 + small * 1.15 * lines.len().saturating_sub(1) as f32;
+    let mut y = rect.y + (rect.h - block) / 2.0;
+    lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            let size = if i == 0 { big } else { small };
+            y += if i == 0 { size * 0.85 } else { size * 1.15 };
+            (l.to_string(), size, y)
+        })
+        .collect()
+}
+
+/// A text stamp's size for `text` at `height`: wide enough for its lines.
+pub fn text_stamp_size(text: &str, height: f32) -> (f32, f32) {
+    let r = Box2 {
+        x: 0.0,
+        y: 0.0,
+        w: 0.0,
+        h: height,
+    };
+    let widest = text_stamp_lines(r, text)
+        .iter()
+        .map(|(l, size, _)| helv_text_width(l, *size, true))
+        .fold(0.0, f32::max);
+    (widest + height * 0.6, height)
+}
+
+/// Advance of `s` in Helvetica (bold or not) at `size`, from the AFM widths
+/// of ASCII; other characters count as a capital.
+pub fn helv_text_width(s: &str, size: f32, bold: bool) -> f32 {
+    s.chars()
+        .map(|c| {
+            let (regular, b) = match c {
+                ' ' => (278.0, 278.0),
+                '.' | ',' => (278.0, 278.0),
+                ':' | ';' => (278.0, 333.0),
+                '/' => (278.0, 278.0),
+                '-' => (333.0, 333.0),
+                'i' | 'j' | 'l' => (222.0, 278.0),
+                'f' | 't' => (278.0, 333.0),
+                'r' => (333.0, 389.0),
+                'm' => (833.0, 889.0),
+                'w' => (722.0, 778.0),
+                'I' => (278.0, 278.0),
+                'J' => (500.0, 556.0),
+                'M' => (833.0, 833.0),
+                'W' => (944.0, 944.0),
+                '0'..='9' => (556.0, 556.0),
+                'a'..='z' => (556.0, 611.0),
+                'A'..='Z' => (667.0, 722.0),
+                _ => (667.0, 722.0),
+            };
+            if bold { b } else { regular }
+        })
+        .sum::<f32>()
+        * size
+        / 1000.0
 }
 
 /// Parse a `/SheafAnnot` payload.

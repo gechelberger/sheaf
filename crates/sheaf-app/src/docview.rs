@@ -49,8 +49,8 @@ use crate::{
     SearchNext, SearchPrev, SelectAllPages, SinglePage, SinglePageContinuous, SplitView,
     ToggleCheckmark, ToggleComments, ToggleCoverPage, ToolArrow, ToolConnector, ToolEllipse,
     ToolFreeText, ToolHighlight, ToolInk, ToolLine, ToolNote, ToolSelect, ToolSquare, ToolSquiggly,
-    ToolStrikeOut, ToolTextEdit, ToolTick, ToolUnderline, TwoUp, TwoUpContinuous, Undo, ZoomActual,
-    ZoomFitPage, ZoomFitWidth, ZoomIn, ZoomOut,
+    ToolStamp, ToolStrikeOut, ToolTextEdit, ToolTick, ToolUnderline, TwoUp, TwoUpContinuous, Undo,
+    ZoomActual, ZoomFitPage, ZoomFitWidth, ZoomIn, ZoomOut,
 };
 
 pub const KEY_CONTEXT: &str = "DocView";
@@ -553,6 +553,9 @@ pub struct DocView {
     pub(crate) calc: Option<crate::calc_panel::CalcTape>,
     pub(crate) comments: Option<crate::comments_panel::Comments>,
     pub(crate) history: Option<crate::history_panel::History>,
+    pub(crate) stamps: Option<crate::stamps_panel::StampsPanel>,
+    /// The stamp the Stamp tool places.
+    pub(crate) stamp_choice: Option<sheaf_ops::stamps::StampRef>,
     pub(crate) pending_history_focus: bool,
     /// A Recognize Text run in progress (see ocr_run.rs).
     pub(crate) ocr: Option<crate::ocr_run::OcrRun>,
@@ -673,6 +676,8 @@ impl DocView {
             plugin_run: None,
             pending_comments_focus: false,
             history: None,
+            stamps: None,
+            stamp_choice: None,
             pending_history_focus: false,
             initial_query: None,
             search_started: None,
@@ -4375,6 +4380,8 @@ impl Render for DocView {
         // What the comment filter hides on the page, kept current whether
         // or not the panel is open (cached; cheap when nothing changed).
         self.comment_view(cx);
+        // Stamp pictures the last frame asked for.
+        crate::stamp_preview::make_wanted(cx);
         if std::mem::take(&mut self.pending_focus) {
             window.focus(&self.focus_handle, cx);
         }
@@ -4590,6 +4597,11 @@ impl Render for DocView {
             .on_action(cx.listener(|v, _: &ToolArrow, _, cx| v.set_tool(Tool::Arrow, cx)))
             .on_action(cx.listener(|v, _: &ToolInk, _, cx| v.set_tool(Tool::Ink, cx)))
             .on_action(cx.listener(|v, _: &ToolTick, _, cx| v.set_tool(Tool::Tick, cx)))
+            .on_action(cx.listener(|v, _: &ToolStamp, _, cx| {
+                v.set_tool(Tool::Stamp, cx);
+                // The workspace shows the Stamps panel too.
+                cx.propagate();
+            }))
             .on_action(cx.listener(|v, _: &ToolConnector, _, cx| v.set_tool(Tool::Connector, cx)))
             .on_action(cx.listener(|v, _: &NewBookmark, window, cx| v.new_bookmark(window, cx)))
             .on_action(cx.listener(|v, _: &Undo, _, cx| v.undo(cx)))
@@ -5158,6 +5170,74 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
         AnnotKind::Insert { at } => out.push(caret_element(*at, fill, src, rot, k)),
         // In their parent's thread, not on the page.
         AnnotKind::Reply { .. } | AnnotKind::Status { .. } => {}
+        AnnotKind::PageStamp {
+            rect,
+            stamp,
+            name,
+            text,
+        } => {
+            let el = match crate::stamp_preview::picture(stamp) {
+                Some(path) => place(*rect)
+                    .opacity(a.opacity.clamp(0.0, 1.0))
+                    .child(img(path).size_full().object_fit(ObjectFit::Fill)),
+                // Until its picture is made (a moment), its name in a box.
+                None => place(*rect)
+                    .border_1()
+                    .border_dashed()
+                    .border_color(color)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(color)
+                    .text_size(px((10.0 * k).max(6.0)))
+                    .child(name.clone()),
+            };
+            let el = match text.as_ref().filter(|t| !t.is_empty()) {
+                Some(t) => {
+                    let size = (rect.h * 0.16).clamp(5.0, 24.0);
+                    el.child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .right_0()
+                            .bottom(px(rect.h * 0.08 * k))
+                            .flex()
+                            .justify_center()
+                            .text_color(color)
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_size(px(size * k))
+                            .line_height(px(size * k))
+                            .child(t.clone()),
+                    )
+                }
+                None => el,
+            };
+            out.push(el.into_any_element());
+        }
+        AnnotKind::TextStamp { rect, text } => {
+            let lw = sheaf_doc::annot::text_stamp_line(*rect);
+            let mut el = place(*rect)
+                .border(px(lw * k))
+                .border_color(fill)
+                .rounded(px(rect.h * 0.18 * k))
+                .text_color(fill)
+                .font_weight(gpui::FontWeight::BOLD);
+            for (line, size, baseline) in sheaf_doc::annot::text_stamp_lines(*rect, text) {
+                el = el.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .top(px((baseline - rect.y - size * 0.9) * k))
+                        .flex()
+                        .justify_center()
+                        .text_size(px(size * k))
+                        .line_height(px(size * k))
+                        .child(line),
+                );
+            }
+            out.push(el.into_any_element());
+        }
         AnnotKind::Line {
             a: pa,
             b: pb,

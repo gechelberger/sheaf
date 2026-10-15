@@ -380,6 +380,7 @@ fn ours_type(kind: &AnnotKind) -> &'static str {
         AnnotKind::Tape { .. } => "Calculator tape",
         AnnotKind::Reply { .. } => "Reply",
         AnnotKind::Status { .. } => "Status",
+        AnnotKind::PageStamp { .. } | AnnotKind::TextStamp { .. } => "Stamp",
     }
 }
 
@@ -404,6 +405,10 @@ pub(crate) fn kind_label(kind: &AnnotKind) -> String {
         AnnotKind::Insert { .. } => "Insert text".into(),
         AnnotKind::Reply { .. } => "Reply".into(),
         AnnotKind::Status { state, .. } => state.clone(),
+        AnnotKind::PageStamp { name, .. } => format!("Stamp {name}"),
+        AnnotKind::TextStamp { text, .. } => {
+            format!("Stamp {}", text.lines().next().unwrap_or_default())
+        }
     }
 }
 
