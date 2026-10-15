@@ -705,7 +705,7 @@ impl api::document::Host for HostState {
         d.snapshot
             .state
             .annots_on(PageId(page))
-            .map(|l| l.iter().map(convert::annot_to_wit).collect())
+            .map(|l| l.iter().filter_map(convert::annot_to_wit).collect())
             .unwrap_or_default()
     }
 

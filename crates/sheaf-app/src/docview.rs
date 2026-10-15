@@ -42,14 +42,15 @@ use sheaf_render::{
 };
 
 use crate::{
-    CancelOcr, CloseSearch, CopySelection, DeletePage, DuplicatePages, ExportCleanCopy,
-    ExportFlattened, ExtractPages, Find, FirstPage, InsertPdf, LastPage, LineDown, LineUp,
-    NewBookmark, NextPage, NextPane, PasteMarks, PasteMarksInPlace, PrevPage, Redo, RotatePageCcw,
-    RotatePageCw, RotateViewCcw, RotateViewCw, Save, SaveAs, ScreenDown, ScreenUp, SearchNext,
-    SearchPrev, SelectAllPages, SinglePage, SinglePageContinuous, SplitView, ToggleCoverPage,
-    ToolArrow, ToolConnector, ToolEllipse, ToolFreeText, ToolHighlight, ToolInk, ToolLine,
-    ToolNote, ToolSelect, ToolSquare, ToolTick, TwoUp, TwoUpContinuous, Undo, ZoomActual,
-    ZoomFitPage, ZoomFitWidth, ZoomIn, ZoomOut,
+    CancelOcr, CloseSearch, CopySelection, CycleTextMarkup, DeletePage, DuplicatePages,
+    ExportCleanCopy, ExportFlattened, ExtractPages, Find, FirstPage, InsertPdf, LastPage, LineDown,
+    LineUp, NewBookmark, NextPage, NextPane, PasteMarks, PasteMarksInPlace, PrevPage, Redo,
+    RotatePageCcw, RotatePageCw, RotateViewCcw, RotateViewCw, Save, SaveAs, ScreenDown, ScreenUp,
+    SearchNext, SearchPrev, SelectAllPages, SinglePage, SinglePageContinuous, SplitView,
+    ToggleCoverPage, ToolArrow, ToolConnector, ToolEllipse, ToolFreeText, ToolHighlight, ToolInk,
+    ToolLine, ToolNote, ToolSelect, ToolSquare, ToolSquiggly, ToolStrikeOut, ToolTextEdit,
+    ToolTick, ToolUnderline, TwoUp, TwoUpContinuous, Undo, ZoomActual, ZoomFitPage, ZoomFitWidth,
+    ZoomIn, ZoomOut,
 };
 
 pub const KEY_CONTEXT: &str = "DocView";
@@ -563,8 +564,9 @@ pub struct DocView {
     pub(crate) selftest_ocr: Option<PathBuf>,
     /// Password the file needs, once known.
     password: Option<String>,
-    /// Dev: open the inline editor on this page's last mark next frame.
-    pending_edit_last: Option<PageId>,
+    /// Open the inline editor on this page's last mark next frame (a text
+    /// edit just placed; dev hooks).
+    pub(crate) pending_edit_last: Option<PageId>,
     /// Recovery data found when opening, until the user has been asked.
     pending_recovery: Option<sheaf_doc::recovery::Recovery>,
     autosave: Option<Task<()>>,
@@ -2311,9 +2313,15 @@ impl DocView {
         else {
             return;
         };
+        let hint = match annot.kind {
+            AnnotKind::Replace { .. } => "Type the replacement; Ctrl+Enter or click away when done",
+            AnnotKind::Insert { .. } => {
+                "Type the text to insert; Ctrl+Enter or click away when done"
+            }
+            _ => "Type a note; Ctrl+Enter or click away when done",
+        };
         let input = cx.new(|cx| {
-            let mut i =
-                TextArea::new("Type a note; Ctrl+Enter or click away when done", cx).rows(3, 10);
+            let mut i = TextArea::new(hint, cx).rows(3, 10);
             i.set_text(annot.contents.clone(), cx);
             i
         });
@@ -2347,6 +2355,29 @@ impl DocView {
             return;
         };
         let text = ed.input.read(cx).text().to_string();
+        // An insertion with nothing to insert isn't one.
+        if text.trim().is_empty()
+            && let Some(cur) = doc
+                .model
+                .state()
+                .annots_on(ed.page)
+                .and_then(|l| l.iter().find(|a| a.id == ed.id))
+            && matches!(cur.kind, AnnotKind::Insert { .. })
+        {
+            self.apply(
+                Edit::AnnotDelete {
+                    page: ed.page,
+                    id: ed.id,
+                },
+                "Delete text insertion",
+                cx,
+            );
+            self.pending_focus = true;
+            return;
+        }
+        let State::Ready(doc) = &mut self.state else {
+            return;
+        };
         if let Some(cur) = doc
             .model
             .state()
@@ -4502,6 +4533,15 @@ impl Render for DocView {
             .on_action(
                 cx.listener(|v, _: &ToolHighlight, _, cx| v.markup_tool(Tool::Highlight, cx)),
             )
+            .on_action(
+                cx.listener(|v, _: &ToolUnderline, _, cx| v.markup_tool(Tool::Underline, cx)),
+            )
+            .on_action(
+                cx.listener(|v, _: &ToolStrikeOut, _, cx| v.markup_tool(Tool::StrikeOut, cx)),
+            )
+            .on_action(cx.listener(|v, _: &ToolSquiggly, _, cx| v.markup_tool(Tool::Squiggly, cx)))
+            .on_action(cx.listener(|v, _: &ToolTextEdit, _, cx| v.markup_tool(Tool::TextEdit, cx)))
+            .on_action(cx.listener(|v, _: &CycleTextMarkup, _, cx| v.cycle_text_markup(cx)))
             .on_action(cx.listener(|v, _: &ToolFreeText, _, cx| v.set_tool(Tool::FreeText, cx)))
             .on_action(cx.listener(|v, _: &ToolSquare, _, cx| v.set_tool(Tool::Square, cx)))
             .on_action(cx.listener(|v, _: &ToolEllipse, _, cx| v.set_tool(Tool::Ellipse, cx)))
@@ -4882,6 +4922,18 @@ fn header_footer_elements(doc: &Doc, pl: &PagePlan, k: f32) -> Vec<AnyElement> {
 /// GPUI elements for one annotation, positioned in page-local logical px.
 /// `src` is the source page size, `rot` the page's extra rotation, `k` logical
 /// px per point.
+/// A text edit's caret, drawn as the file draws it.
+fn caret_element(at: Box2, color: gpui::Rgba, src: PageSize, rot: Rotation, k: f32) -> AnyElement {
+    let tri = sheaf_doc::annot::caret_points(at)
+        .into_iter()
+        .map(|p| {
+            let q = rotate_pt(p, src, rot);
+            (q.x * k, q.y * k)
+        })
+        .collect();
+    crate::markup_tools::fill_canvas(vec![tri], color, src.rotated(rot), k)
+}
+
 pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) -> Vec<AnyElement> {
     let rgb_u32 = ((a.color[0] as u32) << 16) | ((a.color[1] as u32) << 8) | a.color[2] as u32;
     let color = rgb(rgb_u32);
@@ -5034,6 +5086,35 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
                     .into_any_element(),
             );
         }
+        AnnotKind::Underline { rects }
+        | AnnotKind::StrikeOut { rects }
+        | AnnotKind::Squiggly { rects }
+        | AnnotKind::Replace { rects, .. } => {
+            // A replacement crosses its text out, then shows its caret.
+            let lines = match &a.kind {
+                AnnotKind::Replace { .. } => AnnotKind::StrikeOut {
+                    rects: rects.clone(),
+                },
+                other => other.clone(),
+            };
+            let paths = sheaf_doc::annot::text_line_paths(&lines)
+                .into_iter()
+                .map(|path| {
+                    path.into_iter()
+                        .map(|p| {
+                            let q = rotate_pt(p, src, rot);
+                            (q.x * k, q.y * k)
+                        })
+                        .collect()
+                })
+                .collect();
+            let width = sheaf_doc::annot::text_line_width(rects);
+            out.push(stroke_canvas(paths, fill, width * k, src.rotated(rot), k));
+            if let AnnotKind::Replace { at, .. } = &a.kind {
+                out.push(caret_element(*at, fill, src, rot, k));
+            }
+        }
+        AnnotKind::Insert { at } => out.push(caret_element(*at, fill, src, rot, k)),
         AnnotKind::Line {
             a: pa,
             b: pb,

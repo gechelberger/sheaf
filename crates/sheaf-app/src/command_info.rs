@@ -410,8 +410,33 @@ pub fn info(id: &str) -> Option<Info> {
         ),
         "tools::ToolHighlight" => (
             "highlight",
-            "Drag across text to highlight it.",
+            "Drag across text to highlight it, or highlight the selected text.",
             &["marker"],
+        ),
+        "tools::ToolUnderline" => (
+            "underline",
+            "Drag across text to underline it, or underline the selected text.",
+            &["text markup"],
+        ),
+        "tools::ToolStrikeOut" => (
+            "strikethrough",
+            "Drag across text to cross it out, or cross out the selected text.",
+            &["strikeout", "cross out", "text markup"],
+        ),
+        "tools::ToolSquiggly" => (
+            "squiggly",
+            "Drag across text to put a wavy line under it.",
+            &["wavy", "text markup"],
+        ),
+        "tools::ToolTextEdit" => (
+            "text-edit",
+            "Drag across text and type its replacement, or click between characters and type to insert.",
+            &["replace text", "insert text", "caret", "suggest"],
+        ),
+        "tools::CycleTextMarkup" => (
+            "underline",
+            "Switch to the next text markup tool: highlight, underline, strikethrough, squiggly.",
+            &["cycle"],
         ),
         "tools::ToolFreeText" => (
             "text",

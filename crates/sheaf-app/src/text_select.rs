@@ -66,13 +66,6 @@ impl PartialEq for CharsKey {
     }
 }
 
-fn finish_text_drag(doc: &mut crate::docview::Doc) {
-    doc.text_drag = None;
-    if doc.text_sel.is_some_and(|s| s.is_empty()) {
-        doc.text_sel = None;
-    }
-}
-
 /// Pages whose characters are kept, past which the cache starts over.
 const CACHED_PAGES: usize = 64;
 
@@ -199,7 +192,8 @@ impl DocView {
 
     fn update_text_hover(&mut self, cx: &mut Context<Self>) {
         let over = self.last_hover.is_some_and(|(page, p, tolerance)| {
-            self.tool == Tool::Select && self.over_text(page, p, tolerance)
+            (self.tool == Tool::Select || self.tool.marks_text())
+                && self.over_text(page, p, tolerance)
         });
         if over != self.text_hover {
             self.text_hover = over;
@@ -216,7 +210,7 @@ impl DocView {
         cx: &mut Context<Self>,
     ) {
         self.last_hover = Some((page, p, tolerance));
-        if self.tool == Tool::Select {
+        if self.tool == Tool::Select || self.tool.marks_text() {
             self.prefetch_chars(page, cx);
         }
         self.update_text_hover(cx);
@@ -227,9 +221,9 @@ impl DocView {
         self.update_text_hover(cx);
     }
 
-    /// A press on the page with the Select tool, away from any mark: start
-    /// selecting text there (a double-click takes the word). Drops any
-    /// selection before.
+    /// A press on the page with the Select tool away from any mark, or on
+    /// text with a text tool: start selecting text there (a double-click
+    /// takes the word). Drops any selection before.
     pub(crate) fn start_text_drag(
         &mut self,
         page: PageId,
@@ -252,15 +246,18 @@ impl DocView {
                     return;
                 };
                 let (a, b) = c.word_at(at);
-                if let State::Ready(doc) = &mut v.state
-                    && a < b
-                {
-                    doc.text_sel = Some(TextSel {
-                        page,
-                        anchor: a,
-                        head: b,
-                    });
+                if a == b {
+                    return;
                 }
+                let sel = TextSel {
+                    page,
+                    anchor: a,
+                    head: b,
+                };
+                if let State::Ready(doc) = &mut v.state {
+                    doc.text_sel = Some(sel);
+                }
+                v.text_selected(sel, cx);
                 cx.notify();
             });
             return;
@@ -275,10 +272,10 @@ impl DocView {
         });
         self.with_chars(page, cx, |v, _, cx| {
             v.update_text_drag();
-            if let State::Ready(doc) = &mut v.state
+            if let State::Ready(doc) = &v.state
                 && doc.text_drag.is_some_and(|d| d.released)
             {
-                finish_text_drag(doc);
+                v.finish_text_drag(cx);
             }
             cx.notify();
         });
@@ -336,10 +333,41 @@ impl DocView {
         };
         match &mut doc.text_drag {
             Some(d) if !read => d.released = true,
-            _ => finish_text_drag(doc),
+            _ => self.finish_text_drag(cx),
         }
         cx.notify();
         true
+    }
+
+    /// A text drag is over: keep what it selected (an empty selection is
+    /// a click), and let the tool act on it.
+    fn finish_text_drag(&mut self, cx: &mut Context<Self>) {
+        let State::Ready(doc) = &mut self.state else {
+            return;
+        };
+        doc.text_drag = None;
+        let sel = doc.text_sel;
+        if sel.is_some_and(|s| s.is_empty()) {
+            doc.text_sel = None;
+        }
+        if let Some(sel) = sel {
+            self.text_selected(sel, cx);
+        }
+    }
+
+    /// Text was selected (or, when `sel` is empty, clicked) with the
+    /// current tool: the text tools act on it straight away.
+    fn text_selected(&mut self, sel: TextSel, cx: &mut Context<Self>) {
+        match self.tool {
+            Tool::Highlight | Tool::Underline | Tool::StrikeOut | Tool::Squiggly
+                if !sel.is_empty() =>
+            {
+                self.markup_selection(self.tool, cx)
+            }
+            Tool::TextEdit if sel.is_empty() => self.start_insert(sel.page, sel.anchor, cx),
+            Tool::TextEdit => self.start_replace(cx),
+            _ => {}
+        }
     }
 
     /// Drop the text selection. Returns whether there was one.
@@ -385,22 +413,99 @@ impl DocView {
         true
     }
 
-    /// A text markup tool's key or button: with text selected, mark it up
-    /// and keep the tool there was; otherwise pick the tool.
+    /// A text tool's key or button: with text selected, act on it and
+    /// keep the tool there was (Acrobat's quick actions); otherwise pick
+    /// the tool.
     pub(crate) fn markup_tool(&mut self, tool: Tool, cx: &mut Context<Self>) {
-        if let Some((page, _, rects)) = self.selected_text()
-            && !rects.is_empty()
-        {
-            let kind = match tool {
-                Tool::Highlight => AnnotKind::Highlight { rects },
-                _ => return self.set_tool(tool, cx),
-            };
-            let mut a = self.new_annot(kind, self.tool_color, cx);
-            a.opacity = 0.6;
-            self.add_annot(page, a, tool.label(), cx);
-            self.clear_text_sel(cx);
-            return;
+        if self.selected_text().is_some() {
+            match tool {
+                Tool::Highlight | Tool::Underline | Tool::StrikeOut | Tool::Squiggly => {
+                    return self.markup_selection(tool, cx);
+                }
+                Tool::TextEdit => return self.start_replace(cx),
+                _ => {}
+            }
         }
         self.set_tool(tool, cx);
+    }
+
+    /// Shift+U: the next text markup tool.
+    pub(crate) fn cycle_text_markup(&mut self, cx: &mut Context<Self>) {
+        let next = self.tool.next_text_markup();
+        self.set_tool(next, cx);
+        if let State::Ready(doc) = &mut self.state {
+            doc.notice = Some(next.label().into());
+        }
+    }
+
+    /// Mark up the selected text with `tool`'s markup.
+    fn markup_selection(&mut self, tool: Tool, cx: &mut Context<Self>) {
+        let Some((page, _, rects)) = self.selected_text() else {
+            return;
+        };
+        if rects.is_empty() {
+            return;
+        }
+        self.add_text_markup(tool, page, rects, cx);
+        self.clear_text_sel(cx);
+    }
+
+    /// Add `tool`'s markup over `rects` on `page`.
+    pub(crate) fn add_text_markup(
+        &mut self,
+        tool: Tool,
+        page: PageId,
+        rects: Vec<Box2>,
+        cx: &mut Context<Self>,
+    ) {
+        let kind = match tool {
+            Tool::Highlight => AnnotKind::Highlight { rects },
+            Tool::Underline => AnnotKind::Underline { rects },
+            Tool::StrikeOut => AnnotKind::StrikeOut { rects },
+            Tool::Squiggly => AnnotKind::Squiggly { rects },
+            _ => return,
+        };
+        let mut a = self.new_annot(kind, self.tool_color, cx);
+        if tool == Tool::Highlight {
+            a.opacity = 0.6;
+        }
+        self.add_annot(page, a, tool.label(), cx);
+    }
+
+    /// Text Edits on the selection: cross it out, with a caret after it,
+    /// and open the editor for the replacement.
+    fn start_replace(&mut self, cx: &mut Context<Self>) {
+        let Some((page, struck, rects)) = self.selected_text() else {
+            return;
+        };
+        let at = match &self.state {
+            State::Ready(doc) => doc.text_sel.and_then(|sel| {
+                let c = self.cached_chars(sel.page)?;
+                // After the last character crossed out.
+                c.caret_at(sel.range().1)
+            }),
+            _ => None,
+        };
+        let Some(at) = at else {
+            return;
+        };
+        let kind = AnnotKind::Replace { rects, struck, at };
+        let a = self.new_annot(kind, self.tool_color, cx);
+        self.add_annot(page, a, "Replace text", cx);
+        self.clear_text_sel(cx);
+        self.pending_edit_last = Some(page);
+        cx.notify();
+    }
+
+    /// Text Edits at a click in the text: a caret at boundary `at`, and the
+    /// editor for what to insert.
+    fn start_insert(&mut self, page: PageId, at: usize, cx: &mut Context<Self>) {
+        let Some(at) = self.cached_chars(page).and_then(|c| c.caret_at(at)) else {
+            return;
+        };
+        let a = self.new_annot(AnnotKind::Insert { at }, self.tool_color, cx);
+        self.add_annot(page, a, "Insert text", cx);
+        self.pending_edit_last = Some(page);
+        cx.notify();
     }
 }

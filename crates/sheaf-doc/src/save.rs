@@ -1919,6 +1919,168 @@ mod tests {
     }
 
     #[test]
+    fn a_text_replacement_is_a_caret_with_a_grouped_strikeout() {
+        use crate::annot::{AnnotKind, Box2};
+        let dir = tempdir();
+        let a_path = make_pdf(&dir, "a.pdf", "A", 1, &[]);
+        let original = std::fs::read(&a_path).unwrap();
+        let mut model = Document::new(
+            {
+                let mut i = info(&a_path, 1);
+                i.bytes = original.len();
+                i
+            },
+            &[],
+            Box::new(FixedCount(10)),
+        );
+        let p0 = model.page(0).unwrap().id;
+        let words = Box2 {
+            x: 72.0,
+            y: 80.0,
+            w: 120.0,
+            h: 14.0,
+        };
+        let mk = |kind: AnnotKind, contents: &str| Annot {
+            id: crate::annot::AnnotId(0),
+            kind,
+            color: [0, 0, 255],
+            opacity: 1.0,
+            stroke: 1.0,
+            author: "greg".into(),
+            contents: contents.into(),
+            modified: "D:20261014000000".into(),
+            created: "D:20261014000000".into(),
+            fill: None,
+            dashed: false,
+        };
+        let replace = mk(
+            AnnotKind::Replace {
+                rects: vec![words],
+                struck: "old words".into(),
+                at: crate::annot::caret_box(words.right(), words.bottom(), words.h),
+            },
+            "new words",
+        );
+        let underline = mk(
+            AnnotKind::Underline {
+                rects: vec![Box2 { y: 120.0, ..words }],
+            },
+            "",
+        );
+        for (a, label) in [(replace, "replace"), (underline, "underline")] {
+            model
+                .apply(Edit::AnnotAdd { page: p0, annot: a }, label)
+                .unwrap();
+        }
+        let want: Vec<Annot> = model
+            .state()
+            .annots_on(p0)
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect();
+
+        let annots_of = |bytes: &[u8]| {
+            let pdf = Pdf::load_mem(bytes).unwrap();
+            let page0 = pdf.get_pages()[&1];
+            let list: Vec<lopdf::Dictionary> = pdf
+                .get_dictionary(page0)
+                .unwrap()
+                .get(b"Annots")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|o| pdf.dereference(o).unwrap().1.as_dict().unwrap().clone())
+                .collect();
+            let ids: Vec<lopdf::ObjectId> = pdf
+                .get_dictionary(page0)
+                .unwrap()
+                .get(b"Annots")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|o| o.as_reference().unwrap())
+                .collect();
+            (list, ids)
+        };
+        let bytes = crate::incremental::incremental(&model.snapshot()).unwrap();
+        let (list, ids) = annots_of(&bytes);
+        // Caret, its StrikeOut, the underline.
+        let subtypes: Vec<&[u8]> = list
+            .iter()
+            .map(|d| d.get(b"Subtype").unwrap().as_name().unwrap())
+            .collect();
+        assert_eq!(
+            subtypes,
+            [
+                b"Caret".as_slice(),
+                b"StrikeOut".as_slice(),
+                b"Underline".as_slice()
+            ]
+        );
+        let (caret, strike) = (&list[0], &list[1]);
+        assert_eq!(
+            caret.get(b"Contents").unwrap().as_str().unwrap(),
+            b"new words"
+        );
+        assert_eq!(strike.get(b"IRT").unwrap().as_reference().unwrap(), ids[0]);
+        assert_eq!(strike.get(b"RT").unwrap().as_name().unwrap(), b"Group");
+        assert!(strike.has(crate::annot::PART.as_bytes()));
+        assert!(!strike.has(b"SheafAnnot"));
+        assert!(strike.has(b"QuadPoints"));
+        // The names the renderer hides are exactly what was written.
+        let names: Vec<String> = list
+            .iter()
+            .map(|d| crate::file::pdf_text(d.get(b"NM").unwrap()))
+            .collect();
+        let mut expected: Vec<String> = want.iter().flat_map(|a| a.pdf_names()).collect();
+        expected.sort();
+        let mut got = names.clone();
+        got.sort();
+        assert_eq!(got, expected);
+
+        // Read back: two marks, nothing foreign.
+        let out = dir.join("out.pdf");
+        std::fs::write(&out, &bytes).unwrap();
+        let back = crate::file::read_annots(&out, None).unwrap();
+        assert_eq!(back.sheaf[&0], want);
+        assert!(back.foreign.is_empty(), "{:?}", back.foreign);
+
+        // Saved again from the reopened file: the companion isn't doubled.
+        let mut model2 = Document::new(
+            {
+                let mut i = info(&out, 1);
+                i.bytes = bytes.len();
+                i
+            },
+            &[],
+            Box::new(FixedCount(10)),
+        );
+        model2.set_initial_annots(back.sheaf).unwrap();
+        let p = model2.page(0).unwrap().id;
+        let mut changed = model2.state().annots_on(p).unwrap()[0].clone();
+        changed.contents = "newer words".into();
+        model2
+            .apply(
+                Edit::AnnotUpdate {
+                    page: p,
+                    annot: changed,
+                },
+                "edit",
+            )
+            .unwrap();
+        let bytes2 = crate::incremental::incremental(&model2.snapshot()).unwrap();
+        let (list2, _) = annots_of(&bytes2);
+        assert_eq!(list2.len(), 3);
+        assert_eq!(
+            list2[0].get(b"Contents").unwrap().as_str().unwrap(),
+            b"newer words"
+        );
+    }
+
+    #[test]
     fn annots_written_and_read_back() {
         use crate::annot::{AnnotKind, Box2, Pt};
         let dir = tempdir();

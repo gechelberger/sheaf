@@ -150,7 +150,9 @@ pub fn outline_item(depth: u16, n: &OutlineNode) -> w::OutlineItem {
     }
 }
 
-pub fn annot_to_wit(a: &Annot) -> w::Annot {
+/// A mark as API 0.2 shows it; None for kinds 0.2 doesn't have, which
+/// plugins don't see until 0.3 (M9 decision 12).
+pub fn annot_to_wit(a: &Annot) -> Option<w::Annot> {
     let kind = match &a.kind {
         AnnotKind::Highlight { rects } => {
             w::AnnotKind::Highlight(rects.iter().copied().map(box_to_wit).collect())
@@ -190,8 +192,13 @@ pub fn annot_to_wit(a: &Annot) -> w::Annot {
             rect: box_to_wit(*rect),
             size: *size,
         }),
+        AnnotKind::Underline { .. }
+        | AnnotKind::StrikeOut { .. }
+        | AnnotKind::Squiggly { .. }
+        | AnnotKind::Replace { .. }
+        | AnnotKind::Insert { .. } => return None,
     };
-    w::Annot {
+    Some(w::Annot {
         id: a.id.0,
         kind,
         color: rgb_to_wit(a.color),
@@ -199,7 +206,7 @@ pub fn annot_to_wit(a: &Annot) -> w::Annot {
         stroke: a.stroke,
         author: a.author.clone(),
         contents: a.contents.clone(),
-    }
+    })
 }
 
 /// A plugin's annotation as sheaf stores it. The author defaults to the
@@ -463,7 +470,7 @@ mod tests {
             fill: None,
             dashed: false,
         };
-        let back = annot_from_wit(annot_to_wit(&a));
+        let back = annot_from_wit(annot_to_wit(&a).unwrap());
         assert_eq!(
             back,
             Annot {

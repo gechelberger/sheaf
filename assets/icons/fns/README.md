@@ -18,6 +18,10 @@ an image element does not inherit the parent element's color.
 | [select](select/icon.svg) | Select | `ToolSelect` |
 | [note](note/icon.svg) | Sticky note | `ToolNote` |
 | [highlight](highlight/icon.svg) | Highlight | `ToolHighlight` |
+| [underline](underline/icon.svg) | Underline | `ToolUnderline` |
+| [strikethrough](strikethrough/icon.svg) | Strikethrough | `ToolStrikeOut` |
+| [squiggly](squiggly/icon.svg) | Squiggly | `ToolSquiggly` |
+| [text-edit](text-edit/icon.svg) | Text edits | `ToolTextEdit` |
 | [text](text/icon.svg) | Text | `ToolFreeText` |
 | [rectangle](rectangle/icon.svg) | Rectangle | `ToolSquare` |
 | [ellipse](ellipse/icon.svg) | Ellipse | `ToolEllipse` |

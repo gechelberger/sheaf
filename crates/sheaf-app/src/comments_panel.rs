@@ -56,6 +56,11 @@ pub(crate) fn kind_label(kind: &AnnotKind) -> String {
         AnnotKind::Stamp { glyph, .. } => format!("Tickmark {glyph}"),
         AnnotKind::Connector { label, .. } => format!("Connector {label}"),
         AnnotKind::Tape { .. } => "Calculator tape".into(),
+        AnnotKind::Underline { .. } => "Underline".into(),
+        AnnotKind::StrikeOut { .. } => "Strikethrough".into(),
+        AnnotKind::Squiggly { .. } => "Squiggly".into(),
+        AnnotKind::Replace { .. } => "Replace text".into(),
+        AnnotKind::Insert { .. } => "Insert text".into(),
     }
 }
 
@@ -424,8 +429,24 @@ impl DocView {
     }
 }
 
-/// A comment's text as its row shows it.
+/// A comment's text as its row shows it. Text edits read as what they
+/// suggest.
 fn ours_text(a: &Annot) -> String {
+    let one_line = |s: &str| s.replace('\n', " ");
+    match &a.kind {
+        AnnotKind::Replace { struck, .. } if a.contents.is_empty() => {
+            return format!("Cross out “{}”", one_line(struck));
+        }
+        AnnotKind::Replace { struck, .. } => {
+            return format!(
+                "Replace “{}” with “{}”",
+                one_line(struck),
+                one_line(&a.contents)
+            );
+        }
+        AnnotKind::Insert { .. } => return format!("Insert “{}”", one_line(&a.contents)),
+        _ => {}
+    }
     if a.contents.is_empty() {
         kind_label(&a.kind)
     } else {
@@ -534,5 +555,45 @@ mod tests {
         assert_eq!(fmt_pdf_date("D:20261011"), "2026-10-11");
         assert_eq!(fmt_pdf_date(""), "");
         assert_eq!(fmt_pdf_date("garbage"), "");
+    }
+
+    #[test]
+    fn text_edits_read_as_what_they_suggest() {
+        use sheaf_doc::{AnnotId, Box2};
+        let at = Box2 {
+            x: 0.0,
+            y: 0.0,
+            w: 6.0,
+            h: 6.0,
+        };
+        let mk = |kind: AnnotKind, contents: &str| Annot {
+            id: AnnotId(1),
+            kind,
+            color: [0, 0, 255],
+            opacity: 1.0,
+            stroke: 1.0,
+            author: String::new(),
+            contents: contents.into(),
+            modified: String::new(),
+            created: String::new(),
+            fill: None,
+            dashed: false,
+        };
+        let replace = |contents| {
+            mk(
+                AnnotKind::Replace {
+                    rects: vec![at],
+                    struck: "teh".into(),
+                    at,
+                },
+                contents,
+            )
+        };
+        assert_eq!(ours_text(&replace("the")), "Replace “teh” with “the”");
+        assert_eq!(ours_text(&replace("")), "Cross out “teh”");
+        assert_eq!(
+            ours_text(&mk(AnnotKind::Insert { at }, "not")),
+            "Insert “not”"
+        );
     }
 }

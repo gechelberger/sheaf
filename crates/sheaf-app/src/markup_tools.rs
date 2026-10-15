@@ -23,6 +23,11 @@ pub enum Tool {
     Select,
     Note,
     Highlight,
+    Underline,
+    StrikeOut,
+    Squiggly,
+    /// Text Edits: replace selected text, or insert at a click.
+    TextEdit,
     FreeText,
     Square,
     Ellipse,
@@ -40,6 +45,10 @@ impl Tool {
             Tool::Select => "Select",
             Tool::Note => "Note",
             Tool::Highlight => "Highlight",
+            Tool::Underline => "Underline",
+            Tool::StrikeOut => "Strikethrough",
+            Tool::Squiggly => "Squiggly",
+            Tool::TextEdit => "Text Edits",
             Tool::FreeText => "Text",
             Tool::Square => "Rect",
             Tool::Ellipse => "Ellipse",
@@ -51,6 +60,25 @@ impl Tool {
         }
     }
 
+    /// Tools that mark up text: a press on text selects it (as the Select
+    /// tool does), and letting go marks the selection up.
+    pub fn marks_text(self) -> bool {
+        matches!(
+            self,
+            Tool::Highlight | Tool::Underline | Tool::StrikeOut | Tool::Squiggly | Tool::TextEdit
+        )
+    }
+
+    /// Shift+U: the next of the text markup tools.
+    pub fn next_text_markup(self) -> Tool {
+        match self {
+            Tool::Highlight => Tool::Underline,
+            Tool::Underline => Tool::StrikeOut,
+            Tool::StrikeOut => Tool::Squiggly,
+            _ => Tool::Highlight,
+        }
+    }
+
     /// The action that selects this tool; its binding is the shortcut shown.
     pub fn action(self) -> Box<dyn gpui::Action> {
         use crate::*;
@@ -58,6 +86,10 @@ impl Tool {
             Tool::Select => Box::new(ToolSelect),
             Tool::Note => Box::new(ToolNote),
             Tool::Highlight => Box::new(ToolHighlight),
+            Tool::Underline => Box::new(ToolUnderline),
+            Tool::StrikeOut => Box::new(ToolStrikeOut),
+            Tool::Squiggly => Box::new(ToolSquiggly),
+            Tool::TextEdit => Box::new(ToolTextEdit),
             Tool::FreeText => Box::new(ToolFreeText),
             Tool::Square => Box::new(ToolSquare),
             Tool::Ellipse => Box::new(ToolEllipse),
@@ -69,10 +101,14 @@ impl Tool {
         }
     }
 
-    pub const ALL: [Tool; 11] = [
+    pub const ALL: [Tool; 15] = [
         Tool::Select,
         Tool::Note,
         Tool::Highlight,
+        Tool::Underline,
+        Tool::StrikeOut,
+        Tool::Squiggly,
+        Tool::TextEdit,
         Tool::FreeText,
         Tool::Square,
         Tool::Ellipse,
@@ -541,6 +577,24 @@ impl DocView {
                 return;
             }
         }
+        // The text tools select text when the press is on it, as the
+        // Select tool does; letting go marks the selection up.
+        if self.tool.marks_text() {
+            if self.over_text(page_id, p, tolerance) {
+                self.start_text_drag(page_id, page, p, tolerance, ev.click_count, cx);
+                return;
+            }
+            if self.tool == Tool::TextEdit {
+                if let State::Ready(doc) = &mut self.state {
+                    doc.notice = Some(
+                        "Text Edits: drag across text to replace it, or click in text to insert"
+                            .into(),
+                    );
+                }
+                cx.notify();
+                return;
+            }
+        }
         let tool = self.tool;
         let color = self.tool_color;
         let glyph = self.tick_glyph.clone();
@@ -754,12 +808,12 @@ impl DocView {
         let rect = Box2::from_corners(a, b);
         let too_small = rect.w < 3.0 && rect.h < 3.0;
         match tool {
-            Tool::Select => {}
-            Tool::Highlight => {
+            Tool::Select | Tool::TextEdit => {}
+            Tool::Highlight | Tool::Underline | Tool::StrikeOut | Tool::Squiggly => {
                 if too_small {
                     return;
                 }
-                self.highlight_from_drag(page_id, rect, cx);
+                self.markup_from_drag(tool, page_id, rect, cx);
             }
             Tool::FreeText => {
                 if too_small {
@@ -828,16 +882,29 @@ impl DocView {
         }
     }
 
-    /// Highlight the text the drag covered (the engine's, or an unsaved
-    /// OCR layer's); an area highlight where there's no text.
-    fn highlight_from_drag(&mut self, page_id: PageId, rect: Box2, cx: &mut Context<Self>) {
-        let color = self.tool_color;
+    /// Mark up the text a rectangle dragged off the text covered (the
+    /// engine's, or an unsaved OCR layer's). Where there's no text, a
+    /// highlight covers the area; the line markups do nothing.
+    fn markup_from_drag(
+        &mut self,
+        tool: Tool,
+        page_id: PageId,
+        rect: Box2,
+        cx: &mut Context<Self>,
+    ) {
         self.with_chars(page_id, cx, move |view, chars, cx| {
-            let rects = chars.map(|c| c.rects_in(rect)).unwrap_or_default();
-            let rects = if rects.is_empty() { vec![rect] } else { rects };
-            let mut a = view.new_annot(AnnotKind::Highlight { rects }, color, cx);
-            a.opacity = 0.6;
-            view.add_annot(page_id, a, "Highlight", cx);
+            let mut rects = chars.map(|c| c.rects_in(rect)).unwrap_or_default();
+            if rects.is_empty() {
+                if tool != Tool::Highlight {
+                    if let State::Ready(doc) = &mut view.state {
+                        doc.notice = Some(format!("{}: no text there", tool.label()));
+                    }
+                    cx.notify();
+                    return;
+                }
+                rects = vec![rect];
+            }
+            view.add_text_markup(tool, page_id, rects, cx);
         });
     }
 
@@ -1000,7 +1067,7 @@ impl DocView {
     }
 
     pub(crate) fn page_cursor(&self) -> CursorStyle {
-        if self.tool == Tool::Select && self.text_hover {
+        if (self.tool == Tool::Select || self.tool.marks_text()) && self.text_hover {
             CursorStyle::IBeam
         } else if self.tool == Tool::Select {
             CursorStyle::Arrow
@@ -1075,7 +1142,14 @@ impl DocView {
                     .collect();
                 Some(stroke_canvas(vec![pts], c, 2.0 * k, src.rotated(rot), k))
             }
-            Tool::Highlight | Tool::FreeText | Tool::Square | Tool::Ellipse => {
+            Tool::TextEdit => None,
+            Tool::Highlight
+            | Tool::Underline
+            | Tool::StrikeOut
+            | Tool::Squiggly
+            | Tool::FreeText
+            | Tool::Square
+            | Tool::Ellipse => {
                 let r = rotate_rect(
                     Rect {
                         x: a.x.min(b.x),
@@ -1094,6 +1168,11 @@ impl DocView {
                     .h(px(r.h * k));
                 Some(match tool {
                     Tool::Highlight => el.bg(theme::HIGHLIGHT_PREVIEW).into_any_element(),
+                    Tool::Underline | Tool::StrikeOut | Tool::Squiggly => el
+                        .bg(theme::REGION_FILL)
+                        .border_1()
+                        .border_color(theme::REGION_BORDER)
+                        .into_any_element(),
                     Tool::Ellipse => el
                         .border_1()
                         .border_color(c)
@@ -1187,6 +1266,41 @@ pub fn stroke_canvas_dashed(
                 for &(x, y) in &pts[1..] {
                     pb.line_to(gpui::point(o.x + px(x), o.y + px(y)));
                 }
+                if let Ok(path) = pb.build() {
+                    window.paint_path(path, color);
+                }
+            }
+        },
+    )
+    .absolute()
+    .left(px(0.0))
+    .top(px(0.0))
+    .w(px(disp.width * k))
+    .h(px(disp.height * k))
+    .into_any_element()
+}
+
+/// Fill closed polygons (page-local logical px), like [`stroke_canvas`].
+pub fn fill_canvas(
+    polys: Vec<Vec<(f32, f32)>>,
+    color: gpui::Rgba,
+    disp: PageSize,
+    k: f32,
+) -> AnyElement {
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            for pts in &polys {
+                if pts.len() < 3 {
+                    continue;
+                }
+                let mut pb = PathBuilder::fill();
+                let o = bounds.origin;
+                pb.move_to(gpui::point(o.x + px(pts[0].0), o.y + px(pts[0].1)));
+                for &(x, y) in &pts[1..] {
+                    pb.line_to(gpui::point(o.x + px(x), o.y + px(y)));
+                }
+                pb.close();
                 if let Ok(path) = pb.build() {
                     window.paint_path(path, color);
                 }

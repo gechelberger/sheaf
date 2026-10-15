@@ -365,8 +365,10 @@ pub fn is_widget(id: &str) -> bool {
 
 /// The layout a toolbar starts with: today's markup bar.
 pub fn default_layout() -> Vec<Entry> {
+    // Squiggly is in the menu and Shift+U's cycle, not on the bar.
     let mut items: Vec<Entry> = crate::markup_tools::Tool::ALL
         .iter()
+        .filter(|t| **t != crate::markup_tools::Tool::Squiggly)
         .map(|t| Entry::item(t.action().name()))
         .collect();
     items.extend([

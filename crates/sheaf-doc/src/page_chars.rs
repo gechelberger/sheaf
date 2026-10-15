@@ -12,7 +12,7 @@
 
 use sheaf_core::{PageSize, Rotation};
 
-use crate::annot::{Box2, Pt};
+use crate::annot::{Box2, Pt, caret_box};
 use crate::text_layer::{TextLayer, overlaps_line, rotate_box};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -261,6 +261,31 @@ impl PageChars {
         }
     }
 
+    /// Where a caret at boundary `at` goes (see [`caret_box`]): after the
+    /// character before it, or before the one after when it starts a line
+    /// or follows a space. None away from any character.
+    pub fn caret_at(&self, at: usize) -> Option<Box2> {
+        let before = at
+            .checked_sub(1)
+            .and_then(|i| self.glyphs.get(i))
+            .and_then(|g| g.rect)
+            .map(|r| (self.up(r), true));
+        let after = self
+            .glyphs
+            .get(at)
+            .and_then(|g| g.rect)
+            .map(|r| (self.up(r), false));
+        let (r, after_it) = before.or(after)?;
+        let x = if after_it { r.right() } else { r.x };
+        let b = caret_box(x, r.bottom(), r.h);
+        // Back from the upright frame.
+        Some(rotate_box(
+            b,
+            self.page.rotated(self.upright),
+            Rotation::R0.minus(self.upright),
+        ))
+    }
+
     /// The word around boundary `at`: the run of characters that aren't
     /// whitespace, as two boundaries. Empty on whitespace.
     pub fn word_at(&self, at: usize) -> (usize, usize) {
@@ -420,6 +445,19 @@ mod tests {
         // Selecting across the break takes it along.
         assert_eq!(c.text(3, 7), "cd\ne");
         assert_eq!(c.rects(3, 7).len(), 2);
+    }
+
+    #[test]
+    fn carets_sit_between_characters() {
+        let c = sample();
+        // After "ab": at b's right edge, straddling the bottom of the text.
+        let b = c.caret_at(2).unwrap();
+        assert_eq!(b.x + b.w / 2.0, 120.0);
+        assert!(b.y < 112.0 && b.bottom() > 112.0);
+        // At the start of the second line: before "e".
+        let e = c.caret_at(6).unwrap();
+        assert_eq!(e.x + e.w / 2.0, 100.0);
+        assert!(e.y > 120.0);
     }
 
     #[test]

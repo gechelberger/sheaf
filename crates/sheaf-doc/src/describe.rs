@@ -113,6 +113,11 @@ fn noun(kind: &AnnotKind) -> String {
         AnnotKind::Stamp { glyph, .. } => format!("tickmark {glyph}"),
         AnnotKind::Connector { label, .. } => format!("connector {label}"),
         AnnotKind::Tape { .. } => "a calculator tape".into(),
+        AnnotKind::Underline { .. } => "an underline".into(),
+        AnnotKind::StrikeOut { .. } => "a strikethrough".into(),
+        AnnotKind::Squiggly { .. } => "a squiggly underline".into(),
+        AnnotKind::Replace { .. } => "a text replacement".into(),
+        AnnotKind::Insert { .. } => "a text insertion".into(),
     }
 }
 

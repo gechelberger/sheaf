@@ -122,6 +122,32 @@ pub enum AnnotKind {
         rect: Box2,
         size: f32,
     },
+    /// Text markup: a line under the text.
+    Underline {
+        rects: Vec<Box2>,
+    },
+    /// Text markup: a line through the text.
+    StrikeOut {
+        rects: Vec<Box2>,
+    },
+    /// Text markup: a wavy line under the text.
+    Squiggly {
+        rects: Vec<Box2>,
+    },
+    /// A suggested replacement (Acrobat's Replace Text): the text `struck`,
+    /// over `rects`, is crossed out, and a caret at `at` carries the new
+    /// text in `contents`. Written as a Caret with the StrikeOut as its
+    /// grouped companion, as Acrobat writes them.
+    Replace {
+        rects: Vec<Box2>,
+        struck: String,
+        at: Box2,
+    },
+    /// A suggested insertion (Insert Text): a caret at `at`, the text in
+    /// `contents`.
+    Insert {
+        at: Box2,
+    },
 }
 
 /// A box array as `[x0, y0, x1, y1]`, normalized.
@@ -160,86 +186,26 @@ pub fn visible_box(media: [f32; 4], crop: Option<[f32; 4]>) -> [f32; 4] {
 }
 
 impl AnnotKind {
-    /// The same shape moved by (`dx`, `dy`) points.
-    pub fn translated(&self, dx: f32, dy: f32) -> AnnotKind {
-        let mv = |p: &Pt| Pt {
-            x: p.x + dx,
-            y: p.y + dy,
-        };
-        let mb = |b: &Box2| Box2 {
-            x: b.x + dx,
-            y: b.y + dy,
-            w: b.w,
-            h: b.h,
-        };
+    /// The same shape with every point mapped by `mp` and every box by
+    /// `mb`; `size` maps the text size of tapes.
+    fn mapped(
+        &self,
+        mp: &dyn Fn(&Pt) -> Pt,
+        mb: &dyn Fn(&Box2) -> Box2,
+        size: &dyn Fn(f32) -> f32,
+    ) -> AnnotKind {
+        let rs = |rects: &Vec<Box2>| rects.iter().map(mb).collect();
         match self {
-            AnnotKind::Highlight { rects } => AnnotKind::Highlight {
-                rects: rects.iter().map(mb).collect(),
+            AnnotKind::Highlight { rects } => AnnotKind::Highlight { rects: rs(rects) },
+            AnnotKind::Underline { rects } => AnnotKind::Underline { rects: rs(rects) },
+            AnnotKind::StrikeOut { rects } => AnnotKind::StrikeOut { rects: rs(rects) },
+            AnnotKind::Squiggly { rects } => AnnotKind::Squiggly { rects: rs(rects) },
+            AnnotKind::Replace { rects, struck, at } => AnnotKind::Replace {
+                rects: rs(rects),
+                struck: struck.clone(),
+                at: mb(at),
             },
-            AnnotKind::Note { pos } => AnnotKind::Note { pos: mv(pos) },
-            AnnotKind::FreeText { rect, size } => AnnotKind::FreeText {
-                rect: mb(rect),
-                size: *size,
-            },
-            AnnotKind::Square { rect } => AnnotKind::Square { rect: mb(rect) },
-            AnnotKind::Ellipse { rect } => AnnotKind::Ellipse { rect: mb(rect) },
-            AnnotKind::Line {
-                a,
-                b,
-                arrow,
-                arrow_start,
-            } => AnnotKind::Line {
-                a: mv(a),
-                b: mv(b),
-                arrow: *arrow,
-                arrow_start: *arrow_start,
-            },
-            AnnotKind::Ink { paths } => AnnotKind::Ink {
-                paths: paths.iter().map(|p| p.iter().map(mv).collect()).collect(),
-            },
-            AnnotKind::Stamp { rect, glyph } => AnnotKind::Stamp {
-                rect: mb(rect),
-                glyph: glyph.clone(),
-            },
-            AnnotKind::Connector {
-                rect,
-                label,
-                partner,
-            } => AnnotKind::Connector {
-                rect: mb(rect),
-                label: label.clone(),
-                partner: *partner,
-            },
-            AnnotKind::Tape { rect, size } => AnnotKind::Tape {
-                rect: mb(rect),
-                size: *size,
-            },
-        }
-    }
-
-    /// The same shape fitted from bounds `from` into bounds `to`: every
-    /// point scaled and moved, as dragging a resize handle does. Text sizes
-    /// scale with the height of stamps and tapes.
-    pub fn resized(&self, from: Box2, to: Box2) -> AnnotKind {
-        let sx = if from.w > 0.0 { to.w / from.w } else { 1.0 };
-        let sy = if from.h > 0.0 { to.h / from.h } else { 1.0 };
-        let mp = |p: &Pt| Pt {
-            x: to.x + (p.x - from.x) * sx,
-            y: to.y + (p.y - from.y) * sy,
-        };
-        let mb = |b: &Box2| {
-            let p = mp(&Pt { x: b.x, y: b.y });
-            Box2 {
-                x: p.x,
-                y: p.y,
-                w: b.w * sx,
-                h: b.h * sy,
-            }
-        };
-        match self {
-            AnnotKind::Highlight { rects } => AnnotKind::Highlight {
-                rects: rects.iter().map(mb).collect(),
-            },
+            AnnotKind::Insert { at } => AnnotKind::Insert { at: mb(at) },
             AnnotKind::Note { pos } => AnnotKind::Note { pos: mp(pos) },
             AnnotKind::FreeText { rect, size } => AnnotKind::FreeText {
                 rect: mb(rect),
@@ -274,11 +240,53 @@ impl AnnotKind {
                 label: label.clone(),
                 partner: *partner,
             },
-            AnnotKind::Tape { rect, size } => AnnotKind::Tape {
+            AnnotKind::Tape { rect, size: s } => AnnotKind::Tape {
                 rect: mb(rect),
-                size: (*size * sy).max(4.0),
+                size: size(*s),
             },
         }
+    }
+
+    /// The same shape moved by (`dx`, `dy`) points.
+    pub fn translated(&self, dx: f32, dy: f32) -> AnnotKind {
+        self.mapped(
+            &|p| Pt {
+                x: p.x + dx,
+                y: p.y + dy,
+            },
+            &|b| Box2 {
+                x: b.x + dx,
+                y: b.y + dy,
+                w: b.w,
+                h: b.h,
+            },
+            &|s| s,
+        )
+    }
+
+    /// The same shape fitted from bounds `from` into bounds `to`: every
+    /// point scaled and moved, as dragging a resize handle does. Text sizes
+    /// scale with the height of tapes.
+    pub fn resized(&self, from: Box2, to: Box2) -> AnnotKind {
+        let sx = if from.w > 0.0 { to.w / from.w } else { 1.0 };
+        let sy = if from.h > 0.0 { to.h / from.h } else { 1.0 };
+        let mp = |p: &Pt| Pt {
+            x: to.x + (p.x - from.x) * sx,
+            y: to.y + (p.y - from.y) * sy,
+        };
+        self.mapped(
+            &mp,
+            &|b| {
+                let p = mp(&Pt { x: b.x, y: b.y });
+                Box2 {
+                    x: p.x,
+                    y: p.y,
+                    w: b.w * sx,
+                    h: b.h * sy,
+                }
+            },
+            &|s| (s * sy).max(4.0),
+        )
     }
 
     /// How the mark can be reshaped by dragging: its two ends, a box, or
@@ -293,9 +301,14 @@ impl AnnotKind {
             | AnnotKind::Ink { .. }
             | AnnotKind::Stamp { .. }
             | AnnotKind::Tape { .. } => Handles::Box,
-            AnnotKind::Highlight { .. } | AnnotKind::Note { .. } | AnnotKind::Connector { .. } => {
-                Handles::None
-            }
+            AnnotKind::Highlight { .. }
+            | AnnotKind::Underline { .. }
+            | AnnotKind::StrikeOut { .. }
+            | AnnotKind::Squiggly { .. }
+            | AnnotKind::Replace { .. }
+            | AnnotKind::Insert { .. }
+            | AnnotKind::Note { .. }
+            | AnnotKind::Connector { .. } => Handles::None,
         }
     }
 
@@ -384,15 +397,21 @@ pub struct Annot {
 impl Annot {
     /// Bounding box in displayed page space.
     pub fn bounds(&self) -> Box2 {
+        let union = |rects: &[Box2]| {
+            rects.iter().copied().reduce(Box2::union).unwrap_or(Box2 {
+                x: 0.0,
+                y: 0.0,
+                w: 0.0,
+                h: 0.0,
+            })
+        };
         match &self.kind {
-            AnnotKind::Highlight { rects } => {
-                rects.iter().copied().reduce(Box2::union).unwrap_or(Box2 {
-                    x: 0.0,
-                    y: 0.0,
-                    w: 0.0,
-                    h: 0.0,
-                })
-            }
+            AnnotKind::Highlight { rects }
+            | AnnotKind::Underline { rects }
+            | AnnotKind::StrikeOut { rects }
+            | AnnotKind::Squiggly { rects } => union(rects),
+            AnnotKind::Replace { rects, at, .. } => union(rects).union(*at),
+            AnnotKind::Insert { at } => *at,
             AnnotKind::Note { pos } => Box2 {
                 x: pos.x,
                 y: pos.y,
@@ -456,7 +475,15 @@ impl Annot {
     /// companions' (see [`Written`]). sheaf draws these itself, so PDFium
     /// is told to hide exactly these.
     pub fn pdf_names(&self) -> Vec<String> {
-        vec![self.name()]
+        match self.kind {
+            AnnotKind::Replace { .. } => vec![self.name(), self.strike_name()],
+            _ => vec![self.name()],
+        }
+    }
+
+    /// The `/NM` of a replacement's StrikeOut.
+    fn strike_name(&self) -> String {
+        format!("sheaf:{}:strike", self.id.0)
     }
 }
 
@@ -481,9 +508,36 @@ pub fn to_pdf(a: &Annot, geom: &PageGeom, pdf: &mut lopdf::Document) -> Written 
     let (mut main, appearance) = annotation(a, geom);
     let ap = pdf.add_object(Object::Stream(appearance));
     main.set("AP", dictionary! { "N" => ap });
-    Written {
-        main,
-        companions: Vec::new(),
+    let mut companions = Vec::new();
+    // A replacement's crossed-out text: a StrikeOut of its own, grouped
+    // under the Caret, which carries the mark.
+    if let AnnotKind::Replace { rects, .. } = &a.kind {
+        let strike = Annot {
+            kind: AnnotKind::StrikeOut {
+                rects: rects.clone(),
+            },
+            contents: String::new(),
+            ..a.clone()
+        };
+        let (mut dict, appearance) = annotation(&strike, geom);
+        dict.remove(b"SheafAnnot");
+        dict.set("NM", pdf_text_string(&a.strike_name()));
+        let ap = pdf.add_object(Object::Stream(appearance));
+        dict.set("AP", dictionary! { "N" => ap });
+        companions.push(dict);
+    }
+    Written { main, companions }
+}
+
+/// A caret's box at a point between characters `h` points tall: centred
+/// on the point across, its lower half below the text.
+pub fn caret_box(x: f32, bottom: f32, h: f32) -> Box2 {
+    let size = (h * 0.6).max(4.0);
+    Box2 {
+        x: x - size / 2.0,
+        y: bottom - size / 2.0,
+        w: size,
+        h: size,
     }
 }
 
@@ -817,7 +871,11 @@ fn arrowhead(from: Pt, tip: Pt, stroke: f32) -> String {
 /// The main annotation dictionary (without `/AP` or `/P`) and its
 /// appearance stream.
 fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
-    let bounds = a.bounds();
+    // A replacement's Caret covers the caret; its StrikeOut is separate.
+    let bounds = match &a.kind {
+        AnnotKind::Replace { at, .. } => *at,
+        _ => a.bounds(),
+    };
     // Pad so strokes aren't clipped by the BBox.
     let pad = a.stroke.max(1.0) + 1.0;
     let padded = Box2 {
@@ -885,6 +943,57 @@ fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
                 ));
             }
             dict.set("QuadPoints", Object::Array(quads));
+        }
+        AnnotKind::Underline { rects }
+        | AnnotKind::StrikeOut { rects }
+        | AnnotKind::Squiggly { rects } => {
+            let subtype: &[u8] = match a.kind {
+                AnnotKind::Underline { .. } => b"Underline",
+                AnnotKind::StrikeOut { .. } => b"StrikeOut",
+                _ => b"Squiggly",
+            };
+            dict.set("Subtype", Object::Name(subtype.to_vec()));
+            dict.set("C", color_arr);
+            let mut quads = Vec::new();
+            for r in rects {
+                let [x0, y0, x1, y1] = geom.box_to_user(*r);
+                quads.extend([x0, y1, x1, y1, x0, y0, x1, y0].map(Object::Real));
+            }
+            dict.set("QuadPoints", Object::Array(quads));
+            // Drawn in displayed space, then taken to user space, so the
+            // line follows the text whatever the page's /Rotate.
+            let width = text_line_width(rects);
+            content.push_str(&format!(" {} {width:.2} w", color_ops(c, false)));
+            for path in text_line_paths(&a.kind) {
+                let mut first = true;
+                for p in path {
+                    let u = up(p);
+                    content.push_str(&format!(
+                        " {:.2} {:.2} {}",
+                        u.x,
+                        u.y,
+                        if first { "m" } else { "l" }
+                    ));
+                    first = false;
+                }
+                content.push_str(" S");
+            }
+        }
+        AnnotKind::Replace { at, .. } | AnnotKind::Insert { at } => {
+            dict.set("Subtype", Object::Name(b"Caret".to_vec()));
+            dict.set("C", color_arr);
+            dict.set("Sy", Object::Name(b"None".to_vec()));
+            let [p0, p1, p2] = caret_points(*at).map(up);
+            content.push_str(&format!(
+                " {} {:.2} {:.2} m {:.2} {:.2} l {:.2} {:.2} l h f",
+                color_ops(c, true),
+                p0.x,
+                p0.y,
+                p1.x,
+                p1.y,
+                p2.x,
+                p2.y
+            ));
         }
         AnnotKind::Note { pos } => {
             dict.set("Subtype", Object::Name(b"Text".to_vec()));
@@ -1155,6 +1264,64 @@ fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
     (dict, stream)
 }
 
+/// How thick the line of an underline, strikeout or squiggly is: a
+/// fraction of the text's height.
+pub fn text_line_width(rects: &[Box2]) -> f32 {
+    let h = rects.iter().map(|r| r.h).fold(0.0, f32::max);
+    (h * 0.07).clamp(0.75, 3.0)
+}
+
+/// The lines an underline, strikeout or squiggly draws, in displayed
+/// space: one path per rect, under it, through its middle, or a wave
+/// under it.
+pub fn text_line_paths(kind: &AnnotKind) -> Vec<Vec<Pt>> {
+    let (rects, at): (&[Box2], f32) = match kind {
+        AnnotKind::Underline { rects } => (rects, 0.92),
+        AnnotKind::StrikeOut { rects } => (rects, 0.55),
+        AnnotKind::Squiggly { rects } => (rects, 0.9),
+        _ => return Vec::new(),
+    };
+    let wavy = matches!(kind, AnnotKind::Squiggly { .. });
+    rects
+        .iter()
+        .map(|r| {
+            let y = r.y + r.h * at;
+            if !wavy {
+                return vec![Pt { x: r.x, y }, Pt { x: r.right(), y }];
+            }
+            // A zigzag a few points high, with a step of about a quarter of
+            // the text's height.
+            let amp = (r.h * 0.08).max(0.75);
+            let step = (r.h * 0.25).max(2.0);
+            let n = ((r.w / step).ceil() as usize).max(1);
+            (0..=n)
+                .map(|i| Pt {
+                    x: (r.x + i as f32 * step).min(r.right()),
+                    y: if i % 2 == 0 { y - amp } else { y + amp },
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// A caret's triangle in displayed space: its tip at the top centre.
+pub fn caret_points(at: Box2) -> [Pt; 3] {
+    [
+        Pt {
+            x: at.x,
+            y: at.bottom(),
+        },
+        Pt {
+            x: at.x + at.w / 2.0,
+            y: at.y,
+        },
+        Pt {
+            x: at.right(),
+            y: at.bottom(),
+        },
+    ]
+}
+
 /// Parse a `/SheafAnnot` payload.
 pub fn from_json(s: &[u8]) -> Option<Annot> {
     serde_json::from_slice(s).ok()
@@ -1385,5 +1552,40 @@ mod tests {
             .map(|o| o.as_name().unwrap())
             .collect();
         assert_eq!(le, [b"OpenArrow".as_slice(), b"None".as_slice()]);
+    }
+
+    #[test]
+    fn text_lines_sit_under_through_and_under_wavily() {
+        let r = bx(100.0, 100.0, 50.0, 20.0);
+        let under = text_line_paths(&AnnotKind::Underline { rects: vec![r] });
+        assert_eq!(under[0][0].y, under[0][1].y);
+        assert!(under[0][0].y > 115.0);
+        let strike = text_line_paths(&AnnotKind::StrikeOut { rects: vec![r] });
+        assert!((strike[0][0].y - 111.0).abs() < 0.5);
+        let wavy = text_line_paths(&AnnotKind::Squiggly { rects: vec![r] });
+        assert!(wavy[0].len() > 5);
+        assert!(wavy[0].iter().all(|p| p.x >= 100.0 && p.x <= 150.0));
+        assert_eq!(wavy[0].last().unwrap().x, 150.0);
+    }
+
+    #[test]
+    fn text_edits_read_back_from_json() {
+        let mut a = mark(AnnotKind::Replace {
+            rects: vec![bx(10.0, 10.0, 40.0, 12.0)],
+            struck: "teh".into(),
+            at: caret_box(50.0, 22.0, 12.0),
+        });
+        a.contents = "the".into();
+        let json = serde_json::to_vec(&a).unwrap();
+        assert_eq!(from_json(&json).unwrap(), a);
+        assert_eq!(
+            a.pdf_names(),
+            vec!["sheaf:1".to_string(), "sheaf:1:strike".to_string()]
+        );
+        let ins = mark(AnnotKind::Insert {
+            at: caret_box(50.0, 22.0, 12.0),
+        });
+        assert_eq!(from_json(&serde_json::to_vec(&ins).unwrap()).unwrap(), ins);
+        assert_eq!(ins.bounds().w, ins.bounds().h);
     }
 }
