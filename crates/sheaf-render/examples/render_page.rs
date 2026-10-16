@@ -28,7 +28,9 @@ fn main() -> Result<()> {
     let r = PdfiumEngine::open(&input, None)?;
     let opened = t.elapsed();
     let t = Instant::now();
-    let sizes = r.page_sizes()?;
+    let sizes = (0..r.page_count())
+        .map(|i| r.page_size(PageIndex(i)))
+        .collect::<anyhow::Result<Vec<_>>>()?;
     println!(
         "{input}: {} pages, opened in {opened:?}, page sizes in {:?}",
         r.page_count(),

@@ -187,14 +187,14 @@ mod tests {
     fn an_xfa_only_form_shows_the_bar() {
         let mut only = every_kind();
         only.xfa_only();
-        let facts = sheaf_doc::forms::read(&only.pdf).facts;
+        let facts = sheaf_doc::forms::read(&only.source()).facts;
         assert_eq!(bar_message(Some(&facts), FormType::XfaFull), Some(XFA_ONLY));
         // Static XFA with no AcroForm fields: PDFium calls it foreground,
         // and the field model knows better.
         let mut stat = every_kind();
         stat.xfa();
         stat.set_fields(&[]);
-        let facts = sheaf_doc::forms::read(&stat.pdf).facts;
+        let facts = sheaf_doc::forms::read(&stat.source()).facts;
         assert_eq!(
             bar_message(Some(&facts), FormType::XfaForeground),
             Some(XFA_ONLY)
@@ -205,9 +205,9 @@ mod tests {
         // Hybrid and plain forms are filled, with no bar.
         let mut hybrid = every_kind();
         hybrid.xfa();
-        let facts = sheaf_doc::forms::read(&hybrid.pdf).facts;
+        let facts = sheaf_doc::forms::read(&hybrid.source()).facts;
         assert_eq!(bar_message(Some(&facts), FormType::XfaForeground), None);
-        let facts = sheaf_doc::forms::read(&every_kind().pdf).facts;
+        let facts = sheaf_doc::forms::read(&every_kind().source()).facts;
         assert_eq!(bar_message(Some(&facts), FormType::AcroForm), None);
         assert_eq!(damaged_notice(&facts), None);
     }
@@ -220,7 +220,7 @@ mod tests {
         f.fill(name, "Ann");
         f.xfa();
         f.dict(name).remove(b"V");
-        let facts = sheaf_doc::forms::read(&f.pdf).facts;
+        let facts = sheaf_doc::forms::read(&f.source()).facts;
         assert_eq!(facts.xfa_values, 1);
         assert_eq!(
             bar_message(Some(&facts), FormType::XfaForeground),
@@ -228,7 +228,7 @@ mod tests {
         );
         // Filled in both: no bar.
         f.fill(name, "Ann");
-        let facts = sheaf_doc::forms::read(&f.pdf).facts;
+        let facts = sheaf_doc::forms::read(&f.source()).facts;
         assert_eq!(bar_message(Some(&facts), FormType::XfaForeground), None);
     }
 
@@ -245,7 +245,7 @@ mod tests {
         let mut fields = f.fields();
         fields.rotate_right(1);
         f.set_fields(&fields);
-        let facts = sheaf_doc::forms::read(&f.pdf).facts;
+        let facts = sheaf_doc::forms::read(&f.source()).facts;
         assert_eq!(
             damaged_notice(&facts).as_deref(),
             Some("This form can't be filled: the field tree is more than 32 deep")

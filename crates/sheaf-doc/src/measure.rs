@@ -294,7 +294,7 @@ pub fn measure_dict(scale: &Scale) -> Dictionary {
         dictionary! {
             "Type" => "NumberFormat",
             "U" => Object::string_literal(unit),
-            "C" => Object::Real(c as f32),
+            "C" => Object::Real(c),
             "F" => "D",
             "D" => denominator,
         }
@@ -324,7 +324,7 @@ pub fn scale_of(pdf: &Pdf, measure: &Dictionary) -> Option<Scale> {
         .ok()
         .map(crate::file::pdf_text)
         .unwrap_or_else(|| "pt".into());
-    let c = f.get(b"C").ok()?.as_float().ok()? as f64;
+    let c = f.get(b"C").ok()?.as_float().ok()?;
     let precision = f
         .get(b"D")
         .ok()

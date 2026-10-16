@@ -45,7 +45,7 @@ fn scratch(name: &str) -> PathBuf {
     dir
 }
 
-fn crop_box(path: &Path) -> Vec<f32> {
+fn crop_box(path: &Path) -> Vec<f64> {
     let pdf = Pdf::load(path).unwrap();
     let id = *pdf.get_pages().values().next().unwrap();
     pdf.get_dictionary(id)
@@ -96,6 +96,7 @@ fn margins_crop_and_marks_follow() {
         bottom: 0.0,
     };
     let plan = sheaf_ops::crop::plan(
+        doc.store(),
         &doc.snapshot(),
         &[page],
         CropSpec::Margins(m),
@@ -133,13 +134,14 @@ fn trim_white_finds_the_content() {
     let doc = sheaf_ops::open(&src, None).unwrap();
     let page = doc.state().pages[0].id;
     let plan = sheaf_ops::crop::plan(
+        doc.store(),
         &doc.snapshot(),
         &[page],
         CropSpec::TrimWhite { pad: 0.0 },
         &sheaf_ops::NoProgress,
     )
     .unwrap();
-    let size = plan[0].info.page_sizes.as_ref().unwrap()[0];
+    let size = plan[0].info.src.page_size(0);
     assert!((size.width - 100.0).abs() <= 2.0, "{size:?}");
     assert!((size.height - 100.0).abs() <= 2.0, "{size:?}");
     let _ = std::fs::remove_dir_all(&dir);

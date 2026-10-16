@@ -514,7 +514,7 @@ impl DocView {
         let Some(src) = doc
             .model
             .source(pref.source)
-            .map(|s| s.page_size(pref.index))
+            .map(|s| s.src.page_size(pref.index))
         else {
             return;
         };
@@ -561,7 +561,7 @@ impl DocView {
         let src = doc
             .model
             .source(pref.source)
-            .map(|s| s.page_size(pref.index))?;
+            .map(|s| s.src.page_size(pref.index))?;
         let k = w / src.rotated(pref.rotation).width.max(1.0);
         let disp = Pt {
             x: (x - left) / k,

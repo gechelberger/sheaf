@@ -82,7 +82,7 @@ pub(crate) fn box_from_wit(b: w::Box2) -> Box2 {
 /// A page's size as displayed: its source size turned by its rotation.
 pub(crate) fn page_size(snap: &Snapshot, p: &PageRef) -> PageSize {
     snap.source(p.source)
-        .map(|s| s.page_size(p.index))
+        .map(|s| s.src.page_size(p.index))
         .unwrap_or(PageSize {
             width: 612.0,
             height: 792.0,
@@ -659,7 +659,7 @@ impl api::render::HostPageRenderer for HostState {
                 .iter()
                 .find(|p| p.id == PageId(page))
                 .copied()?;
-            let s = d.snapshot.source(p.source).map(|s| s.page_size(p.index))?;
+            let s = d.snapshot.source(p.source).map(|s| s.src.page_size(p.index))?;
             Some((p, (s.width, s.height)))
         });
         let (page, size) = found.unwrap_or((

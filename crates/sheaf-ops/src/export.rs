@@ -297,24 +297,14 @@ mod tests {
             dir: dir.clone(),
             stem: "x".into(),
         };
-        let snapshot = sheaf_doc::Document::new(
-            sheaf_doc::SourceInfo {
-                path: "none.pdf".into(),
-                page_count: 1,
-                first_page: sheaf_core::PageSize {
-                    width: 612.0,
-                    height: 792.0,
-                },
-                page_sizes: None,
-                bytes: 0,
-                password: None,
-                data: None,
-                derived: None,
-            },
-            &[],
-            sheaf_doc::history::default_policy(),
-        )
-        .snapshot();
+        let store = sheaf_doc::Store::new();
+        let primary = sheaf_doc::SourceInfo {
+            name: "none.pdf".into(),
+            ..sheaf_doc::SourceInfo::blank(&store, 1)
+        };
+        let snapshot =
+            sheaf_doc::Document::new(store, primary, &[], sheaf_doc::history::default_policy())
+                .snapshot();
         let tracker = sheaf_progress::Tracker::new();
         tracker.cancel();
         let err = run(&snapshot, &job, &tracker).unwrap_err();

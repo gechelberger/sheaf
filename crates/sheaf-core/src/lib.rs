@@ -15,6 +15,19 @@ pub fn checksum_hex(bytes: &[u8]) -> String {
     format!("{:032x}", checksum(bytes))
 }
 
+/// The file at `path`, read into one shared buffer: what the store
+/// interns and the renderer reads, with no second copy.
+pub fn read_file(path: &std::path::Path) -> std::io::Result<std::sync::Arc<[u8]>> {
+    use std::io::Read as _;
+    let mut file = std::fs::File::open(path)?;
+    let len = usize::try_from(file.metadata()?.len()).map_err(std::io::Error::other)?;
+    // SAFETY: zeroed bytes are bytes.
+    let mut bytes = unsafe { std::sync::Arc::<[u8]>::new_zeroed_slice(len).assume_init() };
+    let buffer = std::sync::Arc::get_mut(&mut bytes).expect("nothing else holds a new buffer");
+    file.read_exact(buffer)?;
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod checksum_tests {
     #[test]

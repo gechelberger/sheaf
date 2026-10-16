@@ -240,7 +240,7 @@ pub fn install(
     let mut resources = deref(pdf, page.get(b"Resources").ok());
     let opacity = wm.opacity.clamp(0.0, 1.0);
     let gs = pdf.add_object(dictionary! {
-        "Type" => "ExtGState", "CA" => Object::Real(opacity), "ca" => Object::Real(opacity),
+        "Type" => "ExtGState", "CA" => Object::from(opacity), "ca" => Object::from(opacity),
     });
     let mut gstates = deref(pdf, resources.get(b"ExtGState").ok());
     gstates.set(GS, gs);

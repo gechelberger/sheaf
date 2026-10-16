@@ -141,7 +141,7 @@ pub fn one_page(pdf: &Pdf, index: usize) -> Result<Vec<u8>> {
     let geom = crate::file::page_geom(pdf, page);
     dict.set(
         "MediaBox",
-        Object::Array(geom.media.iter().map(|v| Object::Real(*v)).collect()),
+        Object::Array(geom.media.iter().map(|v| Object::from(*v)).collect()),
     );
     if geom.rotate != 0 {
         dict.set("Rotate", geom.rotate as i64);
@@ -214,7 +214,7 @@ pub fn build_collection(
         let geom = crate::file::page_geom(&src, page);
         dict.set(
             "MediaBox",
-            Object::Array(geom.media.iter().map(|v| Object::Real(*v)).collect()),
+            Object::Array(geom.media.iter().map(|v| Object::from(*v)).collect()),
         );
         dict.set("Parent", pages_id);
         dict.remove(TEXT_KEY.as_bytes());
@@ -336,7 +336,7 @@ pub fn image_stamp(path: &Path) -> Result<Vec<u8>> {
     ));
     let page = out.add_object(dictionary! {
         "Type" => "Page", "Parent" => pages_id, "Contents" => content,
-        "MediaBox" => vec![0.into(), 0.into(), Object::Real(pw), Object::Real(ph)],
+        "MediaBox" => vec![0.into(), 0.into(), Object::from(pw), Object::from(ph)],
         "Resources" => dictionary! { "XObject" => dictionary! { "Im" => image } },
     });
     finish(&mut out, pages_id, vec![page], None, Vec::new())
@@ -410,7 +410,7 @@ pub fn page_forms(
         let mut form = dictionary! {
             "Type" => "XObject",
             "Subtype" => "Form",
-            "BBox" => vec![Object::Real(x0), Object::Real(y0), Object::Real(x1), Object::Real(y1)],
+            "BBox" => vec![Object::from(x0), Object::from(y0), Object::from(x1), Object::from(y1)],
         };
         if let Ok(r) = dict.get(b"Resources") {
             form.set("Resources", r.clone());
@@ -432,7 +432,11 @@ pub fn form_to_pdf(src: &Pdf, form: ObjectId) -> Result<Vec<u8>> {
         .ok()
         .and_then(|b| src.dereference(b).ok())
         .and_then(|(_, b)| b.as_array().ok())
-        .map(|a| a.iter().map(|v| v.as_float().unwrap_or(0.0)).collect())
+        .map(|a| {
+            a.iter()
+                .map(|v| v.as_float().unwrap_or(0.0) as f32)
+                .collect()
+        })
         .filter(|b: &Vec<f32>| b.len() == 4)
         .context("a form with no box")?;
     let mut out = Pdf::with_version("1.5");
@@ -442,7 +446,7 @@ pub fn form_to_pdf(src: &Pdf, form: ObjectId) -> Result<Vec<u8>> {
     let content = out.add_object(Stream::new(dictionary! {}, b"/Stamp Do".to_vec()));
     let page = out.add_object(dictionary! {
         "Type" => "Page", "Parent" => pages_id, "Contents" => content,
-        "MediaBox" => bbox.iter().map(|v| Object::Real(*v)).collect::<Vec<_>>(),
+        "MediaBox" => bbox.iter().map(|v| Object::from(*v)).collect::<Vec<_>>(),
         "Resources" => dictionary! { "XObject" => dictionary! { "Stamp" => copied } },
     });
     finish(&mut out, pages_id, vec![page], None, Vec::new())

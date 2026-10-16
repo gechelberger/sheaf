@@ -257,27 +257,15 @@ pub fn parse_size(s: &str) -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sheaf_core::PageSize;
-    use sheaf_doc::{Document, Edit, SourceInfo};
+    use sheaf_doc::{Document, Edit, SourceInfo, Store};
 
     fn doc(n: u32) -> Document {
-        Document::new(
-            SourceInfo {
-                path: "x.pdf".into(),
-                page_count: n,
-                first_page: PageSize {
-                    width: 612.0,
-                    height: 792.0,
-                },
-                page_sizes: None,
-                bytes: 0,
-                password: None,
-                data: None,
-                derived: None,
-            },
-            &[],
-            sheaf_doc::history::default_policy(),
-        )
+        let store = Store::new();
+        let primary = SourceInfo {
+            name: "x.pdf".into(),
+            ..SourceInfo::blank(&store, n)
+        };
+        Document::new(store, primary, &[], sheaf_doc::history::default_policy())
     }
 
     fn sizes(parts: &[Part]) -> Vec<usize> {

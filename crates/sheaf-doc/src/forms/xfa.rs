@@ -16,14 +16,11 @@
 
 use std::collections::HashMap;
 
-use lopdf::{Dictionary, Document as Pdf, Object};
+use lopdf::{Dictionary, Object};
 use quick_xml::events::{BytesStart, Event};
 
-use super::read::{MAX_NAME, MAX_NODES};
-use crate::attachments::resolve;
-
-/// The most of an XFA copy read, decompressed.
-const MAX_XFA: usize = 64 << 20;
+use crate::attachments::{Objects, resolve};
+use crate::source::FormLimits;
 
 /// A field (or exclusion group) of the template.
 #[derive(Debug, Clone, PartialEq)]
@@ -80,22 +77,35 @@ fn without_indexes(name: &str) -> String {
     out
 }
 
-/// The fields of `form`'s XFA copy (`/AcroForm /XFA`). Empty when it has
-/// none, or it isn't XML.
-pub fn read(pdf: &Pdf, form: &Dictionary) -> Vec<XfaField> {
-    let Some((template, datasets)) = packets(pdf, form) else {
+/// The fields of `form`'s XFA copy (`/AcroForm /XFA`), read within
+/// `limits`: a copy decompressed to at most [`FormLimits::xfa`], with as
+/// many fields and data values as a field tree's nodes, and names as long
+/// as its full names. Empty when it has none, or it isn't XML.
+pub(crate) fn read<P: Objects + ?Sized>(
+    pdf: &P,
+    form: &Dictionary,
+    limits: &FormLimits,
+) -> Vec<XfaField> {
+    let Some((template, datasets)) = packets(pdf, form, limits) else {
         return Vec::new();
     };
-    let data = datasets.as_deref().map(data_values).unwrap_or_default();
-    fields(&template, &data).unwrap_or_default()
+    let data = datasets
+        .as_deref()
+        .map(|xml| data_values(xml, limits))
+        .unwrap_or_default();
+    fields(&template, &data, limits).unwrap_or_default()
 }
 
 /// The template packet, and the datasets packet when there is one. A copy
 /// in one stream is both.
-fn packets(pdf: &Pdf, form: &Dictionary) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
+fn packets<P: Objects + ?Sized>(
+    pdf: &P,
+    form: &Dictionary,
+    limits: &FormLimits,
+) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
     let content = |o: &Object| {
         let s = resolve(pdf, o)?.as_stream().ok()?;
-        s.decompressed_content_with_limit(MAX_XFA).ok()
+        s.decompressed_content_with_limit(limits.xfa).ok()
     };
     match resolve(pdf, form.get(b"XFA").ok()?)? {
         Object::Array(items) => {
@@ -130,7 +140,7 @@ fn attr(e: &BytesStart, key: &[u8]) -> Option<String> {
 
 /// The data values under `<xfa:data>`, by path (`topmostSubform/f1_01`),
 /// each path's in document order.
-fn data_values(xml: &[u8]) -> HashMap<String, Vec<String>> {
+fn data_values(xml: &[u8], limits: &FormLimits) -> HashMap<String, Vec<String>> {
     let mut reader = quick_xml::Reader::from_reader(xml);
     let mut buf = Vec::new();
     let mut out: HashMap<String, Vec<String>> = HashMap::new();
@@ -152,7 +162,7 @@ fn data_values(xml: &[u8]) -> HashMap<String, Vec<String>> {
                     parent.1 = true;
                 }
                 count += 1;
-                if count > MAX_NODES {
+                if count > limits.nodes {
                     break;
                 }
                 let group = attr(e, b"dataNode").as_deref() == Some("dataGroup");
@@ -168,7 +178,7 @@ fn data_values(xml: &[u8]) -> HashMap<String, Vec<String>> {
             Event::Text(t) => {
                 if let Some(top) = open.last_mut()
                     && let Ok(text) = t.decode()
-                    && top.2.len() < MAX_NAME
+                    && top.2.len() < limits.name
                 {
                     top.2.push_str(&unescape(&text));
                 }
@@ -277,7 +287,11 @@ enum Kind {
 
 /// The template's fields, bound to `data`. None when it isn't XML or is
 /// past the field tree's limits.
-fn fields(xml: &[u8], data: &HashMap<String, Vec<String>>) -> Option<Vec<XfaField>> {
+fn fields(
+    xml: &[u8],
+    data: &HashMap<String, Vec<String>>,
+    limits: &FormLimits,
+) -> Option<Vec<XfaField>> {
     const CONTAINERS: [&[u8]; 5] = [b"subform", b"area", b"subformSet", b"pageSet", b"pageArea"];
     let mut reader = quick_xml::Reader::from_reader(xml);
     let mut buf = Vec::new();
@@ -409,7 +423,7 @@ fn fields(xml: &[u8], data: &HashMap<String, Vec<String>>) -> Option<Vec<XfaFiel
                     } else {
                         format!("{path}.{segment}[{index}]")
                     };
-                    if path.len() > MAX_NAME || out.len() >= MAX_NODES {
+                    if path.len() > limits.name || out.len() >= limits.nodes {
                         return None;
                     }
                     (name, path)
@@ -433,7 +447,7 @@ fn fields(xml: &[u8], data: &HashMap<String, Vec<String>>) -> Option<Vec<XfaFiel
             Event::Text(t) => {
                 if let Some((_, _, text)) = reading.as_mut()
                     && let Ok(t) = t.decode()
-                    && text.len() < MAX_NAME
+                    && text.len() < limits.name
                 {
                     text.push_str(&unescape(&t));
                 }
@@ -546,6 +560,9 @@ fn bound(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source::Limits;
+
+    const LIMITS: &FormLimits = &Limits::DEFAULT.forms;
 
     const TEMPLATE: &str = r#"<xdp:xdp xmlns:xdp="http://ns.adobe.com/xdp/"><template xmlns="http://www.xfa.org/schema/xfa-template/3.0/">
 <subform name="topmostSubform"><subform name="Page1"><bind match="none"/>
@@ -569,10 +586,10 @@ mod tests {
 
     #[test]
     fn fields_bind_by_name_and_order() {
-        let data = data_values(DATA.as_bytes());
+        let data = data_values(DATA.as_bytes(), LIMITS);
         assert_eq!(data["topmostSubform/f1_01"], ["Ann", ""]);
         assert!(!data.contains_key("topmostSubform/Empty"));
-        let fields = fields(TEMPLATE.as_bytes(), &data).unwrap();
+        let fields = fields(TEMPLATE.as_bytes(), &data, LIMITS).unwrap();
         let got: Vec<(&str, Option<&str>, Option<&str>)> = fields
             .iter()
             .map(|f| (f.name.as_str(), f.value.as_deref(), f.tooltip.as_deref()))
@@ -616,7 +633,8 @@ mod tests {
 
     #[test]
     fn what_isnt_xml_reads_as_nothing() {
-        assert_eq!(fields(b"<template><subform", &HashMap::new()), None);
-        assert!(data_values(b"not xml at all").is_empty());
+        let empty = HashMap::new();
+        assert_eq!(fields(b"<template><subform", &empty, LIMITS), None);
+        assert!(data_values(b"not xml at all", LIMITS).is_empty());
     }
 }

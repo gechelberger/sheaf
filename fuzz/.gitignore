@@ -1,0 +1,4 @@
+# What cargo-fuzz makes: inputs it found, crashes, coverage.
+corpus/
+artifacts/
+coverage/

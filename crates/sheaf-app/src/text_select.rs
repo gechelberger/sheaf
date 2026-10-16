@@ -126,7 +126,7 @@ impl DocView {
                 f(self, Some(chars), cx)
             }
             CharsKey::Engine(source, index) => {
-                let size = doc.model.source(source).map(|s| s.page_size(index));
+                let size = doc.model.source(source).map(|s| s.src.page_size(index));
                 let (Some(handle), Some(size)) = (doc.handles.get(&source).cloned(), size) else {
                     return f(self, None, cx);
                 };

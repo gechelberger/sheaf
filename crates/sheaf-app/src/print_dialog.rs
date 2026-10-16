@@ -789,7 +789,7 @@ impl PrintDialog {
                 .ctx
                 .snapshot
                 .source(pref.source)
-                .map(|s| s.page_size(pref.index))
+                .map(|s| s.src.page_size(pref.index))
                 .unwrap_or(PageSize {
                     width: 612.0,
                     height: 792.0,

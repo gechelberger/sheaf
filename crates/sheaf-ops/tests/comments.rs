@@ -5,7 +5,6 @@
 //! Needs libpdfium (`scripts/fetch-pdfium.sh`), like the app itself.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use lopdf::{Document as Pdf, Object, Stream, dictionary};
 use sheaf_core::{PageIndex, Rotation};
@@ -149,7 +148,7 @@ fn opened(
 }
 
 fn engine(bytes: Vec<u8>) -> PdfiumEngine {
-    PdfiumEngine::open_bytes(Arc::new(bytes), None).unwrap()
+    PdfiumEngine::open_bytes(bytes.into(), None).unwrap()
 }
 
 fn render(e: &PdfiumEngine, page: u32) -> Raster {

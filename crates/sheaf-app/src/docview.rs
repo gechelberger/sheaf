@@ -35,6 +35,7 @@ use crate::pane::{Layout, LayoutSpec, MARGIN, PageMode, Pane, Spread};
 use crate::{ClearGuides, FullScreen, GoToPage, ReadMode, ToggleGrid, ToggleRulers};
 use sheaf_doc::{
     Document, Edit, EditOutcome, FlatOutlineItem, OutlineId, PageId, PageRef, SourceId, SourceInfo,
+    Store,
 };
 use sheaf_image::raster::PixelFormat;
 use sheaf_render::{
@@ -235,8 +236,9 @@ pub(crate) struct Incoming {
 }
 
 impl Incoming {
-    pub(crate) fn read(path: &std::path::Path) -> Incoming {
-        match sheaf_doc::file::read_open(path, None) {
+    /// What `info`'s source brings.
+    pub(crate) fn read(info: &SourceInfo) -> Incoming {
+        match sheaf_doc::file::read_open(&info.src) {
             Ok((annots, facts)) => Incoming {
                 marks: annots.sheaf,
                 foreign: annots.foreign,
@@ -244,7 +246,7 @@ impl Incoming {
                 form: facts.form,
             },
             Err(e) => {
-                log::warn!("reading marks in {}: {e:#}", path.display());
+                log::warn!("reading marks in {}: {e:#}", info.name.display());
                 Incoming::default()
             }
         }
@@ -787,29 +789,32 @@ impl DocView {
             let opened = cx
                 .background_executor()
                 .spawn(async move {
-                    let bytes = std::fs::metadata(&path)
-                        .map(|m| m.len() as usize)
-                        .unwrap_or(0);
                     let recovery = sheaf_doc::recovery::find(&path);
-                    RenderHandle::open(path.clone(), password).map(|h| (h, path, bytes, recovery))
+                    let store = Store::new();
+                    // The bytes, read once, and the geometry walk: the
+                    // layout's sizes, before the first paint.
+                    let t = Instant::now();
+                    let primary = SourceInfo::read(&store, &path, password.as_deref())?;
+                    let walk = t.elapsed();
+                    let handle = RenderHandle::open_bytes(primary.src.bytes().clone(), password)?;
+                    anyhow::Ok((store, primary, handle, walk, recovery))
                 })
                 .await;
             this.update(cx, |viewer, cx| {
                 match opened {
-                    Ok((handle, path, bytes, recovery)) => {
-                        let info = handle.info();
+                    Ok((store, primary, handle, walk, recovery)) => {
                         if timing {
                             eprintln!(
-                                "[timing] open: {:?} engine, {:?} since launch, {} pages",
-                                info.open_time,
+                                "[timing] open: {walk:?} source, {:?} engine, {:?} since launch, {} pages",
+                                handle.info().open_time,
                                 launched.elapsed(),
-                                info.page_count
+                                primary.src.page_count()
                             );
                         }
                         viewer.pending_recovery = recovery;
-                        viewer.install(handle, path, bytes, cx);
+                        viewer.install(store, primary, handle, cx);
                     }
-                    Err(e) if sheaf_render::OpenError::is_password(&e) => viewer.lock(cx),
+                    Err(e) if needs_password(&e) => viewer.lock(cx),
                     Err(e) => viewer.state = State::Failed(format!("{e:#}")),
                 }
                 cx.notify();
@@ -841,28 +846,18 @@ impl DocView {
         cx.notify();
     }
 
-    /// Make an opened file the primary source and start the background
-    /// loads. `path` is what the engine opened: the document's own path,
-    /// except while showing recovered changes from a temporary file.
+    /// Make an opened file, a source in `store` with `handle` rendering
+    /// it, the primary source and start the background loads. Its name is
+    /// what was read: the document's own path, except while showing
+    /// recovered changes from a temporary file.
     fn install(
         &mut self,
+        store: Arc<Store>,
+        primary: SourceInfo,
         handle: RenderHandle,
-        path: PathBuf,
-        bytes: usize,
         cx: &mut Context<Self>,
     ) {
-        let info = handle.info();
-        let source = SourceInfo {
-            path,
-            page_count: info.page_count,
-            first_page: info.first_page,
-            page_sizes: None,
-            bytes,
-            password: self.password.clone(),
-            data: Some(sheaf_doc::SourceData(handle.data())),
-            derived: None,
-        };
-        let mut model = Document::new(source, &[], sheaf_doc::history::default_policy());
+        let mut model = Document::new(store, primary, &[], sheaf_doc::history::default_policy());
         model.set_author(crate::prefs::get(cx).identity.name());
         let opened = self.path.clone();
         cx.defer(move |cx| crate::recent::add(&opened, cx));
@@ -937,7 +932,6 @@ impl DocView {
             split: 0.5,
             split_drag: false,
         }));
-        self.fetch_page_sizes(cx);
         self.fetch_outline(cx);
         self.load_sheaf_annots(cx);
         cx.emit(DocEvent::Opened);
@@ -1026,18 +1020,17 @@ impl DocView {
                             std::process::id()
                         ));
                         sheaf_doc::recovery::materialize(&path, &rec, &tmp)?;
-                        let bytes = std::fs::metadata(&tmp)
-                            .map(|m| m.len() as usize)
-                            .unwrap_or(0);
-                        let handle = RenderHandle::open(tmp.clone(), None)?;
-                        anyhow::Ok((handle, tmp, bytes))
+                        let store = Store::new();
+                        let primary = SourceInfo::read(&store, &tmp, None)?;
+                        let handle = RenderHandle::open_bytes(primary.src.bytes().clone(), None)?;
+                        anyhow::Ok((store, primary, handle))
                     }
                 })
                 .await;
             this.update(cx, |viewer, cx| {
                 match opened {
-                    Ok((handle, tmp, bytes)) => {
-                        viewer.install(handle, tmp, bytes, cx);
+                    Ok((store, primary, handle)) => {
+                        viewer.install(store, primary, handle, cx);
                         if let State::Ready(doc) = &mut viewer.state {
                             doc.model.mark_unsaved();
                             doc.notice =
@@ -1090,7 +1083,7 @@ impl DocView {
         let primary_is_file = doc
             .model
             .source(doc.model.primary())
-            .is_some_and(|s| s.path == path);
+            .is_some_and(|s| s.name == path);
         if !dirty {
             sheaf_doc::recovery::discard(&path);
             return;
@@ -1123,52 +1116,6 @@ impl DocView {
     /// The user chose to drop unsaved changes: the sidecar goes with them.
     pub fn discard_recovery(&self) {
         sheaf_doc::recovery::discard(&self.path);
-    }
-
-    fn fetch_page_sizes(&mut self, cx: &mut Context<Self>) {
-        let primary = match &self.state {
-            State::Ready(doc) => doc.model.primary(),
-            _ => return,
-        };
-        self.fetch_source_sizes(primary, cx);
-    }
-
-    /// Enumerate a source's page sizes on its worker and feed them to the model.
-    fn fetch_source_sizes(&mut self, sid: SourceId, cx: &mut Context<Self>) {
-        let State::Ready(doc) = &self.state else {
-            return;
-        };
-        let Some(handle) = doc.handles.get(&sid) else {
-            return;
-        };
-        let rx = handle.page_sizes();
-        let timing = self.timing;
-        let t = Instant::now();
-        cx.spawn(async move |this, cx| {
-            let Ok(result) = rx.await else { return };
-            this.update(cx, |viewer, cx| {
-                let State::Ready(doc) = &mut viewer.state else {
-                    return;
-                };
-                match result {
-                    Ok(sizes) => {
-                        if timing {
-                            eprintln!(
-                                "[timing] page sizes for {} pages in {:?}",
-                                sizes.len(),
-                                t.elapsed()
-                            );
-                        }
-                        doc.model.set_source_sizes(sid, sizes);
-                        doc.touched();
-                        cx.notify();
-                    }
-                    Err(e) => log::error!("page sizes: {e:#}"),
-                }
-            })
-            .ok();
-        })
-        .detach();
     }
 
     fn fetch_outline(&mut self, cx: &mut Context<Self>) {
@@ -1678,6 +1625,7 @@ impl DocView {
         doc.saving = true;
         doc.notice = Some(format!("Saving {}…", path.display()));
         let snapshot = doc.model.snapshot();
+        let store = doc.model.store().clone();
         let timing = self.timing;
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -1689,11 +1637,11 @@ impl DocView {
                     async move {
                         let (strategy, notes) =
                             save::save_to_path_noting(&snapshot, &path, signed)?;
-                        let bytes = std::fs::metadata(&path)
-                            .map(|m| m.len() as usize)
-                            .unwrap_or(0);
-                        let handle = RenderHandle::open(path.clone(), None)?;
-                        anyhow::Ok((handle, bytes, strategy, notes))
+                        // What was written, read back: the source the
+                        // document shows from now on.
+                        let saved = SourceInfo::read(&store, &path, None)?;
+                        let handle = RenderHandle::open_bytes(saved.src.bytes().clone(), None)?;
+                        anyhow::Ok((saved, handle, strategy, notes))
                     }
                 })
                 .await;
@@ -1703,19 +1651,8 @@ impl DocView {
                 };
                 doc.saving = false;
                 let ok = match result {
-                    Ok((handle, bytes, strategy, notes)) => {
-                        let (page_count, first_page) =
-                            (handle.info().page_count, handle.info().first_page);
-                        let saved = SourceInfo {
-                            path: path.clone(),
-                            page_count,
-                            first_page,
-                            page_sizes: None,
-                            bytes,
-                            password: None,
-                            data: Some(sheaf_doc::SourceData(handle.data())),
-                            derived: None,
-                        };
+                    Ok((saved, handle, strategy, notes)) => {
+                        let page_count = saved.src.page_count();
                         let sid = doc.model.rebase_to_saved(saved);
                         // Our marks are now in the file; keep PDFium from drawing them.
                         let st = doc.model.state();
@@ -1779,7 +1716,6 @@ impl DocView {
                             );
                         }
                         doc.touched();
-                        view.fetch_page_sizes(cx);
                         view.refresh_facts(cx);
                         if let State::Ready(doc) = &view.state
                             && doc.layers_changed()
@@ -1839,14 +1775,19 @@ impl DocView {
     /// Read back annotations sheaf wrote into the primary file earlier and
     /// take over their rendering.
     fn load_sheaf_annots(&mut self, cx: &mut Context<Self>) {
-        let path = self.path.clone();
-        let password = self.password.clone();
+        let State::Ready(doc) = &self.state else {
+            return;
+        };
+        let Some(primary) = doc.model.source(doc.model.primary()) else {
+            return;
+        };
+        let src = primary.src.clone();
         let timing = self.timing;
         cx.spawn(async move |this, cx| {
             let t = Instant::now();
             let found = cx
                 .background_executor()
-                .spawn(async move { sheaf_doc::file::read_open(&path, password.as_deref()) })
+                .spawn(async move { sheaf_doc::file::read_open(&src) })
                 .await;
             let (by_index, foreign, facts) = match found {
                 Ok((a, facts)) => (a.sheaf, a.foreign, facts),
@@ -2670,30 +2611,26 @@ impl DocView {
             return;
         };
         doc.notice = Some(format!("Inserting {name}…"));
+        let store = doc.model.store().clone();
         cx.notify();
         let timing = self.timing;
         cx.spawn(async move |this, cx| {
             let t = Instant::now();
             let opened = cx
                 .background_executor()
-                .spawn({
-                    let path = path.clone();
-                    async move {
-                        let bytes = std::fs::metadata(&path)
-                            .map(|m| m.len() as usize)
-                            .unwrap_or(0);
-                        // Pages sheaf made (blank, images) carry nothing more.
-                        let incoming = if bookmarks {
-                            Incoming::read(&path)
-                        } else {
-                            Incoming::default()
-                        };
-                        let handle = RenderHandle::open(path, None)?;
-                        anyhow::Ok((handle, bytes, incoming))
-                    }
+                .spawn(async move {
+                    let info = SourceInfo::read(&store, &path, None)?;
+                    // Pages sheaf made (blank, images) carry nothing more.
+                    let incoming = if bookmarks {
+                        Incoming::read(&info)
+                    } else {
+                        Incoming::default()
+                    };
+                    let handle = RenderHandle::open_bytes(info.src.bytes().clone(), None)?;
+                    anyhow::Ok((info, handle, incoming))
                 })
                 .await;
-            let (handle, bytes, incoming) = match opened {
+            let (info, handle, incoming) = match opened {
                 Ok(v) => v,
                 Err(e) => {
                     this.update(cx, |view, cx| {
@@ -2714,22 +2651,12 @@ impl DocView {
                 .ok()
                 .and_then(|r| r.ok())
                 .unwrap_or_default();
-            let sizes_rx = handle.page_sizes();
             this.update(cx, |view, cx| {
                 let State::Ready(doc) = &mut view.state else {
                     return;
                 };
-                let (page_count, first_page) = (handle.info().page_count, handle.info().first_page);
-                let sid = doc.model.add_source(SourceInfo {
-                    path: path.clone(),
-                    page_count,
-                    first_page,
-                    page_sizes: None,
-                    bytes,
-                    password: None,
-                    data: Some(sheaf_doc::SourceData(handle.data())),
-                    derived: None,
-                });
+                let page_count = info.src.page_count();
+                let sid = doc.model.add_source(info);
                 doc.handles.insert(sid, handle);
                 let mut flat: Vec<FlatOutlineItem> = if bookmarks {
                     outline.iter().map(flat_item).collect()
@@ -2787,20 +2714,6 @@ impl DocView {
                     Some(out) => view.after_model_change(label, out, cx),
                     None => cx.notify(),
                 }
-                // Sizes for the new source arrive on their own.
-                cx.spawn(async move |this, cx| {
-                    if let Ok(Ok(sizes)) = sizes_rx.await {
-                        this.update(cx, |view, cx| {
-                            if let State::Ready(doc) = &mut view.state {
-                                doc.model.set_source_sizes(sid, sizes);
-                                doc.touched();
-                                cx.notify();
-                            }
-                        })
-                        .ok();
-                    }
-                })
-                .detach();
             })
             .ok();
         })
@@ -2968,7 +2881,7 @@ impl DocView {
         let src = doc
             .model
             .source(pref.source)
-            .map(|s| s.page_size(pref.index))
+            .map(|s| s.src.page_size(pref.index))
             .unwrap_or(PageSize {
                 width: 612.0,
                 height: 792.0,
@@ -3562,9 +3475,7 @@ impl DocView {
         let src = doc.model.source(doc.model.primary())?;
         Some(crate::properties_dialog::PropertiesContext {
             path: self.path.clone(),
-            source: src.path.clone(),
-            password: src.password.clone(),
-            bytes: src.bytes,
+            source: src.src.clone(),
             page_size: doc
                 .shown_ref(doc.current_page())
                 .map(|p| doc.model.page_size(&p))
@@ -3579,6 +3490,12 @@ impl DocView {
             _ => 0,
         }
     }
+}
+
+/// Whether opening failed for a wrong or missing password, as the source's
+/// reader or PDFium found.
+pub(crate) fn needs_password(e: &anyhow::Error) -> bool {
+    sheaf_doc::source::OpenError::is_password(e) || sheaf_render::OpenError::is_password(e)
 }
 
 /// Each page's marks as the `/NM`s PDFium should hide, by page index.
@@ -4121,7 +4038,7 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
     let src = doc
         .model
         .source(pl.pref.source)
-        .map(|s| s.page_size(pl.pref.index))
+        .map(|s| s.src.page_size(pl.pref.index))
         .unwrap_or(PageSize {
             width: 612.0,
             height: 792.0,

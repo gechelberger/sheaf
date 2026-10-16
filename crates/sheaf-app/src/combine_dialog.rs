@@ -88,9 +88,9 @@ fn accepted(p: &Path) -> bool {
 /// Look at a file: a PDF's page count, or how many pages an image makes.
 fn inspect(path: &Path) -> Kind {
     if sheaf_ops::combine::is_pdf(path) {
-        match sheaf_ops::open::describe(path, None) {
-            Ok((info, _)) => Kind::Pdf(info.page_count as usize),
-            Err(e) if sheaf_render::OpenError::is_password(&e) => {
+        match sheaf_ops::open::describe(&sheaf_doc::Store::new(), path, None) {
+            Ok((info, _)) => Kind::Pdf(info.src.page_count() as usize),
+            Err(e) if crate::docview::needs_password(&e) => {
                 Kind::Unreadable("needs a password".into())
             }
             Err(e) => Kind::Unreadable(format!("{e:#}")),

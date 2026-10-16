@@ -16,6 +16,7 @@ use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, StringFormat, diction
 use crate::annot::{Annot, AnnotId, AnnotKind, PageGeom};
 use crate::forms::merge::{CopyMaps, FormCopy};
 use crate::model::{DocState, OutlineNode, PageId, PageRef, Snapshot, SourceId, SourceInfo};
+use crate::source::Source;
 use crate::text_layer;
 use sheaf_core::{DestView, PageFrame};
 
@@ -36,7 +37,7 @@ pub fn export_clean_copy(model: &Snapshot, path: &Path) -> Result<()> {
         .source(model.primary)
         .context("primary source missing")?;
     if path.exists()
-        && std::fs::canonicalize(path).ok() == std::fs::canonicalize(&primary.path).ok()
+        && std::fs::canonicalize(path).ok() == std::fs::canonicalize(&primary.name).ok()
     {
         bail!("a clean copy can't replace the open file; choose another name");
     }
@@ -184,7 +185,7 @@ pub fn export_flattened(model: &Snapshot, path: &Path) -> Result<usize> {
         .source(model.primary)
         .context("primary source missing")?;
     if path.exists()
-        && std::fs::canonicalize(path).ok() == std::fs::canonicalize(&primary.path).ok()
+        && std::fs::canonicalize(path).ok() == std::fs::canonicalize(&primary.name).ok()
     {
         bail!("a flattened copy can't replace the open file; choose another name");
     }
@@ -251,7 +252,11 @@ fn flatten_annots(pdf: &mut Pdf) -> Result<usize> {
                 .ok()
                 .and_then(|o| pdf.dereference(o).ok())
                 .and_then(|(_, o)| o.as_array().ok())
-                .map(|a| a.iter().map(|v| v.as_float().unwrap_or(0.0)).collect())
+                .map(|a| {
+                    a.iter()
+                        .map(|v| v.as_float().unwrap_or(0.0) as f32)
+                        .collect()
+                })
                 .unwrap_or_default();
             if rect.len() != 4 {
                 continue;
@@ -268,14 +273,22 @@ fn flatten_annots(pdf: &mut Pdf) -> Result<usize> {
                 .get(b"BBox")
                 .ok()
                 .and_then(|o| o.as_array().ok())
-                .map(|a| a.iter().map(|v| v.as_float().unwrap_or(0.0)).collect())
+                .map(|a| {
+                    a.iter()
+                        .map(|v| v.as_float().unwrap_or(0.0) as f32)
+                        .collect()
+                })
                 .unwrap_or_else(|| vec![llx, lly, urx, ury]);
             let m: Vec<f32> = stream
                 .dict
                 .get(b"Matrix")
                 .ok()
                 .and_then(|o| o.as_array().ok())
-                .map(|a| a.iter().map(|v| v.as_float().unwrap_or(0.0)).collect())
+                .map(|a| {
+                    a.iter()
+                        .map(|v| v.as_float().unwrap_or(0.0) as f32)
+                        .collect()
+                })
                 .filter(|m: &Vec<f32>| m.len() == 6)
                 .unwrap_or_else(|| vec![1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
             if bbox.len() != 4 {
@@ -747,7 +760,7 @@ pub fn derived_copy(
         let page = *loaded
             .pages
             .get(index as usize)
-            .with_context(|| format!("no page {index} in {}", src.path.display()))?;
+            .with_context(|| format!("no page {index} in {}", src.name.display()))?;
         let mut dict = copy_page_dict(&from, page, &mut pdf, &mut map)?;
         let id = if filled.insert(page) {
             map[&page]
@@ -764,7 +777,7 @@ pub fn derived_copy(
         if let Some(crop) = crop {
             dict.set(
                 "CropBox",
-                crop.iter().map(|&v| Object::Real(v)).collect::<Vec<_>>(),
+                crop.iter().map(|&v| Object::from(v)).collect::<Vec<_>>(),
             );
         }
         let rotate = dict
@@ -904,11 +917,10 @@ pub fn save_to_path_noting(
     let primary = model
         .source(model.primary)
         .context("primary source missing")?;
-    let same_file = std::fs::canonicalize(path).ok() == std::fs::canonicalize(&primary.path).ok();
-    let unchanged = primary.bytes == 0
-        || std::fs::metadata(&primary.path)
-            .map(|m| m.len() as usize == primary.bytes)
-            .unwrap_or(false);
+    let same_file = std::fs::canonicalize(path).ok() == std::fs::canonicalize(&primary.name).ok();
+    let unchanged = std::fs::metadata(&primary.name)
+        .map(|m| m.len() as usize == primary.src.bytes().len())
+        .unwrap_or(false);
     if signed == Signed::Append {
         if same_file && !unchanged {
             bail!(
@@ -930,7 +942,7 @@ pub fn save_to_path_noting(
         }
     }
     if signed == Signed::Ask
-        && let Some(e) = signatures_broken(primary)?
+        && let Some(e) = signatures_broken(&primary.src)
     {
         return Err(e.into());
     }
@@ -939,16 +951,15 @@ pub fn save_to_path_noting(
     Ok((Strategy::Rewrite, notes))
 }
 
-/// What a rewrite of `info` would break: its signed fields and its
+/// What a rewrite of `src` would break: its signed fields and its
 /// certification. None when it has neither.
-fn signatures_broken(info: &SourceInfo) -> Result<Option<WouldBreakSignatures>> {
-    let pdf = crate::file::load_source(info)?;
-    let facts = crate::forms::read(&pdf).facts;
+fn signatures_broken(src: &Source) -> Option<WouldBreakSignatures> {
+    let facts = crate::forms::read(src).facts;
     let signatures = facts.signed.max(usize::from(facts.certified));
-    Ok((signatures > 0).then(|| WouldBreakSignatures {
+    (signatures > 0).then(|| WouldBreakSignatures {
         signatures,
-        encrypted: pdf.encryption_state.is_some() || info.password.is_some(),
-    }))
+        encrypted: src.pdf().is_encrypted(),
+    })
 }
 
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -1294,7 +1305,7 @@ pub fn text_string(s: &str) -> Object {
 /// A bookmark's `/Dest`: its page and, when it has one, its position (see
 /// [`DestView`]); otherwise the top of the page.
 fn outline_dest(page: ObjectId, view: Option<&DestView>, frame: Option<PageFrame>) -> Vec<Object> {
-    let num = |v: Option<f32>| v.map(Object::Real).unwrap_or(Object::Null);
+    let num = |v: Option<f32>| v.map(Object::from).unwrap_or(Object::Null);
     let mut dest = vec![Object::Reference(page)];
     match view {
         Some(DestView::Xyz { left, top, zoom }) => {
@@ -1385,8 +1396,8 @@ pub(crate) fn write_outline(
 pub fn validate(model: &Snapshot) -> Result<()> {
     for p in &model.state.pages {
         let info = model.source(p.source).context("unknown source")?;
-        if p.index >= info.page_count {
-            bail!("page ref {:?} out of range for {}", p, info.path.display());
+        if p.index >= info.src.page_count() {
+            bail!("page ref {:?} out of range for {}", p, info.name.display());
         }
     }
     Ok(())
@@ -1721,8 +1732,8 @@ pub(crate) fn link_connectors(
         match connectors.iter().find(|g| g.id == next.id) {
             // Land with it a little in from the top-left corner.
             Some(g) => dest.extend([
-                Object::Real(g.top_left.0 - 36.0),
-                Object::Real(g.top_left.1 + 36.0),
+                Object::from(g.top_left.0 - 36.0),
+                Object::from(g.top_left.1 + 36.0),
                 Object::Null,
             ]),
             None => dest.extend([Object::Null, Object::Null, Object::Null]),
@@ -1738,6 +1749,7 @@ mod tests {
     use super::*;
     use crate::history::FixedCount;
     use crate::model::{Document, Edit, FlatOutlineItem};
+    use crate::store::Store;
     use lopdf::content::{Content, Operation};
     use sheaf_core::{PageSize, Rotation};
 
@@ -1824,20 +1836,20 @@ mod tests {
         path
     }
 
-    fn info(path: &Path, n: u32) -> SourceInfo {
-        SourceInfo {
-            path: path.to_path_buf(),
-            page_count: n,
-            first_page: PageSize {
-                width: 612.0,
-                height: 792.0,
-            },
-            page_sizes: None,
-            bytes: 0,
-            password: None,
-            data: None,
-            derived: None,
-        }
+    /// The file at `path`, read into `store`.
+    fn info(store: &Store, path: &Path) -> SourceInfo {
+        SourceInfo::read(store, path, None).unwrap()
+    }
+
+    /// A document over the file at `path`, in a store of its own.
+    fn open(
+        path: &Path,
+        outline: &[FlatOutlineItem],
+        policy: Box<dyn crate::history::HistoryPolicy>,
+    ) -> Document {
+        let store = Store::new();
+        let primary = info(&store, path);
+        Document::new(store, primary, outline, policy)
     }
 
     /// (marker text, /Rotate) per page of a written PDF, in order.
@@ -1986,8 +1998,8 @@ mod tests {
             color: None,
             style: Default::default(),
         };
-        let mut model = Document::new(
-            info(&a, 2),
+        let mut model = open(
+            &a,
             &[
                 item(
                     "At a spot",
@@ -2052,8 +2064,8 @@ mod tests {
     fn identity_round_trip() {
         let dir = tempdir();
         let a = make_pdf(&dir, "a.pdf", "A", 3, &[("One", 0, 0), ("Three", 2, 0)]);
-        let model = Document::new(
-            info(&a, 3),
+        let model = open(
+            &a,
             &[
                 FlatOutlineItem {
                     title: "One".into(),
@@ -2090,8 +2102,8 @@ mod tests {
         let dir = tempdir();
         let a = make_pdf(&dir, "a.pdf", "A", 4, &[]);
         let b = make_pdf(&dir, "b.pdf", "B", 2, &[]);
-        let mut model = Document::new(
-            info(&a, 4),
+        let mut model = open(
+            &a,
             &[
                 FlatOutlineItem {
                     title: "Top".into(),
@@ -2112,7 +2124,7 @@ mod tests {
             ],
             Box::new(FixedCount(10)),
         );
-        let sb = model.add_source(info(&b, 2));
+        let sb = model.add_source(info(model.store(), &b));
         let ids: Vec<PageId> = model.state().pages.iter().map(|p| p.id).collect();
         model
             .apply(Edit::DeletePages { ids: vec![ids[1]] }, "del")
@@ -2180,7 +2192,7 @@ mod tests {
     fn rewrite_to_path_is_atomic() {
         let dir = tempdir();
         let a = make_pdf(&dir, "a.pdf", "A", 2, &[]);
-        let model = Document::new(info(&a, 2), &[], Box::new(FixedCount(10)));
+        let model = open(&a, &[], Box::new(FixedCount(10)));
         let out = dir.join("out.pdf");
         rewrite_to_path(&model.snapshot(), &out).unwrap();
         assert!(out.exists());
@@ -2203,12 +2215,8 @@ mod tests {
             save_modern(&a);
         }
         let original = std::fs::read(&a).unwrap();
-        let mut model = Document::new(
-            {
-                let mut i = info(&a, 4);
-                i.bytes = original.len();
-                i
-            },
+        let mut model = open(
+            &a,
             &[FlatOutlineItem {
                 title: "One".into(),
                 page: Some(2),
@@ -2245,7 +2253,7 @@ mod tests {
         assert_eq!(read_outline(&bytes), vec![(0, "One".into(), Some(3))]);
 
         // Structural: delete, insert from another file, bookmark rename.
-        let sb = model.add_source(info(&b, 1));
+        let sb = model.add_source(info(model.store(), &b));
         model
             .apply(Edit::DeletePages { ids: vec![ids[0]] }, "del")
             .unwrap();
@@ -2347,9 +2355,7 @@ mod tests {
 
     /// A one-page model of `path`, its page turned a quarter.
     fn rotated(path: &Path) -> Document {
-        let mut i = info(path, 1);
-        i.bytes = std::fs::metadata(path).unwrap().len() as usize;
-        let mut model = Document::new(i, &[], Box::new(FixedCount(10)));
+        let mut model = opened(path);
         let page = model.state().pages[0].id;
         let rotate = Edit::RotatePages {
             ids: vec![page],
@@ -2445,16 +2451,7 @@ mod tests {
         assert_eq!(found.foreign.len(), 1);
         assert_eq!(found.foreign[0].subtype, "Polygon");
         for incremental in [true, false] {
-            let len = std::fs::metadata(&path).unwrap().len() as usize;
-            let mut model = Document::new(
-                {
-                    let mut i = info(&path, 2);
-                    i.bytes = len;
-                    i
-                },
-                &[],
-                Box::new(FixedCount(10)),
-            );
+            let mut model = open(&path, &[], Box::new(FixedCount(10)));
             let p0 = model.page(0).unwrap().id;
             let ours = Annot {
                 id: AnnotId(0),
@@ -2572,16 +2569,7 @@ mod tests {
         assert!(items[1].color.is_none() && items[1].style.is_plain());
         assert!(items[2].style.bold && items[2].style.italic);
         for incremental in [true, false] {
-            let len = std::fs::metadata(&path).unwrap().len() as usize;
-            let mut model = Document::new(
-                {
-                    let mut i = info(&path, 3);
-                    i.bytes = len;
-                    i
-                },
-                &items,
-                Box::new(FixedCount(10)),
-            );
+            let mut model = open(&path, &items, Box::new(FixedCount(10)));
             // A bookmark edit, so the incremental save rewrites the outline.
             let plain = model.state().outline[1].id;
             model
@@ -2610,17 +2598,6 @@ mod tests {
         }
     }
 
-    /// A source as the app makes one: its bytes kept from when it opened.
-    fn kept(path: &Path, n: u32) -> SourceInfo {
-        let bytes = std::fs::read(path).unwrap();
-        SourceInfo {
-            bytes: bytes.len(),
-            data: Some(crate::model::SourceData(std::sync::Arc::new(bytes))),
-            derived: None,
-            ..info(path, n)
-        }
-    }
-
     /// Bug 13 (todos/m9.md): after a save in place, a version from before
     /// it still means the old file, whatever the path holds now.
     #[test]
@@ -2628,7 +2605,7 @@ mod tests {
         for incremental_first in [true, false] {
             let dir = tempdir();
             let a = make_pdf(&dir, "a.pdf", "A", 3, &[]);
-            let mut model = Document::new(kept(&a, 3), &[], Box::new(FixedCount(10)));
+            let mut model = open(&a, &[], Box::new(FixedCount(10)));
             let ids: Vec<PageId> = model.state().pages.iter().map(|p| p.id).collect();
             model
                 .apply(
@@ -2646,7 +2623,7 @@ mod tests {
             }
             let saved = read_pages(&std::fs::read(&a).unwrap());
             assert_eq!(saved[0].0, "A 2");
-            model.rebase_to_saved(kept(&a, 3));
+            model.rebase_to_saved(info(model.store(), &a));
             model.undo().unwrap();
             save_to_path(&model.snapshot(), &a).unwrap();
             let pages: Vec<String> = read_pages(&std::fs::read(&a).unwrap())
@@ -2693,16 +2670,8 @@ mod tests {
             .collect()
     }
 
-    fn opened(path: &Path, bytes: usize) -> Document {
-        Document::new(
-            {
-                let mut i = info(path, 1);
-                i.bytes = bytes;
-                i
-            },
-            &[],
-            Box::new(FixedCount(10)),
-        )
+    fn opened(path: &Path) -> Document {
+        open(path, &[], Box::new(FixedCount(10)))
     }
 
     #[test]
@@ -2710,8 +2679,7 @@ mod tests {
         use crate::annot::{AnnotKind, Pt};
         let dir = tempdir();
         let a_path = make_pdf(&dir, "a.pdf", "A", 1, &[]);
-        let original = std::fs::read(&a_path).unwrap();
-        let mut model = opened(&a_path, original.len());
+        let mut model = opened(&a_path);
         let p0 = model.page(0).unwrap().id;
         let note = thread_mark(
             AnnotKind::Note {
@@ -2797,8 +2765,7 @@ mod tests {
     fn file_with_their_comments(dir: &Path) -> (std::path::PathBuf, Vec<Annot>) {
         use crate::annot::{AnnotKind, Pt};
         let a_path = make_pdf(dir, "a.pdf", "A", 1, &[]);
-        let original = std::fs::read(&a_path).unwrap();
-        let mut model = opened(&a_path, original.len());
+        let mut model = opened(&a_path);
         let p0 = model.page(0).unwrap().id;
         let note = thread_mark(
             AnnotKind::Note {
@@ -2867,8 +2834,7 @@ mod tests {
         assert_eq!(reply.parent.as_deref(), Some(ours[0].name().as_str()));
 
         for incremental in [true, false] {
-            let bytes = std::fs::read(&path).unwrap();
-            let mut model = opened(&path, bytes.len());
+            let mut model = opened(&path);
             model.set_initial_annots(found.sheaf.clone()).unwrap();
             let p0 = model.page(0).unwrap().id;
             let mut note = model.state().annots_on(p0).unwrap()[0].clone();
@@ -2991,8 +2957,7 @@ mod tests {
                 .is_none()
         );
         for incremental in [true, false] {
-            let bytes = std::fs::read(&path).unwrap();
-            let mut model = opened(&path, bytes.len());
+            let mut model = opened(&path);
             let p0 = model.page(0).unwrap().id;
             for annot in [square.clone(), replace.clone()] {
                 model
@@ -3068,8 +3033,7 @@ mod tests {
                 .collect()
         };
         for incremental in [true, false] {
-            let bytes = std::fs::read(&path).unwrap();
-            let mut model = opened(&path, bytes.len());
+            let mut model = opened(&path);
             model.set_initial_annots(found.sheaf.clone()).unwrap();
             let p0 = model.page(0).unwrap().id;
             // Theirs, by name.
@@ -3134,8 +3098,7 @@ mod tests {
             crate::file::read_annots(&path, None).unwrap().foreign,
             found.foreign
         );
-        let bytes = std::fs::read(&path).unwrap();
-        let mut model = opened(&path, bytes.len());
+        let mut model = opened(&path);
         model.set_initial_annots(found.sheaf.clone()).unwrap();
         let p0 = model.page(0).unwrap().id;
         model
@@ -3208,8 +3171,7 @@ mod tests {
         };
         let dir = tempdir();
         let a_path = make_pdf(&dir, "a.pdf", "A", 1, &[]);
-        let original = std::fs::read(&a_path).unwrap();
-        let mut model = opened(&a_path, original.len());
+        let mut model = opened(&a_path);
         let p0 = model.page(0).unwrap().id;
         model
             .apply(
@@ -3300,16 +3262,7 @@ mod tests {
 
         let dir = tempdir();
         let a_path = make_pdf(&dir, "a.pdf", "A", 2, &[]);
-        let original = std::fs::read(&a_path).unwrap();
-        let mut model = Document::new(
-            {
-                let mut i = info(&a_path, 2);
-                i.bytes = original.len();
-                i
-            },
-            &[],
-            Box::new(FixedCount(10)),
-        );
+        let mut model = open(&a_path, &[], Box::new(FixedCount(10)));
         let stamp = |page| Edit::AnnotAdd {
             page,
             annot: thread_mark(
@@ -3389,16 +3342,7 @@ mod tests {
         use crate::annot::{AnnotKind, Box2};
         let dir = tempdir();
         let a_path = make_pdf(&dir, "a.pdf", "A", 1, &[]);
-        let original = std::fs::read(&a_path).unwrap();
-        let mut model = Document::new(
-            {
-                let mut i = info(&a_path, 1);
-                i.bytes = original.len();
-                i
-            },
-            &[],
-            Box::new(FixedCount(10)),
-        );
+        let mut model = open(&a_path, &[], Box::new(FixedCount(10)));
         let p0 = model.page(0).unwrap().id;
         let words = Box2 {
             x: 72.0,
@@ -3517,15 +3461,7 @@ mod tests {
         assert!(back.foreign.is_empty(), "{:?}", back.foreign);
 
         // Saved again from the reopened file: the companion isn't doubled.
-        let mut model2 = Document::new(
-            {
-                let mut i = info(&out, 1);
-                i.bytes = bytes.len();
-                i
-            },
-            &[],
-            Box::new(FixedCount(10)),
-        );
+        let mut model2 = open(&out, &[], Box::new(FixedCount(10)));
         model2.set_initial_annots(back.sheaf).unwrap();
         let p = model2.page(0).unwrap().id;
         let mut changed = model2.state().annots_on(p).unwrap()[0].clone();
@@ -3554,15 +3490,7 @@ mod tests {
         let dir = tempdir();
         let a_path = make_pdf(&dir, "a.pdf", "A", 2, &[]);
         let original = std::fs::read(&a_path).unwrap();
-        let mut model = Document::new(
-            {
-                let mut i = info(&a_path, 2);
-                i.bytes = original.len();
-                i
-            },
-            &[],
-            Box::new(FixedCount(10)),
-        );
+        let mut model = open(&a_path, &[], Box::new(FixedCount(10)));
         let p0 = model.page(0).unwrap().id;
         let mk = |kind: AnnotKind| Annot {
             id: crate::annot::AnnotId(0),
@@ -3652,15 +3580,7 @@ mod tests {
         // Reopen, delete one, save again: no duplicates.
         let out2 = dir.join("inc2.pdf");
         std::fs::copy(&out, &out2).unwrap();
-        let mut model2 = Document::new(
-            {
-                let mut i = info(&out2, 2);
-                i.bytes = bytes.len();
-                i
-            },
-            &[],
-            Box::new(FixedCount(10)),
-        );
+        let mut model2 = open(&out2, &[], Box::new(FixedCount(10)));
         model2.set_initial_annots(back).unwrap();
         let p0b = model2.page(0).unwrap().id;
         let first = model2.state().annots_on(p0b).unwrap()[0].clone();
@@ -3698,8 +3618,7 @@ mod tests {
         use crate::annot::{AnnotKind, Box2};
         let dir = tempdir();
         let a_path = make_pdf(&dir, "g.pdf", "G", 3, &[]);
-        let original = std::fs::read(&a_path).unwrap();
-        let mut model = opened_n(&a_path, 3, original.len());
+        let mut model = opened(&a_path);
         let page = |i: usize| model.page(i).unwrap().id;
         let (p0, p1, p2) = (page(0), page(1), page(2));
         let connector = |y: f32| Annot {
@@ -3756,7 +3675,7 @@ mod tests {
                             let d = pdf.get_dictionary(o.as_reference().unwrap()).unwrap();
                             let top = d.get(b"Rect").unwrap().as_array().unwrap()[3]
                                 .as_float()
-                                .unwrap();
+                                .unwrap() as f32;
                             let to = d.get(b"Dest").unwrap().as_array().unwrap()[0]
                                 .as_reference()
                                 .unwrap();
@@ -3775,7 +3694,7 @@ mod tests {
         // first now goes to its neighbour, and page 3 comes back to it.
         let out = dir.join("g2.pdf");
         std::fs::write(&out, &bytes).unwrap();
-        let mut model = opened_n(&out, 3, bytes.len());
+        let mut model = opened(&out);
         model
             .set_initial_annots(crate::file::read_sheaf_annots(&out).unwrap())
             .unwrap();
@@ -3793,18 +3712,6 @@ mod tests {
         assert_eq!(dests(&bytes), [vec![1, 2], vec![3], vec![1]]);
     }
 
-    fn opened_n(path: &Path, n: u32, bytes: usize) -> Document {
-        Document::new(
-            {
-                let mut i = info(path, n);
-                i.bytes = bytes;
-                i
-            },
-            &[],
-            Box::new(FixedCount(10)),
-        )
-    }
-
     /// Connectors come out as Link annotations whose /Dest is the partner's
     /// page, in both save strategies.
     #[test]
@@ -3812,16 +3719,7 @@ mod tests {
         use crate::annot::{AnnotKind, Box2};
         let dir = tempdir();
         let a_path = make_pdf(&dir, "c.pdf", "C", 3, &[]);
-        let original = std::fs::read(&a_path).unwrap();
-        let mut model = Document::new(
-            {
-                let mut i = info(&a_path, 3);
-                i.bytes = original.len();
-                i
-            },
-            &[],
-            Box::new(FixedCount(10)),
-        );
+        let mut model = open(&a_path, &[], Box::new(FixedCount(10)));
         let (p0, p2) = (model.page(0).unwrap().id, model.page(2).unwrap().id);
         let mk = || Annot {
             id: crate::annot::AnnotId(0),
@@ -3935,12 +3833,8 @@ mod tests {
             pdf.save(&a_path).unwrap();
         }
         let original = std::fs::read(&a_path).unwrap();
-        let mut model = Document::new(
-            {
-                let mut i = info(&a_path, 2);
-                i.bytes = original.len();
-                i
-            },
+        let mut model = open(
+            &a_path,
             &[
                 FlatOutlineItem {
                     title: "Top".into(),
@@ -4141,12 +4035,11 @@ mod tests {
                 .is_encrypted()
         );
 
+        let store = Store::new();
+        let primary = SourceInfo::read(&store, &enc, Some("secret")).unwrap();
         let mut model = Document::new(
-            {
-                let mut i = info(&enc, 2);
-                i.password = Some("secret".into());
-                i
-            },
+            store,
+            primary,
             &[FlatOutlineItem {
                 title: "Top".into(),
                 page: Some(0),
@@ -4206,8 +4099,8 @@ mod tests {
         use crate::annot::{AnnotKind, Box2};
         let dir = tempdir();
         let a = make_pdf(&dir, "x.pdf", "X", 4, &[]);
-        let mut model = Document::new(
-            info(&a, 4),
+        let mut model = open(
+            &a,
             &[
                 FlatOutlineItem {
                     title: "Part".into(),
@@ -4327,7 +4220,7 @@ mod tests {
         use crate::stamps::{HeaderFooter, has_artifacts};
         let dir = tempdir();
         let a = make_pdf(&dir, "hf.pdf", "H", 2, &[]);
-        let mut model = Document::new(info(&a, 2), &[], crate::history::default_policy());
+        let mut model = open(&a, &[], crate::history::default_policy());
         let hf = HeaderFooter {
             texts: [
                 String::new(),
@@ -4380,7 +4273,7 @@ mod tests {
         assert_eq!(scope, None);
         // Stripped, both pages come back clean.
         let bytes = derived_copy(
-            &info(&out, 2),
+            &info(&Store::new(), &out),
             &[(0, None), (1, None)],
             &mut |pdf, d, _, _| {
                 crate::stamps::strip(pdf, d, crate::stamps::HEADER_FOOTER);
@@ -4405,15 +4298,7 @@ mod tests {
         use crate::labels::{LabelSpec, Style, label_ranges, labels_for};
         let dir = tempdir();
         let a = make_pdf(&dir, "labels.pdf", "L", 4, &[]);
-        let bytes = std::fs::metadata(&a).unwrap().len() as usize;
-        let mut model = Document::new(
-            SourceInfo {
-                bytes,
-                ..info(&a, 4)
-            },
-            &[],
-            crate::history::default_policy(),
-        );
+        let mut model = open(&a, &[], crate::history::default_policy());
         let ids: Vec<PageId> = model.state().pages.iter().map(|p| p.id).collect();
         let spec = |id, style, first| LabelSpec {
             start: id,
@@ -4488,8 +4373,8 @@ mod tests {
         use crate::annot::{AnnotKind, Box2};
         let dir = tempdir();
         let a = make_pdf(&dir, "p.pdf", "P", 3, &[]);
-        let mut model = Document::new(
-            info(&a, 3),
+        let mut model = open(
+            &a,
             &[FlatOutlineItem {
                 title: "Top".into(),
                 page: Some(1),
@@ -4574,7 +4459,7 @@ mod tests {
                 .set("Annots", Object::Array(vec![link.into()]));
             pdf.save(&a).unwrap();
         }
-        let mut model = Document::new(info(&a, 1), &[], Box::new(FixedCount(10)));
+        let mut model = open(&a, &[], Box::new(FixedCount(10)));
         let p0 = model.page(0).unwrap().id;
         model
             .apply(
@@ -4730,7 +4615,7 @@ mod tests {
     fn rewrite_writes_invisible_text_layer() {
         let dir = tempdir();
         let a = make_pdf(&dir, "a.pdf", "A", 3, &[]);
-        let mut model = Document::new(info(&a, 3), &[], Box::new(FixedCount(10)));
+        let mut model = open(&a, &[], Box::new(FixedCount(10)));
         let ids: Vec<PageId> = model.state().pages.iter().map(|p| p.id).collect();
         set_layer(&mut model, ids[1], "Hello");
         let bytes = rewrite(&model.snapshot()).unwrap();
@@ -4775,15 +4660,7 @@ mod tests {
         let dir = tempdir();
         let a = make_pdf(&dir, "a.pdf", "A", 2, &[]);
         let original = std::fs::read(&a).unwrap();
-        let mut model = Document::new(
-            {
-                let mut i = info(&a, 2);
-                i.bytes = original.len();
-                i
-            },
-            &[],
-            Box::new(FixedCount(10)),
-        );
+        let mut model = open(&a, &[], Box::new(FixedCount(10)));
         let ids: Vec<PageId> = model.state().pages.iter().map(|p| p.id).collect();
         set_layer(&mut model, ids[0], "Hello");
         let bytes = crate::incremental::incremental(&model.snapshot()).unwrap();
@@ -4820,15 +4697,7 @@ mod tests {
         let dir = tempdir();
         let a = make_pdf(&dir, "a.pdf", "A", 3, &[]);
         let original = std::fs::read(&a).unwrap();
-        let mut model = Document::new(
-            {
-                let mut i = info(&a, 3);
-                i.bytes = original.len();
-                i
-            },
-            &[],
-            Box::new(FixedCount(10)),
-        );
+        let mut model = open(&a, &[], Box::new(FixedCount(10)));
         let ids: Vec<PageId> = model.state().pages.iter().map(|p| p.id).collect();
         set_layer(&mut model, ids[2], "Hello");
         model
@@ -4853,7 +4722,7 @@ mod tests {
     fn one_font_set_per_file() {
         let dir = tempdir();
         let a = make_pdf(&dir, "a.pdf", "A", 3, &[]);
-        let mut model = Document::new(info(&a, 3), &[], Box::new(FixedCount(10)));
+        let mut model = open(&a, &[], Box::new(FixedCount(10)));
         let ids: Vec<PageId> = model.state().pages.iter().map(|p| p.id).collect();
         model
             .apply(
@@ -4885,7 +4754,7 @@ mod tests {
     fn duplicate_shares_layer_and_is_not_double_rotated() {
         let dir = tempdir();
         let a = make_pdf(&dir, "a.pdf", "A", 2, &[]);
-        let mut model = Document::new(info(&a, 2), &[], Box::new(FixedCount(10)));
+        let mut model = open(&a, &[], Box::new(FixedCount(10)));
         let ids: Vec<PageId> = model.state().pages.iter().map(|p| p.id).collect();
         model
             .apply(
@@ -4918,14 +4787,14 @@ mod tests {
     fn reinstall_replaces_previous_layer() {
         let dir = tempdir();
         let a = make_pdf(&dir, "a.pdf", "A", 1, &[]);
-        let mut model = Document::new(info(&a, 1), &[], Box::new(FixedCount(10)));
+        let mut model = open(&a, &[], Box::new(FixedCount(10)));
         let p0 = model.page(0).unwrap().id;
         set_layer(&mut model, p0, "Hello");
         let b = dir.join("b.pdf");
         rewrite_to_path(&model.snapshot(), &b).unwrap();
 
         // Re-OCR the saved file: the old layer goes, the new one comes.
-        let mut model = Document::new(info(&b, 1), &[], Box::new(FixedCount(10)));
+        let mut model = open(&b, &[], Box::new(FixedCount(10)));
         let p0 = model.page(0).unwrap().id;
         set_layer(&mut model, p0, "World");
         let bytes = rewrite(&model.snapshot()).unwrap();
@@ -4939,7 +4808,7 @@ mod tests {
         assert_eq!(glyphless_fonts(&pdf), 1);
 
         // Saving the file again with no layer in the model keeps what's baked.
-        let model = Document::new(info(&b, 1), &[], Box::new(FixedCount(10)));
+        let model = open(&b, &[], Box::new(FixedCount(10)));
         let bytes = rewrite(&model.snapshot()).unwrap();
         let pdf = Pdf::load_mem(&bytes).unwrap();
         let page = pdf.get_pages()[&1];
@@ -4951,7 +4820,7 @@ mod tests {
         use crate::annot::{AnnotKind, Box2};
         let dir = tempdir();
         let a = make_pdf(&dir, "a.pdf", "A", 2, &[]);
-        let mut model = Document::new(info(&a, 2), &[], Box::new(FixedCount(10)));
+        let mut model = open(&a, &[], Box::new(FixedCount(10)));
         let ids: Vec<PageId> = model.state().pages.iter().map(|p| p.id).collect();
         set_layer(&mut model, ids[1], "Hello");
         model
@@ -5013,7 +4882,7 @@ mod tests {
     fn empty_layer_writes_nothing() {
         let dir = tempdir();
         let a = make_pdf(&dir, "a.pdf", "A", 1, &[]);
-        let mut model = Document::new(info(&a, 1), &[], Box::new(FixedCount(10)));
+        let mut model = open(&a, &[], Box::new(FixedCount(10)));
         let p0 = model.page(0).unwrap().id;
         let empty = std::sync::Arc::new(crate::text_layer::TextLayer::from_engine(
             vec![],

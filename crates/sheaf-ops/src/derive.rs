@@ -1,14 +1,14 @@
 //! Pages that show a generated copy of their source page: cropped, or
-//! with the header/footer the file had drawn stripped out. Sources are
-//! files, so the copies are written to the generated-file cache;
-//! `Edit::RebasePages` then moves the document's pages onto them, keeping
-//! ids, rotation, bookmarks and marks.
+//! with the header/footer the file had drawn stripped out. The copies are
+//! made in memory and interned into the document's store, named after
+//! their originals; `Edit::RebasePages` then moves the document's pages
+//! onto them, keeping ids, rotation, bookmarks and marks.
 
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
-use sheaf_core::PageSize;
-use sheaf_doc::{Derived, PageId, Rebase, Snapshot, SourceId, SourceInfo};
+use sheaf_doc::store::{BlobKind, MemoryKind, Origin};
+use sheaf_doc::{Derived, PageId, Rebase, Snapshot, SourceId, SourceInfo, Store};
 use sheaf_progress::{Progress, Unit};
 
 /// A generated PDF holding copies of some pages, and the rebases that
@@ -34,9 +34,33 @@ impl DerivedSource {
     }
 }
 
+/// `bytes`, sheaf's copy of pages `pages` of source `from` (`original`),
+/// as a source in `store`, under the original's name.
+pub(crate) fn copy_of(
+    store: &Store,
+    bytes: Vec<u8>,
+    original: &SourceInfo,
+    from: SourceId,
+    pages: Vec<u32>,
+) -> Result<SourceInfo> {
+    let kind = BlobKind::Pdf {
+        password: None,
+        origin: Origin::Memory(MemoryKind::Derived),
+    };
+    Ok(SourceInfo {
+        src: store.open(bytes.into(), kind)?,
+        name: original.name.clone(),
+        derived: Some(Derived { from, pages }),
+    })
+}
+
 /// Pages whose content has header/footer artifacts (Acrobat's or
-/// sheaf's), as stripped copies. Empty when none have any.
-pub fn strip_stamps(snap: &Snapshot, progress: &dyn Progress) -> Result<Vec<DerivedSource>> {
+/// sheaf's), as stripped copies in `store`. Empty when none have any.
+pub fn strip_stamps(
+    store: &Store,
+    snap: &Snapshot,
+    progress: &dyn Progress,
+) -> Result<Vec<DerivedSource>> {
     progress.set_total(Some(snap.state.pages.len() as u64), Unit::Pages);
     let mut by_source: BTreeMap<SourceId, Vec<(PageId, u32)>> = BTreeMap::new();
     for p in snap.state.pages.iter() {
@@ -68,22 +92,9 @@ pub fn strip_stamps(snap: &Snapshot, progress: &dyn Progress) -> Result<Vec<Deri
             sheaf_doc::stamps::strip(pdf, d, sheaf_doc::stamps::HEADER_FOOTER);
             Ok(())
         })?;
-        let path = sheaf_doc::generated::store(&bytes)?;
-        let sizes: Vec<PageSize> = keep.iter().map(|&(_, i)| info.page_size(i)).collect();
+        let pages = keep.iter().map(|&(_, i)| i).collect();
         out.push(DerivedSource {
-            info: SourceInfo {
-                path,
-                page_count: sizes.len() as u32,
-                first_page: sizes[0],
-                page_sizes: Some(sizes),
-                bytes: bytes.len(),
-                password: None,
-                data: None,
-                derived: Some(Derived {
-                    from: sid,
-                    pages: keep.iter().map(|&(_, i)| i).collect(),
-                }),
-            },
+            info: copy_of(store, bytes, info, sid, pages)?,
             pages: keep
                 .iter()
                 .enumerate()
@@ -97,8 +108,9 @@ pub fn strip_stamps(snap: &Snapshot, progress: &dyn Progress) -> Result<Vec<Deri
 /// Pages with `wm` drawn on (its kind stripped first), and pages outside
 /// `scope` that have one of its kind stripped; `None` strips only. Each
 /// page's sheaf rotation is passed on, so the mark sits upright as the
-/// page is shown.
+/// page is shown. The copies are sources in `store`.
 pub fn watermark(
+    store: &Store,
     snap: &Snapshot,
     behind: bool,
     wm: Option<&sheaf_doc::watermark::Watermark>,
@@ -151,22 +163,9 @@ pub fn watermark(
             }
             Ok(())
         })?;
-        let path = sheaf_doc::generated::store(&bytes)?;
-        let sizes: Vec<PageSize> = keep.iter().map(|k| info.page_size(k.1)).collect();
+        let pages = keep.iter().map(|k| k.1).collect();
         out.push(DerivedSource {
-            info: SourceInfo {
-                path,
-                page_count: sizes.len() as u32,
-                first_page: sizes[0],
-                page_sizes: Some(sizes),
-                bytes: bytes.len(),
-                password: None,
-                data: None,
-                derived: Some(Derived {
-                    from: sid,
-                    pages: keep.iter().map(|k| k.1).collect(),
-                }),
-            },
+            info: copy_of(store, bytes, info, sid, pages)?,
             pages: keep
                 .iter()
                 .enumerate()

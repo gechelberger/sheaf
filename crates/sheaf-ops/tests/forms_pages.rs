@@ -9,7 +9,6 @@
 //! Needs libpdfium (`scripts/fetch-pdfium.sh`), like the app itself.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use lopdf::{Document as Pdf, Object, ObjectId, dictionary};
 use sheaf_core::PageIndex;
@@ -27,7 +26,7 @@ mod common;
 use common::*;
 
 /// A page's `/CropBox`.
-fn crop_box(bytes: &[u8], page: usize) -> Vec<f32> {
+fn crop_box(bytes: &[u8], page: usize) -> Vec<f64> {
     let pdf = Pdf::load_mem(bytes).unwrap();
     let id = pdf.get_pages()[&(page as u32 + 1)];
     pdf.get_dictionary(id)
@@ -81,6 +80,7 @@ fn a_cropped_form_page_keeps_its_fields() {
         bottom: 100.0,
     };
     let plan = sheaf_ops::crop::plan(
+        doc.store(),
         &doc.snapshot(),
         &[page],
         CropSpec::Margins(margins),
@@ -89,8 +89,8 @@ fn a_cropped_form_page_keeps_its_fields() {
     .unwrap();
     // On screen: the copy is a form, so PDFium draws its widgets (before,
     // it had no /AcroForm and the field was blank).
-    let copy = std::fs::read(&plan[0].info.path).unwrap();
-    let shown = PdfiumEngine::open_bytes(Arc::new(copy.clone()), None).unwrap();
+    let copy = plan[0].info.src.bytes().clone();
+    let shown = PdfiumEngine::open_bytes(copy.clone(), None).unwrap();
     let r = shown
         .render_page(PageIndex(0), 612, PixelFormat::Rgba)
         .unwrap();
@@ -152,11 +152,17 @@ fn watermarked(remove: bool) {
     let pages: Vec<PageId> = doc.state().pages.iter().map(|p| p.id).collect();
     let wm = sheaf_doc::watermark::Watermark::default();
     let snap = doc.snapshot();
-    let derived =
-        sheaf_ops::derive::watermark(&snap, false, Some(&wm), &pages, &sheaf_ops::NoProgress)
-            .unwrap();
-    let copy = std::fs::read(&derived[0].info.path).unwrap();
-    let shown = PdfiumEngine::open_bytes(Arc::new(copy.clone()), None).unwrap();
+    let derived = sheaf_ops::derive::watermark(
+        doc.store(),
+        &snap,
+        false,
+        Some(&wm),
+        &pages,
+        &sheaf_ops::NoProgress,
+    )
+    .unwrap();
+    let copy = derived[0].info.src.bytes().clone();
+    let shown = PdfiumEngine::open_bytes(copy.clone(), None).unwrap();
     let r = shown
         .render_page(PageIndex(1), 612, PixelFormat::Rgba)
         .unwrap();
@@ -168,9 +174,15 @@ fn watermarked(remove: bool) {
     rebase(&mut doc, derived, "Watermark");
     if remove {
         let snap = doc.snapshot();
-        let derived =
-            sheaf_ops::derive::watermark(&snap, false, None, &pages, &sheaf_ops::NoProgress)
-                .unwrap();
+        let derived = sheaf_ops::derive::watermark(
+            doc.store(),
+            &snap,
+            false,
+            None,
+            &pages,
+            &sheaf_ops::NoProgress,
+        )
+        .unwrap();
         rebase(&mut doc, derived, "Remove Watermark");
     }
     for (strategy, bytes) in written_both_ways(&doc) {
@@ -271,7 +283,9 @@ fn a_form_with_its_header_and_footer_removed_keeps_its_fields() {
 
     // Removed, as the app does it.
     let mut doc = sheaf_ops::open(&footed, None).unwrap();
-    let derived = sheaf_ops::derive::strip_stamps(&doc.snapshot(), &sheaf_ops::NoProgress).unwrap();
+    let derived =
+        sheaf_ops::derive::strip_stamps(doc.store(), &doc.snapshot(), &sheaf_ops::NoProgress)
+            .unwrap();
     assert_eq!(derived.len(), 1);
     let sid = doc.add_source(derived[0].info.clone());
     doc.apply_batch(
@@ -639,6 +653,7 @@ fn corpus_cropped_forms_keep_their_fields() {
         };
         let snap = doc.snapshot();
         let plan = sheaf_ops::crop::plan(
+            doc.store(),
             &snap,
             &[page],
             CropSpec::Margins(margins),
@@ -682,8 +697,9 @@ fn corpus_deleted_pages_leave_no_values() {
         if entry.path.starts_with("forms/safedocs/") || entry.pages < 2 {
             continue;
         }
-        let mut pdf = Pdf::load_mem(&std::fs::read(corpus.path(&entry)).unwrap()).unwrap();
-        let form = sheaf_doc::forms::read(&pdf);
+        let bytes = std::fs::read(corpus.path(&entry)).unwrap();
+        let mut pdf = Pdf::load_mem(&bytes).unwrap();
+        let form = form_in(&bytes);
         // Each text field's pages.
         let mut pages: BTreeMap<_, Vec<u32>> = BTreeMap::new();
         for (&page, widgets) in &form.widgets {

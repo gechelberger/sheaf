@@ -28,11 +28,12 @@ pub fn form(boundingbox: Vec<f32>, matrix: Vec<f32>, content: Vec<u8>) -> Stream
     let mut dict = Dictionary::new();
     dict.set("Type", Object::Name(b"XObject".to_vec()));
     dict.set("Subtype", Object::Name(b"Form".to_vec()));
+    // sheaf: f32s go through `From<f32>`, now that a real is an f64.
     dict.set(
         "BBox",
-        Object::Array(boundingbox.into_iter().map(Object::Real).collect()),
+        Object::Array(boundingbox.into_iter().map(Object::from).collect()),
     );
-    dict.set("Matrix", Object::Array(matrix.into_iter().map(Object::Real).collect()));
+    dict.set("Matrix", Object::Array(matrix.into_iter().map(Object::from).collect()));
     let mut xobject = Stream::new(dict, content);
     // Ignore any compression error.
     let _ = xobject.compress();

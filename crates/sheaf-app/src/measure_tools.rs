@@ -86,7 +86,7 @@ impl DocView {
         let Some(src) = doc
             .model
             .source(pref.source)
-            .map(|s| s.page_size(pref.index))
+            .map(|s| s.src.page_size(pref.index))
         else {
             return p;
         };

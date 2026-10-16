@@ -2,10 +2,8 @@
 //! `/EmbeddedFiles` name tree and those on file-attachment annotations.
 //! Listed when a file opens; bytes are read on demand.
 
-use std::path::Path;
-
 use anyhow::{Context, Result, bail};
-use lopdf::{Dictionary, Document as Pdf, Object, ObjectId};
+use lopdf::{Dictionary, Document as Pdf, LazyPdf, Object, ObjectId};
 
 use crate::file::pdf_text;
 
@@ -100,14 +98,14 @@ pub fn attachments_in(pdf: &Pdf) -> Vec<Attachment> {
     out
 }
 
-/// The bytes of attachment `at` in the file at `path`.
-pub fn read_attachment(path: &Path, password: Option<&str>, at: &AttachmentRef) -> Result<Vec<u8>> {
+/// The bytes of attachment `at` in `file`, a PDF opened with `password`.
+pub fn read_attachment(file: &[u8], password: Option<&str>, at: &AttachmentRef) -> Result<Vec<u8>> {
     if let AttachmentRef::Cached(stem) = at {
         let p = crate::generated::blob_path(stem)
             .with_context(|| format!("{stem:?} isn't a cache name"))?;
         return std::fs::read(&p).with_context(|| format!("reading {}", p.display()));
     }
-    let pdf = crate::file::load_pdf(path, password)?;
+    let pdf = crate::file::load_pdf_mem(file, password)?;
     attachment_bytes(&pdf, at)
 }
 
@@ -293,9 +291,34 @@ fn folder_key(key: &str) -> Option<(i64, &str)> {
     Some((id.parse().ok()?, name))
 }
 
-pub(crate) fn resolve<'a>(pdf: &'a Pdf, o: &'a Object) -> Option<&'a Object> {
+/// What objects are read from: a source's [`LazyPdf`], or an eager
+/// document the old writers load, so [`resolve`] and `forms::xfa::read`
+/// serve both. Transitional (M10.5): it goes with the eager documents in
+/// slice 9.
+pub(crate) trait Objects {
+    /// Object `id`, its references followed; None when it can't be read.
+    fn object(&self, id: ObjectId) -> Option<&Object>;
+
+    fn dictionary(&self, id: ObjectId) -> Option<&Dictionary> {
+        self.object(id)?.as_dict().ok()
+    }
+}
+
+impl Objects for Pdf {
+    fn object(&self, id: ObjectId) -> Option<&Object> {
+        self.get_object(id).ok()
+    }
+}
+
+impl Objects for LazyPdf {
+    fn object(&self, id: ObjectId) -> Option<&Object> {
+        self.get_object(id).ok()
+    }
+}
+
+pub(crate) fn resolve<'a, P: Objects + ?Sized>(pdf: &'a P, o: &'a Object) -> Option<&'a Object> {
     match o {
-        Object::Reference(id) => pdf.get_object(*id).ok(),
+        Object::Reference(id) => pdf.object(*id),
         o => Some(o),
     }
 }

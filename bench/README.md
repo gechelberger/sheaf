@@ -33,10 +33,12 @@ looks for them; no PDF is committed.
 the tests do. Without either, it says it skipped and exits 0.
 
 **The gate harness,** `crates/sheaf-ops/tests/gate_7k.rs`, times today's
-open, render, saves, crop, Bates and flatten on the three fixtures, and
-history at scale, and prints each beside slice 2's baseline. It makes a
-fixture that's missing or older than `gen.py` (in `$SHEAF_GATE_DIR`, else
-`target/gate-7k/`):
+geometry walk (a source's open: its cross-reference sections and page
+table), open, render, saves, crop, Bates and flatten on the three
+fixtures, and history at scale, and prints each beside slice 2's
+baseline. The walk (from slice 3) and history assert their gates. It
+makes a fixture that's missing or older than `gen.py` (in
+`$SHEAF_GATE_DIR`, else `target/gate-7k/`):
 
 ```sh
 cargo test -p sheaf-ops --release --test gate_7k -- --ignored --nocapture --test-threads=1

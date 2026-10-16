@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sheaf_core::PageSize;
 use sheaf_doc::images::placement;
-use sheaf_doc::{Box2, Document, Edit, SourceInfo, TextLayer};
+use sheaf_doc::{Box2, Document, Edit, SourceInfo, Store, TextLayer};
 use sheaf_image::clean::ScanParams;
 use sheaf_image::io::PageImage;
 use sheaf_ocr::{OcrConfig, OcrImage, OcrWord};
@@ -304,19 +304,9 @@ fn add_text(
             PageSize { width, height }
         })
         .collect();
-    let info = SourceInfo {
-        path: src.to_path_buf(),
-        page_count: pages.len() as u32,
-        first_page: sizes[0],
-        page_sizes: Some(sizes.clone()),
-        bytes: std::fs::metadata(src)
-            .map(|m| m.len() as usize)
-            .unwrap_or(0),
-        password: None,
-        data: None,
-        derived: None,
-    };
-    let mut doc = Document::new(info, &[], sheaf_doc::history::default_policy());
+    let store = Store::new();
+    let info = SourceInfo::read(&store, src, None)?;
+    let mut doc = Document::new(store, info, &[], sheaf_doc::history::default_policy());
     let ids: Vec<_> = doc.state().pages.iter().map(|p| p.id).collect();
     let layers = ids
         .into_iter()

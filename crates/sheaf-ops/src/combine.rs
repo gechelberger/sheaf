@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use sheaf_doc::{Document, Edit, FlatOutlineItem, NewOutlineItem, PageId, SourceId};
+use sheaf_doc::{Document, Edit, FlatOutlineItem, NewOutlineItem, PageId, SourceId, Store};
 use sheaf_progress::{Progress, Unit};
 
 use crate::images::Paper;
@@ -109,6 +109,7 @@ pub fn build(
         bail!("nothing to combine");
     }
     progress.set_total(Some(items.len() as u64), Unit::Items);
+    let store = Store::new();
     let mut doc: Option<Document> = None;
     let mut report = CombineReport::default();
     let (mut renamed, mut signed) = (Vec::new(), Vec::new());
@@ -121,9 +122,9 @@ pub fn build(
             .unwrap_or_default();
         let file = page_source(&item.path, params.image_page)
             .with_context(|| format!("reading {}", item.path.display()))?;
-        let (info, outline) = crate::open::describe(&file, item.password.as_deref())
+        let (info, outline) = crate::open::describe(&store, &file, item.password.as_deref())
             .with_context(|| format!("opening {name}"))?;
-        let count = info.page_count as usize;
+        let count = info.src.page_count() as usize;
         let wanted: Vec<u32> = match &item.pages {
             Some(r) if !r.trim().is_empty() => crate::pages::parse(r, count)
                 .map_err(anyhow::Error::msg)
@@ -131,11 +132,11 @@ pub fn build(
                 .into_iter()
                 .map(|i| i as u32)
                 .collect(),
-            _ => (0..info.page_count).collect(),
+            _ => (0..info.src.page_count()).collect(),
         };
         // Its marks, and its form (M10 slice 4).
         let (marks, form) = if is_pdf(&item.path) {
-            sheaf_doc::file::read_open(&file, item.password.as_deref())
+            sheaf_doc::file::read_open(&info.src)
                 .map(|(a, facts)| (a.sheaf, facts.form))
                 .unwrap_or_default()
         } else {
@@ -144,7 +145,12 @@ pub fn build(
         // Page ids of this file's pages, by index in the file.
         let ids: Vec<(u32, PageId)> = match doc.as_mut() {
             None => {
-                let mut d = Document::new(info, &[], sheaf_doc::history::default_policy());
+                let mut d = Document::new(
+                    store.clone(),
+                    info,
+                    &[],
+                    sheaf_doc::history::default_policy(),
+                );
                 if !marks.is_empty() {
                     d.set_initial_annots(marks.clone())?;
                 }

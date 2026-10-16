@@ -13,8 +13,8 @@
 //! as `<kind>-7000.pdf`. One that's missing, older than gen.py or not the
 //! length slice 2 measured is made again, with python3; the heavy one
 //! needs DejaVuSans.ttf (gen.py's `--font`). Beside them go the copy a
-//! fixture's document is opened from and saved to, and crop's copies in
-//! `cache/`.
+//! fixture's document is opened from and saved to, and the cache sheaf's
+//! generated files would go to, in `cache/`.
 //!
 //! Each fixture runs in two processes of its own, the second for the
 //! flatten, and each prints a table: every row's number now, slice 2's
@@ -36,9 +36,10 @@
 //! engines after 200 groups and the thumbnail strip (13), crop commit
 //! (15), Bates apply and the live-token reorder (17), and the flattened
 //! export's RSS (19). The rows today's code has no counterpart for come
-//! with those slices; idle CPU is the app's (12, 13). Until then only
-//! slice 1's history bench asserts. The 200 OCR versions take about 5 GB
-//! until slice 12 bounds history, and skip with less memory available.
+//! with those slices; idle CPU is the app's (12, 13). So far slice 1's
+//! history bench and slice 3's geometry walk assert, after their tables
+//! print. The 200 OCR versions take about 5 GB until slice 12 bounds
+//! history, and skip with less memory available.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -49,8 +50,9 @@ use std::time::{Duration, Instant};
 use sheaf_core::{PageIndex, PageSize, Rotation};
 use sheaf_doc::save::Strategy;
 use sheaf_doc::stamps::{Bates, HeaderFooter};
+use sheaf_doc::store::BlobKind;
 use sheaf_doc::{
-    Annot, AnnotId, AnnotKind, Box2, Document, Edit, OcrWord, PageId, SourceInfo, TextLayer,
+    Annot, AnnotId, AnnotKind, Box2, Document, Edit, OcrWord, PageId, SourceInfo, Store, TextLayer,
 };
 use sheaf_image::raster::PixelFormat;
 use sheaf_ops::NoProgress;
@@ -321,17 +323,24 @@ fn gates(kind: Kind) {
     };
     let mut rows = Vec::new();
 
-    // The geometry walk: PDFium's page sizes, which slice 3's lazy reader
-    // replaces.
-    let (walk, _) = measure(RUNS, || {
-        let engine = PdfiumEngine::open(&path, None).unwrap();
-        timed(|| engine.page_sizes().unwrap()).0
-    });
-    let gate = match kind {
-        Kind::Synthetic => "< 100 ms, slice 3",
-        Kind::Heavy => "< 250 ms, slice 3",
-        Kind::Scanned => "",
+    // The geometry walk: the cross-reference sections and the page table,
+    // from bytes already interned, parsed again each run (slice 3; slice
+    // 2's baseline is PDFium's page sizes).
+    let store = Store::new();
+    let file = BlobKind::file(&path, None);
+    let blob = store
+        .intern(sheaf_core::read_file(&path).unwrap(), file)
+        .unwrap();
+    let (walk, _) = measure(RUNS, || timed(|| store.source(&blob).unwrap()).0);
+    drop((blob, store));
+    let walk_gate = match kind {
+        Kind::Synthetic => Some(Duration::from_millis(100)),
+        Kind::Heavy => Some(Duration::from_millis(250)),
+        Kind::Scanned => None,
     };
+    let gate = walk_gate.map_or(String::new(), |g| {
+        format!("< {} ms, asserted", g.as_millis())
+    });
     rows.push(Row::time("geometry walk", walk, base.walk_ms, gate));
 
     // Ready: open to edits enabled.
@@ -483,8 +492,8 @@ fn gates(kind: Kind) {
     });
 
     // Crop every page by half an inch a side, as the app does: the cropped
-    // copy written to the cache (emptied first, so every run writes it),
-    // an engine opened on it, then the edit onto it.
+    // copy made in memory and interned, an engine opened on its bytes, then
+    // the edit onto it.
     let ids: Vec<PageId> = doc.state().pages.iter().map(|p| p.id).collect();
     let half_inch = CropSpec::Margins(Margins {
         top: 36.0,
@@ -492,15 +501,12 @@ fn gates(kind: Kind) {
         bottom: 36.0,
         left: 36.0,
     });
-    let generated = cache.join("generated");
     let mut edits = Vec::new();
     let (crop, _) = measure(RUNS, || {
-        if generated.exists() {
-            std::fs::remove_dir_all(&generated).unwrap();
-        }
         let snap = doc.snapshot();
         let (t, (edit, engines)) = timed(|| {
-            let plan = sheaf_ops::crop::plan(&snap, &ids, half_inch, &NoProgress).unwrap();
+            let plan =
+                sheaf_ops::crop::plan(doc.store(), &snap, &ids, half_inch, &NoProgress).unwrap();
             let engines = engines_on(&plan);
             let edit = timed(|| {
                 let pages = plan
@@ -574,6 +580,12 @@ fn gates(kind: Kind) {
         &format!("{} 7k: {}, {file_mb:.1} MB", kind.name(), path.display()),
         &rows,
     );
+    if let Some(gate) = walk_gate {
+        assert!(
+            walk < gate,
+            "the geometry walk took {walk:?}, over {gate:?}"
+        );
+    }
 }
 
 /// The flatten's rows on the `kind` fixture, from the file as opened:
@@ -614,7 +626,7 @@ fn flatten(kind: Kind) {
 fn engines_on(copies: &[DerivedSource]) -> Vec<RenderHandle> {
     copies
         .iter()
-        .map(|c| RenderHandle::open(c.info.path.clone(), None).unwrap())
+        .map(|c| RenderHandle::open_bytes(c.info.src.bytes().clone(), None).unwrap())
         .collect()
 }
 
@@ -623,7 +635,7 @@ fn engines_on(copies: &[DerivedSource]) -> Vec<RenderHandle> {
 /// then `hf` set, in one step. Gives the engines opened on the copies.
 fn set_header_footer(doc: &mut Document, hf: &HeaderFooter) -> Vec<RenderHandle> {
     let snap = doc.snapshot();
-    let copies = sheaf_ops::derive::strip_stamps(&snap, &NoProgress).unwrap();
+    let copies = sheaf_ops::derive::strip_stamps(doc.store(), &snap, &NoProgress).unwrap();
     let engines = engines_on(&copies);
     let pages: Vec<_> = copies
         .iter()
@@ -645,7 +657,7 @@ fn set_header_footer(doc: &mut Document, hf: &HeaderFooter) -> Vec<RenderHandle>
 #[test]
 #[ignore = "gate: cargo test -p sheaf-ops --release --test gate_7k -- --ignored --nocapture --test-threads=1"]
 fn history_at_7k_pages_and_20k_marks() {
-    let mut d = Document::new(source(PAGES), &[], sheaf_doc::history::default_policy());
+    let mut d = blank(PAGES);
     let mut marks: HashMap<u32, Vec<Annot>> = HashMap::new();
     for i in 0..20_000 {
         marks
@@ -721,7 +733,7 @@ fn history_of_200_ocr_versions_at_1000_pages() {
         );
         return;
     }
-    let mut d = Document::new(source(1000), &[], sheaf_doc::history::default_policy());
+    let mut d = blank(1000);
     let ids: Vec<PageId> = d.state().pages.iter().map(|p| p.id).collect();
     let ((), mem) = with_mem(|| {
         for run in 0..200 {
@@ -835,21 +847,11 @@ fn fixture(kind: Kind) -> PathBuf {
     path
 }
 
-/// A model-only source of `pages` Letter pages.
-fn source(pages: u32) -> SourceInfo {
-    SourceInfo {
-        path: "a.pdf".into(),
-        page_count: pages,
-        first_page: PageSize {
-            width: 612.0,
-            height: 792.0,
-        },
-        page_sizes: None,
-        bytes: 1000,
-        password: None,
-        data: None,
-        derived: None,
-    }
+/// A document of `pages` blank Letter pages, in a store of its own.
+fn blank(pages: u32) -> Document {
+    let store = Store::new();
+    let primary = SourceInfo::blank(&store, pages);
+    Document::new(store, primary, &[], sheaf_doc::history::default_policy())
 }
 
 /// A small red square, `id` 0 for the document to assign one.

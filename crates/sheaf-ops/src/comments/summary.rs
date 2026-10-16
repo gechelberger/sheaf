@@ -199,7 +199,7 @@ fn pages(
         let pref = st.pages[page];
         let source = snap
             .source(pref.source)
-            .map(|s| s.page_size(pref.index))
+            .map(|s| s.src.page_size(pref.index))
             .unwrap_or(PageSize {
                 width: 612.0,
                 height: 792.0,
@@ -612,7 +612,7 @@ impl Writer {
             kids.push(Object::Reference(self.pdf.add_object(dictionary! {
                 "Type" => "Page",
                 "Parent" => pages_id,
-                "MediaBox" => vec![0.into(), 0.into(), Object::Real(w), Object::Real(h)],
+                "MediaBox" => vec![0.into(), 0.into(), Object::from(w), Object::from(h)],
                 "Resources" => resources,
                 "Contents" => content,
             })));

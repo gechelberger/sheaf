@@ -1672,24 +1672,12 @@ mod tests {
 
     #[test]
     fn a_plugin_update_keeps_what_it_cant_see() {
-        use sheaf_doc::{Annot, AnnotId, AnnotKind, Document, Edit, FixedCount, Pt, SourceInfo};
-        let mut d = Document::new(
-            SourceInfo {
-                path: "a.pdf".into(),
-                page_count: 1,
-                first_page: sheaf_core::PageSize {
-                    width: 612.0,
-                    height: 792.0,
-                },
-                page_sizes: None,
-                bytes: 0,
-                password: None,
-                data: None,
-                derived: None,
-            },
-            &[],
-            Box::new(FixedCount(10)),
-        );
+        use sheaf_doc::{
+            Annot, AnnotId, AnnotKind, Document, Edit, FixedCount, Pt, SourceInfo, Store,
+        };
+        let store = Store::new();
+        let primary = SourceInfo::blank(&store, 1);
+        let mut d = Document::new(store, primary, &[], Box::new(FixedCount(10)));
         let page = d.page(0).unwrap().id;
         let line = Annot {
             id: AnnotId(1),

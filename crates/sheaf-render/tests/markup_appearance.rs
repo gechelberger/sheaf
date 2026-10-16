@@ -11,7 +11,9 @@ use std::path::{Path, PathBuf};
 use lopdf::{Document as Pdf, Object, Stream, dictionary};
 use sheaf_core::{PageIndex, PageSize, Rotation};
 use sheaf_doc::annot::caret_box;
-use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, Document, Edit, FixedCount, Pt, SourceInfo};
+use sheaf_doc::{
+    Annot, AnnotId, AnnotKind, Box2, Document, Edit, FixedCount, Pt, SourceInfo, Store,
+};
 use sheaf_image::raster::PixelFormat;
 use sheaf_render::pdfium::PdfiumEngine;
 use sheaf_render::{Job, Renderer};
@@ -119,20 +121,9 @@ fn check(rotate: i64) {
         height: 792.0,
     }
     .rotated(Rotation::from_degrees(rotate as i32));
-    let mut model = Document::new(
-        SourceInfo {
-            path: src.clone(),
-            page_count: 1,
-            first_page: shown,
-            page_sizes: None,
-            bytes: 0,
-            password: None,
-            data: None,
-            derived: None,
-        },
-        &[],
-        Box::new(FixedCount(10)),
-    );
+    let store = Store::new();
+    let primary = SourceInfo::read(&store, &src, None).unwrap();
+    let mut model = Document::new(store, primary, &[], Box::new(FixedCount(10)));
     let page = model.page(0).unwrap().id;
     let replaced = row(300.0);
     for a in [
@@ -369,24 +360,9 @@ fn tapes_draw_turned_and_from_old_text() {
     let dir = tempdir();
     let src = dir.join("src.pdf");
     blank_pdf(&src, 0);
-    let letter = PageSize {
-        width: 612.0,
-        height: 792.0,
-    };
-    let mut model = Document::new(
-        SourceInfo {
-            path: src.clone(),
-            page_count: 1,
-            first_page: letter,
-            page_sizes: None,
-            bytes: 0,
-            password: None,
-            data: None,
-            derived: None,
-        },
-        &[],
-        Box::new(FixedCount(10)),
-    );
+    let store = Store::new();
+    let primary = SourceInfo::read(&store, &src, None).unwrap();
+    let mut model = Document::new(store, primary, &[], Box::new(FixedCount(10)));
     let page = model.page(0).unwrap().id;
     let mut tape = Tape {
         lines: vec![
@@ -494,23 +470,9 @@ fn clouds_and_callouts_draw() {
     let dir = tempdir();
     let src = dir.join("src.pdf");
     blank_pdf(&src, 0);
-    let mut model = Document::new(
-        SourceInfo {
-            path: src.clone(),
-            page_count: 1,
-            first_page: PageSize {
-                width: 612.0,
-                height: 792.0,
-            },
-            page_sizes: None,
-            bytes: 0,
-            password: None,
-            data: None,
-            derived: None,
-        },
-        &[],
-        Box::new(FixedCount(10)),
-    );
+    let store = Store::new();
+    let primary = SourceInfo::read(&store, &src, None).unwrap();
+    let mut model = Document::new(store, primary, &[], Box::new(FixedCount(10)));
     let page = model.page(0).unwrap().id;
     let mut cloud = mark(
         AnnotKind::Square {

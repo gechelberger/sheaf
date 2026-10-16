@@ -125,12 +125,12 @@ impl DocView {
         let Some(src) = doc.model.source(doc.model.primary()) else {
             return;
         };
-        let (path, password, sid) = (src.path.clone(), src.password.clone(), doc.model.primary());
+        let (src, sid) = (src.src.clone(), doc.model.primary());
         cx.spawn(async move |this, cx| {
             let facts = cx
                 .background_executor()
                 .spawn(async move {
-                    let pdf = sheaf_doc::file::load_pdf(&path, password.as_deref())?;
+                    let pdf = sheaf_doc::file::load_pdf_mem(src.bytes(), src.password())?;
                     anyhow::Ok(sheaf_doc::file::facts_in(&pdf))
                 })
                 .await;
@@ -238,7 +238,7 @@ impl DocView {
         let Some(src) = doc.model.source(doc.model.primary()) else {
             return;
         };
-        let (file, password) = (src.path.clone(), src.password.clone());
+        let src = src.src.clone();
         let at: AttachmentRef = a.at.clone();
         let name = a.name.clone();
         cx.spawn(async move |this, cx| {
@@ -246,7 +246,7 @@ impl DocView {
                 .background_executor()
                 .spawn(async move {
                     let bytes =
-                        sheaf_doc::attachments::read_attachment(&file, password.as_deref(), &at)?;
+                        sheaf_doc::attachments::read_attachment(src.bytes(), src.password(), &at)?;
                     let (dest, open) = match then {
                         Then::SaveTo(p) => (p, false),
                         Then::Open => (temp_path(&name)?, true),

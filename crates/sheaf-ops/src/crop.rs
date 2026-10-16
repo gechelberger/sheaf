@@ -1,6 +1,6 @@
 //! Crop pages (Document > Crop Pages…). A cropped page becomes a page of
-//! a generated PDF whose `/CropBox` is the new shown area: sources are
-//! files, and PDFium then renders, sizes and maps text for it like any
+//! a PDF sheaf makes in memory, whose `/CropBox` is the new shown area:
+//! the layout sizes it, and PDFium renders and maps text for it, like any
 //! page. `Edit::RebasePages` moves the document's page onto it, keeping
 //! its id, rotation and bookmarks, and shifts its marks and OCR text so
 //! they stay on the same content.
@@ -9,9 +9,9 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use sheaf_core::{PageIndex, PageSize, Rotation};
+use sheaf_core::{PageIndex, Rotation};
 use sheaf_doc::annot::Pt;
-use sheaf_doc::{Derived, PageId, Snapshot, SourceId, SourceInfo};
+use sheaf_doc::{PageId, Snapshot, SourceId, Store};
 use sheaf_image::raster::{PixelFormat, content_bounds};
 use sheaf_progress::{Progress, Unit};
 use sheaf_render::pdfium::PdfiumEngine;
@@ -68,9 +68,10 @@ fn unrotate(m: Margins, rot: Rotation) -> Margins {
     }
 }
 
-/// Plan the crop of `ids` in `snap`; the cropped copies are written to the
-/// generated-file cache.
+/// Plan the crop of `ids` in `snap`; the cropped copies are sources in
+/// `store`.
 pub fn plan(
+    store: &Store,
     snap: &Snapshot,
     ids: &[PageId],
     spec: CropSpec,
@@ -103,7 +104,6 @@ pub fn plan(
         };
         let mut boxes = Vec::new();
         let mut planned = Vec::new();
-        let mut sizes = Vec::new();
         for (id, index, rot) in pages {
             progress.check()?;
             let obj = *objs.get(index as usize).context("source page missing")?;
@@ -139,29 +139,13 @@ pub fn plan(
                 [a.x.min(b.x), a.y.min(b.y), a.x.max(b.x), a.y.max(b.y)],
             ));
             planned.push((id, boxes.len() as u32 - 1, (-m.left, -m.top)));
-            sizes.push(PageSize {
-                width: nw,
-                height: nh,
-            });
             done += 1;
             progress.set(done);
         }
         let bytes = sheaf_doc::save::cropped_copy(info, &boxes)?;
-        let path = sheaf_doc::generated::store(&bytes)?;
+        let pages = boxes.iter().map(|&(i, _)| i).collect();
         out.push(CroppedSource {
-            info: SourceInfo {
-                path,
-                page_count: sizes.len() as u32,
-                first_page: sizes[0],
-                page_sizes: Some(sizes),
-                bytes: bytes.len(),
-                password: None,
-                data: None,
-                derived: Some(Derived {
-                    from: sid,
-                    pages: boxes.iter().map(|&(i, _)| i).collect(),
-                }),
-            },
+            info: crate::derive::copy_of(store, bytes, info, sid, pages)?,
             pages: planned,
         });
     }

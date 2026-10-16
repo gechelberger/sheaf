@@ -10,10 +10,11 @@ use std::path::{Path, PathBuf};
 
 use lopdf::{Object, dictionary};
 use sheaf_core::Rotation;
-use sheaf_doc::Edit;
+use sheaf_doc::file::FileFacts;
 use sheaf_doc::forms::FormClass;
 use sheaf_doc::forms::fixture::{Form, every_kind, hybrid_reference, hybrid_update, row};
 use sheaf_doc::save::{Strategy, save_to_path};
+use sheaf_doc::{Edit, SourceInfo, Store};
 use sheaf_render::pdfium::PdfiumEngine;
 use sheaf_render::{FormType, Renderer};
 
@@ -28,6 +29,12 @@ fn write(dir: &Path, name: &str, form: &mut Form) -> PathBuf {
     let path = dir.join(name);
     std::fs::write(&path, form.bytes()).unwrap();
     path
+}
+
+/// What `path` says about itself when it opens, read from its source.
+fn facts_of(path: &Path) -> FileFacts {
+    let info = SourceInfo::read(&Store::new(), path, None).unwrap();
+    sheaf_doc::file::read_open(&info.src).unwrap().1
 }
 
 /// A field tree that loops: `a`'s kid is `b`, whose kid is `a`.
@@ -87,7 +94,7 @@ fn forms_open_into_the_model() {
         .map(|p| st.widgets_on(p.id).map_or(0, |w| w.len()))
         .collect();
     assert_eq!(on_page, [6, 4]);
-    let (_, facts) = sheaf_doc::file::read_open(&path, None).unwrap();
+    let facts = facts_of(&path);
     assert_eq!(facts.form.facts.class, FormClass::AcroForm);
     let engine = PdfiumEngine::open(&path, None).unwrap();
     assert_eq!(engine.form_type(), FormType::AcroForm);
@@ -110,7 +117,7 @@ fn forms_open_into_the_model() {
         ("none.pdf", none, FormClass::None, FormType::None),
     ] {
         let path = write(&dir, name, &mut { form });
-        let (_, facts) = sheaf_doc::file::read_open(&path, None).unwrap();
+        let facts = facts_of(&path);
         assert_eq!(facts.form.facts.class, class, "{name}");
         let engine = PdfiumEngine::open(&path, None).unwrap();
         assert_eq!(engine.form_type(), form_type, "{name}");
@@ -127,8 +134,7 @@ fn forms_open_into_the_model() {
         assert_eq!(doc.page_count(), 1, "{name}");
         assert!(doc.state().fields.is_empty(), "{name}");
         assert!(doc.state().widgets.is_empty(), "{name}");
-        let (_, facts) = sheaf_doc::file::read_open(&path, None).unwrap();
-        let facts = facts.form.facts;
+        let facts = facts_of(&path).form.facts;
         let damaged = facts.damaged.clone().unwrap_or_default();
         assert!(damaged.contains(why), "{name}: {damaged:?}");
         assert!(!facts.is_fillable());

@@ -26,6 +26,8 @@ mod processor;
 mod toc;
 mod writer;
 
+// sheaf: objects read when asked for (SHEAF.md).
+mod lazy;
 mod load_options;
 mod object_stream;
 mod parser;
@@ -45,8 +47,10 @@ pub use datetime::DateTime;
 pub use destinations::Destination;
 pub use encodings::{Encoding, encode_utf8, encode_utf16_be};
 pub use encryption::{EncryptionState, EncryptionVersion, Permissions};
-pub use error::{DecompressError, Error, ParseError, Result};
+// sheaf: `Limit`, and `LazyPdf` with its byte sources, caps and facts.
+pub use error::{DecompressError, Error, Limit, ParseError, Result};
 pub use incremental_document::IncrementalDocument;
+pub use lazy::{ByteSource, FileBytes, LazyPdf, ReadLimits, XrefFacts, XrefKind};
 pub use load_options::{FilterFunc, LoadOptions};
 pub use object_stream::{ObjectStream, ObjectStreamBuilder, ObjectStreamConfig};
 pub use outlines::Outline;

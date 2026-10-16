@@ -21,6 +21,7 @@ use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, dictionary};
 use crate::forms::Field;
 use crate::model::{DocState, PageId, Snapshot, SourceId};
 use crate::save::{copy_object, remap};
+use crate::source::Limits;
 
 /// A copy of a source's form: its source, and `Field::copy`.
 pub(crate) type FormCopy = (SourceId, u32);
@@ -31,7 +32,7 @@ pub(crate) type CopyMaps = HashMap<FormCopy, HashMap<ObjectId, ObjectId>>;
 
 /// The most document scripts read from one file, as `forms::read` counts
 /// them.
-const MAX_SCRIPTS: usize = 100_000;
+const MAX_SCRIPTS: usize = Limits::DEFAULT.forms.scripts;
 
 /// The copy of a form `page`'s widgets are in, when they're in one.
 pub(crate) fn page_copy(state: &DocState, page: PageId) -> Option<FormCopy> {

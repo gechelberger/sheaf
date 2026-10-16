@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -15,6 +15,7 @@ use crate::annot::{Annot, AnnotId, AnnotKind};
 use crate::forms::{Field, FieldId, FileForm, Widget};
 use crate::history::{HistoryPolicy, HistoryStats};
 use crate::prim::{HeapSize, Key, Prim, Rec, Val, same};
+use crate::store::{BlobKind, Src, Store};
 use crate::text_layer::TextLayer;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -27,27 +28,20 @@ pub struct PageId(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct OutlineId(pub u64);
 
-/// What the model knows about an opened file. Sizes are as the engine
-/// renders them (after the file's own `/Rotate`). `page_sizes` may be absent
-/// briefly after open while the engine enumerates them.
+/// A file registered for the document's pages: its source, and the name
+/// it goes by. Every insert registers anew, so inserting the same file
+/// twice gives two registrations of one [`Src`], and two forms (until
+/// M10.5 slice 11 makes the source its blob). The bytes, page table and
+/// password are the source's.
 #[derive(Debug, Clone)]
 pub struct SourceInfo {
-    pub path: PathBuf,
-    pub page_count: u32,
-    pub first_page: PageSize,
-    pub page_sizes: Option<Vec<PageSize>>,
-    /// File size, for the history memory estimate.
-    pub bytes: usize,
-    /// The password the file was opened with, if it needed one. Saves
-    /// decrypt with it; the written file is not re-encrypted.
-    pub password: Option<String>,
-    /// The file's bytes as read when it was opened, when the opener kept
-    /// them (the app does, sharing the renderer's copy). Saves read these,
-    /// not the path: after a save in place the path holds the new file, and
-    /// a version from before the save still means the old one. Without
-    /// them, the path is read (a cached file sheaf made, which never
-    /// changes; or a headless run).
-    pub data: Option<SourceData>,
+    pub src: Src,
+    /// The path the bytes came from, or a derived copy's original's name.
+    /// Notices, rename stems (`name_apart`), `form_notice`, the recovery
+    /// sidecar and save's same-file check read it; it's never read for
+    /// bytes: after a save in place the path holds the new file, and a
+    /// version from before the save still means the old one.
+    pub name: PathBuf,
     /// For a copy sheaf made of another source's pages (cropped,
     /// watermarked, a header/footer stripped): which pages. A save writes
     /// each as the page it was made from, with its annotations and form
@@ -63,22 +57,36 @@ pub struct Derived {
     pub pages: Vec<u32>,
 }
 
-/// A file's bytes, shared (an `Arc`, cheap to clone).
-#[derive(Clone)]
-pub struct SourceData(pub Arc<Vec<u8>>);
-
-impl std::fmt::Debug for SourceData {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "SourceData({} bytes)", self.0.len())
-    }
-}
-
 impl SourceInfo {
-    pub fn page_size(&self, index: u32) -> PageSize {
-        self.page_sizes
-            .as_ref()
-            .and_then(|s| s.get(index as usize).copied())
-            .unwrap_or(self.first_page)
+    /// The file at `path`, read once, opened with `password` and parsed
+    /// into `store`, under its own path. A wrong or missing password is
+    /// [`OpenError::Password`](crate::source::OpenError::Password) in the
+    /// chain.
+    pub fn read(store: &Store, path: &Path, password: Option<&str>) -> Result<SourceInfo> {
+        let bytes =
+            sheaf_core::read_file(path).with_context(|| format!("reading {}", path.display()))?;
+        let src = store
+            .open(bytes, BlobKind::file(path, password))
+            .with_context(|| format!("opening {}", path.display()))?;
+        Ok(SourceInfo {
+            src,
+            name: path.to_path_buf(),
+            derived: None,
+        })
+    }
+
+    /// For tests: `pages` blank Letter pages, named `a.pdf`, parsed into
+    /// `store`.
+    #[cfg(any(test, feature = "fixtures"))]
+    pub fn blank(store: &Store, pages: u32) -> SourceInfo {
+        let bytes = crate::generated::blank_pages(612.0, 792.0, pages as usize)
+            .expect("blank pages are written");
+        let kind = BlobKind::file(Path::new("a.pdf"), None);
+        SourceInfo {
+            src: store.open(bytes.into(), kind).expect("blank pages open"),
+            name: "a.pdf".into(),
+            derived: None,
+        }
     }
 }
 
@@ -577,8 +585,10 @@ struct Version {
     /// The edits from the parent; empty for the root. A job's later
     /// batches add to its version's steps.
     steps: Vec<Step>,
-    /// Sources registered since the parent (inserted files), which the
-    /// steps refer to.
+    /// The registrations it holds: the files registered since the parent
+    /// (inserted ones, and the file a save wrote), which its steps and
+    /// state refer to; the first version holds those of the versions
+    /// pruned before it too. They go when it does (see `remove_version`).
     sources: Vec<SourceId>,
     /// The state, unless trimming dropped it; then a jump rebuilds it by
     /// applying the steps' prims from the nearest ancestor that kept one.
@@ -687,6 +697,8 @@ impl IdAlloc {
 }
 
 pub struct Document {
+    /// The blobs its sources are in, outside undo.
+    store: Arc<Store>,
     sources: HashMap<SourceId, Arc<SourceInfo>>,
     primary: SourceId,
     versions: HashMap<VersionId, Version>,
@@ -723,14 +735,17 @@ pub struct Document {
 }
 
 impl Document {
-    /// A document showing `primary` in its entirety.
+    /// A document showing `primary`, a source in `store`, in its
+    /// entirety.
     pub fn new(
+        store: Arc<Store>,
         primary: SourceInfo,
         outline: &[FlatOutlineItem],
         policy: Box<dyn HistoryPolicy>,
     ) -> Self {
         let source = SourceId(0);
         let mut doc = Self {
+            store,
             sources: HashMap::new(),
             primary: source,
             versions: HashMap::new(),
@@ -753,7 +768,8 @@ impl Document {
             forms: HashMap::new(),
             scripts_mixed: false,
         };
-        let pages: Vector<PageRef> = (0..primary.page_count)
+        doc.debug_assert_ours(&primary);
+        let pages: Vector<PageRef> = (0..primary.src.page_count())
             .map(|index| PageRef {
                 id: doc.ids.page(),
                 source,
@@ -818,6 +834,12 @@ impl Document {
         self.primary
     }
 
+    /// Where its sources' bytes are: what a registration's source is
+    /// interned into.
+    pub fn store(&self) -> &Arc<Store> {
+        &self.store
+    }
+
     pub fn source(&self, id: SourceId) -> Option<&Arc<SourceInfo>> {
         self.sources.get(&id)
     }
@@ -827,7 +849,9 @@ impl Document {
     }
 
     /// Register another file so its pages can be inserted. The next
-    /// version records it, with the edit that uses it.
+    /// version records it, with the edit that uses it, and the
+    /// registration goes when that version is pruned: an edit on another
+    /// branch registers the file again.
     pub fn add_source(&mut self, info: SourceInfo) -> SourceId {
         let id = self.register_source(info);
         self.unlogged_sources.push(id);
@@ -835,10 +859,32 @@ impl Document {
     }
 
     fn register_source(&mut self, info: SourceInfo) -> SourceId {
+        self.debug_assert_ours(&info);
         let id = SourceId(self.next_source);
         self.next_source += 1;
         self.sources.insert(id, Arc::new(info));
         id
+    }
+
+    /// Forget registrations whose version is gone, and their forms: a
+    /// source goes with the last registration holding it, and an engine
+    /// opened on it keeps only its bytes, until slice 13's engine pool. The
+    /// primary stays while it is the primary.
+    fn unregister(&mut self, ids: &[SourceId]) {
+        for id in ids.iter().filter(|&&id| id != self.primary) {
+            self.sources.remove(id);
+            self.forms.remove(id);
+        }
+    }
+
+    /// A registration's source is a blob of this document's store: the
+    /// store is what counts its bytes.
+    fn debug_assert_ours(&self, info: &SourceInfo) {
+        debug_assert!(
+            self.store.holds(info.src.blob()),
+            "{} is in another store",
+            info.name.display()
+        );
     }
 
     /// Source `id`'s form, as `forms::read` read it: the fields that come
@@ -900,7 +946,7 @@ impl Document {
             let file = self
                 .sources
                 .get(sid)
-                .and_then(|s| s.path.file_name())
+                .and_then(|s| s.name.file_name())
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
             let scripted = st.fields.values().any(|f| {
@@ -925,7 +971,7 @@ impl Document {
             let file = self
                 .sources
                 .get(sid)
-                .and_then(|s| s.path.file_name())
+                .and_then(|s| s.name.file_name())
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
             parts.push(format!("the signature from {file} is no longer valid here"));
@@ -947,15 +993,6 @@ impl Document {
             })
             .collect();
         Some(sentences.join(". "))
-    }
-
-    /// Page sizes arrive after open; they're not part of any snapshot.
-    pub fn set_source_sizes(&mut self, id: SourceId, sizes: Vec<PageSize>) {
-        if let Some(src) = self.sources.get_mut(&id) {
-            let mut info = (**src).clone();
-            info.page_sizes = Some(sizes);
-            *src = Arc::new(info);
-        }
     }
 
     /// The outline also arrives after open. Only valid before any edit.
@@ -1208,7 +1245,7 @@ impl Document {
                 .filter(|p| p.source == self.primary)
                 .map(|p| p.index)
                 .collect();
-            if (0..primary.page_count).any(|i| !shown.contains(&i)) {
+            if (0..primary.src.page_count()).any(|i| !shown.contains(&i)) {
                 return true;
             }
         }
@@ -1252,14 +1289,15 @@ impl Document {
     /// the same parent (see [`replace`](Self::replace)). Its steps still
     /// lead to its state as it was before the save; it keeps its snapshot,
     /// as do its children (see `keeps_snapshot`), so nothing is ever
-    /// replayed across a save. M10.5 slice 9 deletes this.
+    /// replayed across a save. The new version holds the saved file's
+    /// registration. M10.5 slice 9 deletes this.
     pub fn rebase_to_saved(&mut self, saved: SourceInfo) -> SourceId {
         // The forms it was made of are one now; whether their scripts
         // were from more than one is the session's to remember.
         self.scripts_mixed |= self.script_sources().len() > 1;
-        let path = saved.path.clone();
+        let path = saved.name.clone();
         let id = self.register_source(saved);
-        self.primary = id;
+        let replaced = std::mem::replace(&mut self.primary, id);
         // Versions made from it before (and undone) were made from it as
         // it was, so their prims don't fit it re-expressed: they keep their
         // states (see `keeps_snapshot`). A damaged one stays out of reach.
@@ -1268,6 +1306,7 @@ impl Document {
         }
         let old = self.cursor;
         let mut v = self.versions.remove(&old).expect("current version");
+        v.sources.push(id);
         v.saves.push(Saved {
             path,
             at: crate::annot::pdf_date_now(),
@@ -1311,6 +1350,15 @@ impl Document {
                 .map(|f| size_of::<(FieldId, Field)>() + f.heap_size())
                 .sum::<usize>();
         let new = self.replace(old, v);
+        // The primary it replaces stayed only as the primary when pruning
+        // took the version that held it: nothing refers to it now.
+        let held = self
+            .versions
+            .values()
+            .any(|v| v.sources.contains(&replaced));
+        if !held {
+            self.unregister(&[replaced]);
+        }
         let st = self.state().clone();
         self.saved_outline = st.outline;
         self.saved_annots = st.annots;
@@ -1339,7 +1387,7 @@ impl Document {
         let src = self
             .sources
             .get(&page.source)
-            .map(|s| s.page_size(page.index))
+            .map(|s| s.src.page_size(page.index))
             .unwrap_or(PageSize {
                 width: 612.0,
                 height: 792.0,
@@ -1433,9 +1481,10 @@ impl Document {
         self.cursor
     }
 
-    /// The edits that made version `id` from its parent, and the sources
-    /// that came in with them: the edge into it, which is what a merge
-    /// would replay (`todos/file-contention.md`).
+    /// The edits that made version `id` from its parent, and the
+    /// registrations it holds (the files that came in with them): the edge
+    /// into it, which is what a merge would replay
+    /// (`todos/file-contention.md`).
     pub fn edge(&self, id: VersionId) -> Option<(&[Step], &[SourceId])> {
         let v = self.versions.get(&id)?;
         Some((&v.steps, &v.sources))
@@ -1524,7 +1573,9 @@ impl Document {
         coalesce(&mut v.steps);
         if v.steps.iter().all(|s| s.prims.is_empty()) {
             // The job put back all it did: back to the parent, whose state
-            // this is (trimming may have dropped its snapshot).
+            // this is (trimming may have dropped its snapshot). What the
+            // version held waits for the next one, as if the job hadn't
+            // run.
             let p = self.versions.get_mut(&parent).expect("parent");
             p.children.retain(|c| *c != old);
             if p.redo_to == Some(old) {
@@ -1532,6 +1583,8 @@ impl Document {
             }
             p.state.get_or_insert(state);
             self.cursor = parent;
+            v.sources.append(&mut self.unlogged_sources);
+            self.unlogged_sources = v.sources;
         } else {
             (v.snapshot_bytes, v.step_bytes) = accounting(&v.steps, &state);
             v.state = Some(state);
@@ -1724,10 +1777,9 @@ impl Document {
     }
 
     /// Snapshots the policy may drop, in the order to drop them: versions
-    /// off the current line first (other branches, undone ones), then the
-    /// current line's, oldest first.
-    fn droppable(&self) -> Vec<VersionId> {
-        let line: HashSet<VersionId> = self.line().into_iter().collect();
+    /// off the current `line` first (other branches, undone ones), then the
+    /// line's, oldest first.
+    fn droppable(&self, line: &HashSet<VersionId>) -> Vec<VersionId> {
         let mut ids: Vec<VersionId> = self
             .versions
             .iter()
@@ -1739,8 +1791,9 @@ impl Document {
     }
 
     fn trim(&mut self) {
-        let droppable = self.droppable();
-        let stats = self.stats_for(&droppable);
+        let line = self.line().into_iter().collect();
+        let droppable = self.droppable(&line);
+        let stats = self.stats_for(&line, &droppable);
         let n = self.policy.trim(&stats).min(droppable.len());
         for id in &droppable[..n] {
             self.versions.get_mut(id).expect("version").state = None;
@@ -1751,7 +1804,9 @@ impl Document {
     /// Keep the tree to [`crate::history::MAX_VERSIONS`]: drop versions on
     /// other branches, oldest first, then the oldest versions before the
     /// saved one. Edits back to the last save always stay (a later merge
-    /// replays them).
+    /// replays them). A version dropped from a branch takes its
+    /// registrations with it; the first version's go to the next, whose
+    /// state was made over them.
     fn prune(&mut self) {
         let max = crate::history::MAX_VERSIONS;
         while self.versions.len() > max {
@@ -1786,17 +1841,23 @@ impl Document {
                     self.remove_subtree(sibling);
                 }
             }
-            self.versions.remove(&old);
+            let mut sources = self.versions.remove(&old).expect("old root").sources;
             let new_root = self.versions.get_mut(&next).expect("next");
             new_root.parent = None;
+            sources.append(&mut new_root.sources);
+            new_root.sources = sources;
             self.root = next;
             i += 1;
         }
     }
 
+    /// Take version `id` out of the tree, and the registrations it holds
+    /// out of the document.
     fn remove_version(&mut self, id: VersionId) {
-        if let Some(v) = self.versions.remove(&id)
-            && let Some(p) = v.parent
+        let Some(v) = self.versions.remove(&id) else {
+            return;
+        };
+        if let Some(p) = v.parent
             && let Some(parent) = self.versions.get_mut(&p)
         {
             parent.children.retain(|c| *c != id);
@@ -1807,6 +1868,7 @@ impl Document {
         if self.saved == Some(id) {
             self.saved = None;
         }
+        self.unregister(&v.sources);
     }
 
     fn remove_subtree(&mut self, id: VersionId) {
@@ -1819,7 +1881,7 @@ impl Document {
         }
     }
 
-    fn stats_for(&self, droppable: &[VersionId]) -> HistoryStats {
+    fn stats_for(&self, line: &HashSet<VersionId>, droppable: &[VersionId]) -> HistoryStats {
         let mut kept: Vec<VersionId> = self
             .versions
             .iter()
@@ -1838,14 +1900,44 @@ impl Document {
             cursor: snapshot_bytes.len() - 1,
             snapshot_bytes,
             step_bytes: self.versions.values().map(|v| v.step_bytes).sum(),
-            undone_source_bytes: 0,
+            blob_bytes: self.store.bytes(),
+            undone_source_bytes: self.undone_source_bytes(line),
         }
     }
 
-    /// Snapshots kept and their estimated bytes (droppable ones first), and
-    /// the bytes every version's steps hold.
+    /// The bytes of the blobs only versions off the current `line` hold
+    /// registrations of (inserts that were undone), each blob once. A blob
+    /// a registration on the line, one waiting for the next version, or the
+    /// primary shares isn't counted: pruning wouldn't free it.
+    fn undone_source_bytes(&self, line: &HashSet<VersionId>) -> usize {
+        let held = self.versions.iter().flat_map(|(id, v)| {
+            let on_line = line.contains(id);
+            v.sources.iter().map(move |s| (s, on_line))
+        });
+        let waiting = self.unlogged_sources.iter().chain([&self.primary]);
+        let (mut kept, mut undone) = (HashSet::new(), HashMap::new());
+        for (sid, on_line) in held.chain(waiting.map(|s| (s, true))) {
+            let Some(blob) = self.sources.get(sid).map(|s| s.src.blob()) else {
+                continue;
+            };
+            if on_line {
+                kept.insert(blob.id());
+            } else {
+                undone.insert(blob.id(), blob.len());
+            }
+        }
+        undone
+            .into_iter()
+            .filter(|(id, _)| !kept.contains(id))
+            .map(|(_, len)| len)
+            .sum()
+    }
+
+    /// Snapshots kept and their estimated bytes (droppable ones first), the
+    /// bytes every version's steps hold, and the sources' bytes.
     pub fn stats(&self) -> HistoryStats {
-        self.stats_for(&self.droppable())
+        let line = self.line().into_iter().collect();
+        self.stats_for(&line, &self.droppable(&line))
     }
 
     /// How many versions the history holds, with or without snapshots.
@@ -2093,7 +2185,7 @@ impl Document {
         let stem = self
             .sources
             .get(&source)
-            .and_then(|s| s.path.file_stem())
+            .and_then(|s| s.name.file_stem())
             .map(|s| s.to_string_lossy().replace('.', "_"))
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| "form".to_string());
@@ -2267,7 +2359,7 @@ impl Document {
                 annots,
             } => {
                 let info = self.sources.get(&source).context("unknown source")?.clone();
-                if range.end > info.page_count {
+                if range.end > info.src.page_count() {
                     bail!("range exceeds source page count");
                 }
                 let at = match before {
@@ -2285,7 +2377,7 @@ impl Document {
                     .collect();
                 out.pages_added = new.len();
                 // Map source index -> new PageId for bookmark targets.
-                let mut by_index = vec![PageId(u64::MAX); info.page_count as usize];
+                let mut by_index = vec![PageId(u64::MAX); info.src.page_count() as usize];
                 for p in &new {
                     by_index[p.index as usize] = p.id;
                 }
@@ -2357,7 +2449,7 @@ impl Document {
                 annots,
             } => {
                 let info = self.sources.get(&source).context("unknown source")?.clone();
-                if range.end > info.page_count {
+                if range.end > info.src.page_count() {
                     bail!("range exceeds source page count");
                 }
                 let mut replacements = range.clone();
@@ -2712,10 +2804,10 @@ impl Document {
                 for r in rebases {
                     let i = *pos.get(&r.id).context("page to rebase not found")?;
                     let info = self.sources.get(&r.source).context("unknown source")?;
-                    if r.index >= info.page_count {
+                    if r.index >= info.src.page_count() {
                         bail!("page {} isn't in the source", r.index);
                     }
-                    let size = info.page_size(r.index);
+                    let size = info.src.page_size(r.index);
                     let old = pages[i];
                     pages.set(
                         i,
@@ -3193,20 +3285,15 @@ mod tests {
     use super::*;
     use crate::history::FixedCount;
 
-    pub(super) fn src(n: u32) -> SourceInfo {
-        SourceInfo {
-            path: "a.pdf".into(),
-            page_count: n,
-            first_page: PageSize {
-                width: 612.0,
-                height: 792.0,
-            },
-            page_sizes: None,
-            bytes: 1000,
-            password: None,
-            data: None,
-            derived: None,
-        }
+    /// A document of `n` blank pages, in a store of its own.
+    pub(super) fn new_doc(
+        n: u32,
+        outline: &[FlatOutlineItem],
+        policy: Box<dyn HistoryPolicy>,
+    ) -> Document {
+        let store = Store::new();
+        let primary = SourceInfo::blank(&store, n);
+        Document::new(store, primary, outline, policy)
     }
 
     pub(super) fn flat(items: &[(&str, Option<u32>, u16)]) -> Vec<FlatOutlineItem> {
@@ -3225,8 +3312,8 @@ mod tests {
 
     fn doc() -> Document {
         // Pages 0..6; bookmarks: A->0 { A1->1, A2->2 }, B->3, C->5
-        Document::new(
-            src(6),
+        new_doc(
+            6,
             &flat(&[
                 ("A", Some(0), 0),
                 ("A1", Some(1), 1),
@@ -3276,8 +3363,8 @@ mod tests {
 
     #[test]
     fn form_fields_follow_their_pages() {
-        let form = crate::forms::read(&crate::forms::fixture::every_kind().pdf);
-        let mut d = Document::new(src(2), &[], Box::new(FixedCount(10)));
+        let form = crate::forms::read(&crate::forms::fixture::every_kind().source());
+        let mut d = new_doc(2, &[], Box::new(FixedCount(10)));
         d.set_initial_fields(&form).unwrap();
         let (p1, p2) = (id_at(&d, 0), id_at(&d, 1));
         let st = d.state();
@@ -3304,7 +3391,7 @@ mod tests {
         d.undo().unwrap();
         assert_eq!(on(&d, p2), 4);
         // A replaced page shows another page, without them.
-        let other = d.add_source(src(1));
+        let other = d.add_source(SourceInfo::blank(d.store(), 1));
         d.apply(
             Edit::ReplacePages {
                 ids: vec![p1],
@@ -3322,8 +3409,8 @@ mod tests {
 
     #[test]
     fn fields_dirty_compares_with_the_saved_form() {
-        let form = crate::forms::read(&crate::forms::fixture::every_kind().pdf);
-        let mut d = Document::new(src(2), &[], Box::new(FixedCount(10)));
+        let form = crate::forms::read(&crate::forms::fixture::every_kind().source());
+        let mut d = new_doc(2, &[], Box::new(FixedCount(10)));
         d.set_initial_fields(&form).unwrap();
         // A field changed, one gone and one added, as edits will do.
         let (changed, gone, added) = (FieldId(0), FieldId(1), FieldId(99));
@@ -3338,8 +3425,68 @@ mod tests {
         assert_eq!(d.fields_dirty(), want);
         assert_eq!(d.snapshot().fields_dirty, want);
         // Saved, they're what's in the file.
-        d.rebase_to_saved(src(2));
+        d.rebase_to_saved(SourceInfo::blank(d.store(), 2));
         assert!(d.fields_dirty().is_empty() && d.snapshot().fields_dirty.is_empty());
+    }
+
+    /// One file's bytes, interned twice, are one source; each insert still
+    /// registers it anew, so each brings a form of its own (M10.5 slice 3:
+    /// form identity stays per registration until slice 11).
+    #[test]
+    fn inserting_the_same_file_twice_gives_two_registrations_and_two_forms() {
+        let mut fixture = crate::forms::fixture::every_kind();
+        let bytes: Arc<[u8]> = fixture.bytes().into();
+        let mut d = new_doc(1, &[], Box::new(FixedCount(10)));
+        let mut sids = Vec::new();
+        let mut renamed = Vec::new();
+        for _ in 0..2 {
+            let kind = BlobKind::file(Path::new("form.pdf"), None);
+            let src = d.store().open(bytes.clone(), kind).unwrap();
+            let form = crate::forms::read(&src);
+            let sid = d.add_source(SourceInfo {
+                src,
+                name: "form.pdf".into(),
+                derived: None,
+            });
+            d.set_source_form(sid, form);
+            let out = d
+                .apply(
+                    Edit::InsertPages {
+                        source: sid,
+                        range: 0..2,
+                        before: None,
+                        outline: None,
+                        annots: Vec::new(),
+                    },
+                    "insert",
+                )
+                .unwrap();
+            renamed.push(out.forms_renamed);
+            sids.push(sid);
+        }
+        let [a, b] = [sids[0], sids[1]];
+        assert_ne!(a, b);
+        let (first, second) = (&d.source(a).unwrap().src, &d.source(b).unwrap().src);
+        assert!(std::ptr::eq(&**first, &**second), "one source");
+        // Its bytes are in the store once, beside the blank primary's.
+        assert_eq!(
+            d.store().bytes(),
+            first.bytes().len() + d.source(d.primary()).unwrap().src.bytes().len()
+        );
+        // Two forms: the second's fields are under a name of their own.
+        let st = d.state();
+        let names = |sid| -> BTreeSet<&str> {
+            st.fields
+                .values()
+                .filter(|f| f.source == sid)
+                .map(|f| f.name.as_str())
+                .collect()
+        };
+        let (of_a, of_b) = (names(a), names(b));
+        assert_eq!((of_a.len(), of_b.len()), (9, 9));
+        assert!(of_a.is_disjoint(&of_b), "{of_a:?} {of_b:?}");
+        assert!(of_b.iter().all(|n| n.starts_with("form.")), "{of_b:?}");
+        assert_eq!(renamed, [vec![], vec![("form".to_string(), b)]]);
     }
 
     #[test]
@@ -3427,8 +3574,8 @@ mod tests {
     fn insert_with_outline_merge() {
         let mut d = doc();
         let s = d.add_source(SourceInfo {
-            path: "b.pdf".into(),
-            ..src(3)
+            name: "b.pdf".into(),
+            ..SourceInfo::blank(d.store(), 3)
         });
         let out = d
             .apply(
@@ -3480,8 +3627,8 @@ mod tests {
     fn replace_keeps_ids_and_bookmarks() {
         let mut d = doc();
         let s = d.add_source(SourceInfo {
-            path: "b.pdf".into(),
-            ..src(2)
+            name: "b.pdf".into(),
+            ..SourceInfo::blank(d.store(), 2)
         });
         let p3 = id_at(&d, 3);
         d.apply(
@@ -3684,7 +3831,7 @@ mod tests {
 
     #[test]
     fn history_trims_snapshots_and_replays_them() {
-        let mut d = Document::new(src(3), &[], Box::new(FixedCount(3)));
+        let mut d = new_doc(3, &[], Box::new(FixedCount(3)));
         for i in 0..5 {
             d.apply(
                 Edit::RotatePages {
@@ -3716,7 +3863,7 @@ mod tests {
     /// opened version's and the current one's): the versions, oldest
     /// first.
     fn trimmed_history() -> (Document, Vec<VersionId>) {
-        let mut d = Document::new(src(6), &[], Box::new(FixedCount(1)));
+        let mut d = new_doc(6, &[], Box::new(FixedCount(1)));
         for i in 0..3 {
             rotate(&mut d, i, &format!("r{i}"));
         }
@@ -3827,8 +3974,8 @@ mod tests {
         .unwrap();
         let old_primary = d.primary();
         let new = d.rebase_to_saved(SourceInfo {
-            path: "saved.pdf".into(),
-            ..src(6)
+            name: "saved.pdf".into(),
+            ..SourceInfo::blank(d.store(), 6)
         });
         assert_ne!(new, old_primary);
         assert!(!d.is_dirty());
@@ -3848,7 +3995,7 @@ mod tests {
     /// are from it as it was.
     #[test]
     fn a_save_keeps_what_was_undone_before_it() {
-        let mut d = Document::new(src(3), &[], Box::new(FixedCount(1)));
+        let mut d = new_doc(3, &[], Box::new(FixedCount(1)));
         rotate(&mut d, 0, "a");
         rotate(&mut d, 1, "b");
         let (b, want_b) = (d.current_version(), d.state().clone());
@@ -3857,7 +4004,7 @@ mod tests {
         let (c, want_c) = (d.current_version(), d.state().clone());
         assert!(d.versions[&b].state.is_none(), "b's snapshot was dropped");
         d.undo().unwrap();
-        d.rebase_to_saved(src(3));
+        d.rebase_to_saved(SourceInfo::blank(d.store(), 3));
         rotate(&mut d, 0, "d");
         d.jump(b).unwrap();
         assert_eq!(*d.state(), want_b);
@@ -4054,7 +4201,7 @@ mod tests {
             "add",
         );
         assert!(mine.is_ok());
-        let sid = d.add_source(src(3));
+        let sid = d.add_source(SourceInfo::blank(d.store(), 3));
         d.apply(
             Edit::InsertPages {
                 source: sid,
@@ -4104,7 +4251,7 @@ mod tests {
             )
             .unwrap();
         }
-        let sid = d.add_source(src(1));
+        let sid = d.add_source(SourceInfo::blank(d.store(), 1));
         d.apply(
             Edit::ReplacePages {
                 ids: vec![p1, p2],
@@ -4425,7 +4572,7 @@ mod tests {
             d.state().text_layer(copy).unwrap()
         ));
         // Replacing a page's content makes its OCR stale.
-        let other = d.add_source(src(2));
+        let other = d.add_source(SourceInfo::blank(d.store(), 2));
         d.apply(
             Edit::ReplacePages {
                 ids: vec![copy],
@@ -4592,13 +4739,13 @@ mod tests {
     fn a_save_gives_the_cursor_a_new_version() {
         let mut d = doc();
         let opened = d.current_version();
-        d.rebase_to_saved(src(6));
+        d.rebase_to_saved(SourceInfo::blank(d.store(), 6));
         let root = d.current_version();
         assert_ne!(root, opened);
         assert!(d.jump(opened).is_err());
         rotate(&mut d, 0, "rotate");
         let old = d.current_version();
-        d.rebase_to_saved(src(6));
+        d.rebase_to_saved(SourceInfo::blank(d.store(), 6));
         let new = d.current_version();
         assert_ne!(new, old);
         assert!(d.jump(old).is_err(), "the old id doesn't resolve");
@@ -4620,15 +4767,17 @@ mod tests {
 
     /// A job whose batches put back all they did leaves no version: the
     /// parent is current again, as if the job never ran, even when its
-    /// snapshot was dropped.
+    /// snapshot was dropped. A file registered before it waits for the
+    /// next version again.
     #[test]
     fn a_job_that_nets_to_nothing_leaves_no_version() {
-        let mut d = Document::new(src(3), &[], Box::new(FixedCount(1)));
+        let mut d = new_doc(3, &[], Box::new(FixedCount(1)));
         rotate(&mut d, 2, "rotate");
         let (parent, want) = (d.current_version(), d.state().clone());
         let n = d.version_count();
         let job = d.begin_job();
         let p0 = id_at(&d, 0);
+        let s = d.add_source(SourceInfo::blank(d.store(), 1));
         d.apply_in_job(
             job,
             Edit::SetTextLayers {
@@ -4638,6 +4787,7 @@ mod tests {
         )
         .unwrap();
         let v = d.current_version();
+        assert_eq!(d.edge(v).unwrap().1, [s]);
         assert!(d.versions[&parent].state.is_none(), "trimmed");
         d.apply_in_job(job, Edit::ClearTextLayers { ids: vec![p0] }, "ocr")
             .unwrap();
@@ -4647,6 +4797,8 @@ mod tests {
         assert!(!d.can_redo());
         assert!(!d.job_is_current(job));
         assert_eq!(*d.state(), want);
+        rotate(&mut d, 0, "rotate");
+        assert_eq!(d.edge(d.current_version()).unwrap().1, [s]);
     }
 
     /// An amend takes the sources added since the version it joins, and a
@@ -4666,7 +4818,7 @@ mod tests {
             .unwrap();
         };
         ocr(&mut d, 0, "ocr");
-        let s = d.add_source(src(1));
+        let s = d.add_source(SourceInfo::blank(d.store(), 1));
         ocr(&mut d, 1, "ocr");
         let v = d.current_version();
         let (steps, sources) = d.edge(v).unwrap();
@@ -4683,11 +4835,11 @@ mod tests {
     /// version after it.
     #[test]
     fn a_job_s_version_pruned_to_the_first_is_not_amended() {
-        let mut d = Document::new(src(3), &[], Box::new(FixedCount(1)));
+        let mut d = new_doc(3, &[], Box::new(FixedCount(1)));
         for i in 1..crate::history::MAX_VERSIONS {
             rotate(&mut d, i % 3, "rotate");
         }
-        d.rebase_to_saved(src(3));
+        d.rebase_to_saved(SourceInfo::blank(d.store(), 3));
         let opened = d.timeline()[0].id;
         d.jump(opened).unwrap();
         let job = d.begin_job();
@@ -4718,7 +4870,7 @@ mod tests {
     fn rebase_clears_text_layers() {
         let mut d = doc();
         set(&mut d, &[0], "a");
-        d.rebase_to_saved(src(6));
+        d.rebase_to_saved(SourceInfo::blank(d.store(), 6));
         assert!(d.state().text_layers.is_empty());
         assert!(!d.is_dirty());
         // The version before the save still carries its layer, so undoing
@@ -4753,7 +4905,7 @@ mod tests {
 
     #[test]
     fn an_added_mark_costs_its_page_not_the_document() {
-        let mut d = Document::new(src(2000), &[], Box::new(FixedCount(10)));
+        let mut d = new_doc(2000, &[], Box::new(FixedCount(10)));
         let marks = (0..2000u32)
             .map(|i| (i, (1..=10).map(|j| square(u64::from(i) * 10 + j)).collect()))
             .collect();
@@ -4772,6 +4924,157 @@ mod tests {
         assert!(stats.step_bytes < 4 << 10, "{}", stats.step_bytes);
         let snapshot = *stats.snapshot_bytes.last().unwrap();
         assert!(snapshot < 16 << 10, "{snapshot}");
+    }
+
+    /// `bytes` as the file `name`, parsed into `store`.
+    fn file(store: &Store, bytes: Vec<u8>, name: &str) -> SourceInfo {
+        let kind = BlobKind::file(Path::new(name), None);
+        SourceInfo {
+            src: store.open(bytes.into(), kind).unwrap(),
+            name: name.into(),
+            derived: None,
+        }
+    }
+
+    /// All of `info`'s pages inserted at the end, as a new version.
+    fn insert_all(d: &mut Document, info: SourceInfo) -> SourceId {
+        let count = info.src.page_count();
+        let source = d.add_source(info);
+        d.apply(
+            Edit::InsertPages {
+                source,
+                range: 0..count,
+                before: None,
+                outline: None,
+                annots: Vec::new(),
+            },
+            "insert",
+        )
+        .unwrap();
+        source
+    }
+
+    #[test]
+    fn an_undone_insert_counts_its_source_until_redo() {
+        let mut d = doc();
+        let primary = d.store().bytes();
+        let blank = |d: &Document| SourceInfo::blank(d.store(), 2);
+        let info = blank(&d);
+        let sid = insert_all(&mut d, info);
+        let len = d.source(sid).unwrap().src.bytes().len();
+        let stats = d.stats();
+        assert_eq!(stats.undone_source_bytes, 0);
+        assert_eq!(stats.blob_bytes, d.store().bytes());
+        assert_eq!(stats.blob_bytes, primary + len);
+        d.undo().unwrap();
+        let stats = d.stats();
+        assert_eq!(stats.undone_source_bytes, len);
+        assert_eq!(stats.blob_bytes, primary + len, "undo frees nothing");
+        assert_eq!(
+            stats.total_bytes(),
+            stats.snapshot_bytes.iter().sum::<usize>() + stats.step_bytes + len
+        );
+        d.redo().unwrap();
+        assert_eq!(d.stats().undone_source_bytes, 0);
+        // Undone again: the same bytes registered for the next version,
+        // then inserted on the line, share its blob.
+        d.undo().unwrap();
+        let waiting = d.add_source(blank(&d));
+        assert_eq!(d.stats().undone_source_bytes, 0);
+        d.apply(
+            Edit::InsertPages {
+                source: waiting,
+                range: 0..2,
+                before: None,
+                outline: None,
+                annots: Vec::new(),
+            },
+            "insert",
+        )
+        .unwrap();
+        assert_ne!(waiting, sid);
+        let stats = d.stats();
+        assert_eq!(stats.undone_source_bytes, 0);
+        assert_eq!(stats.blob_bytes, primary + len, "one blob");
+    }
+
+    #[test]
+    fn pruning_an_undone_400_page_scan_frees_its_bytes() {
+        use sheaf_image::io::{PageImage, Pixels};
+        let mut d = new_doc(3, &[], Box::new(FixedCount(1)));
+        let rasters: Vec<PageImage> = (0..400u32)
+            .map(|i| PageImage {
+                width: 8,
+                height: 8,
+                dpi: (72.0, 72.0),
+                rotate: 0,
+                pixels: Pixels::Gray((0..64).map(|j| (i * 7 + j) as u8).collect()),
+            })
+            .collect();
+        let scan = crate::images::to_pdf(&rasters, crate::images::PageFit::LETTER).unwrap();
+        let (len, before) = (scan.len(), d.store().bytes());
+        let info = file(d.store(), scan, "scan.pdf");
+        let sid = insert_all(&mut d, info);
+        let id = d.source(sid).unwrap().src.id();
+        assert_eq!((d.page_count(), d.store().bytes()), (403, before + len));
+        d.undo().unwrap();
+        assert_eq!(d.stats().undone_source_bytes, len);
+        // One edit branches off; past `MAX_VERSIONS`, the branch goes.
+        for i in 0..crate::history::MAX_VERSIONS {
+            rotate(&mut d, i % 3, "rotate");
+        }
+        assert!(d.source(sid).is_none(), "its registration went with it");
+        assert_eq!(d.store().bytes(), before);
+        assert!(d.store().get(id).is_none());
+        let stats = d.stats();
+        assert_eq!((stats.undone_source_bytes, stats.blob_bytes), (0, before));
+    }
+
+    #[test]
+    fn the_root_advancing_keeps_its_sources() {
+        let mut d = new_doc(3, &[], Box::new(FixedCount(1)));
+        // Unsaved, as a recovered document is: the first version can move.
+        d.mark_unsaved();
+        let info = SourceInfo::blank(d.store(), 1);
+        let gone = insert_all(&mut d, info);
+        d.undo().unwrap();
+        let info = SourceInfo::blank(d.store(), 2);
+        let kept = insert_all(&mut d, info);
+        for i in 0..crate::history::MAX_VERSIONS {
+            rotate(&mut d, i % 3, "rotate");
+        }
+        let first = &d.versions[&d.root];
+        assert!(!first.steps.is_empty(), "pruned to a later one");
+        assert_eq!(first.sources, [d.primary(), kept]);
+        assert!(d.source(gone).is_none(), "its branch was pruned");
+        assert_eq!(d.page_count(), 5);
+        assert!(d.state().pages.iter().all(|p| d.source(p.source).is_some()));
+        let bytes = |sid| d.source(sid).unwrap().src.bytes().len();
+        assert_eq!(d.store().bytes(), bytes(d.primary()) + bytes(kept));
+    }
+
+    /// A save's file stays while it's the primary, though pruning took the
+    /// version that held it, and goes when the next save replaces it.
+    #[test]
+    fn a_pruned_save_s_file_goes_when_the_next_save_replaces_it() {
+        let mut d = new_doc(3, &[], Box::new(FixedCount(1)));
+        for i in 1..crate::history::MAX_VERSIONS {
+            rotate(&mut d, i % 3, "rotate");
+        }
+        let a4 = crate::generated::blank_pages(595.0, 842.0, 3).unwrap();
+        let saved = d.rebase_to_saved(file(d.store(), a4, "saved.pdf"));
+        let id = d.source(saved).unwrap().src.id();
+        // Back to the first version, and one edit too many: the saved
+        // branch goes.
+        let opened = d.timeline()[0].id;
+        d.jump(opened).unwrap();
+        rotate(&mut d, 0, "rotate");
+        assert_eq!(d.version_count(), 1);
+        assert_eq!(d.primary(), saved);
+        assert!(d.store().get(id).is_some());
+        d.rebase_to_saved(SourceInfo::blank(d.store(), 3));
+        assert!(d.source(saved).is_none());
+        assert!(d.store().get(id).is_none());
     }
 
     #[test]

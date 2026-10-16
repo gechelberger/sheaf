@@ -5,13 +5,17 @@
 //! A [`Form`] is a plain lopdf document plus the ids a test needs to
 //! break it on purpose. [`Form::bytes`] writes it, filling in each
 //! signature's `/ByteRange` around its `/Contents` as signing would (the
-//! contents are zeros: nothing is really signed). lopdf can't write a
+//! contents are zeros: nothing is really signed), and [`Form::source`]
+//! reads what it writes as `forms::read` reads a file. lopdf can't write a
 //! hybrid-reference file, so [`hybrid_reference`] writes one by hand.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, StringFormat, dictionary};
+
+use crate::store::{BlobKind, Src, Store};
 
 /// A rectangle in page space: left, bottom, right, top.
 pub type Rect = [f32; 4];
@@ -437,8 +441,13 @@ impl Form {
         out
     }
 
+    /// The file, as a source in a store of its own.
+    pub fn source(&mut self) -> Src {
+        source(self.bytes())
+    }
+
     fn widget(&mut self, page: usize, rect: Rect) -> ObjectId {
-        let r: Vec<Object> = rect.iter().map(|&v| Object::Real(v)).collect();
+        let r: Vec<Object> = rect.iter().map(|&v| Object::from(v)).collect();
         let id = self.pdf.add_object(dictionary! {
             "Type" => "Annot", "Subtype" => "Widget", "Rect" => r, "F" => 4,
             "P" => self.pages[page],
@@ -462,7 +471,12 @@ impl Form {
             .ok()
             .and_then(|d| d.get(b"Rect").ok())
             .and_then(|r| r.as_array().ok())
-            .map(|r| r.iter().filter_map(|v| v.as_float().ok()).collect())
+            .map(|r| {
+                r.iter()
+                    .filter_map(|v| v.as_float().ok())
+                    .map(|v| v as f32)
+                    .collect()
+            })
             .unwrap_or_default();
         [r[0], r[1], r[2], r[3]]
     }
@@ -474,7 +488,7 @@ impl Form {
         self.pdf.add_object(Stream::new(
             dictionary! {
                 "Type" => "XObject", "Subtype" => "Form",
-                "BBox" => vec![0.into(), 0.into(), Object::Real(w), Object::Real(h)],
+                "BBox" => vec![0.into(), 0.into(), Object::from(w), Object::from(h)],
                 "Resources" => dictionary! { "Font" => dictionary! { "Helv" => self.helv } },
             },
             content,
@@ -491,7 +505,7 @@ impl Form {
                 Operation::new("BT", vec![]),
                 Operation::new("Tf", vec!["Helv".into(), 10.into()]),
                 Operation::new("g", vec![0.into()]),
-                Operation::new("Td", vec![2.into(), Object::Real((h - 7.0) / 2.0)]),
+                Operation::new("Td", vec![2.into(), Object::from((h - 7.0) / 2.0)]),
                 Operation::new("Tj", vec![Object::string_literal(text)]),
                 Operation::new("ET", vec![]),
                 Operation::new("EMC", vec![]),
@@ -580,6 +594,14 @@ impl Form {
         let value = quick_xml::escape::escape(value);
         data.push_str(&format!("<{bare}>{value}</{bare}>"));
     }
+}
+
+/// A file's `bytes` as a source in a store of its own, named `form.pdf`.
+pub fn source(bytes: Vec<u8>) -> Src {
+    let kind = BlobKind::file(Path::new("form.pdf"), None);
+    Store::new()
+        .open(bytes.into(), kind)
+        .expect("the file opens as a source")
 }
 
 /// Rows down a page, 30 pt apart.

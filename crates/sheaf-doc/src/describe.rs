@@ -218,26 +218,13 @@ mod tests {
     use super::*;
     use crate::history::FixedCount;
     use crate::model::{Document, SourceInfo};
-    use sheaf_core::{PageSize, Rotation};
+    use crate::store::Store;
+    use sheaf_core::Rotation;
 
     fn doc(n: u32) -> Document {
-        Document::new(
-            SourceInfo {
-                path: "a.pdf".into(),
-                page_count: n,
-                first_page: PageSize {
-                    width: 612.0,
-                    height: 792.0,
-                },
-                page_sizes: None,
-                bytes: 0,
-                password: None,
-                data: None,
-                derived: None,
-            },
-            &[],
-            Box::new(FixedCount(10)),
-        )
+        let store = Store::new();
+        let primary = SourceInfo::blank(&store, n);
+        Document::new(store, primary, &[], Box::new(FixedCount(10)))
     }
 
     #[test]

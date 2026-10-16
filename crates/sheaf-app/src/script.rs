@@ -364,7 +364,7 @@ impl crate::docview::DocView {
         let pane = doc.pane();
         let r = pane.layout.as_ref()?.rect(page)?;
         let pref = doc.shown_ref(page)?;
-        let src = doc.model.source(pref.source)?.page_size(pref.index);
+        let src = doc.model.source(pref.source)?.src.page_size(pref.index);
         let shown = crate::markup_tools::rotate_pt(sheaf_doc::Pt { x, y }, src, pref.rotation);
         let k = r.w / src.rotated(pref.rotation).width.max(1.0);
         let b = pane.scroll.bounds();

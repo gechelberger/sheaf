@@ -5,7 +5,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use sheaf_doc::file::ForeignAnnot;
-use sheaf_doc::{Document, FlatOutlineItem, SourceInfo};
+use sheaf_doc::{Document, FlatOutlineItem, SourceInfo, Store};
 use sheaf_render::Renderer;
 use sheaf_render::pdfium::PdfiumEngine;
 
@@ -20,9 +20,16 @@ pub fn open_with_foreign(
     path: &Path,
     password: Option<&str>,
 ) -> Result<(Document, Vec<ForeignAnnot>)> {
-    let (source, outline) = describe(path, password)?;
-    let mut doc = Document::new(source, &outline, sheaf_doc::history::default_policy());
-    let (annots, facts) = sheaf_doc::file::read_open(path, password)?;
+    let store = Store::new();
+    let (source, outline) = describe(&store, path, password)?;
+    let (annots, facts) = sheaf_doc::file::read_open(&source.src)
+        .with_context(|| format!("reading {}", path.display()))?;
+    let mut doc = Document::new(
+        store,
+        source,
+        &outline,
+        sheaf_doc::history::default_policy(),
+    );
     if !annots.sheaf.is_empty() {
         doc.set_initial_annots(annots.sheaf)?;
     }
@@ -38,35 +45,21 @@ pub fn open_with_foreign(
     Ok((doc, annots.foreign))
 }
 
-/// A renderer for a source: on the bytes the document kept from when it
-/// opened, when it kept them (see `SourceInfo::data`), else on the file.
+/// A renderer for a source, on its blob's bytes.
 pub fn engine_for(info: &SourceInfo) -> Result<PdfiumEngine> {
-    match &info.data {
-        Some(data) => PdfiumEngine::open_bytes(data.0.clone(), info.password.as_deref()),
-        None => PdfiumEngine::open(&info.path, info.password.as_deref()),
-    }
+    PdfiumEngine::open_bytes(info.src.bytes().clone(), info.src.password())
 }
 
-/// What the model needs to know about a file to use its pages, and its
-/// bookmarks (page numbers are 0-based indexes into the file).
-pub fn describe(path: &Path, password: Option<&str>) -> Result<(SourceInfo, Vec<FlatOutlineItem>)> {
-    let engine = PdfiumEngine::open(path, password)?;
-    let sizes = engine.page_sizes()?;
-    let first_page = *sizes
-        .first()
-        .with_context(|| format!("{} has no pages", path.display()))?;
-    let source = SourceInfo {
-        path: path.to_path_buf(),
-        page_count: engine.page_count(),
-        first_page,
-        page_sizes: Some(sizes),
-        bytes: std::fs::metadata(path)
-            .map(|m| m.len() as usize)
-            .unwrap_or(0),
-        password: password.map(str::to_string),
-        data: None,
-        derived: None,
-    };
+/// `path` as a source in `store`, read once and parsed, and its bookmarks
+/// (page numbers are 0-based indexes into the file), which PDFium reads
+/// from the same bytes.
+pub fn describe(
+    store: &Store,
+    path: &Path,
+    password: Option<&str>,
+) -> Result<(SourceInfo, Vec<FlatOutlineItem>)> {
+    let source = SourceInfo::read(store, path, password)?;
+    let engine = engine_for(&source)?;
     let mut outline: Vec<FlatOutlineItem> = engine
         .outline()
         .unwrap_or_else(|e| {
@@ -85,7 +78,7 @@ pub fn describe(path: &Path, password: Option<&str>) -> Result<(SourceInfo, Vec<
         .collect();
     // PDFium doesn't report bookmark colors and styles; lopdf does.
     if !outline.is_empty()
-        && let Ok(pdf) = sheaf_doc::file::load_pdf(path, password)
+        && let Ok(pdf) = sheaf_doc::file::load_source(&source)
     {
         sheaf_doc::file::style_flat_items(&mut outline, &sheaf_doc::file::outline_styles(&pdf));
     }

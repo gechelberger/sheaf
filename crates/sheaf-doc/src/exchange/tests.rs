@@ -2,6 +2,7 @@ use super::*;
 use crate::annot::{Annot, AnnotKind, Pt};
 use crate::history::FixedCount;
 use crate::model::Document;
+use crate::store::Store;
 use lopdf::{Stream, dictionary};
 
 fn geom() -> PageGeom {
@@ -200,23 +201,9 @@ fn pdf_with_square(dir: &std::path::Path) -> std::path::PathBuf {
 
 fn opened(path: &std::path::Path) -> (Document, Vec<(SourceId, ForeignAnnot)>) {
     let found = crate::file::read_annots(path, None).unwrap();
-    let mut doc = Document::new(
-        SourceInfo {
-            path: path.to_path_buf(),
-            page_count: 2,
-            first_page: sheaf_core::PageSize {
-                width: 612.0,
-                height: 792.0,
-            },
-            page_sizes: None,
-            bytes: std::fs::metadata(path).unwrap().len() as usize,
-            password: None,
-            data: None,
-            derived: None,
-        },
-        &[],
-        Box::new(FixedCount(10)),
-    );
+    let store = Store::new();
+    let primary = SourceInfo::read(&store, path, None).unwrap();
+    let mut doc = Document::new(store, primary, &[], Box::new(FixedCount(10)));
     let note = Annot {
         id: AnnotId(0),
         kind: AnnotKind::Note {

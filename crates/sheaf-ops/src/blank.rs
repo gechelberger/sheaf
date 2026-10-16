@@ -123,8 +123,6 @@ pub fn find(
     for (sid, list) in by_source {
         let info = snap.source(sid).context("unknown source")?;
         let engine = crate::open::engine_for(info)?;
-        let file = sheaf_doc::file::load_source(info)?;
-        let objs: Vec<_> = file.get_pages().into_values().collect();
         for i in list {
             progress.check()?;
             done += 1;
@@ -134,13 +132,10 @@ pub fn find(
             if snap.state.annots_on(p.id).is_some_and(|a| !a.is_empty()) {
                 continue;
             }
-            let has_annots = objs
-                .get(p.index as usize)
-                .and_then(|&o| file.get_dictionary(o).ok())
-                .and_then(|d| d.get(b"Annots").ok())
-                .and_then(|a| file.dereference(a).ok())
-                .and_then(|(_, a)| a.as_array().ok().map(|a| !a.is_empty()))
-                .unwrap_or(false);
+            let has_annots = info
+                .src
+                .page(p.index)
+                .is_some_and(|page| !page.annots.is_empty());
             if has_annots {
                 continue;
             }
@@ -165,7 +160,7 @@ pub fn find(
                 Says::Content => continue,
                 Says::Nothing => {}
             }
-            let size = info.page_size(p.index);
+            let size = info.src.page_size(p.index);
             let raster = engine.render(
                 PageIndex(p.index),
                 Job::Page {

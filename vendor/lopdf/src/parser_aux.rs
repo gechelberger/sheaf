@@ -2,7 +2,7 @@ use log::warn;
 
 use crate::{Dictionary, Object, ObjectId, Stream, parser};
 use crate::{
-    Error, Result,
+    Error, Limit, Result,
     content::{Content, Operation},
     document::Document,
     encodings::Encoding,
@@ -560,8 +560,55 @@ pub fn decode_xref_stream(stream: Stream) -> Result<(Xref, Dictionary)> {
 /// behavior of [`decode_xref_stream`]). Cross-reference streams are decoded
 /// early during loading, so this bounds the memory a `/XRef` stream can use.
 pub fn decode_xref_stream_with_limit(
-    mut stream: Stream, max_decompressed_size: Option<usize>,
+    stream: Stream, max_decompressed_size: Option<usize>,
 ) -> Result<(Xref, Dictionary)> {
+    decode_xref_stream_capped(stream, max_decompressed_size, None).map(|(xref, dict, _)| (xref, dict))
+}
+
+/// sheaf: what a cross-reference stream may list.
+#[derive(Clone, Copy)]
+pub(crate) struct XrefCap {
+    /// The object numbers it lists are below it.
+    pub max_objects: u32,
+    /// How many entries it may list.
+    pub entries: usize,
+}
+
+/// sheaf: [`decode_xref_stream_with_limit`], with how many entries the stream lists. One that
+/// lists more than `cap` allows is [`Limit::Objects`], told from its dictionary before its data
+/// is decompressed.
+pub(crate) fn decode_xref_stream_capped(
+    mut stream: Stream, max_decompressed_size: Option<usize>, cap: Option<XrefCap>,
+) -> Result<(Xref, Dictionary, usize)> {
+    let size = stream
+        .dict
+        .get(b"Size")
+        .and_then(Object::as_i64)
+        .map_err(|_| ParseError::InvalidXref)?;
+    let section_indice = stream
+        .dict
+        .get(b"Index")
+        .and_then(parse_integer_array)
+        .unwrap_or_else(|_| vec![0, size]);
+    let index_entries = section_indice
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .try_fold(0_usize, |total, section| {
+            let count = usize::try_from(section[1]).map_err(|_| ParseError::InvalidXref)?;
+            total.checked_add(count).ok_or(ParseError::InvalidXref)
+        })?;
+    if let Some(cap) = cap {
+        let past = section_indice.as_chunks::<2>().0.iter().any(|&[start, count]| {
+            start < 0
+                || start
+                    .checked_add(count)
+                    .is_none_or(|end| end > i64::from(cap.max_objects))
+        });
+        if past || index_entries > cap.entries {
+            return Err(Error::Limit(Limit::Objects));
+        }
+    }
     if stream.is_compressed() {
         match max_decompressed_size {
             Some(max) => stream.decompress_with_limit(max)?,
@@ -570,16 +617,8 @@ pub fn decode_xref_stream_with_limit(
     }
     let mut dict = stream.dict;
     let mut reader = Cursor::new(stream.content);
-    let size = dict
-        .get(b"Size")
-        .and_then(Object::as_i64)
-        .map_err(|_| ParseError::InvalidXref)?;
     let mut xref = Xref::new(size as u32, XrefType::CrossReferenceStream);
     {
-        let section_indice = dict
-            .get(b"Index")
-            .and_then(parse_integer_array)
-            .unwrap_or_else(|_| vec![0, size]);
         let field_widths = dict
             .get(b"W")
             .and_then(parse_integer_array)
@@ -606,14 +645,6 @@ pub fn decode_xref_stream_with_limit(
             return Err(ParseError::InvalidXref.into());
         }
 
-        let index_entries = section_indice
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .try_fold(0_usize, |total, section| {
-                let count = usize::try_from(section[1]).map_err(|_| ParseError::InvalidXref)?;
-                total.checked_add(count).ok_or(ParseError::InvalidXref)
-            })?;
         // Validate the total before inserting anything so multiple plausible /Index sections
         // cannot overrun the body. Records narrower than three bytes are rejected to limit
         // amplification; lopdf's writer emits /W [1 4 2], so its own output is unaffected.
@@ -666,7 +697,7 @@ pub fn decode_xref_stream_with_limit(
     dict.remove(b"Length");
     dict.remove(b"W");
     dict.remove(b"Index");
-    Ok((xref, dict))
+    Ok((xref, dict, index_entries))
 }
 
 fn read_big_endian_integer(reader: &mut Cursor<Vec<u8>>, buffer: &mut [u8]) -> Result<u32> {

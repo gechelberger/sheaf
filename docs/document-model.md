@@ -22,8 +22,23 @@ and *outputs* (serialization) of it.
 ## Core idea: a virtual document over immutable sources
 
 ```
-Source               an opened PDF file: bytes, a RenderHandle (PDFium worker),
-                     page count/sizes. Immutable once opened. Refcounted.
+Store                the document's bytes, named by their content: one Blob for
+                     the same bytes however often they're interned, and one Src
+                     for a Blob while anything holds it. Weak references only.
+
+Blob                 { id: BlobId { hash, len },   // compared byte for byte too
+                       bytes: Arc<[u8]>,           // shared with PDFium
+                       kind: Pdf { password, origin: File(path) | Memory(Derived) } }
+
+Src = Arc<Source>    a Blob parsed lazily (lopdf's LazyPdf), under one Limits,
+                     with the facts read from it once: the page table (each
+                     page's Geom, inherited /Resources, /Contents, /Annots),
+                     XrefFacts, conformance. Immutable.
+
+SourceInfo           { src: Src, name: PathBuf, derived: Option<Derived> }
+                     a registration, which a SourceId names (until M10.5 slice
+                     11 makes the BlobId the identity): the same file inserted
+                     twice is two registrations of one Src.
 
 PageRef              { id: PageId, source: SourceId, index: u32, rotation: Rotation }
                      one page of the virtual document, pointing at a page of a source.
@@ -39,7 +54,8 @@ DocState             { pages: im::Vector<PageRef>,
                        widgets: ... }           // the fields' widgets, by page
                      a complete, immutable snapshot of what the user sees.
 
-Document             { sources: HashMap<SourceId, Arc<Source>>,
+Document             { store: Arc<Store>,
+                       sources: HashMap<SourceId, Arc<SourceInfo>>,
                        versions: HashMap<VersionId, Version>,  // a tree (see Undo/redo)
                        cursor: VersionId,            // which version is current
                        saved: Option<VersionId> }    // which version is on disk
@@ -60,6 +76,59 @@ opening it as a second source and splicing 400 `PageRef`s — milliseconds.
 bytes. Two strategies, chosen per save (see below). The snapshot is
 immutable and `Send`, so saving runs on a background thread while the user
 keeps editing.
+
+**Sources are read lazily** (M10.5 slice 3). A file is read once, into a
+blob, and a source parses the blob in place:
+
+- **The open (`Store::source`) reads the cross-reference sections, the
+  trailer and the page tree.** Every other object is read when it's first
+  asked for, decrypted on its own (a source keeps `/Encrypt`), and kept,
+  as is a failure to read it that the bytes alone decide; an object
+  stream is decoded once. `XrefFacts` records what a later
+  append needs: the newest section's kind and start, `/Size`, the largest
+  cross-reference stream number, `/ID` and where the header starts.
+- **The page table** numbers pages as PDFium does (a kid with `/Kids` is
+  a node, any other a page) and reads the inheritable keys up `/Parent`
+  as it does. Each page's `Geom` is its boxes and rotation as PDFium
+  sizes them: an empty media box is Letter, the crop box is clipped to the
+  media box (one outside it shows nothing), `/Rotate` is whole quarter
+  turns, `(degrees / 90) mod 4`, and `/UserUnit` doesn't scale the size.
+  The layout's page sizes are `Geom::shown()` from the first paint, and
+  equal PDFium's on every corpus page; PDFium isn't asked for sizes. A
+  page the tree lists twice is two entries, which share what the page
+  holds, as pages naming one `/Annots` array share it. The table ends at
+  the root's `/Count` when PDFium counts by it, since PDFium loads no
+  page past it.
+- **One `Limits`** caps every reader of a source: lopdf's (256 MiB a
+  stream decompressed, 1,024 sections, 8,388,607 objects and twice as
+  many cross-reference stream entries, references 64 deep), the page
+  tree's (1,024 levels, fewer than 0xFFFFF pages) and the form reader's.
+  Breaking one, a `/Kids` cycle, a `/Parent` loop or an object that
+  doesn't decrypt is a typed error, never a panic, a hang or memory
+  without bound; nothing is repaired. So the app doesn't open such a
+  file, though PDFium shows some of them (none in the corpus: every
+  corpus file PDFium opens opens as a source).
+- **A table that can't be read** is rebuilt by scanning, as lopdf's eager
+  reader rebuilds it, and every object is read then: `base_sound()` is
+  false, and such a file is never appended to. With no `trailer` keyword,
+  the newest cross-reference stream that decodes is the trailer, as
+  PDFium takes it.
+- **Bytes stay in memory.** PDFium opens the blob's own `Arc<[u8]>`
+  (`RenderHandle::open_bytes`). A derived copy (cropped, watermarked, a
+  header and footer stripped) is a memory blob, written nowhere; blank and
+  image pages are read back from the generated cache once, into blobs.
+  `LazyPdf` can also read a file by position (`FileBytes`).
+- **What still loads eagerly:** the form, File > Properties and the
+  signature check read the source, but the rest of what the open reads
+  (marks, other tools' comments, labels, header and footer, attachments,
+  layers, outline styles) comes from one eager lopdf load of the blob
+  until M10.5 slice 4, and the old writers load their sources eagerly
+  until slice 9.
+
+At 7,000 pages the open (the geometry walk, asserted by the 7k gate
+harness, `crates/sheaf-ops/tests/gate_7k.rs`) takes 48 ms on the
+synthetic fixture and 72–80 ms on the heavy one, against gates of 100 and
+250 ms.
 
 ## Undo/redo: snapshots, not inverse commands
 
@@ -151,8 +220,15 @@ Costs and how they're bounded:
   moving half the pages before the first 1 ms (release;
   `history_at_7k_pages_and_20k_marks` in the 7k gate harness,
   `crates/sheaf-ops/tests/gate_7k.rs`).
-- Sources referenced only by undone versions stay registered for now;
-  M10.5 slices 3 and 12 count and free them.
+- Sources referenced only by undone versions are counted and freed. Each
+  version owns the registrations made for it, and pruning a version
+  drops them; a blob goes when its last registration does.
+  `HistoryStats` counts every live blob once (`blob_bytes`) and those only
+  versions off the current line registered (`undone_source_bytes`), and
+  `MemoryBudget` weighs the second (see Decisions). Pruning is by count
+  until M10.5 slice 12 prunes by bytes. Inserting a 400-page scan, undoing
+  it and editing past `MAX_VERSIONS` frees its bytes
+  (`pruning_an_undone_400_page_scan_frees_its_bytes`).
 
 What an `Edit` looks like:
 
@@ -205,7 +281,8 @@ bookmarks that targeted it.
 - `DocView` holds a `Document` instead of a bare `RenderHandle`; sidebar
   thumbnails become the primary editing surface (drag to reorder,
   multi-select, keyboard rotate/delete).
-- Sizes and outline come from `DocState`, not from the worker, after open.
+- Sizes come from the sources' page tables (`Geom`) from the first paint,
+  and the outline from `DocState`; the worker is never asked for either.
 
 ## Saving
 
@@ -235,10 +312,10 @@ page, a mark, a bookmark, OCR text replaced: `Snapshot::removes_content`),
 since an incremental save would leave it in the earlier revision.
 
 Either way the save runs on a background thread from a cloned snapshot. On
-completion the saved file is reopened as a fresh single source replacing all
-the others, and `saved = cursor`. History is kept (undo across a save works;
-the snapshots still reference the old sources, which stay alive until
-truncated).
+completion the saved file is read back into the store as a fresh single
+source replacing all the others, and `saved = cursor`. History is kept (undo
+across a save works; the snapshots still reference the old sources, which
+stay registered until the versions holding them are pruned).
 
 ## Rendering edited pages: the spikes (M10.5 slice 2)
 
@@ -597,22 +674,29 @@ prints today's numbers on the three fixtures beside slice 2's baselines.
   version does (`snapshot_bytes`: the `im` nodes it copied for the slots
   its version changed), what all versions' steps hold (`step_bytes`: their
   edits, lines and prims' values, each counted once, by the version that
-  made it, and an `Arc` once however many of its prims put it), and source
-  bytes referenced only by undone versions (an inserted scan that was then
-  undone; 0 until M10.5 slice 3). Snapshot and step bytes are computed
-  when a version is made, from its prims and the sizes of the maps they
-  changed. They are estimates, and one is coarse: the pages, the outline
-  and the labels are each one value, and a prim that puts one counts all
-  of it, walking it, though `im` shares all but the changed path with the
-  version before (about 170 KB to rotate one page of 7,000, about 375 KB
-  to rename one bookmark of 2,000). So in a long session of such edits
-  the steps alone can pass `MemoryBudget`, which then drops every snapshot
-  it may, and undo replays from the nearest version that kept one. M10.5
-  slice 8's records leave only the page order, the outline's top level
-  and the labels counted this way. Trimming frees snapshot bytes
-  only; a version's step bytes go when it is pruned (past `MAX_VERSIONS`,
-  and by bytes from M10.5 slice 12). Default:
-  `AllOf([FixedCount(200), MemoryBudget(256 MB)])`.
+  made it, and an `Arc` once however many of its prims put it), the bytes
+  of every blob the store holds, each once (`blob_bytes`), and those of
+  the blobs only versions off the current line registered
+  (`undone_source_bytes`: an inserted scan that was then undone). Steps
+  name sources by registration, so source bytes are never step bytes.
+  Snapshot and step bytes are computed when a version is made, from its
+  prims and the sizes of the maps they changed. They are estimates, and
+  one is coarse: the pages, the outline and the labels are each one value,
+  and a prim that puts one counts all of it, walking it, though `im`
+  shares all but the changed path with the version before (about 170 KB to
+  rotate one page of 7,000, about 375 KB to rename one bookmark of 2,000).
+  So in a long session of such edits the steps alone can pass
+  `MemoryBudget`, which then drops every snapshot it may, and undo replays
+  from the nearest version that kept one. M10.5 slice 8's records leave
+  only the page order, the outline's top level and the labels counted this
+  way. Trimming frees snapshot bytes only; a version's step bytes, and the
+  registrations it holds, go when it is pruned (past `MAX_VERSIONS`, and
+  by bytes from M10.5 slice 12), and a blob goes with the last
+  registration holding it (an engine opened on it keeps its bytes until
+  M10.5 slice 13's engine pool closes it). A policy weighs undone
+  sources but not `blob_bytes`, so a large undone insert makes
+  `MemoryBudget` drop every snapshot it may until its branch is pruned.
+  Default: `AllOf([FixedCount(200), MemoryBudget(256 MB)])`.
 - **Deleting pages cascades to bookmarks that target them**, with a
   non-modal notice ("Deleted 3 pages and 2 bookmarks — Undo"). No modal;
   snapshot undo makes the cascade zero-risk. Rationale: for both "delete a

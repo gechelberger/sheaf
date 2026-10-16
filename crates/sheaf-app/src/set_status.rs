@@ -323,7 +323,7 @@ impl DocView {
             &|pref| {
                 doc.model
                     .source(pref.source)
-                    .map(|s| s.page_size(pref.index))
+                    .map(|s| s.src.page_size(pref.index))
             },
             id,
             &spec,
@@ -464,7 +464,7 @@ fn reset_edits(st: &sheaf_doc::DocState, id: OutlineId, stamps: bool) -> Vec<Edi
 mod tests {
     use super::*;
     use sheaf_core::PageSize;
-    use sheaf_doc::{Annot, AnnotId, Document, FixedCount, FlatOutlineItem, SourceInfo};
+    use sheaf_doc::{Annot, AnnotId, Document, FixedCount, FlatOutlineItem, SourceInfo, Store};
 
     fn letter(_: &sheaf_doc::PageRef) -> Option<PageSize> {
         Some(PageSize {
@@ -493,20 +493,14 @@ mod tests {
 
     #[test]
     fn set_status_borders_and_stamps_a_bookmarks_pages_then_resets() {
+        let store = Store::new();
+        let primary = SourceInfo {
+            name: "binder.pdf".into(),
+            ..SourceInfo::blank(&store, 5)
+        };
         let mut d = Document::new(
-            SourceInfo {
-                path: "binder.pdf".into(),
-                page_count: 5,
-                first_page: PageSize {
-                    width: 612.0,
-                    height: 792.0,
-                },
-                page_sizes: None,
-                bytes: 0,
-                password: None,
-                data: None,
-                derived: None,
-            },
+            store,
+            primary,
             &[
                 FlatOutlineItem {
                     title: "Cash".into(),

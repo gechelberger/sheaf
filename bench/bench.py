@@ -2,7 +2,8 @@
 proposal 16 and its §10.1), over gen.py's synthetic N-page file.
 
 A  load from memory, count pages and close, as PdfiumEngine::open_bytes
-   does; then the page-size walk, as Renderer::page_sizes does
+   does; then the page-size walk, as Renderer::page_sizes did for the
+   layout until M10.5 slice 3 read sizes from the source's page table
 B  load page N/2, render it 1024 px wide and close; then at 320 px, a
    preview
 C  load its text page and count its chars

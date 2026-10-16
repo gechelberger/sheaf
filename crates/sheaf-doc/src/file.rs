@@ -37,7 +37,7 @@ impl PdfFile {
             media_box
                 .get(i)
                 .and_then(|o| o.as_float().ok())
-                .unwrap_or(0.0)
+                .unwrap_or(0.0) as f32
         };
         let size = PageSize {
             width: (num(2) - num(0)).abs(),
@@ -196,7 +196,8 @@ pub fn anon_name(dict: &lopdf::Dictionary) -> String {
         match v {
             Some(lopdf::Object::Array(a)) => {
                 for o in a {
-                    eat(format!("{:.2}", o.as_float().unwrap_or(0.0)).as_bytes());
+                    // As an f32, as reals were read before, so names stay.
+                    eat(format!("{:.2}", o.as_float().unwrap_or(0.0) as f32).as_bytes());
                 }
             }
             Some(lopdf::Object::Name(n)) => eat(n),
@@ -224,27 +225,12 @@ pub struct AnnotsInFile {
     pub foreign: Vec<ForeignAnnot>,
 }
 
-/// A source's bytes: the ones kept from when it was opened, else the file's
-/// now (see `SourceInfo::data`).
-pub fn source_bytes(info: &crate::SourceInfo) -> Result<std::sync::Arc<Vec<u8>>> {
-    match &info.data {
-        Some(d) => Ok(d.0.clone()),
-        None => Ok(std::sync::Arc::new(
-            std::fs::read(&info.path)
-                .with_context(|| format!("reading {}", info.path.display()))?,
-        )),
-    }
-}
-
-/// A source as lopdf sees it, decrypted as [`load_pdf`] does: from the
-/// bytes kept from when it was opened when there are any, so a file
-/// replaced since (by a save in place) doesn't matter.
+/// A source as lopdf sees it, decrypted as [`load_pdf`] does: its blob's
+/// bytes, opened with its password, so a file replaced since (by a save in
+/// place) doesn't matter.
 pub fn load_source(info: &crate::SourceInfo) -> Result<lopdf::Document> {
-    let Some(data) = &info.data else {
-        return load_pdf(&info.path, info.password.as_deref());
-    };
-    load_pdf_mem(&data.0, info.password.as_deref())
-        .with_context(|| format!("loading {}", info.path.display()))
+    load_pdf_mem(info.src.bytes(), info.src.password())
+        .with_context(|| format!("loading {}", info.name.display()))
 }
 
 /// [`load_pdf`] for a file in memory.
@@ -299,6 +285,8 @@ pub struct FileFacts {
     /// either (see [`outline_styles`]).
     pub outline_styles: Vec<OutlineStyle>,
     /// The form: its fields and widgets, and what sheaf shows about it.
+    /// [`read_open`] reads it from the source; [`facts_in`] leaves it
+    /// empty.
     pub form: crate::forms::FileForm,
 }
 
@@ -389,7 +377,7 @@ pub fn style_flat_items(items: &mut [FlatOutlineItem], styles: &[OutlineStyle]) 
     }
 }
 
-/// The facts sheaf reads from an open file's catalog.
+/// The facts sheaf reads from an open file's catalog, but its form.
 pub fn facts_in(pdf: &lopdf::Document) -> FileFacts {
     FileFacts {
         label_ranges: crate::labels::label_ranges(pdf),
@@ -398,20 +386,20 @@ pub fn facts_in(pdf: &lopdf::Document) -> FileFacts {
         collection: crate::portfolio::collection(pdf),
         layers: crate::layers::layers_in(pdf),
         outline_styles: outline_styles(pdf),
-        form: crate::forms::read(pdf),
+        form: Default::default(),
     }
 }
 
-/// Everything read from a file when it opens: annotations and facts, from
-/// one load.
-pub fn read_open(
-    path: impl AsRef<Path>,
-    password: Option<&str>,
-) -> Result<(AnnotsInFile, FileFacts)> {
-    let pdf = load_pdf(path.as_ref(), password)?;
+/// Everything read from a source when it opens: annotations and facts.
+/// The form is read from the source; the rest from one eager load of its
+/// bytes, until the open reads it all from the source (M10.5 slice 4).
+pub fn read_open(src: &crate::Source) -> Result<(AnnotsInFile, FileFacts)> {
+    let pdf = load_pdf_mem(src.bytes(), src.password())?;
     let found = annots_in(&pdf);
     recover_cached(&pdf);
-    Ok((found, facts_in(&pdf)))
+    let mut facts = facts_in(&pdf);
+    facts.form = crate::forms::read(src);
+    Ok((found, facts))
 }
 
 /// What our marks keep in this machine's cache, when it isn't there (a
@@ -631,7 +619,11 @@ fn annots_in(pdf: &lopdf::Document) -> AnnotsInFile {
                 .ok()
                 .and_then(|o| pdf.dereference(o).ok())
                 .and_then(|(_, o)| o.as_array().ok())
-                .map(|a| a.iter().map(|v| v.as_float().unwrap_or(0.0)).collect())
+                .map(|a| {
+                    a.iter()
+                        .map(|v| v.as_float().unwrap_or(0.0) as f32)
+                        .collect()
+                })
                 .unwrap_or_default();
             if rect.len() != 4 {
                 continue;
@@ -721,7 +713,10 @@ pub fn page_geom(pdf: &lopdf::Document, page: lopdf::ObjectId) -> PageGeom {
             && let Ok(arr) = mb.as_array()
             && arr.len() == 4
         {
-            let v: Vec<f32> = arr.iter().map(|o| o.as_float().unwrap_or(0.0)).collect();
+            let v: Vec<f32> = arr
+                .iter()
+                .map(|o| o.as_float().unwrap_or(0.0) as f32)
+                .collect();
             media = Some([
                 v[0].min(v[2]),
                 v[1].min(v[3]),
@@ -757,6 +752,66 @@ pub fn page_geom(pdf: &lopdf::Document, page: lopdf::ObjectId) -> PageGeom {
 mod tests {
     use super::*;
     use lopdf::{Object, Stream, dictionary};
+
+    /// Reals are f64s (vendor/lopdf/SHEAF.md). Read and written back by
+    /// lopdf, a fraction, a large number and a 16-digit coordinate keep
+    /// their digits, in a dictionary and in content; and an f32 that sheaf
+    /// computes is written as the digits it always was.
+    #[test]
+    fn reals_keep_their_digits() {
+        use lopdf::content::{Content, Operation};
+        const TEXTS: [&str; 3] = ["0.1", "123456.789", "306.1234567890123"];
+        let reals = || TEXTS.map(|t| Object::Real(t.parse().unwrap())).to_vec();
+        let mut pdf = lopdf::Document::with_version("1.7");
+        let pages_id = pdf.new_object_id();
+        let ops = format!("{} {} m\n{} w", TEXTS[1], TEXTS[2], TEXTS[0]);
+        let content = pdf.add_object(Stream::new(dictionary! {}, ops.clone().into_bytes()));
+        let page = pdf.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages_id, "Contents" => content,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "SheafReals" => reals(),
+        });
+        pdf.objects.insert(
+            pages_id,
+            dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 }.into(),
+        );
+        let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        pdf.trailer.set("Root", catalog);
+        let mut first = Vec::new();
+        pdf.save_to(&mut first).unwrap();
+
+        let mut read = lopdf::Document::load_mem(&first).unwrap();
+        let mut written = Vec::new();
+        read.save_to(&mut written).unwrap();
+        let array = format!("[{}]", TEXTS.join(" "));
+        assert!(
+            written.windows(array.len()).any(|w| w == array.as_bytes()),
+            "{}",
+            String::from_utf8_lossy(&written)
+        );
+        let again = lopdf::Document::load_mem(&written).unwrap();
+        let dict = again.get_dictionary(page).unwrap();
+        assert_eq!(
+            dict.get(b"SheafReals").unwrap().as_array().unwrap(),
+            &reals()
+        );
+        let content = Content::decode(&again.get_page_content(page)).unwrap();
+        let operands: Vec<Object> = content
+            .operations
+            .iter()
+            .flat_map(|op| op.operands.clone())
+            .collect();
+        let [a, b, c] = reals().try_into().unwrap();
+        assert_eq!(operands, vec![b, c, a]);
+        assert_eq!(String::from_utf8(content.encode().unwrap()).unwrap(), ops);
+
+        // An f32 writes its shortest digits, a whole one too.
+        let reals = [0.1f32, 612.0, -3.0, 16_777_216.0, 1e-7].map(Object::from);
+        let width = Content {
+            operations: vec![Operation::new("w", reals.to_vec())],
+        };
+        assert_eq!(width.encode().unwrap(), b"0.1 612 -3 16777216 0.0000001 w");
+    }
 
     #[test]
     fn their_threads_read_with_states_and_groups() {

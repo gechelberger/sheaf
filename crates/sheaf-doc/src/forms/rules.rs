@@ -12,7 +12,9 @@
 
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId};
 
+use super::field::{FieldKind, Value};
 use crate::attachments::resolve;
+use crate::source::Limits;
 
 /// What a save took out, for the reader.
 pub const XFA_REMOVED: &str =
@@ -91,10 +93,10 @@ fn drop_xfa(pdf: &mut Pdf, catalog_id: ObjectId, touched: &mut Vec<ObjectId>) ->
     if !form.has(b"XFA") {
         return false;
     }
-    let xfa = super::xfa::read(pdf, &form);
+    let xfa = super::xfa::read(pdf, &form, &Limits::DEFAULT.forms);
     if xfa.iter().any(|f| f.tooltip.is_some()) {
         let xfa = super::xfa::Lookup::new(xfa);
-        for f in super::read(pdf).fields {
+        for f in super::read::fields_of(pdf, &form).unwrap_or_default() {
             if let Some(tip) = xfa.get(&f.name).and_then(|x| x.tooltip.as_deref())
                 && let Ok(d) = pdf.get_dictionary_mut(f.object)
                 && !d.has(b"TU")
@@ -149,11 +151,15 @@ fn drop_rights(pdf: &mut Pdf, catalog_id: ObjectId, touched: &mut Vec<ObjectId>)
             touched.push(catalog_id);
         }
     }
-    let signed = super::read(pdf).facts.signed > 0;
-    if !signed
-        && !certified
+    if !certified
         && let Some((at, mut form)) = form_of(pdf, catalog_id)
         && form.has(b"SigFlags")
+        // No signed field needs it; a damaged tree may hold one.
+        && super::read::fields_of(pdf, &form).is_some_and(|fields| {
+            !fields
+                .iter()
+                .any(|f| f.kind == FieldKind::Signature && f.value == Some(Value::Signed))
+        })
     {
         form.remove(b"SigFlags");
         put_form(pdf, catalog_id, at, form);

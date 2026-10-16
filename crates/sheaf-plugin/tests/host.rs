@@ -10,7 +10,7 @@ use std::time::Duration;
 use anyhow::Result;
 use futures::executor::block_on;
 use sheaf_core::PageSize;
-use sheaf_doc::{Document, Edit, FixedCount, SourceId, SourceInfo};
+use sheaf_doc::{Document, Edit, FixedCount, SourceId, SourceInfo, Store};
 use sheaf_plugin::ui::{
     BuiltinPanel, FieldAnswer, FieldKind, FieldValue, Form, PanelRow, ShowPanel, Ui,
 };
@@ -144,23 +144,12 @@ impl TextSource for FakeText {
 }
 
 fn doc(pages: u32) -> Document {
-    Document::new(
-        SourceInfo {
-            path: "return.pdf".into(),
-            page_count: pages,
-            first_page: PageSize {
-                width: 612.0,
-                height: 792.0,
-            },
-            page_sizes: None,
-            bytes: 1000,
-            password: None,
-            data: None,
-            derived: None,
-        },
-        &[],
-        Box::new(FixedCount(50)),
-    )
+    let store = Store::new();
+    let primary = SourceInfo {
+        name: "return.pdf".into(),
+        ..SourceInfo::blank(&store, pages)
+    };
+    Document::new(store, primary, &[], Box::new(FixedCount(50)))
 }
 
 fn ctx(d: &Document) -> CallContext {

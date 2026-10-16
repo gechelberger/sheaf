@@ -304,7 +304,10 @@ pub fn box_of(arr: &[lopdf::Object]) -> Option<[f32; 4]> {
     if arr.len() != 4 {
         return None;
     }
-    let v: Vec<f32> = arr.iter().map(|o| o.as_float().unwrap_or(0.0)).collect();
+    let v: Vec<f32> = arr
+        .iter()
+        .map(|o| o.as_float().unwrap_or(0.0) as f32)
+        .collect();
     Some([
         v[0].min(v[2]),
         v[1].min(v[3]),
@@ -1436,7 +1439,7 @@ impl PageGeom {
 }
 
 fn pdf_rect(r: [f32; 4]) -> Object {
-    Object::Array(r.iter().map(|v| Object::Real(*v)).collect())
+    Object::Array(r.iter().map(|v| Object::from(*v)).collect())
 }
 
 /// Path operators for an ellipse inscribed in the user-space box (no
@@ -1579,7 +1582,7 @@ fn border_style(a: &Annot) -> Dictionary {
         bs.set("S", Object::Name(b"D".to_vec()));
         bs.set(
             "D",
-            Object::Array(DASH.iter().map(|v| Object::Real(*v)).collect()),
+            Object::Array(DASH.iter().map(|v| Object::from(*v)).collect()),
         );
     }
     bs
@@ -1593,7 +1596,7 @@ fn inner_box(outer: [f32; 4], inner: [f32; 4]) -> Object {
     Object::Array(
         [x0 - llx, y0 - lly, urx - x1, ury - y1]
             .iter()
-            .map(|v| Object::Real(v.max(0.0)))
+            .map(|v| Object::from(v.max(0.0)))
             .collect(),
     )
 }
@@ -1674,7 +1677,7 @@ fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
         dict.set("CreationDate", pdf_text_string(&a.created));
     }
     let c = a.color;
-    let color_arr = Object::Array(c.iter().map(|v| Object::Real(*v as f32 / 255.0)).collect());
+    let color_arr = Object::Array(c.iter().map(|v| Object::from(*v as f32 / 255.0)).collect());
 
     // Rotation of upright text, in degrees, to counter the page rotation.
     let text_rot = geom.rotate.rem_euclid(360) as f32;
@@ -1696,7 +1699,7 @@ fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
             for r in rects {
                 let [x0, y0, x1, y1] = geom.box_to_user(*r);
                 // QuadPoints order: x1 y1 x2 y2 (upper), x3 y3 x4 y4 (lower).
-                quads.extend([x0, y1, x1, y1, x0, y0, x1, y0].map(Object::Real));
+                quads.extend([x0, y1, x1, y1, x0, y0, x1, y0].map(Object::from));
                 content.push_str(&format!(
                     " {x0:.2} {y0:.2} {:.2} {:.2} re f",
                     x1 - x0,
@@ -1718,7 +1721,7 @@ fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
             let mut quads = Vec::new();
             for r in rects {
                 let [x0, y0, x1, y1] = geom.box_to_user(*r);
-                quads.extend([x0, y1, x1, y1, x0, y0, x1, y0].map(Object::Real));
+                quads.extend([x0, y1, x1, y1, x0, y0, x1, y0].map(Object::from));
             }
             dict.set("QuadPoints", Object::Array(quads));
             // Drawn in displayed space, then taken to user space, so the
@@ -1875,7 +1878,7 @@ fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
             if let Some(f) = a.fill {
                 dict.set(
                     "IC",
-                    Object::Array(f.iter().map(|v| Object::Real(*v as f32 / 255.0)).collect()),
+                    Object::Array(f.iter().map(|v| Object::from(*v as f32 / 255.0)).collect()),
                 );
                 content.push_str(&format!(" {}", color_ops(f, true)));
             }
@@ -1909,7 +1912,7 @@ fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
                         .iter()
                         .flat_map(|p| {
                             let u = up(*p);
-                            [Object::Real(u.x), Object::Real(u.y)]
+                            [Object::from(u.x), Object::from(u.y)]
                         })
                         .collect(),
                 ),
@@ -1919,7 +1922,7 @@ fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
             if let (true, Some(f)) = (closed, a.fill) {
                 dict.set(
                     "IC",
-                    Object::Array(f.iter().map(|v| Object::Real(*v as f32 / 255.0)).collect()),
+                    Object::Array(f.iter().map(|v| Object::from(*v as f32 / 255.0)).collect()),
                 );
                 content.push_str(&format!(" {}", color_ops(f, true)));
             }
@@ -1968,7 +1971,7 @@ fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
             let coords = |pts: &[Pt]| {
                 Object::Array(
                     pts.iter()
-                        .flat_map(|u| [Object::Real(u.x), Object::Real(u.y)])
+                        .flat_map(|u| [Object::from(u.x), Object::from(u.y)])
                         .collect(),
                 )
             };
@@ -2032,7 +2035,7 @@ fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
                 Object::Array(
                     [up_point, up_knee, up_end]
                         .iter()
-                        .flat_map(|p| [Object::Real(p.x), Object::Real(p.y)])
+                        .flat_map(|p| [Object::from(p.x), Object::from(p.y)])
                         .collect(),
                 ),
             );
@@ -2044,7 +2047,7 @@ fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
                 Object::Array(
                     [bx0 - llx, by0 - lly, urx - bx1, ury - by1]
                         .iter()
-                        .map(|v| Object::Real(v.max(0.0)))
+                        .map(|v| Object::from(v.max(0.0)))
                         .collect(),
                 ),
             );
@@ -2150,8 +2153,8 @@ fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
                 let mut coords = Vec::new();
                 for (i, p) in path.iter().enumerate() {
                     let u = up(*p);
-                    coords.push(Object::Real(u.x));
-                    coords.push(Object::Real(u.y));
+                    coords.push(Object::from(u.x));
+                    coords.push(Object::from(u.y));
                     content.push_str(&format!(
                         " {:.2} {:.2} {}",
                         u.x,
@@ -2632,7 +2635,7 @@ pub fn tape_pdf(a: &Annot) -> Option<Vec<u8>> {
     let content = pdf.add_object(Stream::new(dictionary! {}, content.into_bytes()));
     let page = pdf.add_object(dictionary! {
         "Type" => "Page", "Parent" => pages_id, "Contents" => content,
-        "MediaBox" => vec![0.into(), 0.into(), Object::Real(rect.w), Object::Real(rect.h)],
+        "MediaBox" => vec![0.into(), 0.into(), Object::from(rect.w), Object::from(rect.h)],
         "Resources" => font_resources(),
     });
     pdf.objects.insert(

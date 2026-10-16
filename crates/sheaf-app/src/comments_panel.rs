@@ -209,7 +209,7 @@ impl DocView {
             && let Some(src) = doc
                 .model
                 .source(pref.source)
-                .map(|s| s.page_size(pref.index))
+                .map(|s| s.src.page_size(pref.index))
         {
             let r = rotate_rect(
                 Rect {
@@ -1936,28 +1936,17 @@ pub(crate) fn foreign_outline(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sheaf_doc::{Box2, Document, FixedCount, SourceInfo};
+    use sheaf_doc::{Box2, Document, FixedCount, SourceInfo, Store};
 
     /// The rows for a page with a thread (a; r in reply to it; rr in reply
     /// to r) and a comment b, as short strings.
     fn rows(reply: Option<(Item, Option<AnnotId>)>) -> Vec<String> {
-        let d = Document::new(
-            SourceInfo {
-                path: "x.pdf".into(),
-                page_count: 1,
-                first_page: PageSize {
-                    width: 612.0,
-                    height: 792.0,
-                },
-                page_sizes: None,
-                bytes: 0,
-                password: None,
-                data: None,
-                derived: None,
-            },
-            &[],
-            Box::new(FixedCount(10)),
-        );
+        let store = Store::new();
+        let primary = SourceInfo {
+            name: "x.pdf".into(),
+            ..SourceInfo::blank(&store, 1)
+        };
+        let d = Document::new(store, primary, &[], Box::new(FixedCount(10)));
         let source = d.state().pages[0].source;
         let theirs = |name: &str, parent: Option<&str>, date: &str| {
             (

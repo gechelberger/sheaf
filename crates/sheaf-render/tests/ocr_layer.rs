@@ -12,7 +12,9 @@ use std::sync::Arc;
 use lopdf::{Document as Pdf, Object, Stream, dictionary};
 use sheaf_core::{PageIndex, PageSize, Rotation};
 use sheaf_doc::text_layer::rotate_box;
-use sheaf_doc::{Box2, Document, Edit, FixedCount, OcrWord, PageChars, Pt, SourceInfo, TextLayer};
+use sheaf_doc::{
+    Box2, Document, Edit, FixedCount, OcrWord, PageChars, Pt, SourceInfo, Store, TextLayer,
+};
 use sheaf_render::Renderer;
 use sheaf_render::pdfium::PdfiumEngine;
 
@@ -90,20 +92,9 @@ fn check(rotate: i64, upright: Rotation) {
     let src = dir.join("src.pdf");
     blank_pdf(&src, rotate);
     let displayed = LETTER.rotated(Rotation::from_degrees(rotate as i32));
-    let mut model = Document::new(
-        SourceInfo {
-            path: src.clone(),
-            page_count: 1,
-            first_page: displayed,
-            page_sizes: None,
-            bytes: 0,
-            password: None,
-            data: None,
-            derived: None,
-        },
-        &[],
-        Box::new(FixedCount(10)),
-    );
+    let store = Store::new();
+    let primary = SourceInfo::read(&store, &src, None).unwrap();
+    let mut model = Document::new(store, primary, &[], Box::new(FixedCount(10)));
     let page = model.page(0).unwrap().id;
     if upright != Rotation::R0 {
         model

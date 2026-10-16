@@ -1,15 +1,14 @@
-//! File > Properties: what a file says about itself. Read when the dialog
-//! opens (the font list walks every page), not when the file does.
+//! File > Properties: what a file says about itself. Read from its source
+//! when the dialog opens (the font list walks every page's resources), not
+//! when the file does.
 
 use std::collections::HashSet;
-use std::io::Read;
-use std::path::Path;
 
-use anyhow::{Context, Result};
-use lopdf::{Dictionary, Document as Pdf, Object, ObjectId};
+use lopdf::{Dictionary, LazyPdf, Object, ObjectId};
 
 use crate::attachments::resolve;
 use crate::file::pdf_text;
+use crate::source::{PageFacts, Source};
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Properties {
@@ -67,26 +66,13 @@ pub enum Embedding {
 /// Pages walked for fonts before giving up.
 const FONT_PAGE_LIMIT: usize = 5_000;
 
-/// Read the properties of the file at `path`.
-pub fn read(path: &Path, password: Option<&str>) -> Result<Properties> {
-    let raw = Pdf::load(path).with_context(|| format!("loading {}", path.display()))?;
-    let security = raw.is_encrypted().then(|| security_of(&raw));
-    let linearized = linearized(path);
-    let pdf = if raw.is_encrypted() {
-        crate::file::load_pdf(path, password)?
-    } else {
-        raw
-    };
-    let mut p = properties_of(&pdf);
-    p.security = security;
-    p.linearized = linearized;
-    Ok(p)
-}
-
-/// Everything but security and Fast Web View, which need the file itself.
-pub fn properties_of(pdf: &Pdf) -> Properties {
+/// The properties of `src`: its strings decrypted as it's read, its
+/// security from the `/Encrypt` it keeps, Fast Web View from the
+/// linearization its first bytes declare.
+pub fn read(src: &Source) -> Properties {
+    let pdf = src.pdf();
     let info = pdf
-        .trailer
+        .trailer()
         .get(b"Info")
         .ok()
         .and_then(|o| resolve(pdf, o))
@@ -98,7 +84,7 @@ pub fn properties_of(pdf: &Pdf) -> Properties {
             .unwrap_or_default()
     };
     let catalog = pdf.catalog().ok();
-    let mut version = pdf.version.clone();
+    let mut version = pdf.version().to_string();
     if let Some(v) = catalog
         .and_then(|c| c.get(b"Version").ok())
         .and_then(|o| o.as_name().ok())
@@ -115,8 +101,7 @@ pub fn properties_of(pdf: &Pdf) -> Properties {
         .and_then(|m| m.get(b"Marked").ok())
         .and_then(|o| o.as_bool().ok())
         .unwrap_or(false);
-    let pages = pdf.get_pages();
-    let (fonts, fonts_truncated) = fonts_in(pdf, pages.values().copied());
+    let (fonts, fonts_truncated) = fonts_in(pdf, src.pages());
     Properties {
         version,
         title: text(b"Title"),
@@ -127,19 +112,19 @@ pub fn properties_of(pdf: &Pdf) -> Properties {
         producer: text(b"Producer"),
         created: text(b"CreationDate"),
         modified: text(b"ModDate"),
-        pages: pages.len() as u32,
+        pages: src.page_count(),
         tagged,
-        linearized: false,
-        security: None,
+        linearized: src.xref().linearized,
+        security: pdf.is_encrypted().then(|| security_of(pdf)),
         fonts,
         fonts_truncated,
-        form: crate::forms::read(pdf).facts,
+        form: crate::forms::read(src).facts,
     }
 }
 
-fn security_of(pdf: &Pdf) -> Security {
+fn security_of(pdf: &LazyPdf) -> Security {
     let enc = pdf
-        .trailer
+        .trailer()
         .get(b"Encrypt")
         .ok()
         .and_then(|o| resolve(pdf, o))
@@ -194,32 +179,24 @@ fn security_of(pdf: &Pdf) -> Security {
     }
 }
 
-/// Fast Web View: the first object in the file is a linearization
-/// dictionary.
-fn linearized(path: &Path) -> bool {
-    let mut head = [0u8; 2048];
-    let Ok(mut f) = std::fs::File::open(path) else {
-        return false;
-    };
-    let n = f.read(&mut head).unwrap_or(0);
-    head[..n].windows(11).any(|w| w == b"/Linearized")
-}
-
-/// Fonts used by these pages (and the forms they draw), once each.
-fn fonts_in(pdf: &Pdf, pages: impl Iterator<Item = ObjectId>) -> (Vec<Font>, bool) {
+/// Fonts used by these pages (and the forms they draw), once each: each
+/// page's resources as the page table has them, its own or inherited.
+fn fonts_in(pdf: &LazyPdf, pages: &[PageFacts]) -> (Vec<Font>, bool) {
     let mut seen_fonts: HashSet<ObjectId> = HashSet::new();
     let mut seen_res: HashSet<ObjectId> = HashSet::new();
     let mut fonts: Vec<Font> = Vec::new();
     let mut truncated = false;
-    for (n, page) in pages.enumerate() {
+    for (n, page) in pages.iter().enumerate() {
         if n >= FONT_PAGE_LIMIT {
             truncated = true;
             break;
         }
-        let Ok(page) = pdf.get_dictionary(page) else {
-            continue;
-        };
-        if let Some(res) = page_resources(pdf, page) {
+        if let Some(res) = page
+            .resources
+            .as_deref()
+            .and_then(|o| resolve(pdf, o))
+            .and_then(|o| o.as_dict().ok())
+        {
             walk_resources(pdf, res, &mut seen_fonts, &mut seen_res, &mut fonts, 0);
         }
     }
@@ -228,29 +205,8 @@ fn fonts_in(pdf: &Pdf, pages: impl Iterator<Item = ObjectId>) -> (Vec<Font>, boo
     (fonts, truncated)
 }
 
-/// A page's resources, inherited from the page tree if need be.
-fn page_resources<'a>(pdf: &'a Pdf, page: &'a Dictionary) -> Option<&'a Dictionary> {
-    let mut node = page;
-    for _ in 0..32 {
-        if let Some(r) = node
-            .get(b"Resources")
-            .ok()
-            .and_then(|o| resolve(pdf, o))
-            .and_then(|o| o.as_dict().ok())
-        {
-            return Some(r);
-        }
-        node = node
-            .get(b"Parent")
-            .ok()
-            .and_then(|o| resolve(pdf, o))
-            .and_then(|o| o.as_dict().ok())?;
-    }
-    None
-}
-
 fn walk_resources(
-    pdf: &Pdf,
+    pdf: &LazyPdf,
     res: &Dictionary,
     seen_fonts: &mut HashSet<ObjectId>,
     seen_res: &mut HashSet<ObjectId>,
@@ -308,7 +264,7 @@ fn walk_resources(
     }
 }
 
-fn describe_font(pdf: &Pdf, d: &Dictionary) -> Font {
+fn describe_font(pdf: &LazyPdf, d: &Dictionary) -> Font {
     let name_of = |d: &Dictionary, k: &[u8]| {
         d.get(k)
             .ok()
@@ -366,9 +322,19 @@ fn describe_font(pdf: &Pdf, d: &Dictionary) -> Font {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use lopdf::{Stream, dictionary};
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
 
+    use lopdf::encryption::crypt_filters::{Aes256CryptFilter, CryptFilter};
+    use lopdf::{
+        Document as Pdf, EncryptionState, EncryptionVersion, Permissions, Stream, dictionary,
+    };
+
+    use super::*;
+    use crate::store::Src;
+
+    /// Two pages: the first with its own fonts, one in a form it draws;
+    /// the second with its parent's.
     fn sample() -> Pdf {
         let mut pdf = Pdf::with_version("1.4");
         let file = pdf.add_object(Stream::new(dictionary! {}, vec![0u8; 4]));
@@ -379,6 +345,9 @@ mod tests {
         let helv = pdf.add_object(
             dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" },
         );
+        let courier = pdf.add_object(
+            dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Courier" },
+        );
         let form = pdf.add_object(Stream::new(
             dictionary! { "Subtype" => "Form", "Resources" => dictionary! { "Font" => dictionary! { "F9" => helv } } },
             Vec::new(),
@@ -388,9 +357,14 @@ mod tests {
             "Type" => "Page", "Parent" => pages_id,
             "Resources" => dictionary! { "Font" => dictionary! { "F1" => embedded }, "XObject" => dictionary! { "X1" => form } },
         });
+        let plain = pdf.add_object(dictionary! { "Type" => "Page", "Parent" => pages_id });
         pdf.objects.insert(
             pages_id,
-            dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 }.into(),
+            dictionary! {
+                "Type" => "Pages", "Kids" => vec![page.into(), plain.into()], "Count" => 2,
+                "Resources" => dictionary! { "Font" => dictionary! { "F2" => courier } },
+            }
+            .into(),
         );
         let info = pdf.add_object(dictionary! {
             "Title" => Object::string_literal("Engagement letter"),
@@ -405,46 +379,65 @@ mod tests {
         pdf
     }
 
+    /// `pdf`, written, as a source.
+    fn source(pdf: &Pdf) -> Src {
+        let mut bytes = Vec::new();
+        pdf.clone().save_to(&mut bytes).unwrap();
+        crate::forms::fixture::source(bytes)
+    }
+
     #[test]
     fn reads_info_version_and_tags() {
-        let p = properties_of(&sample());
+        let p = read(&source(&sample()));
         assert_eq!(p.title, "Engagement letter");
         assert_eq!(p.producer, "sheaf test");
         assert_eq!(p.version, "1.7");
-        assert_eq!(p.pages, 1);
+        assert_eq!(p.pages, 2);
         assert!(p.tagged);
+        assert!(!p.linearized && p.security.is_none());
     }
 
     #[test]
-    fn lists_fonts_including_forms() {
-        let p = properties_of(&sample());
+    fn lists_fonts_including_forms_and_inherited_ones() {
+        let p = read(&source(&sample()));
+        let font = |name: &str, kind: &str, embedding| Font {
+            name: name.into(),
+            kind: kind.into(),
+            embedding,
+        };
         assert_eq!(
             p.fonts,
             [
-                Font {
-                    name: "Arial-Bold".into(),
-                    kind: "TrueType".into(),
-                    embedding: Embedding::Subset
-                },
-                Font {
-                    name: "Helvetica".into(),
-                    kind: "Type1".into(),
-                    embedding: Embedding::NotEmbedded
-                },
+                font("Arial-Bold", "TrueType", Embedding::Subset),
+                font("Courier", "Type1", Embedding::NotEmbedded),
+                font("Helvetica", "Type1", Embedding::NotEmbedded),
             ]
         );
+        assert!(!p.fonts_truncated);
     }
 
     #[test]
-    fn permissions_decode() {
-        let mut pdf = Pdf::with_version("1.7");
-        let enc = pdf.add_object(dictionary! {
-            "Filter" => "Standard", "V" => 5, "R" => 6,
+    fn an_encrypted_file_reads_decrypted_with_its_permissions() {
+        let mut pdf = sample();
+        let filter: Arc<dyn CryptFilter> = Arc::new(Aes256CryptFilter);
+        let state = EncryptionState::try_from(EncryptionVersion::V5 {
+            encrypt_metadata: true,
+            crypt_filters: BTreeMap::from([(b"StdCF".to_vec(), filter)]),
+            file_encryption_key: &[7; 32],
+            stream_filter: b"StdCF".to_vec(),
+            string_filter: b"StdCF".to_vec(),
+            owner_password: "owner",
+            user_password: "",
             // Print and copy allowed; nothing else.
-            "P" => (-4096i64 | 0b100 | 0b10000),
-        });
-        pdf.trailer.set("Encrypt", enc);
-        let s = security_of(&pdf);
+            permissions: Permissions::PRINTABLE | Permissions::COPYABLE,
+        })
+        .unwrap();
+        pdf.encrypt(&state).unwrap();
+        let p = read(&source(&pdf));
+        // Its strings decrypt as they're read; /Encrypt is kept.
+        assert_eq!(p.title, "Engagement letter");
+        assert_eq!(p.fonts.len(), 3);
+        let s = p.security.expect("its security");
         assert_eq!(s.method, "Password (AES-256)");
         let allowed: Vec<&str> = s
             .permissions

@@ -3,13 +3,14 @@
 //! (bug 6); a rewrite drops Reader's usage rights, and `/SigFlags` when
 //! nothing signed needs it (bug 7); an XFA copy holding values the
 //! AcroForm lacks is found; a save that would rewrite a signed file asks,
-//! and appending leaves its signed bytes as they were.
+//! and appending leaves its signed bytes as they were, but for an
+//! encrypted one.
 //!
 //! Needs libpdfium (`scripts/fetch-pdfium.sh`), like the app itself.
 
 use std::path::Path;
 
-use lopdf::{Document as Pdf, Object};
+use lopdf::{Document as Pdf, EncryptionState, EncryptionVersion, Object, Permissions};
 use sheaf_doc::forms::fixture::Form;
 use sheaf_doc::forms::{Finding, check};
 use sheaf_doc::save::{Signed, Strategy, WouldBreakSignatures, save_to_path_noting};
@@ -49,7 +50,7 @@ fn parts(bytes: &[u8]) -> (bool, bool, bool) {
 /// Each field's own `/TU`, by full name.
 fn tooltips(bytes: &[u8]) -> Vec<(String, Option<String>)> {
     let pdf = Pdf::load_mem(bytes).unwrap();
-    sheaf_doc::forms::read(&pdf)
+    form_in(bytes)
         .fields
         .into_iter()
         .map(|f| {
@@ -133,8 +134,8 @@ fn a_form_brought_into_a_hybrid_one_is_saved_in_full() {
         blue(&mut f, "z", 0, 0, "Zed");
         std::fs::write(&other, f.bytes()).unwrap();
     }
-    let (info, _) = sheaf_ops::open::describe(&other, None).unwrap();
-    let (_, facts) = sheaf_doc::file::read_open(&other, None).unwrap();
+    let (info, _) = sheaf_ops::open::describe(doc.store(), &other, None).unwrap();
+    let (_, facts) = sheaf_doc::file::read_open(&info.src).unwrap();
     let sid = doc.add_source(info);
     doc.set_source_form(sid, facts.form);
     doc.apply(
@@ -205,13 +206,11 @@ fn an_xfa_copy_holding_values_the_acroform_lacks_is_found() {
     let y = f.widgets_of(y)[1];
     f.xfa();
     f.dict(y).remove(b"V");
-    let pdf = Pdf::load_mem(&f.bytes()).unwrap();
-    let facts = sheaf_doc::forms::read(&pdf).facts;
+    let facts = form_in(&f.bytes()).facts;
     assert_eq!(facts.xfa_values, 1);
     // With its value back in the AcroForm, nothing's missing.
     f.dict(y).set("V", Object::string_literal("Why"));
-    let pdf = Pdf::load_mem(&f.bytes()).unwrap();
-    assert_eq!(sheaf_doc::forms::read(&pdf).facts.xfa_values, 0);
+    assert_eq!(form_in(&f.bytes()).facts.xfa_values, 0);
 }
 
 /// A two-page form with a signed signature field on page 1, and a text
@@ -283,6 +282,38 @@ fn a_save_that_would_rewrite_a_signed_file_asks() {
 }
 
 #[test]
+fn an_encrypted_signed_file_asks_with_no_append() {
+    // Opened with its empty user password; sheaf can't append to it yet.
+    let dir = scratch("saves-signed-encrypted");
+    let mut f = signed();
+    let id = Object::string_literal("0123456789abcdef");
+    f.pdf.trailer.set("ID", vec![id.clone(), id]);
+    let state = EncryptionState::try_from(EncryptionVersion::V2 {
+        document: &f.pdf,
+        owner_password: "owner",
+        user_password: "",
+        key_length: 128,
+        permissions: Permissions::all(),
+    })
+    .unwrap();
+    f.pdf.encrypt(&state).unwrap();
+    let path = write(&dir, "signed.pdf", &mut f);
+    let mut doc = sheaf_ops::open(&path, None).unwrap();
+    let second = doc.state().pages[1].id;
+    doc.apply(Edit::DeletePages { ids: vec![second] }, "Delete")
+        .unwrap();
+    let err = save_to_path_noting(&doc.snapshot(), &path, Signed::Ask).unwrap_err();
+    assert_eq!(
+        err.downcast_ref::<WouldBreakSignatures>(),
+        Some(&WouldBreakSignatures {
+            signatures: 1,
+            encrypted: true
+        })
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_certified_file_asks_too() {
     let dir = scratch("saves-certified");
     let mut f = Form::new(2);
@@ -308,8 +339,8 @@ fn signed_fields_brought_in_are_kept_and_said_so() {
     let a = write(&dir, "a.pdf", &mut Form::new(1));
     let s = write(&dir, "signed.pdf", &mut signed());
     let mut doc = sheaf_ops::open(&a, None).unwrap();
-    let (info, _) = sheaf_ops::open::describe(&s, None).unwrap();
-    let (_, facts) = sheaf_doc::file::read_open(&s, None).unwrap();
+    let (info, _) = sheaf_ops::open::describe(doc.store(), &s, None).unwrap();
+    let (_, facts) = sheaf_doc::file::read_open(&info.src).unwrap();
     let sid = doc.add_source(info);
     doc.set_source_form(sid, facts.form);
     let out = doc

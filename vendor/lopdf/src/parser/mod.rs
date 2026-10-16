@@ -1,7 +1,8 @@
-use super::{Dictionary, Object, ObjectId, Reader, Stream, StringFormat};
+use super::{Dictionary, Object, ObjectId, Stream, StringFormat};
 use crate::Error;
 use crate::content::*;
 use crate::error;
+use crate::parser_aux::{XrefCap, decode_xref_stream_capped};
 use crate::xref::*;
 use std::collections::HashSet;
 use std::str::{self, FromStr};
@@ -26,6 +27,38 @@ pub(crate) type ParserInput<'a> = &'a [u8];
 pub(crate) type NomError<'a> = nom::error::Error<ParserInput<'a>>;
 
 pub(crate) type NomResult<'a, O, E = NomError<'a>> = IResult<ParserInput<'a>, O, E>;
+
+/// sheaf: what parsing an object needs from the reader around it: its strictness, the limit on
+/// decompressing a cross-reference stream, and the value of a stream's indirect `/Length`. The
+/// eager `Reader` and `LazyPdf` both provide it.
+pub(crate) trait Resolve {
+    fn strict(&self) -> bool;
+    fn max_decompressed_size(&self) -> Option<usize>;
+    /// The integer object `id`, reached on the resolution path `already_seen`.
+    fn length(&self, id: ObjectId, already_seen: &mut HashSet<ObjectId>) -> crate::Result<i64>;
+}
+
+/// sheaf: an indirect object as [`indirect_object_in`] parses it.
+pub(crate) struct Parsed {
+    pub id: ObjectId,
+    pub object: Object,
+    /// Where the object ends in the input: after `endobj`, or after the object without one.
+    pub end: usize,
+    /// How much of the input is left after the white-space that follows.
+    pub rest: usize,
+}
+
+/// sheaf: a cross-reference section as [`xref_and_trailer`] parses it.
+pub(crate) struct Section {
+    pub xref: Xref,
+    pub trailer: Dictionary,
+    /// The number of the cross-reference stream, when the section is one.
+    pub stream: Option<u32>,
+    /// The entries its stream lists; none for a table, whose entries are each in the bytes.
+    pub listed: usize,
+    /// How much of the input is left after it.
+    pub rest: usize,
+}
 
 #[inline]
 fn strip_nom<O>(r: NomResult<O>) -> Option<O> {
@@ -96,7 +129,8 @@ fn integer(input: ParserInput) -> NomResult<i64> {
     convert_result(i64::from_str(str::from_utf8(int_input).unwrap()), i, ErrorKind::Digit)
 }
 
-fn real(input: ParserInput) -> NomResult<f32> {
+// sheaf: f64, for objects and content operands alike.
+fn real(input: ParserInput) -> NomResult<f64> {
     let (i, _) = pair(
         opt(one_of("+-")),
         alt((
@@ -107,7 +141,7 @@ fn real(input: ParserInput) -> NomResult<f32> {
     .parse(input)?;
 
     let float_input = &input[..input.len() - i.len()];
-    convert_result(f32::from_str(str::from_utf8(float_input).unwrap()), i, ErrorKind::Digit)
+    convert_result(f64::from_str(str::from_utf8(float_input).unwrap()), i, ErrorKind::Digit)
 }
 
 pub(crate) fn hex_char(input: ParserInput) -> NomResult<u8> {
@@ -374,14 +408,14 @@ fn recover_stream_length(input: ParserInput) -> Option<(ParserInput, ParserInput
 }
 
 fn stream<'a>(
-    input: ParserInput<'a>, reader: &Reader, already_seen: &mut HashSet<ObjectId>, recover_length: bool,
+    input: ParserInput<'a>, reader: &dyn Resolve, already_seen: &mut HashSet<ObjectId>, recover_length: bool,
     recovery_bound: Option<usize>,
 ) -> NomResult<'a, Object> {
     let (i, dict) = terminated(dictionary, (space, tag(&b"stream"[..]), space0, eol)).parse(input)?;
 
     if let Ok(length) = dict.get(b"Length").and_then(|value| {
         if let Ok(id) = value.as_reference() {
-            reader.get_object(id, already_seen).and_then(|value| value.as_i64())
+            reader.length(id, already_seen)
         } else {
             value.as_i64()
         }
@@ -395,7 +429,7 @@ fn stream<'a>(
         };
         match terminated(take(length), pair(opt(eol), tag(&b"endstream"[..]))).parse(i) {
             Ok((remaining, data)) => Ok((remaining, Object::Stream(Stream::new(dict, data.to_vec())))),
-            Err(_) if recover_length && !reader.strict => {
+            Err(_) if recover_length && !reader.strict() => {
                 // The scan must not cross into a neighbouring object, so it stops at the
                 // xref-derived bound: the first `i.len() - bound` bytes of `i`.
                 let scan_end = recovery_bound.map_or(i.len(), |bound| i.len().saturating_sub(bound));
@@ -463,7 +497,7 @@ pub fn direct_object(input: ParserInput) -> Option<Object> {
 }
 
 fn object<'a>(
-    input: ParserInput<'a>, reader: &Reader, already_seen: &mut HashSet<ObjectId>, recover_stream_length: bool,
+    input: ParserInput<'a>, reader: &dyn Resolve, already_seen: &mut HashSet<ObjectId>, recover_stream_length: bool,
     recovery_bound: Option<usize>,
 ) -> NomResult<'a, Object> {
     terminated(
@@ -477,13 +511,22 @@ fn object<'a>(
 }
 
 pub fn indirect_object(
-    input: ParserInput, offset: usize, expected_id: Option<ObjectId>, reader: &Reader,
+    input: ParserInput, offset: usize, expected_id: Option<ObjectId>, reader: &dyn Resolve,
     already_seen: &mut HashSet<ObjectId>, recovery_bound: Option<usize>,
 ) -> crate::Result<(ObjectId, Object)> {
+    indirect_object_in(input, offset, expected_id, reader, already_seen, recovery_bound)
+        .map(|parsed| (parsed.id, parsed.object))
+}
+
+/// sheaf: [`indirect_object`], with where the object ends and what's left of `input` after it.
+pub(crate) fn indirect_object_in(
+    input: ParserInput, offset: usize, expected_id: Option<ObjectId>, reader: &dyn Resolve,
+    already_seen: &mut HashSet<ObjectId>, recovery_bound: Option<usize>,
+) -> crate::Result<Parsed> {
     // Every downstream slice is a suffix of `input`, so express the absolute
     // end offset as the maximum length a suffix may have.
     let recovery_bound = recovery_bound.map(|end| input.len().saturating_sub(end));
-    let (id, mut object) = _indirect_object(
+    let mut parsed = _indirect_object(
         input.take_from(offset),
         offset,
         expected_id,
@@ -493,15 +536,16 @@ pub fn indirect_object(
         recovery_bound,
     )?;
 
-    offset_stream(&mut object, offset);
+    offset_stream(&mut parsed.object, offset);
+    parsed.end += offset;
 
-    Ok((id, object))
+    Ok(parsed)
 }
 
 fn _indirect_object<'a>(
-    input: ParserInput<'a>, offset: usize, expected_id: Option<ObjectId>, reader: &Reader,
+    input: ParserInput<'a>, offset: usize, expected_id: Option<ObjectId>, reader: &dyn Resolve,
     already_seen: &mut HashSet<ObjectId>, recover_stream_length: bool, recovery_bound: Option<usize>,
-) -> crate::Result<(ObjectId, Object)> {
+) -> crate::Result<Parsed> {
     let (i, (_, object_id)) = terminated((space, object_id), pair(tag(&b"obj"[..]), space))
         .parse(input)
         .map_err(|_| Error::IndirectObject { offset })?;
@@ -512,16 +556,24 @@ fn _indirect_object<'a>(
     }
 
     let object_offset = input.len() - i.len();
-    let (_, mut object) = terminated(
+    // sheaf: the white-space after `endobj` is parsed apart, to say where the object ends.
+    let (i, mut object) = terminated(
         |i: ParserInput<'a>| object(i, reader, already_seen, recover_stream_length, recovery_bound),
-        (space, opt(tag(&b"endobj"[..])), space),
+        (space, opt(tag(&b"endobj"[..]))),
     )
     .parse(i)
     .map_err(|_| Error::IndirectObject { offset })?;
+    let end = input.len() - i.len();
+    let (rest, _) = space(i).map_err(|_| Error::IndirectObject { offset })?;
 
     offset_stream(&mut object, object_offset);
 
-    Ok((object_id, object))
+    Ok(Parsed {
+        id: object_id,
+        object,
+        end,
+        rest: rest.len(),
+    })
 }
 
 pub fn header(input: ParserInput, strict: bool) -> Option<String> {
@@ -619,24 +671,31 @@ fn trailer(input: ParserInput) -> NomResult<Dictionary> {
     delimited(pair(tag(&b"trailer"[..]), space), dictionary, space).parse(input)
 }
 
-pub fn xref_and_trailer(input: ParserInput, reader: &Reader) -> crate::Result<(Xref, Dictionary)> {
-    let xref_trailer = map(pair(|i| xref(i, reader.strict), trailer), |(mut xref, trailer)| {
+/// sheaf: with the section's cross-reference stream number and what's left of `input`. A stream
+/// lists what `cap` allows ([`decode_xref_stream_capped`]).
+pub(crate) fn xref_and_trailer(
+    input: ParserInput, reader: &dyn Resolve, cap: Option<XrefCap>,
+) -> crate::Result<Section> {
+    let xref_trailer = map(pair(|i| xref(i, reader.strict()), trailer), |(mut xref, trailer)| {
         xref.size = trailer
             .get(b"Size")
             .and_then(Object::as_i64)
             .map_err(|_| error::ParseError::InvalidTrailer)? as u32;
-        Ok((xref, trailer))
+        Ok((xref, trailer, None, 0))
     });
-    alt((
+    let (rest, section) = alt((
         xref_trailer,
         (|input| {
             _indirect_object(input, 0, None, reader, &mut HashSet::new(), false, None)
-                .map(|(_, obj)| {
-                    let res = match obj {
-                        Object::Stream(stream) => decode_xref_stream_with_limit(stream, reader.max_decompressed_size),
+                .map(|parsed| {
+                    let res = match parsed.object {
+                        Object::Stream(stream) => {
+                            decode_xref_stream_capped(stream, reader.max_decompressed_size(), cap)
+                                .map(|(xref, trailer, listed)| (xref, trailer, Some(parsed.id.0), listed))
+                        }
                         _ => Err(crate::error::ParseError::InvalidXref.into()),
                     };
-                    (input, res)
+                    (&input[input.len() - parsed.rest..], res)
                 })
                 .map_err(|_| {
                     // artificial error kind is created to allow descriptive nom errors
@@ -645,8 +704,15 @@ pub fn xref_and_trailer(input: ParserInput, reader: &Reader) -> crate::Result<(X
         }),
     ))
     .parse(input)
-    .map(|(_, o)| o)
-    .map_err(|_| error::ParseError::InvalidTrailer)?
+    .map_err(|_| error::ParseError::InvalidTrailer)?;
+    let (xref, trailer, stream, listed) = section?;
+    Ok(Section {
+        xref,
+        trailer,
+        stream,
+        listed,
+        rest: rest.len(),
+    })
 }
 
 /// sheaf: the length of the indirect object header (`N G obj`) that `input` starts with, with any
@@ -656,21 +722,31 @@ pub(crate) fn indirect_object_header_len(input: ParserInput) -> Option<usize> {
     Some(input.len() - rest.len())
 }
 
+/// sheaf: the length of the white-space and comments that `input` starts with.
+pub(crate) fn space_len(input: ParserInput) -> usize {
+    space(input).map_or(0, |(rest, _)| input.len() - rest.len())
+}
+
+/// sheaf: the length of the end of a stream's data that `input` starts with: `endstream`, after
+/// an end of line, then `endobj` when it's there, as `_indirect_object` reads them.
+pub(crate) fn stream_end(input: ParserInput) -> Option<usize> {
+    let (rest, _) = (opt(eol), tag(&b"endstream"[..]), space, opt(tag(&b"endobj"[..])))
+        .parse(input)
+        .ok()?;
+    Some(input.len() - rest.len())
+}
+
+/// sheaf: with white-space of any kind around the offset, as PDFium reads it: `startxref 1234`
+/// on one line, or a blank line before `%%EOF`.
 pub fn xref_start(input: ParserInput) -> Option<i64> {
     strip_nom(
         delimited(
-            pair(tag(&b"startxref"[..]), preceded(opt(tag(&b" "[..])), eol)),
-            trim_spaces(integer),
-            (eol, tag(&b"%%EOF"[..]), space),
+            pair(tag(&b"startxref"[..]), white_space),
+            integer,
+            (white_space, tag(&b"%%EOF"[..]), space),
         )
         .parse(input),
     )
-}
-
-fn trim_spaces<'a, O>(
-    p: impl Parser<ParserInput<'a>, Output = O, Error = NomError<'a>>,
-) -> impl Parser<ParserInput<'a>, Output = O, Error = NomError<'a>> {
-    delimited(many0(tag(" ")), p, many0(tag(" ")))
 }
 
 // The following code create parser to parse content stream.

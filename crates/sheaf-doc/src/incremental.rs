@@ -62,10 +62,10 @@ enum Mode {
 fn build(snap: &Snapshot, mode: Mode) -> Result<(usize, Vec<u8>)> {
     let primary_id = snap.primary;
     let info = snap.source(primary_id).context("primary source missing")?;
-    let original = crate::file::source_bytes(info)?;
+    let original = info.src.bytes();
     let original_len = original.len();
     let mut pdf =
-        Pdf::load_mem(&original).with_context(|| format!("parsing {}", info.path.display()))?;
+        Pdf::load_mem(original).with_context(|| format!("parsing {}", info.name.display()))?;
     if snap.header_footer_dirty {
         // Drawing it touches every page's content: a rewrite does that.
         bail!("a new header/footer is written by a full save");
@@ -467,7 +467,7 @@ fn build(snap: &Snapshot, mode: Mode) -> Result<(usize, Vec<u8>)> {
         }
     }
     if changed.is_empty() {
-        return Ok((original_len, std::sync::Arc::unwrap_or_clone(original)));
+        return Ok((original_len, original.to_vec()));
     }
 
     // ----- serialize the update section ---------------------------------------
@@ -477,7 +477,7 @@ fn build(snap: &Snapshot, mode: Mode) -> Result<(usize, Vec<u8>)> {
             _ => id.1,
         }
     };
-    let mut out = std::sync::Arc::unwrap_or_clone(original);
+    let mut out = original.to_vec();
     if !out.ends_with(b"\n") {
         out.push(b'\n');
     }

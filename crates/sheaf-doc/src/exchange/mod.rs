@@ -362,7 +362,7 @@ pub fn gather(
         .pages
         .front()
         .and_then(|p| sources.get(&p.source))
-        .and_then(|s| s.path.file_name())
+        .and_then(|s| s.name.file_name())
         .map(|n| n.to_string_lossy().into_owned());
     Ok(out)
 }
@@ -400,7 +400,7 @@ impl<'a> Geoms<'a> {
             .or_insert_with(|| {
                 let info = sources.get(&source)?;
                 crate::file::load_source(info)
-                    .map_err(|e| log::warn!("{}: {e:#}", info.path.display()))
+                    .map_err(|e| log::warn!("{}: {e:#}", info.name.display()))
                     .ok()
             })
             .as_ref()
@@ -416,7 +416,7 @@ impl<'a> Geoms<'a> {
         let size = self
             .sources
             .get(&pref.source)
-            .map(|s| s.page_size(pref.index))
+            .map(|s| s.src.page_size(pref.index))
             .unwrap_or(sheaf_core::PageSize {
                 width: 612.0,
                 height: 792.0,

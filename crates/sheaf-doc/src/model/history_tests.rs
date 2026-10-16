@@ -1,13 +1,14 @@
 //! History's proof (M10.5 slice 1): over random runs of every kind of
 //! edit, with batches, jobs, undo, redo, jumps, trims and saves, each version
-//! rebuilt from its prims is the state it was made as. Each kind's no-op
-//! makes no version.
+//! rebuilt from its prims is the state it was made as, and every file it
+//! refers to is still registered (slice 3). Each kind's no-op makes no
+//! version.
 
 use std::collections::BTreeSet;
 
 use proptest::prelude::*;
 
-use super::tests::{connector, flat, header, square, src, tl};
+use super::tests::{connector, flat, header, new_doc, square, tl};
 use super::*;
 use crate::history::FixedCount;
 use crate::labels::{LabelSpec, Style};
@@ -55,7 +56,8 @@ fn kind(edit: &Edit) -> &'static str {
 /// A document, and what a run of actions did to it.
 struct Run {
     d: Document,
-    /// Another file with a form, whose pages come in.
+    /// The opened file, and another with a form, whose pages come in.
+    opened: SourceId,
     other: SourceId,
     /// The job the run's job actions join, until one starts another.
     job: Option<JobId>,
@@ -69,17 +71,24 @@ impl Run {
     /// Six pages with two bookmarks and a form, beside a file with the same
     /// form, keeping no snapshot it may drop.
     fn new() -> Self {
-        let mut d = Document::new(
-            src(6),
+        let mut d = new_doc(
+            6,
             &flat(&[("A", Some(0), 0), ("B", Some(3), 0)]),
             Box::new(FixedCount(1)),
         );
-        let form = crate::forms::read(&crate::forms::fixture::every_kind().pdf);
+        let form = crate::forms::read(&crate::forms::fixture::every_kind().source());
         d.set_initial_fields(&form).unwrap();
-        let other = d.add_source(src(4));
+        let other = d.add_source(SourceInfo::blank(d.store(), 4));
         d.set_source_form(other, form);
+        // The opened version holds it, so any version may bring its pages
+        // in, as it may the opened file's. (The app registers a file for
+        // each insert, and the version the insert made holds it.)
+        d.unlogged_sources.clear();
+        let root = d.root;
+        d.versions.get_mut(&root).unwrap().sources.push(other);
         let made = vec![(d.current_version(), d.state().clone())];
         Self {
+            opened: d.primary(),
             d,
             other,
             job: None,
@@ -137,7 +146,8 @@ impl Run {
             TRIM => self.d.trim(),
             SAVE => {
                 let pages = self.d.page_count() as u32;
-                self.d.rebase_to_saved(src(pages));
+                self.d
+                    .rebase_to_saved(SourceInfo::blank(self.d.store(), pages));
                 // The current version, expressed anew over the saved file.
                 self.made.retain(|(id, _)| self.d.versions.contains_key(id));
                 self.made
@@ -226,12 +236,8 @@ impl Run {
         };
         // A file pages come from, and its page count.
         let source = |rng: &mut fastrand::Rng| {
-            let id = if rng.bool() {
-                self.other
-            } else {
-                self.d.primary()
-            };
-            (id, self.d.sources[&id].page_count)
+            let id = if rng.bool() { self.other } else { self.opened };
+            (id, self.d.sources[&id].src.page_count())
         };
         // A few of its pages: a saved file has all the document's, and
         // bringing in all of them doubles it.
@@ -445,11 +451,30 @@ impl Run {
     /// Every version recorded, rebuilt from the opened version's state by
     /// its prims alone (unless a save is on the way), and reached by a jump
     /// with no snapshot kept that may be dropped: the state it was made as,
-    /// ids and all. Neither draws an id. The kinds of edit that made a
-    /// version.
+    /// ids and all. Neither draws an id. Each registration is held once, by
+    /// a version or the next one to be made (the primary may be by none),
+    /// and what the versions refer to is registered. The kinds of edit that
+    /// made a version.
     fn check(mut self) -> BTreeSet<&'static str> {
         let d = &mut self.d;
         d.trim();
+        let mut held = BTreeSet::new();
+        for s in d.versions.values().flat_map(|v| &v.sources) {
+            assert!(held.insert(*s), "{s:?} is held twice");
+        }
+        for s in &d.unlogged_sources {
+            assert!(held.insert(*s), "{s:?} is held twice");
+        }
+        held.insert(d.primary);
+        let registered: BTreeSet<SourceId> = d.sources.keys().copied().collect();
+        assert_eq!(held, registered);
+        assert!(d.forms.keys().all(|s| registered.contains(s)));
+        for (id, st) in &self.made {
+            let pages = st.pages.iter().map(|p| p.source);
+            for s in pages.chain(st.fields.values().map(|f| f.source)) {
+                assert!(registered.contains(&s), "{id:?} refers to {s:?}");
+            }
+        }
         // Saved versions and their children keep their snapshots.
         if d.version_count() > 2 && d.versions.values().all(|v| v.saves.is_empty()) {
             assert!(
@@ -594,12 +619,12 @@ fn a_run_applies_every_kind() {
 /// have none: each always makes or removes something, or fails.
 #[test]
 fn each_kind_s_no_op_pushes_nothing() {
-    let mut d = Document::new(
-        src(6),
+    let mut d = new_doc(
+        6,
         &flat(&[("A", Some(0), 0), ("A1", Some(1), 1), ("B", Some(3), 0)]),
         Box::new(FixedCount(100)),
     );
-    let other = d.add_source(src(4));
+    let other = d.add_source(SourceInfo::blank(d.store(), 4));
     let [p0, p1, p2] = [0, 1, 2].map(|i| d.page(i).unwrap().id);
     let roman = || {
         vec![LabelSpec {

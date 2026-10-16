@@ -7,8 +7,8 @@
 use std::path::{Path, PathBuf};
 
 use lopdf::{Document as Pdf, Object, Stream, dictionary};
-use sheaf_core::{DestView, PageSize};
-use sheaf_doc::{Document, FixedCount, FlatOutlineItem, SourceInfo};
+use sheaf_core::DestView;
+use sheaf_doc::{Document, FixedCount, FlatOutlineItem, SourceInfo, Store};
 use sheaf_render::Renderer;
 use sheaf_render::pdfium::PdfiumEngine;
 
@@ -75,20 +75,11 @@ fn positions_round_trip_through_pdfium() {
         kind: "FitH".into(),
         params: vec![Some(500.0)],
     });
+    let store = Store::new();
+    let primary = SourceInfo::read(&store, &src, None).unwrap();
     let model = Document::new(
-        SourceInfo {
-            path: src.clone(),
-            page_count: 2,
-            first_page: PageSize {
-                width: 612.0,
-                height: 792.0,
-            },
-            page_sizes: None,
-            bytes: 0,
-            password: None,
-            data: None,
-            derived: None,
-        },
+        store,
+        primary,
         &[
             item("Upright", 0, xyz(36.0, 100.0)),
             // Displayed space on a /Rotate 90 page is 792 wide, 612 tall.

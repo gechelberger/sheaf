@@ -17,7 +17,7 @@ use sheaf_core::PageIndex;
 use sheaf_doc::forms::check;
 use sheaf_doc::forms::fixture::Form;
 use sheaf_doc::save::Strategy;
-use sheaf_doc::{Document, Edit, EditOutcome, PageId, SourceInfo};
+use sheaf_doc::{Document, Edit, EditOutcome, PageId};
 use sheaf_ops::combine::{CombineItem, CombineParams};
 use sheaf_render::pdfium::render_appearances;
 
@@ -32,9 +32,9 @@ fn insert(
     range: Option<Range<u32>>,
     before: Option<PageId>,
 ) -> EditOutcome {
-    let (info, _) = sheaf_ops::open::describe(path, None).unwrap();
-    let range = range.unwrap_or(0..info.page_count);
-    let (_, facts) = sheaf_doc::file::read_open(path, None).unwrap();
+    let (info, _) = sheaf_ops::open::describe(doc.store(), path, None).unwrap();
+    let range = range.unwrap_or(0..info.src.page_count());
+    let (_, facts) = sheaf_doc::file::read_open(&info.src).unwrap();
     let sid = doc.add_source(info);
     doc.set_source_form(sid, facts.form);
     doc.apply(
@@ -101,8 +101,7 @@ fn form_b() -> Form {
 
 /// The form's `/CO`, as full names.
 fn calculation_order(bytes: &[u8]) -> Vec<String> {
-    let pdf = Pdf::load_mem(bytes).unwrap();
-    let form = sheaf_doc::forms::read(&pdf);
+    let form = form_in(bytes);
     form.facts
         .calculation_order
         .iter()
@@ -113,14 +112,12 @@ fn calculation_order(bytes: &[u8]) -> Vec<String> {
 
 /// The form's `/DR /Font` names.
 fn fonts(bytes: &[u8]) -> Vec<String> {
-    let pdf = Pdf::load_mem(bytes).unwrap();
-    sheaf_doc::forms::read(&pdf).facts.fonts
+    form_in(bytes).facts.fonts
 }
 
 /// A field's own `/DA`, as text.
 fn da_of(bytes: &[u8], name: &str) -> String {
-    let pdf = Pdf::load_mem(bytes).unwrap();
-    let f = sheaf_doc::forms::read(&pdf)
+    let f = form_in(bytes)
         .fields
         .into_iter()
         .find(|f| f.name == name)
@@ -246,12 +243,7 @@ fn a_clash_on_a_parent_renames_the_whole_form() {
         let what = format!("{strategy:?}");
         let report = clean(&bytes, &what);
         assert_eq!(report.fields, 2, "{what}");
-        let pdf = Pdf::load_mem(&bytes).unwrap();
-        let read: Vec<String> = sheaf_doc::forms::read(&pdf)
-            .fields
-            .into_iter()
-            .map(|f| f.name)
-            .collect();
+        let read: Vec<String> = form_in(&bytes).fields.into_iter().map(|f| f.name).collect();
         assert_eq!(read, ["top.x", "b.top.y"], "{what}");
     }
     let _ = std::fs::remove_dir_all(&dir);
@@ -286,13 +278,8 @@ fn a_font_of_the_same_name_comes_in_renamed() {
 /// Save `doc` in place as the app does: then it shows the saved file.
 fn save_in_place(doc: &mut Document, path: &Path) -> Strategy {
     let strategy = sheaf_doc::save::save_to_path(&doc.snapshot(), path).unwrap();
-    let bytes = std::fs::read(path).unwrap();
-    let (info, _) = sheaf_ops::open::describe(path, None).unwrap();
-    doc.rebase_to_saved(SourceInfo {
-        bytes: bytes.len(),
-        data: Some(sheaf_doc::SourceData(std::sync::Arc::new(bytes))),
-        ..info
-    });
+    let (info, _) = sheaf_ops::open::describe(doc.store(), path, None).unwrap();
+    doc.rebase_to_saved(info);
     strategy
 }
 
@@ -376,6 +363,7 @@ fn duplicating_a_copy_or_a_cropped_page_gets_fields_of_its_own() {
         .unwrap();
     let first = doc.state().pages[0].id;
     let plan = sheaf_ops::crop::plan(
+        doc.store(),
         &doc.snapshot(),
         &[first],
         sheaf_ops::crop::CropSpec::Margins(sheaf_ops::crop::Margins {
@@ -429,8 +417,8 @@ fn replaced_pages_bring_their_form() {
     let b = write(&dir, "b.pdf", &mut form_b());
     let mut doc = sheaf_ops::open(&a, None).unwrap();
     let second = doc.state().pages[1].id;
-    let (info, _) = sheaf_ops::open::describe(&b, None).unwrap();
-    let (_, facts) = sheaf_doc::file::read_open(&b, None).unwrap();
+    let (info, _) = sheaf_ops::open::describe(doc.store(), &b, None).unwrap();
+    let (_, facts) = sheaf_doc::file::read_open(&info.src).unwrap();
     let sid = doc.add_source(info);
     doc.set_source_form(sid, facts.form);
     doc.apply(

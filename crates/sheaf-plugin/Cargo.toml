@@ -26,3 +26,5 @@ usvg = { version = "0.46", default-features = false }
 
 [dev-dependencies]
 env_logger.workspace = true
+# Documents of blank pages, for the host tests.
+sheaf-doc = { workspace = true, features = ["fixtures"] }

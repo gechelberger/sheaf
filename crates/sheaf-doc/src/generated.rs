@@ -1,8 +1,9 @@
 //! PDFs sheaf makes for pages that have no file of their own (images, blank
-//! pages). Sources are files, since save, recovery and the renderer all
-//! reopen them by path, so these are written to a content-addressed cache:
-//! the same bytes give the same file, and a file outlives a crash so
-//! recovery can still use it.
+//! pages), and the stamps and attachments marks name, written to a
+//! content-addressed cache: the same bytes give the same file, and a file
+//! outlives a crash so recovery can still use it. Blank and image pages
+//! go in as files, read from here into the document's store; marks name
+//! their stamps and attachments by the file's stem.
 
 use std::path::PathBuf;
 
@@ -167,7 +168,7 @@ pub fn blank_pages(width: f32, height: f32, count: usize) -> Result<Vec<u8>> {
             pdf.add_object(dictionary! {
                 "Type" => "Page",
                 "Parent" => pages_id,
-                "MediaBox" => vec![0.into(), 0.into(), Object::Real(width), Object::Real(height)],
+                "MediaBox" => vec![0.into(), 0.into(), Object::from(width), Object::from(height)],
                 "Contents" => content,
                 "Resources" => dictionary! {},
             })

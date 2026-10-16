@@ -267,7 +267,7 @@ pub fn convert(
             .ok()
             .and_then(|o| o.as_float().ok())
             .unwrap_or(1.0)
-            .clamp(0.0, 1.0),
+            .clamp(0.0, 1.0) as f32,
         stroke,
         author: text(b"T"),
         contents,
@@ -441,7 +441,7 @@ fn floats(pdf: &Pdf, a: &[Object]) -> Vec<f32> {
             pdf.dereference(o)
                 .ok()
                 .and_then(|(_, o)| o.as_float().ok())
-                .unwrap_or(0.0)
+                .unwrap_or(0.0) as f32
         })
         .collect()
 }
@@ -501,7 +501,7 @@ fn border_width(pdf: &Pdf, dict: &Dictionary) -> f32 {
         .and_then(|bs| bs.get(b"W").ok())
         .and_then(|w| w.as_float().ok())
     {
-        return w;
+        return w as f32;
     }
     numbers(pdf, dict, b"Border")
         .and_then(|b| b.get(2).copied())

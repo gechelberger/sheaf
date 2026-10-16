@@ -1286,12 +1286,15 @@ impl Workspace {
             let p = file.clone();
             let counted = cx
                 .background_executor()
-                .spawn(async move { sheaf_ops::open::describe(&p, None) })
+                .spawn(async move {
+                    sheaf_doc::SourceInfo::read(&sheaf_doc::Store::new(), &p, None)
+                        .map(|info| info.src.page_count())
+                })
                 .await;
             ws.update_in(cx, |ws, window, cx| {
                 let Some(doc) = ws.doc().cloned() else { return };
                 let file_pages = match counted {
-                    Ok((info, _)) => info.page_count as usize,
+                    Ok(pages) => pages as usize,
                     Err(e) => {
                         doc.update(cx, |d, cx| d.set_notice(format!("Replace: {e:#}"), cx));
                         return;

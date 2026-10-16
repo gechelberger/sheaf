@@ -118,7 +118,6 @@ pub trait Renderer {
     /// The document's form, as the engine classes it.
     fn form_type(&self) -> FormType;
     fn page_size(&self, page: PageIndex) -> Result<PageSize>;
-    fn page_sizes(&self) -> Result<Vec<PageSize>>;
     /// The bookmark tree, flattened in pre-order.
     fn outline(&self) -> Result<Vec<OutlineItem>>;
     /// All matches of `query` on one page.
@@ -272,10 +271,10 @@ pub mod pdfium {
     }
 
     pub struct PdfiumEngine {
-        // Dropped under the lock, before `bytes`: PDFium reads the buffer
+        // Dropped under the lock, before `_bytes`: PDFium reads the buffer
         // for as long as the document is open.
         doc: ManuallyDrop<PdfDocument<'static>>,
-        bytes: Arc<Vec<u8>>,
+        _bytes: Arc<[u8]>,
     }
 
     impl Drop for PdfiumEngine {
@@ -295,15 +294,14 @@ pub mod pdfium {
             // enumerate 7k page sizes in one measurement). One sequential read
             // of even a few hundred MB is cheap by comparison, and it's what a
             // viewer wants anyway. Truly huge files can revisit this.
-            let bytes =
-                std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-            Self::open_bytes(Arc::new(bytes), password)
-                .with_context(|| format!("opening {}", path.display()))
+            let bytes = sheaf_core::read_file(path)
+                .with_context(|| format!("reading {}", path.display()))?;
+            Self::open_bytes(bytes, password).with_context(|| format!("opening {}", path.display()))
         }
 
         /// Open a file already in memory, sharing the buffer: the document
         /// model keeps the same bytes, so saves read what PDFium shows.
-        pub fn open_bytes(bytes: Arc<Vec<u8>>, password: Option<&str>) -> Result<Self> {
+        pub fn open_bytes(bytes: Arc<[u8]>, password: Option<&str>) -> Result<Self> {
             // SAFETY: the slice points into `bytes`, which the engine owns
             // and never changes, and `doc` (which borrows it) is dropped
             // before it (in `drop`).
@@ -321,13 +319,8 @@ pub mod pdfium {
             };
             Ok(Self {
                 doc: ManuallyDrop::new(doc),
-                bytes,
+                _bytes: bytes,
             })
-        }
-
-        /// The file's bytes, shared.
-        pub fn bytes(&self) -> Arc<Vec<u8>> {
-            self.bytes.clone()
         }
 
         /// A page `width` pixels wide, RGBA, transparent where nothing is
@@ -432,16 +425,6 @@ pub mod pdfium {
                 width: r.width().value,
                 height: r.height().value,
             })
-        }
-
-        fn page_sizes(&self) -> Result<Vec<PageSize>> {
-            // FPDF_GetPageSizeByIndexF reads the page dictionary without
-            // loading page content: ~30µs/page, so ~200ms for 7k pages. Cheap
-            // but not free, which is why DocInfo doesn't wait for it. Locked
-            // a page at a time, so other documents get turns during it.
-            (0..self.page_count())
-                .map(|i| self.page_size(PageIndex(i)))
-                .collect()
         }
 
         fn outline(&self) -> Result<Vec<OutlineItem>> {
@@ -582,6 +565,17 @@ pub mod pdfium {
                 let _pdfium = lock();
                 self.doc.bookmarks().root()
             };
+            if root.is_some() {
+                // A destination's page index walks the page tree for each
+                // page PDFium hasn't loaded yet, so load every page's
+                // dictionary first, a page at a time: 60 ms at 7,000
+                // pages, where 2,000 bookmarks took 1.2 s without. It goes
+                // when M10.5 slice 4 reads the outline from the source.
+                for i in 0..self.page_count() {
+                    let _pdfium = lock();
+                    let _ = self.doc.pages().page_size(i as i32);
+                }
+            }
             let mut out = Vec::new();
             let mut frames = HashMap::new();
             walk(root, 0, &self.doc, &mut frames, &mut out);
@@ -957,18 +951,15 @@ pub mod pdfium {
     }
 }
 
-/// What the worker learned about the document at open time. Deliberately
-/// O(1) in page count so first paint doesn't wait on a 7,000-page walk; the
-/// full size table comes later via [`RenderHandle::page_sizes`].
+/// What the worker learned about the document at open time: nothing that
+/// walks its pages, so first paint doesn't wait on a 7,000-page file. The
+/// layout's page count and sizes are the source's (`sheaf_doc::Source`).
 #[derive(Debug)]
 pub struct DocInfo {
-    pub page_count: u32,
     /// The kind of form it has: the app shows the XFA-only bar from this
     /// until the field model is read.
     pub form_type: FormType,
-    /// Size of page 0, used as the layout estimate until all sizes arrive.
-    pub first_page: PageSize,
-    /// Wall time to read, parse, and size the first page.
+    /// Wall time to parse the file.
     pub open_time: std::time::Duration,
 }
 
@@ -998,7 +989,6 @@ pub enum Matcher {
 
 enum Msg {
     Render(RenderRequest, oneshot::Sender<Result<Rendered>>),
-    PageSizes(oneshot::Sender<Result<Vec<PageSize>>>),
     Outline(oneshot::Sender<Result<Vec<OutlineItem>>>),
     TextBoxes {
         page: u32,
@@ -1052,60 +1042,43 @@ enum Msg {
 pub struct RenderHandle {
     tx: mpsc::Sender<Msg>,
     info: Arc<DocInfo>,
-    /// The file's bytes, which the worker's PDFium reads: the document
-    /// model keeps the same buffer (`SourceInfo::data`).
-    data: Arc<Vec<u8>>,
 }
 
 impl RenderHandle {
-    /// Spawn a worker, open `path` on it, and block until the open finishes.
-    /// Call from a background task if you don't want to block the UI.
-    pub fn open(path: PathBuf, password: Option<String>) -> Result<Self> {
+    /// Spawn a worker, open `bytes` on it, and block until the open
+    /// finishes. The worker's PDFium reads the buffer it's given: the
+    /// document model's source holds the same one. Call from a background
+    /// task if you don't want to block the UI.
+    pub fn open_bytes(bytes: Arc<[u8]>, password: Option<String>) -> Result<Self> {
         let (tx, rx) = mpsc::channel::<Msg>();
-        let (ready_tx, ready_rx) = mpsc::channel::<Result<(DocInfo, Arc<Vec<u8>>)>>();
+        let (ready_tx, ready_rx) = mpsc::channel::<Result<DocInfo>>();
 
         std::thread::Builder::new()
             .name("sheaf-render".into())
             .spawn(move || {
                 let t = Instant::now();
-                let engine = match pdfium::PdfiumEngine::open(&path, password.as_deref()) {
+                let engine = match pdfium::PdfiumEngine::open_bytes(bytes, password.as_deref()) {
                     Ok(e) => e,
                     Err(e) => {
                         let _ = ready_tx.send(Err(e));
                         return;
                     }
                 };
-                let info = engine.page_size(PageIndex(0)).map(|first_page| {
-                    let info = DocInfo {
-                        page_count: engine.page_count(),
-                        form_type: engine.form_type(),
-                        first_page,
-                        open_time: t.elapsed(),
-                    };
-                    (info, engine.bytes())
-                });
-                let failed = info.is_err();
-                let _ = ready_tx.send(info);
-                if failed {
-                    return;
-                }
+                let _ = ready_tx.send(Ok(DocInfo {
+                    form_type: engine.form_type(),
+                    open_time: t.elapsed(),
+                }));
                 worker_loop(engine, rx);
             })
             .context("spawning render thread")?;
 
-        let (info, data) = ready_rx
+        let info = ready_rx
             .recv()
             .context("render thread died before opening")??;
         Ok(Self {
             tx,
             info: Arc::new(info),
-            data,
         })
-    }
-
-    /// The file's bytes as opened, shared with the renderer.
-    pub fn data(&self) -> Arc<Vec<u8>> {
-        self.data.clone()
     }
 
     pub fn info(&self) -> &DocInfo {
@@ -1118,13 +1091,6 @@ impl RenderHandle {
     pub fn render(&self, request: RenderRequest) -> oneshot::Receiver<Result<Rendered>> {
         let (tx, rx) = oneshot::channel();
         self.send(Msg::Render(request, tx));
-        rx
-    }
-
-    /// Fetch the size of every page. Runs on the worker between renders.
-    pub fn page_sizes(&self) -> oneshot::Receiver<Result<Vec<PageSize>>> {
-        let (tx, rx) = oneshot::channel();
-        self.send(Msg::PageSizes(tx));
         rx
     }
 
@@ -1163,8 +1129,7 @@ impl RenderHandle {
     }
 
     /// The size of one page as the engine renders it (after its own
-    /// `/Rotate`). Unlike [`page_sizes`](Self::page_sizes) this answers
-    /// right away, for callers that can't wait for the whole walk.
+    /// `/Rotate`).
     pub fn page_size(&self, page: u32) -> oneshot::Receiver<Result<PageSize>> {
         let (tx, rx) = oneshot::channel();
         self.send(Msg::PageSize { page, reply: tx });
@@ -1269,20 +1234,11 @@ impl RenderHandle {
     }
 }
 
-/// Pages sized per chunk before checking the channel for render requests.
-const SIZE_CHUNK: u32 = 64;
-
-/// A page-size walk in progress, resumed between renders so a 7,000-page
-/// enumeration never delays a visible page.
-struct SizeWalk {
-    reply: oneshot::Sender<Result<Vec<PageSize>>>,
-    sizes: Vec<PageSize>,
-}
-
 /// Pages searched per chunk before checking for render requests.
 const SEARCH_CHUNK: u32 = 4;
 
-/// A document search in progress, likewise resumed between renders.
+/// A document search in progress, resumed between renders so it never
+/// delays a visible page.
 struct SearchWalk {
     matcher: Matcher,
     next: u32,
@@ -1291,12 +1247,11 @@ struct SearchWalk {
 
 fn worker_loop(engine: impl Renderer, rx: mpsc::Receiver<Msg>) {
     let page_count = engine.page_count();
-    let mut walk: Option<SizeWalk> = None;
     let mut search: Option<SearchWalk> = None;
 
     loop {
         // Block only when there's no background work to resume.
-        let first = if walk.is_some() || search.is_some() {
+        let first = if search.is_some() {
             match rx.try_recv() {
                 Ok(m) => Some(m),
                 Err(mpsc::TryRecvError::Empty) => None,
@@ -1393,12 +1348,6 @@ fn worker_loop(engine: impl Renderer, rx: mpsc::Receiver<Msg>) {
                         tx,
                     });
                 }
-                Msg::PageSizes(reply) => {
-                    walk = Some(SizeWalk {
-                        reply,
-                        sizes: Vec::with_capacity(page_count as usize),
-                    });
-                }
             }
         }
 
@@ -1447,31 +1396,6 @@ fn worker_loop(engine: impl Renderer, rx: mpsc::Receiver<Msg>) {
                     let _ = sw.tx.unbounded_send(SearchEvent::Done);
                     search = None;
                 }
-            }
-        }
-
-        // Then the size walk by one chunk.
-        if let Some(w) = &mut walk {
-            if w.reply.is_canceled() {
-                walk = None;
-                continue;
-            }
-            let from = w.sizes.len() as u32;
-            let to = (from + SIZE_CHUNK).min(page_count);
-            for i in from..to {
-                match engine.page_size(PageIndex(i)) {
-                    Ok(sz) => w.sizes.push(sz),
-                    Err(e) => {
-                        let _ = walk.take().unwrap().reply.send(Err(e));
-                        break;
-                    }
-                }
-            }
-            if let Some(w) = &walk
-                && w.sizes.len() as u32 >= page_count
-            {
-                let w = walk.take().unwrap();
-                let _ = w.reply.send(Ok(w.sizes));
             }
         }
     }
