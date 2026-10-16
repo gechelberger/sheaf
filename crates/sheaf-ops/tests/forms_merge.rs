@@ -483,7 +483,7 @@ fn undo_takes_the_form_out_again() {
     let b = write(&dir, "b.pdf", &mut form_b());
     let mut doc = sheaf_ops::open(&a, None).unwrap();
     insert(&mut doc, &b, None, None);
-    doc.undo().unwrap();
+    doc.undo().unwrap().unwrap();
     assert_eq!(names(&doc), ["a", "a2"]);
     for (strategy, bytes) in written_both_ways(&doc) {
         let what = format!("{strategy:?}");

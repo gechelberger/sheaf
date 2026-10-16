@@ -2647,7 +2647,7 @@ mod tests {
             let saved = read_pages(&std::fs::read(&a).unwrap());
             assert_eq!(saved[0].0, "A 2");
             model.rebase_to_saved(kept(&a, 3));
-            model.undo();
+            model.undo().unwrap();
             save_to_path(&model.snapshot(), &a).unwrap();
             let pages: Vec<String> = read_pages(&std::fs::read(&a).unwrap())
                 .into_iter()
@@ -3105,8 +3105,8 @@ mod tests {
                 "incremental {incremental}"
             );
             // Undone, they're all written again.
-            model.undo().unwrap();
-            model.undo().unwrap();
+            model.undo().unwrap().unwrap();
+            model.undo().unwrap().unwrap();
             let mut back = contents(&save(&model));
             back.sort();
             assert_eq!(

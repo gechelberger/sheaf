@@ -6543,6 +6543,7 @@ dependencies = [
  "image",
  "log",
  "lopdf",
+ "proc-macro2",
  "proptest",
  "quick-xml",
  "regex",
@@ -6550,6 +6551,7 @@ dependencies = [
  "serde_json",
  "sheaf-core",
  "sheaf-image",
+ "syn 2.0.119",
  "thiserror 2.0.21",
 ]
 

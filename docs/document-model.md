@@ -34,13 +34,15 @@ DocState             { pages: im::Vector<PageRef>,
                        annots: im::HashMap<PageId, im::Vector<Annot>>,  // sheaf's marks
                        removed_comments: ...,   // other tools' comments deleted, by /NM
                        text_layers: ...,        // unsaved OCR text, by page
-                       labels, header_footer }
+                       labels, header_footer,
+                       fields: im::OrdMap<FieldId, Field>,   // the form
+                       widgets: ... }           // the fields' widgets, by page
                      a complete, immutable snapshot of what the user sees.
 
 Document             { sources: HashMap<SourceId, Arc<Source>>,
-                       history: Vec<Version { label, state: DocState }>,
-                       cursor: usize,            // which version is current
-                       saved: Option<usize> }    // which version is on disk
+                       versions: HashMap<VersionId, Version>,  // a tree (see Undo/redo)
+                       cursor: VersionId,            // which version is current
+                       saved: Option<VersionId> }    // which version is on disk
 ```
 
 **Editing never touches a source or a lopdf object.** An edit is a pure
@@ -74,16 +76,82 @@ Snapshots win. Undo/redo cannot be wrong because there is no inverse logic;
 moves 50 pages pushes one version at the end of the gesture. Dirty tracking
 is `cursor != saved`. "Revert to saved" is `cursor = saved`.
 
+History also keeps what each edit changed (M10.5 slice 1), so a snapshot
+dropped to save memory is rebuilt exactly, never by running the edit again:
+
+```
+Version   { parent, children, redo_to,   // undo goes to the parent, redo to redo_to
+            label, author, at,
+            steps: Vec<Step>,            // the edits from the parent
+            state: Option<DocState>,     // the snapshot, unless trimmed
+            snapshot_bytes, step_bytes,  // what it holds (see Decisions)
+            job, saves, damaged }
+Step      { edit: Edit,
+            line: String,                // what it did, in words
+            prims: Arc<[Prim]> }         // what it changed
+Prim      { key: Key, before: Option<Val>, after: Option<Val> }
+```
+
+- **An edit records what it changed.** It reads the state and writes only
+  through a recording context (`prim::Rec`), which makes a `Prim` for
+  each slot it wrote: the slot (`key`), the value it held and the value it
+  holds now, `None` for absent. The keys are transitional, one per field
+  of `DocState` until M10.5 slice 8 replaces them with the records' keys:
+  `Pages`, `Outline`, `AnnotsOf(page)`, `TextLayer(page)`,
+  `RemovedOf(page)`, `Labels`, `HeaderFooter`, `Field(id)` and
+  `WidgetsOf(page)`. Before-values cost nothing: they are the parent's im
+  and `Arc` values.
+- **A no-op makes no version.** A slot written back to what it held makes
+  no prim (the same im nodes or `Arc`, else equal), and a batch's or job's
+  prims are coalesced per key into one, from the first before to the last
+  after, on the last step that changed the slot. So a batch that rotates a
+  page and rotates it back has none, and nothing is pushed. No whole state
+  is ever compared.
+- **Replay is exact and checked.** Undo, redo and jump rebuild a version
+  whose snapshot was trimmed from the nearest ancestor that kept one, by
+  applying each version's prims on the way. `DocState::apply` refuses a
+  prim whose before isn't what its slot holds (`Mismatch`), and replay
+  never runs an edit again, so what an edit reads without recording it
+  (source sizes, the forms, random mark ids) can't make it differ. A
+  mismatch is a bug: the version is marked damaged and can't be reached,
+  the History panel shows "History is damaged at version N", undo and redo
+  return `Err(Damaged)` instead of doing nothing, and a debug build
+  panics.
+- **A VersionId names one state, which never changes.** A job's amend
+  (see Text layers) and a save each put a new version, with a new id, in
+  the old one's place under the same parent, and the old id stops
+  resolving. The one exception until M10.5 slice 4: the `set_initial_*`
+  loaders fill in the opened version before the first edit.
+- **One `IdAlloc`.** Page, bookmark and field ids come from counters that
+  only go up, so an id is never handed out twice, whatever undo does. The
+  prims hold the ids an edit drew, so a replay draws none. Mark ids are
+  random below 2^53.
+- **Lines are made once.** describe runs at apply, against the state just
+  before that edit, so the second edit of "move pages 3–4 before 1, then
+  delete page 4" says "Delete page 4". The line is stored on the step, and
+  the History panel reads it whether or not the parent's snapshot is kept.
+- **Saves pin snapshots.** Until M10.5 slice 9 a save re-expresses its
+  version over the saved file (`rebase_to_saved`), so that version's
+  prims don't lead to it, and those of its children made before the save
+  don't start from it. Both keep their snapshots, and nothing is replayed
+  across a save.
+
+`model/history_tests.rs` is the proof: over random runs of all 21 kinds
+of edit, with batches, jobs, undo, redo, jumps and trims down to one
+snapshot, every version rebuilt from its prims equals the state it was
+made as, ids included, and each kind's no-op pushes nothing.
+
 Costs and how they're bounded:
 
-- Per-version memory is proportional to what changed, except `pages`, which
-  is cloned whole (`Arc<Vec<PageRef>>`, 16 bytes per page). At 7,000 pages
-  and a 200-version cap that is ~22 MB worst case. If it ever matters, swap
-  `Vec` for `im::Vector` and the clone becomes O(log n); nothing else changes.
-- Outline and annotation maps are persistent from the start (`im` crate), so
-  per-page markup edits don't scale with document size.
-- Sources referenced only by undone versions are freed when the history is
-  truncated (new edit after undo) or capped.
+- Per-version memory is proportional to what changed. `pages` is an
+  `im::Vector`, so a reorder of 7,000 pages copies tree nodes, by one split
+  and two joins, not the list. Outline, marks, layers and fields are
+  persistent too (`im` crate), so per-page edits don't scale with document
+  size. At 7,000 pages and 20,000 marks, adding a mark takes 0.7 ms and
+  moving half the pages before the first 1 ms (release; the ignored
+  `history_at_7k_pages_and_20k_marks`).
+- Sources referenced only by undone versions stay registered for now;
+  M10.5 slices 3 and 12 count and free them.
 
 What an `Edit` looks like:
 
@@ -112,8 +180,9 @@ pub enum Edit {
 
 impl Document {
     pub fn apply(&mut self, edit: Edit, label: impl Into<String>) -> Result<()>;
-    pub fn undo(&mut self) -> Option<&str>;   // returns the label of what was undone
-    pub fn redo(&mut self) -> Option<&str>;
+    // the label of what was undone, or None with nothing to undo
+    pub fn undo(&mut self) -> Result<Option<&str>, Damaged>;
+    pub fn redo(&mut self) -> Result<Option<&str>, Damaged>;
     pub fn state(&self) -> &DocState;
 }
 ```
@@ -187,7 +256,7 @@ truncated).
 
   ```rust
   pub trait HistoryPolicy {
-      /// How many of the oldest versions to drop, given current stats.
+      /// How many of the oldest snapshots to drop, given current stats.
       fn trim(&self, stats: &HistoryStats) -> usize;
   }
   pub struct FixedCount(pub usize);
@@ -195,10 +264,25 @@ truncated).
   pub struct AllOf(pub Vec<Box<dyn HistoryPolicy>>); // drop until all are satisfied
   ```
 
-  `HistoryStats` reports each version's *marginal* bytes — what it doesn't
-  share with its neighbour, estimated at push time via `Arc::ptr_eq` per
-  field and `im`'s `diff()` — plus source bytes referenced only by undone
-  versions (an inserted scan that was then undone). Default:
+  `HistoryStats` reports what each kept snapshot holds that no other
+  version does (`snapshot_bytes`: the `im` nodes it copied for the slots
+  its version changed), what all versions' steps hold (`step_bytes`: their
+  edits, lines and prims' values, each counted once, by the version that
+  made it, and an `Arc` once however many of its prims put it), and source
+  bytes referenced only by undone versions (an inserted scan that was then
+  undone; 0 until M10.5 slice 3). Snapshot and step bytes are computed
+  when a version is made, from its prims and the sizes of the maps they
+  changed. They are estimates, and one is coarse: the pages, the outline
+  and the labels are each one value, and a prim that puts one counts all
+  of it, walking it, though `im` shares all but the changed path with the
+  version before (about 170 KB to rotate one page of 7,000, about 375 KB
+  to rename one bookmark of 2,000). So in a long session of such edits
+  the steps alone can pass `MemoryBudget`, which then drops every snapshot
+  it may, and undo replays from the nearest version that kept one. M10.5
+  slice 8's records leave only the page order, the outline's top level
+  and the labels counted this way. Trimming frees snapshot bytes
+  only; a version's step bytes go when it is pruned (past `MAX_VERSIONS`,
+  and by bytes from M10.5 slice 12). Default:
   `AllOf([FixedCount(200), MemoryBudget(256 MB)])`.
 - **Deleting pages cascades to bookmarks that target them**, with a
   non-modal notice ("Deleted 3 pages and 2 bookmarks — Undo"). No modal;
@@ -239,10 +323,13 @@ recognition time) and the engine's name. It lives in
   other content), Move and Rotate leave it alone.
 - **Coalesced undo.** Results arrive in batches over minutes, but a run is
   one undo step: `Document::begin_job` returns a `JobId`, and
-  `apply_in_job` amends the newest version in place when that version
-  belongs to the job and isn't the saved one; otherwise it pushes and tags
-  the new version. A save or an unrelated edit mid-run splits the run into
-  two steps. `job_is_undone` tells the runner to stop rather than put undone
+  `apply_in_job` amends the newest version when that version belongs to
+  the job, has nothing after it and was never saved; otherwise it pushes
+  and tags the new version. An amend coalesces the run's prims and
+  replaces the version with a new `VersionId` under the same parent (an id
+  names one state), and a run whose batches put back all they did leaves
+  no version. A save or an unrelated edit mid-run splits the run into two
+  steps. `job_is_undone` tells the runner to stop rather than put undone
   results back.
 - **Search.** PDFium can't see unsaved layers, so Find and Patterns run the
   same literal/regex search over the model's layers

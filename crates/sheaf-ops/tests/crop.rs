@@ -121,7 +121,7 @@ fn margins_crop_and_marks_follow() {
     sheaf_doc::save::rewrite_to_path(&doc.snapshot(), &out).unwrap();
     assert_eq!(crop_box(&out), vec![72.0, 0.0, 612.0, 720.0]);
     // Undo puts it back.
-    doc.undo().unwrap();
+    doc.undo().unwrap().unwrap();
     assert_eq!(doc.page_size(&doc.state().pages[0]).width, 612.0);
     let _ = std::fs::remove_dir_all(&dir);
 }

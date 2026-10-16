@@ -34,3 +34,7 @@ image.workspace = true
 env_logger.workspace = true
 # Random field trees for the form reader (M10 slice 2).
 proptest = { version = "1", default-features = false, features = ["std"] }
+# The retired-symbols ledger reads the workspace's code (M10.5 slice 1),
+# and says where each hit is.
+syn = { version = "2", features = ["full", "visit"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }

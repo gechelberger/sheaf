@@ -23,6 +23,7 @@ pub mod measure;
 pub mod model;
 pub mod page_chars;
 pub mod portfolio;
+pub mod prim;
 pub mod properties;
 pub mod recovery;
 pub mod save;
@@ -37,9 +38,9 @@ pub use sheaf_core::{DestView, PageFrame};
 pub use annot::{Annot, AnnotId, AnnotKind, Box2, PageGeom, Pt, default_author, pdf_date_now};
 pub use history::{AllOf, FixedCount, HistoryPolicy, HistoryStats, MemoryBudget};
 pub use model::{
-    Derived, DocState, Document, Edit, EditOutcome, FlatOutlineItem, JobId, NewOutlineItem,
-    OutlineId, OutlineNode, PageId, PageRef, Rebase, Saved, Snapshot, SourceData, SourceId,
-    SourceInfo, Step, TextStyle, VersionId, VersionView,
+    Damaged, Derived, DocState, Document, Edit, EditOutcome, FlatOutlineItem, JobId,
+    NewOutlineItem, OutlineId, OutlineNode, PageId, PageRef, Rebase, Saved, Snapshot, SourceData,
+    SourceId, SourceInfo, Step, TextStyle, VersionId, VersionView,
 };
 pub use page_chars::{Glyph, PageChars};
 pub use text_layer::{OcrWord, TextHit, TextLayer};

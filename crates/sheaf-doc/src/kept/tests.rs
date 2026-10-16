@@ -556,9 +556,9 @@ fn a_deleted_mark_is_gone_from_the_saved_bytes() {
         .unwrap();
     assert!(model.snapshot().removes_content);
     // Undone, it's the saved version again: nothing removed.
-    model.undo();
+    model.undo().unwrap();
     assert!(!model.snapshot().removes_content);
-    model.redo();
+    model.redo().unwrap();
     assert_eq!(
         save_to_path(&model.snapshot(), &path).unwrap(),
         Strategy::Rewrite

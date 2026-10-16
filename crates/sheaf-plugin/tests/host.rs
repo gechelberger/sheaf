@@ -211,7 +211,7 @@ fn command_returns_edits_that_apply_as_one_step() {
 
     d.apply_batch(batch.edits.clone(), &batch.label).unwrap();
     assert_eq!(d.state().outline.len(), 3);
-    d.undo();
+    d.undo().unwrap();
     assert!(d.state().outline.is_empty(), "one undo reverts them all");
 }
 
@@ -1001,7 +1001,7 @@ fn bookmark_from_pattern_bundled_plugin() {
             (1, "Inv #103".to_string(), Some(2), Some(198.0)),
         ]
     );
-    d.undo();
+    d.undo().unwrap();
 
     // A preset, the whole match, top level; then a re-run adds nothing.
     *ui.answer.lock().unwrap() = Some(answer(1, "{0}", 0));
@@ -1230,7 +1230,7 @@ fn currency_convert_bundled_plugin() {
         "No amounts to convert to USD"
     );
     // Undone, then again: the rates come from storage, not the network.
-    d.undo();
+    d.undo().unwrap();
     *ui.answer.lock().unwrap() = answer("2026-10-10");
     let out = run(&p, "convert", None, ctx(&d)).unwrap();
     assert_eq!(out.batches[0].edits.len(), 2);

@@ -1520,10 +1520,19 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        let Some(label) = doc.model.undo().map(str::to_string) else {
-            doc.notice = Some("Nothing to undo".into());
-            cx.notify();
-            return;
+        let label = match doc.model.undo() {
+            Ok(Some(label)) => label.to_string(),
+            Ok(None) => {
+                doc.notice = Some("Nothing to undo".into());
+                cx.notify();
+                return;
+            }
+            Err(e) => {
+                doc.notice = Some(e.to_string());
+                self.refresh_history();
+                cx.notify();
+                return;
+            }
         };
         doc.notice = Some(format!("Undid: {label}"));
         doc.touched();
@@ -1534,10 +1543,19 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        let Some(label) = doc.model.redo().map(str::to_string) else {
-            doc.notice = Some("Nothing to redo".into());
-            cx.notify();
-            return;
+        let label = match doc.model.redo() {
+            Ok(Some(label)) => label.to_string(),
+            Ok(None) => {
+                doc.notice = Some("Nothing to redo".into());
+                cx.notify();
+                return;
+            }
+            Err(e) => {
+                doc.notice = Some(e.to_string());
+                self.refresh_history();
+                cx.notify();
+                return;
+            }
         };
         doc.notice = Some(format!("Redid: {label}"));
         doc.touched();
