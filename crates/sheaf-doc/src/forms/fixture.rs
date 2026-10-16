@@ -8,6 +8,8 @@
 //! contents are zeros: nothing is really signed), and [`Form::source`]
 //! reads what it writes as `forms::read` reads a file. lopdf can't write a
 //! hybrid-reference file, so [`hybrid_reference`] writes one by hand.
+//! [`every_fact`] is a file with one of each fact a file opens with, and
+//! [`outline_tree`] gives a form bookmarks.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -15,6 +17,9 @@ use std::path::Path;
 use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, StringFormat, dictionary};
 
+use crate::annot::{Annot, AnnotId, AnnotKind, PageGeom, Pt};
+use crate::model::PageId;
+use crate::stamps::HeaderFooter;
 use crate::store::{BlobKind, Src, Store};
 
 /// A rectangle in page space: left, bottom, right, top.
@@ -635,6 +640,127 @@ pub fn every_kind() -> Form {
         &[name, empty, on, off, radio, combo, list, button, sig],
     );
     f
+}
+
+/// A file that says one of each thing the opened version holds, on three
+/// pages: a field on the first, a mark on the second, roman page labels,
+/// a header/footer on the third alone, and a closed bookmark to the first
+/// with one under it to the third.
+pub fn every_fact() -> Form {
+    let mut f = Form::new(3);
+    f.text("name", 0, row(0));
+    let geom = PageGeom {
+        media: [0.0, 0.0, 612.0, 792.0],
+        rotate: 0,
+    };
+    let main = crate::annot::to_pdf(&note(), &geom, &mut f.pdf).main;
+    let main = f.pdf.add_object(main);
+    f.set_annots(1, &[main]);
+    let catalog = f.catalog;
+    f.dict(catalog).set(
+        "PageLabels",
+        dictionary! { "Nums" => vec![0.into(), dictionary! { "S" => "r" }.into()] },
+    );
+    let mut texts: [String; 6] = Default::default();
+    texts[0] = "Draft".into();
+    let hf = HeaderFooter {
+        texts,
+        pages: Some(vec![PageId(2)]),
+        ..Default::default()
+    };
+    let scope = crate::stamps::to_catalog(&hf, &[PageId(0), PageId(1), PageId(2)]);
+    f.dict(catalog).set(crate::stamps::CATALOG_KEY, scope);
+    let pages = f.pages.clone();
+    let item = |title: &str, page: ObjectId| {
+        dictionary! {
+            "Title" => Object::string_literal(title),
+            "Dest" => vec![page.into(), "Fit".into()],
+        }
+    };
+    let mut closed = item("A", pages[0]);
+    closed.set("Count", -1);
+    outline_tree(&mut f, vec![(0, closed), (1, item("A1", pages[2]))]);
+    f
+}
+
+/// `items` as `f`'s outline: each (depth, item) in pre-order, a depth at
+/// most one below the item before's. The links between them are filled
+/// in, and `/Count` where an item has none: how many items are below it.
+/// The items' ids, in order.
+pub fn outline_tree(f: &mut Form, items: Vec<(u16, Dictionary)>) -> Vec<ObjectId> {
+    let root = f.pdf.new_object_id();
+    let ids: Vec<ObjectId> = items.iter().map(|_| f.pdf.new_object_id()).collect();
+    let depths: Vec<u16> = items.iter().map(|(depth, _)| *depth).collect();
+    let mut dicts: Vec<Dictionary> = items.into_iter().map(|(_, item)| item).collect();
+    // The items below `at` (None: the root), and those of them a level down.
+    let below = |at: Option<usize>| {
+        let (from, depth) = at.map_or((0, 0), |i| (i + 1, depths[i] + 1));
+        let all: Vec<usize> = (from..depths.len())
+            .take_while(|&j| depths[j] >= depth)
+            .collect();
+        let kids: Vec<usize> = all
+            .iter()
+            .copied()
+            .filter(|&j| depths[j] == depth)
+            .collect();
+        (all.len(), kids)
+    };
+    let link = |dicts: &mut [Dictionary], parent: Option<usize>, root_dict: &mut Dictionary| {
+        let (count, kids) = below(parent);
+        for pair in kids.windows(2) {
+            dicts[pair[0]].set("Next", ids[pair[1]]);
+            dicts[pair[1]].set("Prev", ids[pair[0]]);
+        }
+        let parent_id = parent.map_or(root, |i| ids[i]);
+        for &k in &kids {
+            dicts[k].set("Parent", parent_id);
+        }
+        let (Some(&first), Some(&last)) = (kids.first(), kids.last()) else {
+            return;
+        };
+        let at = match parent {
+            Some(i) => &mut dicts[i],
+            None => root_dict,
+        };
+        at.set("First", ids[first]);
+        at.set("Last", ids[last]);
+        if !at.has(b"Count") {
+            at.set("Count", count as i64);
+        }
+    };
+    let mut outlines = dictionary! { "Type" => "Outlines" };
+    link(&mut dicts, None, &mut outlines);
+    for i in 0..ids.len() {
+        link(&mut dicts, Some(i), &mut outlines);
+    }
+    f.pdf.objects.insert(root, outlines.into());
+    for (&id, item) in ids.iter().zip(dicts) {
+        f.pdf.objects.insert(id, item.into());
+    }
+    let catalog = f.catalog;
+    f.dict(catalog).set("Outlines", root);
+    ids
+}
+
+/// The note [`every_fact`] puts on its second page, as sheaf reads it.
+pub fn note() -> Annot {
+    Annot {
+        id: AnnotId(4),
+        kind: AnnotKind::Note {
+            pos: Pt { x: 1.0, y: 2.0 },
+        },
+        color: [1, 2, 3],
+        opacity: 1.0,
+        stroke: 1.0,
+        author: "me".into(),
+        contents: "mine".into(),
+        modified: String::new(),
+        created: String::new(),
+        fill: None,
+        dashed: false,
+        cloudy: false,
+        name: String::new(),
+    }
 }
 
 /// `bytes` with an incremental update appended: `change` edits a copy of

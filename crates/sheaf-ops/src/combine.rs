@@ -6,8 +6,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use sheaf_doc::{Document, Edit, FlatOutlineItem, NewOutlineItem, PageId, SourceId, Store};
-use sheaf_progress::{Progress, Unit};
+use sheaf_doc::open::Facts;
+use sheaf_doc::{
+    Document, Edit, FlatOutlineItem, NewOutlineItem, PageId, SourceId, SourceInfo, Store,
+};
+use sheaf_progress::{NoProgress, Progress, Unit};
 
 use crate::images::Paper;
 
@@ -122,7 +125,7 @@ pub fn build(
             .unwrap_or_default();
         let file = page_source(&item.path, params.image_page)
             .with_context(|| format!("reading {}", item.path.display()))?;
-        let (info, outline) = crate::open::describe(&store, &file, item.password.as_deref())
+        let info = SourceInfo::read(&store, &file, item.password.as_deref())
             .with_context(|| format!("opening {name}"))?;
         let count = info.src.page_count() as usize;
         let wanted: Vec<u32> = match &item.pages {
@@ -134,29 +137,34 @@ pub fn build(
                 .collect(),
             _ => (0..info.src.page_count()).collect(),
         };
-        // Its marks, and its form (M10 slice 4).
-        let (marks, form) = if is_pdf(&item.path) {
-            sheaf_doc::file::read_open(&info.src)
-                .map(|(a, facts)| (a.sheaf, facts.form))
-                .unwrap_or_default()
+        // Its marks, its form (M10 slice 4) and its bookmarks; an image's
+        // page has none.
+        let Facts {
+            marks,
+            form,
+            outline,
+            ..
+        } = if is_pdf(&item.path) {
+            sheaf_doc::open::finish(&info.src, &NoProgress)
         } else {
-            Default::default()
+            Facts::default()
         };
         // Page ids of this file's pages, by index in the file.
         let ids: Vec<(u32, PageId)> = match doc.as_mut() {
             None => {
-                let mut d = Document::new(
+                // The first file opens as the document, with its marks and
+                // form. Its bookmarks go under its own below, like every
+                // file's, and its labels and header/footer aren't taken.
+                let mut d = sheaf_doc::open::start(
                     store.clone(),
                     info,
-                    &[],
                     sheaf_doc::history::default_policy(),
                 );
-                if !marks.is_empty() {
-                    d.set_initial_annots(marks.clone())?;
-                }
-                if !form.fields.is_empty() || !form.widgets.is_empty() {
-                    d.set_initial_fields(&form)?;
-                }
+                d.ready(Facts {
+                    marks,
+                    form,
+                    ..Default::default()
+                })?;
                 let all: Vec<PageId> = d.state().pages.iter().map(|p| p.id).collect();
                 let drop: Vec<PageId> = all
                     .iter()

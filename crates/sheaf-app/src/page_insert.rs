@@ -104,6 +104,9 @@ impl DocView {
         at: Where,
         cx: &mut Context<Self>,
     ) {
+        if self.still_opening(cx) {
+            return;
+        }
         let fit = match size.map(|s| self.size_of(s)) {
             Some(s) => PageFit::Paper {
                 width: s.width.min(s.height),
@@ -152,6 +155,9 @@ impl DocView {
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
+        if self.still_opening(cx) {
+            return;
+        }
         let State::Ready(doc) = &self.state else {
             return;
         };
@@ -175,6 +181,11 @@ impl DocView {
                         return;
                     }
                 };
+                // A recovery may have reopened the view meanwhile: a document
+                // still opening takes nothing in.
+                if v.still_opening(cx) {
+                    return;
+                }
                 let State::Ready(doc) = &mut v.state else {
                     return;
                 };
@@ -207,7 +218,7 @@ impl DocView {
                         v.after_model_change(label, out, cx);
                         v.set_notice(notice, cx);
                     }
-                    Err(e) => v.set_notice(format!("Replace failed: {e:#}"), cx),
+                    Err(e) => v.set_notice(crate::docview::failed("Replace", &e), cx),
                 }
             })
             .ok();
@@ -316,7 +327,7 @@ impl DocView {
                             cx,
                         );
                     }
-                    Err(e) => v.set_notice(format!("Crop failed: {e:#}"), cx),
+                    Err(e) => v.set_notice(crate::docview::failed("Crop", &e), cx),
                 }
             })
             .ok();
@@ -373,7 +384,7 @@ impl DocView {
                 doc.touched();
                 self.after_model_change(label, out, cx);
             }
-            Err(e) => self.set_notice(format!("Page labels: {e:#}"), cx),
+            Err(e) => self.set_notice(crate::docview::failed("Page labels", &e), cx),
         }
     }
 }
@@ -447,7 +458,7 @@ impl DocView {
                         v.after_model_change(label.to_string(), out, cx);
                         v.set_notice(format!("{label}: shown now, written when you save"), cx);
                     }
-                    Err(e) => v.set_notice(format!("{label} failed: {e:#}"), cx),
+                    Err(e) => v.set_notice(crate::docview::failed(label, &e), cx),
                 }
             })
             .ok();
@@ -563,7 +574,7 @@ impl DocView {
                             cx,
                         );
                     }
-                    Err(e) => v.set_notice(format!("{label} failed: {e:#}"), cx),
+                    Err(e) => v.set_notice(crate::docview::failed(&label, &e), cx),
                 }
             })
             .ok();

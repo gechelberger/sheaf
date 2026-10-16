@@ -2,9 +2,10 @@
 //!
 //! Needs libpdfium (`scripts/fetch-pdfium.sh`), like the app itself.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use lopdf::{Document as Pdf, Object, Stream, dictionary};
+use sheaf_doc::Document;
 use sheaf_ops::blank::{BlankParams, Reason};
 
 /// Pages: 0 text, 1 empty, 2 "intentionally left blank", 3 a link on an
@@ -55,6 +56,11 @@ fn mixed(dir: &std::path::Path) -> PathBuf {
     path
 }
 
+/// `path` opened as the app opens it.
+fn open(path: &Path) -> Document {
+    sheaf_doc::open::file(path, None).unwrap().doc
+}
+
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("sheaf-blank-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -65,7 +71,7 @@ fn scratch(name: &str) -> PathBuf {
 #[test]
 fn finds_blanks_and_spares_content() {
     let dir = scratch("mixed");
-    let doc = sheaf_ops::open(&mixed(&dir), None).unwrap();
+    let doc = open(&mixed(&dir));
     let found = sheaf_ops::blank::find(
         &doc.snapshot(),
         None,
@@ -121,7 +127,7 @@ fn a_noisy_scanned_blank_is_blank() {
     let bytes = sheaf_doc::images::to_pdf(&[page], sheaf_doc::images::PageFit::Original).unwrap();
     let path = dir.join("scan.pdf");
     std::fs::write(&path, bytes).unwrap();
-    let doc = sheaf_ops::open(&path, None).unwrap();
+    let doc = open(&path);
     let found = sheaf_ops::blank::find(
         &doc.snapshot(),
         None,

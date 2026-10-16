@@ -791,9 +791,10 @@ pub fn open(
     path: &Path,
     password: Option<&str>,
 ) -> Result<(Document, Vec<(SourceId, ForeignAnnot)>)> {
-    let (doc, foreign) = crate::open::open_with_foreign(path, password)?;
-    let primary = doc.primary();
-    Ok((doc, foreign.into_iter().map(|f| (primary, f)).collect()))
+    let opened = sheaf_doc::open::file(path, password)?;
+    let primary = opened.doc.primary();
+    let foreign = opened.view.foreign.into_iter();
+    Ok((opened.doc, foreign.map(|f| (primary, f)).collect()))
 }
 
 /// A comments data file's format.

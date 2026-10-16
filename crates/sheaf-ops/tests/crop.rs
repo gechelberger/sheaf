@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use lopdf::{Document as Pdf, Stream, dictionary};
-use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, Edit};
+use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, Document, Edit};
 use sheaf_ops::crop::{CropSpec, Margins};
 
 /// A Letter page with a black square at user (300..400, 300..400).
@@ -29,6 +29,11 @@ fn pdf(dir: &Path) -> PathBuf {
     let path = dir.join("square.pdf");
     pdf.save(&path).unwrap();
     path
+}
+
+/// `path` opened as the app opens it.
+fn open(path: &Path) -> Document {
+    sheaf_doc::open::file(path, None).unwrap().doc
 }
 
 fn scratch(name: &str) -> PathBuf {
@@ -63,7 +68,7 @@ fn crop_box(path: &Path) -> Vec<f64> {
 fn margins_crop_and_marks_follow() {
     let dir = scratch("margins");
     let src = pdf(&dir);
-    let mut doc = sheaf_ops::open(&src, None).unwrap();
+    let mut doc = open(&src);
     let page = doc.state().pages[0].id;
     let mark = Annot {
         id: AnnotId(0),
@@ -131,7 +136,7 @@ fn margins_crop_and_marks_follow() {
 fn trim_white_finds_the_content() {
     let dir = scratch("trim");
     let src = pdf(&dir);
-    let doc = sheaf_ops::open(&src, None).unwrap();
+    let doc = open(&src);
     let page = doc.state().pages[0].id;
     let plan = sheaf_ops::crop::plan(
         doc.store(),

@@ -542,6 +542,17 @@ impl LazyPdf {
         Ok((id, object))
     }
 
+    /// Whether a read of the object `id` was kept: it was asked for, or is in an object stream
+    /// that was decoded, and it read, or failed for a reason the bytes alone decide. A reader's
+    /// tests can tell from it what the reader read.
+    pub fn is_read(&self, id: ObjectId) -> bool {
+        let number = id.0 as usize;
+        self.slots
+            .get(number / CHUNK)
+            .and_then(OnceLock::get)
+            .is_some_and(|chunk| chunk[number % CHUNK].get().is_some())
+    }
+
     /// Where the object `id` is in the bytes, from its header to after `endobj`. None for an
     /// object stream's member, for an object that can't be read, and for a stream whose data
     /// has no length to end by, or no `endstream` after it.

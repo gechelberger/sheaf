@@ -24,6 +24,7 @@ pub mod labels;
 pub mod layers;
 pub mod measure;
 pub mod model;
+pub mod open;
 pub mod page_chars;
 pub mod portfolio;
 pub mod prim;
@@ -44,8 +45,8 @@ pub use annot::{Annot, AnnotId, AnnotKind, Box2, PageGeom, Pt, default_author, p
 pub use history::{AllOf, FixedCount, HistoryPolicy, HistoryStats, MemoryBudget};
 pub use model::{
     Damaged, Derived, DocState, Document, Edit, EditOutcome, FlatOutlineItem, JobId,
-    NewOutlineItem, OutlineId, OutlineNode, PageId, PageRef, Rebase, Saved, Snapshot, SourceId,
-    SourceInfo, Step, TextStyle, VersionId, VersionView,
+    NewOutlineItem, NotReady, OutlineId, OutlineNode, PageId, PageRef, Rebase, Saved, Snapshot,
+    SourceId, SourceInfo, Step, TextStyle, VersionId, VersionView,
 };
 pub use page_chars::{Glyph, PageChars};
 pub use source::Source;

@@ -115,7 +115,7 @@ impl DocView {
                 self.after_model_change(label.clone(), out, cx);
                 self.set_notice(format!("{label} — Ctrl+Z brings them back"), cx);
             }
-            Err(e) => self.set_notice(format!("Delete failed: {e:#}"), cx),
+            Err(e) => self.set_notice(crate::docview::failed("Delete", &e), cx),
         }
     }
 

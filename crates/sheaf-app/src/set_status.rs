@@ -509,6 +509,7 @@ mod tests {
                     view: None,
                     color: None,
                     style: Default::default(),
+                    open: true,
                 },
                 FlatOutlineItem {
                     title: "Receivables".into(),
@@ -517,6 +518,7 @@ mod tests {
                     view: None,
                     color: None,
                     style: Default::default(),
+                    open: true,
                 },
             ],
             Box::new(FixedCount(10)),

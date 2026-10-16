@@ -90,7 +90,9 @@ Marked `sheaf:` in the source.
     with `object` (an `Arc`), `raw_span` (where an object is in the
     bytes, from its header to after `endobj`, a stream whose `/Length`
     the parser couldn't read too, by the length its data was read by),
-    `ids` (the objects the table lists in use) and `xref()`
+    `ids` (the objects the table lists in use), `is_read` (whether a
+    read of an object was kept, so a test can tell what a reader read)
+    and `xref()`
     (`XrefFacts`: the newest section's kind and start, the trailer's
     `/Size`, the largest cross-reference stream number, `/ID`, the
     header's offset, whether a section is hybrid, linearization, the

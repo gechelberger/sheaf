@@ -14,7 +14,7 @@ use lopdf::{Document as Pdf, EncryptionState, EncryptionVersion, Object, Permiss
 use sheaf_doc::forms::fixture::Form;
 use sheaf_doc::forms::{Finding, check};
 use sheaf_doc::save::{Signed, Strategy, WouldBreakSignatures, save_to_path_noting};
-use sheaf_doc::{Document, Edit};
+use sheaf_doc::{Document, Edit, SourceInfo};
 
 mod common;
 use common::*;
@@ -70,7 +70,7 @@ fn a_changed_hybrid_form_loses_its_xfa_copy() {
     // Bug 6: a page deleted, so the XFA describes a field that's gone.
     let dir = scratch("saves-xfa");
     let path = write(&dir, "form.pdf", &mut hybrid());
-    let mut doc = sheaf_ops::open(&path, None).unwrap();
+    let mut doc = open(&path);
     let second = doc.state().pages[1].id;
     doc.apply(Edit::DeletePages { ids: vec![second] }, "Delete")
         .unwrap();
@@ -102,7 +102,7 @@ fn an_unchanged_hybrid_form_keeps_its_xfa_copy() {
     // A page turned: the form is as it was.
     let dir = scratch("saves-xfa-kept");
     let path = write(&dir, "form.pdf", &mut hybrid());
-    let mut doc = sheaf_ops::open(&path, None).unwrap();
+    let mut doc = open(&path);
     let first = doc.state().pages[0].id;
     doc.apply(
         Edit::RotatePages {
@@ -128,16 +128,16 @@ fn a_form_brought_into_a_hybrid_one_is_saved_in_full() {
     let dir = scratch("saves-xfa-insert");
     let path = write(&dir, "form.pdf", &mut hybrid());
     let other = write(&dir, "other.pdf", &mut Form::new(1));
-    let mut doc = sheaf_ops::open(&path, None).unwrap();
+    let mut doc = open(&path);
     {
         let mut f = Form::new(1);
         blue(&mut f, "z", 0, 0, "Zed");
         std::fs::write(&other, f.bytes()).unwrap();
     }
-    let (info, _) = sheaf_ops::open::describe(doc.store(), &other, None).unwrap();
-    let (_, facts) = sheaf_doc::file::read_open(&info.src).unwrap();
+    let info = SourceInfo::read(doc.store(), &other, None).unwrap();
+    let form = sheaf_doc::forms::read(&info.src);
     let sid = doc.add_source(info);
-    doc.set_source_form(sid, facts.form);
+    doc.set_source_form(sid, form);
     doc.apply(
         Edit::InsertPages {
             source: sid,
@@ -171,7 +171,7 @@ fn usage_rights_go_with_a_rewrite() {
     f.usage_rights();
     let path = write(&dir, "form.pdf", &mut f);
     assert_eq!(parts(&std::fs::read(&path).unwrap()), (true, true, true));
-    let mut doc = sheaf_ops::open(&path, None).unwrap();
+    let mut doc = open(&path);
     let first = doc.state().pages[0].id;
     doc.apply(
         Edit::RotatePages {
@@ -240,7 +240,7 @@ fn a_save_that_would_rewrite_a_signed_file_asks() {
     let path = write(&dir, "signed.pdf", &mut signed());
     let original = std::fs::read(&path).unwrap();
     assert!(signature_fits(&original));
-    let mut doc = sheaf_ops::open(&path, None).unwrap();
+    let mut doc = open(&path);
     let second = doc.state().pages[1].id;
     doc.apply(Edit::DeletePages { ids: vec![second] }, "Delete")
         .unwrap();
@@ -273,7 +273,7 @@ fn a_save_that_would_rewrite_a_signed_file_asks() {
     assert_eq!((report.pages, report.signed), (1, 1));
     // An unsigned file isn't asked about.
     let plain = write(&dir, "plain.pdf", &mut hybrid());
-    let mut doc = sheaf_ops::open(&plain, None).unwrap();
+    let mut doc = open(&plain);
     let second = doc.state().pages[1].id;
     doc.apply(Edit::DeletePages { ids: vec![second] }, "Delete")
         .unwrap();
@@ -298,7 +298,7 @@ fn an_encrypted_signed_file_asks_with_no_append() {
     .unwrap();
     f.pdf.encrypt(&state).unwrap();
     let path = write(&dir, "signed.pdf", &mut f);
-    let mut doc = sheaf_ops::open(&path, None).unwrap();
+    let mut doc = open(&path);
     let second = doc.state().pages[1].id;
     doc.apply(Edit::DeletePages { ids: vec![second] }, "Delete")
         .unwrap();
@@ -320,7 +320,7 @@ fn a_certified_file_asks_too() {
     let sig = f.signature("cert", 0, row(0));
     f.certify(sig);
     let path = write(&dir, "certified.pdf", &mut f);
-    let mut doc = sheaf_ops::open(&path, None).unwrap();
+    let mut doc = open(&path);
     let second = doc.state().pages[1].id;
     doc.apply(Edit::DeletePages { ids: vec![second] }, "Delete")
         .unwrap();
@@ -338,11 +338,11 @@ fn signed_fields_brought_in_are_kept_and_said_so() {
     let dir = scratch("saves-signed-in");
     let a = write(&dir, "a.pdf", &mut Form::new(1));
     let s = write(&dir, "signed.pdf", &mut signed());
-    let mut doc = sheaf_ops::open(&a, None).unwrap();
-    let (info, _) = sheaf_ops::open::describe(doc.store(), &s, None).unwrap();
-    let (_, facts) = sheaf_doc::file::read_open(&info.src).unwrap();
+    let mut doc = open(&a);
+    let info = SourceInfo::read(doc.store(), &s, None).unwrap();
+    let form = sheaf_doc::forms::read(&info.src);
     let sid = doc.add_source(info);
-    doc.set_source_form(sid, facts.form);
+    doc.set_source_form(sid, form);
     let out = doc
         .apply(
             Edit::InsertPages {
@@ -374,7 +374,7 @@ fn corpus_path(path: &str) -> Option<std::path::PathBuf> {
 
 /// The file at `path` opened, its page `index` deleted, and rewritten.
 fn without_page(path: &Path, index: usize) -> (Document, Vec<u8>) {
-    let mut doc = sheaf_ops::open(path, None).unwrap();
+    let mut doc = open(path);
     let id = doc.state().pages[index].id;
     doc.apply(Edit::DeletePages { ids: vec![id] }, "Delete")
         .unwrap();
@@ -416,7 +416,7 @@ fn corpus_the_w9s_instructions_page_alone_has_no_form() {
     let Some(fw9) = corpus_path("forms/irs/fw9.pdf") else {
         return;
     };
-    let doc = sheaf_ops::open(&fw9, None).unwrap();
+    let doc = open(&fw9);
     let second = doc.state().pages[1].id;
     let bytes = sheaf_doc::save::extract_bytes(&doc.snapshot(), &[second]).unwrap();
     let report = clean(&bytes, "W-9 page 2");

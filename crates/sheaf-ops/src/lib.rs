@@ -13,13 +13,19 @@ pub mod derive;
 pub mod dirs;
 pub mod export;
 pub mod images;
-pub mod open;
 pub mod pages;
 pub mod prefs;
 pub mod scan;
 pub mod split;
 pub mod stamps;
 
-pub use open::open;
+use anyhow::Result;
+use sheaf_doc::SourceInfo;
+use sheaf_render::pdfium::PdfiumEngine;
 
 pub use sheaf_progress::{Cancelled, NoProgress, Progress, Snapshot as ProgressSnapshot, Tracker};
+
+/// A renderer for a source, on its blob's bytes.
+pub fn engine_for(info: &SourceInfo) -> Result<PdfiumEngine> {
+    PdfiumEngine::open_bytes(info.src.bytes().clone(), info.src.password())
+}

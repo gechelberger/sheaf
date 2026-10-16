@@ -356,7 +356,7 @@ impl DocView {
                 }
                 Err(e) => {
                     log::error!("ocr: applying results: {e:#}");
-                    doc.notice = Some(format!("OCR: applying results failed: {e:#}"));
+                    doc.notice = Some(crate::docview::failed("OCR: applying results", &e));
                     false
                 }
             };

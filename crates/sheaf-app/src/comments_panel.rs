@@ -1479,6 +1479,9 @@ impl DocView {
         path: std::path::PathBuf,
         cx: &mut Context<Self>,
     ) {
+        if self.still_opening(cx) {
+            return;
+        }
         let needle = self.comment_needle(cx);
         let columns = csv_columns(cx);
         let title = self
@@ -1582,6 +1585,10 @@ impl DocView {
     /// Bring in the comments in the FDF, XFDF or PDF file at `path`, as
     /// one undo step: one here already by name is updated, the rest added.
     pub fn import_comments_from(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
+        // What's brought in is matched against the comments already here.
+        if self.still_opening(cx) {
+            return;
+        }
         let State::Ready(doc) = &mut self.state else {
             return;
         };

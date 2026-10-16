@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use gpui::{AnyElement, Context, div, prelude::*, px};
 use sheaf_doc::SourceId;
-use sheaf_doc::forms::{FileForm, FormClass, FormFacts};
+use sheaf_doc::forms::{FormClass, FormFacts};
 use sheaf_render::FormType;
 use sheaf_ui::button::Button;
 use sheaf_ui::theme;
@@ -62,20 +62,6 @@ pub(crate) fn damaged_notice(facts: &FormFacts) -> Option<String> {
 }
 
 impl Doc {
-    /// Take in the primary file's form, read after open: its fields go to
-    /// the model, and a damaged one gets a notice.
-    pub(crate) fn take_form(&mut self, form: &FileForm) {
-        if (!form.fields.is_empty() || !form.widgets.is_empty())
-            && let Err(e) = self.model.set_initial_fields(form)
-        {
-            log::warn!("form fields arrived after edits; ignored: {e:#}");
-        }
-        if let Some(notice) = damaged_notice(&form.facts) {
-            self.notice = Some(notice);
-        }
-        self.forms.primary = Some(Arc::new(form.facts.clone()));
-    }
-
     /// What the bar says now, unless it was dismissed.
     pub(crate) fn form_bar(&self) -> Option<&'static str> {
         // Saved without it: nothing left to say.

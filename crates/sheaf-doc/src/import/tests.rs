@@ -1,5 +1,5 @@
 use super::*;
-use lopdf::{Stream, dictionary};
+use lopdf::{Document as Pdf, Stream, dictionary};
 
 fn mark(kind: AnnotKind) -> Annot {
     Annot {

@@ -34,13 +34,10 @@ pub(crate) use crate::pane::Zoom;
 use crate::pane::{Layout, LayoutSpec, MARGIN, PageMode, Pane, Spread};
 use crate::{ClearGuides, FullScreen, GoToPage, ReadMode, ToggleGrid, ToggleRulers};
 use sheaf_doc::{
-    Document, Edit, EditOutcome, FlatOutlineItem, OutlineId, PageId, PageRef, SourceId, SourceInfo,
-    Store,
+    Document, Edit, EditOutcome, OutlineId, PageId, PageRef, SourceId, SourceInfo, Store,
 };
 use sheaf_image::raster::PixelFormat;
-use sheaf_render::{
-    Job, OutlineItem, Rect, RenderHandle, RenderRequest, Rendered, SearchEvent, SearchHit,
-};
+use sheaf_render::{Job, Rect, RenderHandle, RenderRequest, Rendered, SearchEvent, SearchHit};
 
 use crate::comments_panel::ExportKind;
 use crate::{
@@ -56,6 +53,10 @@ use crate::{
 };
 
 pub const KEY_CONTEXT: &str = "DocView";
+
+/// The notice when an edit, or something that writes the document out,
+/// comes while the file is still opening (M10.5 proposal 28).
+pub(crate) const STILL_OPENING: &str = "Still opening the file — try again in a moment";
 
 const STATUS_H: f32 = 24.0;
 /// Height of the divider between split panes, logical px.
@@ -123,6 +124,8 @@ pub(crate) struct Doc {
     pub(crate) first_paint: Option<Instant>,
     /// Last edit notice, shown in the status bar.
     pub(crate) notice: Option<String>,
+    /// How far the file's facts are read, until it's ready.
+    pub(crate) reading: Option<sheaf_ops::Tracker>,
     // Sidebar state.
     pub(crate) thumb_scroll: ScrollHandle,
     /// Pages whose previews the thumbnail panel is showing; kept cached.
@@ -131,7 +134,6 @@ pub(crate) struct Doc {
     pub(crate) review_keep: HashSet<(PageId, Rotation)>,
     /// Last page the thumbnail panel auto-scrolled to follow.
     pub(crate) thumb_followed: Option<PageId>,
-    pub(crate) outline_loaded: bool,
     pub(crate) outline_expanded: HashSet<OutlineId>,
     pub(crate) outline_scroll: ScrollHandle,
     // Selection and drag state for the thumbnail panel.
@@ -197,11 +199,10 @@ pub(crate) struct Doc {
     /// Another tool's comment being dragged, made ours when it's let go.
     pub(crate) adopting: Option<usize>,
     /// Files embedded in the primary file, and its portfolio schema if it
-    /// is one (see attachments_panel.rs). `facts_loaded` once read.
+    /// is one (see attachments_panel.rs), once the file has opened.
     pub(crate) attachments: Vec<sheaf_doc::attachments::Attachment>,
     pub(crate) collection: Option<sheaf_doc::portfolio::Collection>,
     pub(crate) attachment_selected: Option<usize>,
-    pub(crate) facts_loaded: bool,
     /// The forms in the document's files (see form_bar.rs).
     pub(crate) forms: crate::form_bar::Forms,
     /// Optional content groups and which are hidden (see layers_panel.rs).
@@ -213,9 +214,6 @@ pub(crate) struct Doc {
     /// index: PDFium is told not to draw them, again whenever its renderer
     /// is reopened.
     pub(crate) drawn_marks: Vec<(u32, Vec<String>)>,
-    /// Bookmark colors and styles from the file, when they arrived before
-    /// the outline did.
-    pub(crate) pending_outline_styles: Option<Vec<sheaf_doc::file::OutlineStyle>>,
     /// Every page's label (from the model), and the version it's for.
     pub(crate) labels: std::cell::RefCell<(u64, Option<std::sync::Arc<Vec<String>>>)>,
     /// With two panes: the top pane's share of the height.
@@ -226,29 +224,24 @@ pub(crate) struct Doc {
 
 /// What an inserted or replacing file brings besides its pages, read on
 /// a background thread: sheaf's own marks (which the edit carries in),
-/// other tools' comments, its bookmarks' colors and styles, and its form.
+/// other tools' comments, its bookmarks, and its form.
 #[derive(Default)]
 pub(crate) struct Incoming {
     pub marks: HashMap<u32, Vec<sheaf_doc::Annot>>,
     pub foreign: Vec<sheaf_doc::file::ForeignAnnot>,
-    pub outline_styles: Vec<sheaf_doc::file::OutlineStyle>,
+    pub outline: Vec<sheaf_doc::FlatOutlineItem>,
     pub form: sheaf_doc::forms::FileForm,
 }
 
 impl Incoming {
     /// What `info`'s source brings.
     pub(crate) fn read(info: &SourceInfo) -> Incoming {
-        match sheaf_doc::file::read_open(&info.src) {
-            Ok((annots, facts)) => Incoming {
-                marks: annots.sheaf,
-                foreign: annots.foreign,
-                outline_styles: facts.outline_styles,
-                form: facts.form,
-            },
-            Err(e) => {
-                log::warn!("reading marks in {}: {e:#}", info.name.display());
-                Incoming::default()
-            }
+        let facts = sheaf_doc::open::finish(&info.src, &sheaf_ops::NoProgress);
+        Incoming {
+            marks: facts.marks,
+            foreign: facts.foreign,
+            outline: facts.outline,
+            form: facts.form,
         }
     }
 
@@ -532,7 +525,8 @@ pub(crate) struct AnnotEditor {
 /// see `todos/plugins.md`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum DocEvent {
-    /// The file is open and its model exists.
+    /// The file has opened: what it says besides its pages is read into
+    /// the opened version, and edits are taken from now on.
     Opened,
     /// The model changed: an edit, a batch, an undo or a redo. `label` is
     /// the undo label ("Undo: …"/"Redo: …" for those two).
@@ -655,6 +649,9 @@ pub struct DocView {
     /// Rows of plugin panels for this document, by `<plugin>.<panel>`.
     #[cfg(feature = "plugins")]
     pub(crate) plugin_panels: HashMap<String, crate::plugin_panel::PluginPanelState>,
+    /// Plugin calls given while the file opens, until it's ready.
+    #[cfg(feature = "plugins")]
+    pub(crate) plugin_calls: crate::plugins::Waiting,
 }
 
 /// A search match, addressed by page id so it survives reordering and so
@@ -751,6 +748,8 @@ impl DocView {
             guide_drag: None,
             #[cfg(feature = "plugins")]
             plugin_panels: HashMap::new(),
+            #[cfg(feature = "plugins")]
+            plugin_calls: Default::default(),
         };
         this.open(cx);
         this
@@ -812,7 +811,7 @@ impl DocView {
                             );
                         }
                         viewer.pending_recovery = recovery;
-                        viewer.install(store, primary, handle, cx);
+                        viewer.install(store, primary, handle, false, cx);
                     }
                     Err(e) if needs_password(&e) => viewer.lock(cx),
                     Err(e) => viewer.state = State::Failed(format!("{e:#}")),
@@ -846,19 +845,21 @@ impl DocView {
         cx.notify();
     }
 
-    /// Make an opened file, a source in `store` with `handle` rendering
-    /// it, the primary source and start the background loads. Its name is
-    /// what was read: the document's own path, except while showing
-    /// recovered changes from a temporary file.
+    /// Show a file as it opens, a source in `store` with `handle` rendering
+    /// it, as the primary source, and read the rest of it on a background
+    /// thread (see [`Self::finish_open`]). Its name is what was read: the
+    /// document's own path, or when `recovered`, the temporary file that
+    /// holds the recovered changes.
     fn install(
         &mut self,
         store: Arc<Store>,
         primary: SourceInfo,
         handle: RenderHandle,
+        recovered: bool,
         cx: &mut Context<Self>,
     ) {
-        let mut model = Document::new(store, primary, &[], sheaf_doc::history::default_policy());
-        model.set_author(crate::prefs::get(cx).identity.name());
+        let src = primary.src.clone();
+        let model = opening_model(store, primary, crate::prefs::get(cx).identity.name());
         let opened = self.path.clone();
         cx.defer(move |cx| crate::recent::add(&opened, cx));
         let mut handles = HashMap::new();
@@ -876,11 +877,11 @@ impl DocView {
             retired: Vec::new(),
             first_paint: None,
             notice: None,
+            reading: None,
             thumb_scroll: ScrollHandle::new(),
             thumb_keep: HashSet::new(),
             review_keep: HashSet::new(),
             thumb_followed: None,
-            outline_loaded: false,
             outline_expanded: HashSet::new(),
             outline_scroll: ScrollHandle::new(),
             selection: HashSet::new(),
@@ -921,42 +922,16 @@ impl DocView {
             attachments: Vec::new(),
             collection: None,
             attachment_selected: None,
-            facts_loaded: false,
             forms: Default::default(),
             layers: Vec::new(),
             layers_hidden: HashSet::new(),
             layers_default: HashSet::new(),
             layers_generation: 0,
             drawn_marks: Vec::new(),
-            pending_outline_styles: None,
             split: 0.5,
             split_drag: false,
         }));
-        self.fetch_outline(cx);
-        self.load_sheaf_annots(cx);
-        cx.emit(DocEvent::Opened);
-        if let Some(p) = self.selftest_save.take() {
-            self.selftest_save(p, cx);
-        }
-        if let Some(p) = self.selftest_insert.take() {
-            self.insert_pdf(p, cx);
-        }
-        if let Some(p) = self.selftest_annot.take() {
-            self.selftest_annot(p, cx);
-        }
-        if let Some(p) = self.selftest_clean.take() {
-            self.selftest_clean(p, cx);
-        }
-        if let Some(p) = self.selftest_extract.take() {
-            let ids: Vec<PageId> = (0..2).filter_map(|i| self.doc_page_id(i)).collect();
-            self.extract_to(ids, p, cx);
-        }
-        if let Some(p) = self.selftest_flatten.take() {
-            self.selftest_flatten(p, cx);
-        }
-        if let Some(p) = self.selftest_ocr.take() {
-            self.selftest_ocr(p, cx);
-        }
+        self.finish_open(src, recovered, cx);
         if let Some(src) = self.initial_pattern.take() {
             self.run_initial_pattern(src, cx);
         }
@@ -1030,12 +1005,7 @@ impl DocView {
             this.update(cx, |viewer, cx| {
                 match opened {
                     Ok((store, primary, handle)) => {
-                        viewer.install(store, primary, handle, cx);
-                        if let State::Ready(doc) = &mut viewer.state {
-                            doc.model.mark_unsaved();
-                            doc.notice =
-                                Some("Recovered unsaved changes — Ctrl+S to keep them".into());
-                        }
+                        viewer.install(store, primary, handle, true, cx);
                         if timing {
                             eprintln!("[timing] recovered unsaved changes in {:?}", t.elapsed());
                         }
@@ -1118,54 +1088,170 @@ impl DocView {
         sheaf_doc::recovery::discard(&self.path);
     }
 
-    fn fetch_outline(&mut self, cx: &mut Context<Self>) {
-        let State::Ready(doc) = &self.state else {
-            return;
-        };
-        let rx = doc.primary().outline();
-        let timing = self.timing;
-        let t = Instant::now();
+    /// Read what `src`, the primary file, says besides its pages on a
+    /// background thread, and make that the opened version
+    /// ([`Self::ready`]). Until then the view shows the pages alone, with
+    /// how many have been read, and edits are refused.
+    fn finish_open(&mut self, src: sheaf_doc::Src, recovered: bool, cx: &mut Context<Self>) {
+        use futures::FutureExt;
+        let tracker = sheaf_ops::Tracker::new();
+        if let State::Ready(doc) = &mut self.state {
+            doc.reading = Some(tracker.clone());
+        }
         cx.spawn(async move |this, cx| {
-            let Ok(result) = rx.await else { return };
-            this.update(cx, |viewer, cx| {
-                let State::Ready(doc) = &mut viewer.state else {
-                    return;
-                };
-                match result {
-                    Ok(items) => {
-                        if timing {
-                            eprintln!(
-                                "[timing] outline: {} items in {:?}",
-                                items.len(),
-                                t.elapsed()
-                            );
-                        }
-                        let mut flat: Vec<FlatOutlineItem> = items.iter().map(flat_item).collect();
-                        if let Some(styles) = doc.pending_outline_styles.take() {
-                            sheaf_doc::file::style_flat_items(&mut flat, &styles);
-                        }
-                        match doc.model.set_initial_outline(&flat) {
-                            Ok(()) => {
-                                // Start with the top level expanded.
-                                doc.outline_expanded =
-                                    doc.model.state().outline.iter().map(|n| n.id).collect();
-                                doc.outline_loaded = true;
-                                doc.touched();
-                            }
-                            Err(e) => log::warn!("outline arrived after edits; ignored: {e:#}"),
-                        }
-                        cx.notify();
-                    }
-                    Err(e) => log::error!("outline: {e:#}"),
+            let t = Instant::now();
+            let blob = src.id();
+            let reading = cx
+                .background_executor()
+                .spawn(async move { sheaf_doc::open::finish(&src, &tracker) });
+            let mut reading = Box::pin(reading.fuse());
+            let facts = loop {
+                let mut tick = cx
+                    .background_executor()
+                    .timer(std::time::Duration::from_millis(100))
+                    .fuse();
+                futures::select_biased! {
+                    facts = reading => break facts,
+                    _ = tick => {}
                 }
-            })
-            .ok();
+                // The status bar's count of the pages read.
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    return;
+                }
+            };
+            this.update(cx, |view, cx| view.ready(blob, facts, t, recovered, cx))
+                .ok();
         })
         .detach();
     }
 
+    /// `facts`, read from the file `blob` since `started`, are in. If the
+    /// view still shows that file as it opens (a recovery, a reopen or a
+    /// close can come between), they make its opened version, and the
+    /// view takes what it shows beside the model; then listeners hear the
+    /// file opened, and the dev hooks that edit or save run. A
+    /// `recovered` file stays unsaved until it's saved.
+    fn ready(
+        &mut self,
+        blob: sheaf_doc::BlobId,
+        facts: sheaf_doc::open::Facts,
+        started: Instant,
+        recovered: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let State::Ready(doc) = &mut self.state else {
+            return;
+        };
+        let Some(view) = take_facts(&mut doc.model, blob, facts, recovered) else {
+            return;
+        };
+        let primary = doc.model.primary();
+        doc.reading = None;
+        if doc.notice.as_deref() == Some(STILL_OPENING) {
+            doc.notice = None;
+        }
+        doc.foreign_annots = view.foreign.into_iter().map(|f| (primary, f)).collect();
+        doc.foreign_generation += 1;
+        doc.attachments = view.attachments;
+        doc.collection = view.collection;
+        doc.set_layers(view.layers);
+        if let Some(notice) = crate::form_bar::damaged_notice(&view.form) {
+            doc.notice = Some(notice);
+        }
+        doc.forms.primary = Some(Arc::new(view.form));
+        if doc.collection.is_some() {
+            doc.open_portfolio();
+            self.wanted_panel = Some("attachments");
+        }
+        let st = doc.model.state();
+        // Start with the top level expanded where the file leaves it open.
+        doc.outline_expanded = st.outline.iter().filter(|n| n.open).map(|n| n.id).collect();
+        if self.timing {
+            eprintln!(
+                "[timing] ready: {} sheaf annotations, {} third-party, {} bookmarks, {} fields \
+                 in {:?}, {:?} since launch",
+                st.annots.values().map(|l| l.len()).sum::<usize>(),
+                doc.foreign_annots.len(),
+                st.outline_flat().len(),
+                st.fields.len(),
+                started.elapsed(),
+                self.launched.elapsed()
+            );
+        }
+        let drawn = drawn_marks(st);
+        if !drawn.is_empty() {
+            doc.drawn_marks = drawn.clone();
+            let rx = doc.primary().hide_annots(drawn);
+            cx.spawn(async move |this, cx| {
+                let _ = rx.await;
+                this.update(cx, |view, cx| {
+                    if let State::Ready(doc) = &mut view.state {
+                        doc.invalidate_tiles();
+                    }
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
+        if recovered {
+            doc.notice = Some("Recovered unsaved changes — Ctrl+S to keep them".into());
+        }
+        doc.touched();
+        self.refresh_history();
+        cx.emit(DocEvent::Opened);
+        if let Some(p) = self.selftest_save.take() {
+            self.selftest_save(p, cx);
+        }
+        if let Some(p) = self.selftest_insert.take() {
+            self.insert_pdf(p, cx);
+        }
+        if let Some(p) = self.selftest_annot.take() {
+            self.selftest_annot(p, cx);
+        }
+        if let Some(p) = self.selftest_clean.take() {
+            self.selftest_clean(p, cx);
+        }
+        if let Some(p) = self.selftest_extract.take() {
+            let ids: Vec<PageId> = (0..2).filter_map(|i| self.doc_page_id(i)).collect();
+            self.extract_to(ids, p, cx);
+        }
+        if let Some(p) = self.selftest_flatten.take() {
+            self.selftest_flatten(p, cx);
+        }
+        if let Some(p) = self.selftest_ocr.take() {
+            self.selftest_ocr(p, cx);
+        }
+        cx.notify();
+    }
+
     pub fn go_to_page(&mut self, page: usize, cx: &mut Context<Self>) {
         self.scroll(ScrollTo::Page(page), cx);
+    }
+
+    /// Whether the file is still opening: being read, or shown while its
+    /// facts are read. Edits, and what writes the document out, wait.
+    pub(crate) fn is_opening(&self) -> bool {
+        match &self.state {
+            State::Loading => true,
+            State::Ready(doc) => !doc.model.is_ready(),
+            State::Locked(_) | State::Failed(_) => false,
+        }
+    }
+
+    /// Whether something that reads the whole document (a save, an export,
+    /// a print, a dialog over it) has to wait for the file to open, saying
+    /// so if it does: keys run it even while the menus have it greyed out.
+    pub(crate) fn still_opening(&mut self, cx: &mut Context<Self>) -> bool {
+        let State::Ready(doc) = &mut self.state else {
+            return false;
+        };
+        if doc.model.is_ready() {
+            return false;
+        }
+        doc.notice = Some(STILL_OPENING.into());
+        cx.notify();
+        true
     }
 
     // ----- edits ------------------------------------------------------------
@@ -1243,7 +1329,7 @@ impl DocView {
                 self.after_model_change(label.to_string(), out, cx);
             }
             Err(e) => {
-                doc.notice = Some(format!("{label} failed: {e:#}"));
+                doc.notice = Some(failed(label, &e));
                 cx.notify();
             }
         }
@@ -1268,6 +1354,19 @@ impl DocView {
             plugin,
         });
         cx.notify();
+    }
+
+    /// The plugin calls to make now the file has opened: `opened` to each
+    /// of `subscribers`, then the calls that waited for it.
+    #[cfg(feature = "plugins")]
+    pub(crate) fn release_plugin_calls(
+        &mut self,
+        subscribers: Vec<String>,
+    ) -> Vec<(String, sheaf_plugin::Call)> {
+        let State::Ready(doc) = &self.state else {
+            return Vec::new();
+        };
+        self.plugin_calls.release(&doc.model, subscribers)
     }
 
     /// What a plugin command sees of this document; `ocr` is the OCR
@@ -1549,6 +1648,9 @@ impl DocView {
     /// file as the new primary source without disturbing undo history.
     /// Resolves to whether the save succeeded.
     pub fn save_to(&mut self, path: PathBuf, cx: &mut Context<Self>) -> Task<bool> {
+        if self.still_opening(cx) {
+            return Task::ready(false);
+        }
         if self.would_drop_xfa_values() {
             // Asked next frame.
             self.pending_xfa = Some(path);
@@ -1653,18 +1755,10 @@ impl DocView {
                 let ok = match result {
                     Ok((saved, handle, strategy, notes)) => {
                         let page_count = saved.src.page_count();
+                        let saved_src = saved.src.clone();
                         let sid = doc.model.rebase_to_saved(saved);
                         // Our marks are now in the file; keep PDFium from drawing them.
-                        let st = doc.model.state();
-                        let pages: Vec<(u32, Vec<String>)> = st
-                            .pages
-                            .iter()
-                            .enumerate()
-                            .filter_map(|(i, p)| {
-                                let list = st.annots.get(&p.id)?;
-                                Some((i as u32, list.iter().flat_map(|a| a.pdf_names()).collect()))
-                            })
-                            .collect();
+                        let pages = drawn_marks(doc.model.state());
                         doc.drawn_marks = pages.clone();
                         // The saved file's third-party comments, at their
                         // new page numbers.
@@ -1672,7 +1766,7 @@ impl DocView {
                         doc.foreign_generation += 1;
                         // A new engine: nothing of theirs is hidden in it.
                         doc.foreign_hidden.retain(|(s, _, _)| *s != sid);
-                        reread_foreign(sid, path.clone(), cx);
+                        reread_foreign(sid, saved_src, cx);
                         if !pages.is_empty() {
                             let rx = handle.hide_annots(pages);
                             cx.spawn(async move |this, cx| {
@@ -1771,114 +1865,6 @@ impl DocView {
     }
 
     // ----- markup -------------------------------------------------------------
-
-    /// Read back annotations sheaf wrote into the primary file earlier and
-    /// take over their rendering.
-    fn load_sheaf_annots(&mut self, cx: &mut Context<Self>) {
-        let State::Ready(doc) = &self.state else {
-            return;
-        };
-        let Some(primary) = doc.model.source(doc.model.primary()) else {
-            return;
-        };
-        let src = primary.src.clone();
-        let timing = self.timing;
-        cx.spawn(async move |this, cx| {
-            let t = Instant::now();
-            let found = cx
-                .background_executor()
-                .spawn(async move { sheaf_doc::file::read_open(&src) })
-                .await;
-            let (by_index, foreign, facts) = match found {
-                Ok((a, facts)) => (a.sheaf, a.foreign, facts),
-                Err(e) => {
-                    log::warn!("reading annotations: {e:#}");
-                    return;
-                }
-            };
-            this.update(cx, |view, cx| {
-                let State::Ready(doc) = &mut view.state else {
-                    return;
-                };
-                if timing && !foreign.is_empty() {
-                    eprintln!(
-                        "[timing] found {} third-party annotations in {:?}",
-                        foreign.len(),
-                        t.elapsed()
-                    );
-                }
-                let primary = doc.model.primary();
-                doc.foreign_annots = foreign.into_iter().map(|f| (primary, f)).collect();
-                doc.foreign_generation += 1;
-                if !facts.outline_styles.is_empty() {
-                    if doc.outline_loaded {
-                        if let Err(e) = doc.model.set_initial_outline_styles(&facts.outline_styles)
-                        {
-                            log::warn!("bookmark colors arrived after edits; ignored: {e:#}");
-                        }
-                    } else {
-                        doc.pending_outline_styles = Some(facts.outline_styles.clone());
-                    }
-                }
-                if let Some(ranges) = &facts.label_ranges
-                    && let Err(e) = doc.model.set_initial_labels(ranges)
-                {
-                    log::warn!("page labels arrived after edits; ignored: {e:#}");
-                }
-                if let Some((hf, scope)) = facts.header_footer.clone()
-                    && let Err(e) = doc.model.set_initial_header_footer(hf, scope)
-                {
-                    log::warn!("header/footer settings arrived after edits; ignored: {e:#}");
-                }
-                // The labels changed under the same version.
-                doc.labels.borrow_mut().0 = u64::MAX;
-                doc.attachments = facts.attachments;
-                doc.collection = facts.collection;
-                doc.set_layers(facts.layers);
-                doc.take_form(&facts.form);
-                doc.facts_loaded = true;
-                if doc.collection.is_some() {
-                    doc.open_portfolio();
-                    view.wanted_panel = Some("attachments");
-                }
-                if by_index.is_empty() {
-                    cx.notify();
-                    return;
-                }
-                let drawn = marks_by_page(&by_index);
-                let n: usize = by_index.values().map(|v| v.len()).sum();
-                match doc.model.set_initial_annots(by_index) {
-                    Ok(()) => {
-                        if timing {
-                            eprintln!(
-                                "[timing] loaded {n} sheaf annotations on {} pages in {:?}",
-                                drawn.len(),
-                                t.elapsed()
-                            );
-                        }
-                        doc.drawn_marks = drawn.clone();
-                        let rx = doc.primary().hide_annots(drawn);
-                        doc.touched();
-                        cx.spawn(async move |this, cx| {
-                            let _ = rx.await;
-                            this.update(cx, |view, cx| {
-                                if let State::Ready(doc) = &mut view.state {
-                                    doc.invalidate_tiles();
-                                }
-                                cx.notify();
-                            })
-                            .ok();
-                        })
-                        .detach();
-                    }
-                    Err(e) => log::warn!("annotations arrived after edits; ignored: {e:#}"),
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
 
     /// A new annotation with the document's defaults filled in.
     /// A new mark by whoever `settings.toml` names (the OS user otherwise).
@@ -2236,6 +2222,9 @@ impl DocView {
     }
 
     pub fn extract_to(&mut self, ids: Vec<PageId>, path: PathBuf, cx: &mut Context<Self>) {
+        if self.still_opening(cx) {
+            return;
+        }
         let State::Ready(doc) = &mut self.state else {
             return;
         };
@@ -2292,6 +2281,9 @@ impl DocView {
     }
 
     pub fn export_flattened_to(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if self.still_opening(cx) {
+            return;
+        }
         let State::Ready(doc) = &mut self.state else {
             return;
         };
@@ -2380,6 +2372,9 @@ impl DocView {
     }
 
     pub fn export_clean_to(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if self.still_opening(cx) {
+            return;
+        }
         let State::Ready(doc) = &mut self.state else {
             return;
         };
@@ -2607,6 +2602,9 @@ impl DocView {
         bookmarks: bool,
         cx: &mut Context<Self>,
     ) {
+        if self.still_opening(cx) {
+            return;
+        }
         let State::Ready(doc) = &mut self.state else {
             return;
         };
@@ -2630,7 +2628,7 @@ impl DocView {
                     anyhow::Ok((info, handle, incoming))
                 })
                 .await;
-            let (info, handle, incoming) = match opened {
+            let (info, handle, mut incoming) = match opened {
                 Ok(v) => v,
                 Err(e) => {
                     this.update(cx, |view, cx| {
@@ -2643,27 +2641,18 @@ impl DocView {
                     return;
                 }
             };
-            // Bookmarks come from the worker before we apply the edit, so the
-            // insert and its merge are one undo step.
-            let outline = handle
-                .outline()
-                .await
-                .ok()
-                .and_then(|r| r.ok())
-                .unwrap_or_default();
             this.update(cx, |view, cx| {
+                // A recovery may have reopened the view meanwhile: a document
+                // still opening takes nothing in.
+                if view.still_opening(cx) {
+                    return;
+                }
                 let State::Ready(doc) = &mut view.state else {
                     return;
                 };
                 let page_count = info.src.page_count();
                 let sid = doc.model.add_source(info);
                 doc.handles.insert(sid, handle);
-                let mut flat: Vec<FlatOutlineItem> = if bookmarks {
-                    outline.iter().map(flat_item).collect()
-                } else {
-                    Vec::new()
-                };
-                sheaf_doc::file::style_flat_items(&mut flat, &incoming.outline_styles);
                 let label = format!("Insert {name}");
                 let mut outcome = None;
                 let mixed = doc.model.scripts_mixed();
@@ -2673,7 +2662,7 @@ impl DocView {
                         source: sid,
                         range: 0..page_count,
                         before,
-                        outline: Some(flat),
+                        outline: Some(std::mem::take(&mut incoming.outline)),
                         annots: incoming.edit_marks(),
                     },
                     &label,
@@ -2707,7 +2696,7 @@ impl DocView {
                             );
                         }
                     }
-                    Err(e) => doc.notice = Some(format!("Insert failed: {e:#}")),
+                    Err(e) => doc.notice = Some(failed("Insert", &e)),
                 }
                 doc.touched();
                 match outcome {
@@ -3378,6 +3367,9 @@ impl DocView {
     /// Run a print job: write the print file in the background, then hand
     /// it to the printer (or, for Save as PDF, ask where to save it).
     pub(crate) fn print(&mut self, req: crate::print_dialog::PrintRequest, cx: &mut Context<Self>) {
+        if self.still_opening(cx) {
+            return;
+        }
         let State::Ready(doc) = &mut self.state else {
             return;
         };
@@ -3508,21 +3500,83 @@ pub(crate) fn marks_by_page(
         .collect()
 }
 
-/// Read `path`'s third-party comments in the background and list them as
-/// `source`'s (after a save, the file's pages have new numbers).
-fn reread_foreign(source: SourceId, path: PathBuf, cx: &mut Context<DocView>) {
+/// The model a file opens as in the app while its facts are read: its
+/// pages, as [`sheaf_doc::open::start`] makes them, with `author` on the
+/// marks made in it. [`take_facts`] opens it.
+pub(crate) fn opening_model(store: Arc<Store>, primary: SourceInfo, author: String) -> Document {
+    let mut model = sheaf_doc::open::start(store, primary, sheaf_doc::history::default_policy());
+    model.set_author(author);
+    model
+}
+
+/// `facts`, read from the file `blob`, made `model`'s opened version, and
+/// what the view shows beside it; a `recovered` file stays unsaved. None
+/// when `model` no longer shows that file, or has opened already: another
+/// open of the same bytes had its facts first.
+pub(crate) fn take_facts(
+    model: &mut Document,
+    blob: sheaf_doc::BlobId,
+    facts: sheaf_doc::open::Facts,
+    recovered: bool,
+) -> Option<sheaf_doc::open::ViewFacts> {
+    let primary = model.primary();
+    if model.source(primary).is_none_or(|s| s.src.id() != blob) {
+        return None;
+    }
+    let view = model.ready(facts).ok()?;
+    if recovered {
+        model.mark_unsaved();
+    }
+    Some(view)
+}
+
+/// The status line while a file's facts are read: the page its first
+/// pass is on, while it's on one before the last.
+fn opening_line(reading: Option<&sheaf_ops::Tracker>) -> String {
+    let s = reading
+        .map(sheaf_ops::Tracker::snapshot)
+        .unwrap_or_default();
+    match s.total {
+        Some(total) if (1..total).contains(&s.done) => {
+            format!("Opening: page {} of {total}…", s.done)
+        }
+        _ => "Opening…".into(),
+    }
+}
+
+/// The notice for an edit the model refused: [`STILL_OPENING`] while the
+/// file opens, or else that `what` failed, and why.
+pub(crate) fn failed(what: &str, e: &anyhow::Error) -> String {
+    if e.is::<sheaf_doc::NotReady>() {
+        STILL_OPENING.into()
+    } else {
+        format!("{what} failed: {e:#}")
+    }
+}
+
+/// The marks sheaf draws itself, as `/NM`s by page index, when `st`'s
+/// pages are the primary file's in order: as it opened, or as a save
+/// wrote it.
+fn drawn_marks(st: &sheaf_doc::DocState) -> Vec<(u32, Vec<String>)> {
+    st.pages
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| {
+            let list = st.annots.get(&p.id)?;
+            Some((i as u32, list.iter().flat_map(|a| a.pdf_names()).collect()))
+        })
+        .collect()
+}
+
+/// Read the third-party comments in `src`, the file a save wrote, in the
+/// background and list them as `source`'s (after a save, the file's pages
+/// have new numbers).
+fn reread_foreign(source: SourceId, src: sheaf_doc::Src, cx: &mut Context<DocView>) {
     cx.spawn(async move |this, cx| {
-        let found = cx
+        let foreign = cx
             .background_executor()
-            .spawn(async move { sheaf_doc::file::read_annots(&path, None) })
+            .spawn(async move { sheaf_doc::file::annots_in(src.pdf(), src.page_ids()).foreign })
             .await;
-        let foreign = match found {
-            Ok(a) => a.foreign,
-            Err(e) => {
-                log::warn!("reading third-party comments: {e:#}");
-                return;
-            }
-        };
         this.update(cx, |view, cx| {
             if let State::Ready(doc) = &mut view.state
                 && doc.model.primary() == source
@@ -3537,17 +3591,6 @@ fn reread_foreign(source: SourceId, path: PathBuf, cx: &mut Context<DocView>) {
         .ok();
     })
     .detach();
-}
-
-fn flat_item(i: &OutlineItem) -> FlatOutlineItem {
-    FlatOutlineItem {
-        title: i.title.clone(),
-        page: i.page,
-        depth: i.depth,
-        view: i.view.clone(),
-        color: None,
-        style: Default::default(),
-    }
 }
 
 /// Wrap a BGRA raster as a GPUI image without copying the pixel data.
@@ -4463,7 +4506,13 @@ impl DocView {
             doc.page_position(doc.current_page(), count),
             layout.zoom_percent(),
         );
-        let notice = doc.notice.clone().map(Into::into);
+        // Until the file's facts are read, it says it's still opening,
+        // and how far it has read.
+        let notice = doc
+            .notice
+            .clone()
+            .or_else(|| (!doc.model.is_ready()).then(|| opening_line(doc.reading.as_ref())))
+            .map(Into::into);
         let wants: Vec<_> = frames.into_iter().flat_map(|f| f.wants).collect();
         for (pref, want) in wants {
             self.ensure_rendered(pref, want, cx);
@@ -5837,6 +5886,7 @@ fn reveal_new_bookmarks(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Context as _;
     use sheaf_doc::OutlineNode;
 
     fn node(id: u64, children: Vec<OutlineNode>) -> OutlineNode {
@@ -5847,6 +5897,7 @@ mod tests {
             view: None,
             color: None,
             style: Default::default(),
+            open: true,
             children: children.into(),
         }
     }
@@ -5867,5 +5918,130 @@ mod tests {
         let mut got: Vec<u64> = expanded.iter().map(|i| i.0).collect();
         got.sort();
         assert_eq!(got, [1, 2, 4]);
+    }
+
+    /// `path` opened as the view opens it, with no window: the model
+    /// [`DocView::install`] makes, and the facts [`DocView::ready`] takes
+    /// in, read as `finish_open` reads them.
+    fn as_the_view_opens(
+        path: &std::path::Path,
+        recovered: bool,
+    ) -> anyhow::Result<(Document, sheaf_doc::open::ViewFacts)> {
+        let store = Store::new();
+        let primary = SourceInfo::read(&store, path, None)?;
+        let (src, blob) = (primary.src.clone(), primary.src.id());
+        let mut model = opening_model(store, primary, "Me".into());
+        let facts = sheaf_doc::open::finish(&src, &sheaf_ops::NoProgress);
+        let view = take_facts(&mut model, blob, facts, recovered).context("not taken")?;
+        Ok((model, view))
+    }
+
+    /// Whether the view's open of `path` and the command line's both open
+    /// it (false: neither does) as one document, or how they differ:
+    /// whether it opens at all, the opened state, ids included, the
+    /// view's facts, the version, or the ids the next edit draws.
+    fn opens_alike(path: &std::path::Path) -> Result<bool, &'static str> {
+        let (app, headless) = match (
+            as_the_view_opens(path, false),
+            sheaf_doc::open::file(path, None),
+        ) {
+            (Ok(app), Ok(headless)) => (app, headless),
+            (Err(_), Err(_)) => return Ok(false),
+            _ => return Err("it opens one way only"),
+        };
+        let ((mut a, view), mut h) = (app, headless.doc);
+        if a.state() != h.state() {
+            return Err("the opened state");
+        }
+        if view != headless.view {
+            return Err("the view's facts");
+        }
+        let version = |d: &Document| (d.current_version(), d.is_dirty(), d.can_undo());
+        if version(&a) != version(&h) {
+            return Err("the version");
+        }
+        // A copy of a page draws a page id, and a field id for each field
+        // on it.
+        let duplicate = |d: &mut Document| {
+            let ids = vec![d.page(0).expect("a source has pages").id];
+            d.apply(Edit::DuplicatePages { ids }, "Duplicate")
+                .map(|_| ())
+                .map_err(|e| format!("{e:#}"))
+        };
+        if duplicate(&mut a) != duplicate(&mut h) || a.state() != h.state() {
+            return Err("the ids the next edit draws");
+        }
+        Ok(true)
+    }
+
+    /// The view's open and the command line's are one open: on a file
+    /// that says every fact, on one with every kind of field, and over
+    /// Greg's corpus (skipped without it), they give one document. A
+    /// recovered file opens the same, unsaved, and facts read from other
+    /// bytes, or that come again, aren't taken.
+    #[test]
+    fn the_app_opens_as_the_command_line_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixtures = [
+            ("every-fact.pdf", sheaf_doc::forms::fixture::every_fact()),
+            ("every-kind.pdf", sheaf_doc::forms::fixture::every_kind()),
+        ];
+        for (name, mut f) in fixtures {
+            let path = dir.path().join(name);
+            std::fs::write(&path, f.bytes()).unwrap();
+            assert_eq!(opens_alike(&path), Ok(true), "{name}");
+        }
+        let path = dir.path().join("every-fact.pdf");
+        let (recovered, _) = as_the_view_opens(&path, true).unwrap();
+        let headless = sheaf_doc::open::file(&path, None).unwrap().doc;
+        assert!(recovered.state() == headless.state());
+        assert!(recovered.is_dirty() && !recovered.can_undo());
+        let store = Store::new();
+        let primary = SourceInfo::read(&store, &path, None).unwrap();
+        let src = primary.src.clone();
+        let mut model = opening_model(store, primary, "Me".into());
+        let other = sheaf_doc::forms::fixture::every_kind().source();
+        let facts = || sheaf_doc::open::finish(&src, &sheaf_ops::NoProgress);
+        assert!(take_facts(&mut model, other.id(), facts(), false).is_none());
+        assert!(!model.is_ready());
+        assert!(take_facts(&mut model, src.id(), facts(), false).is_some());
+        assert!(take_facts(&mut model, src.id(), facts(), false).is_none());
+
+        let Some(corpus) = sheaf_doc::forms::corpus::Corpus::or_skip() else {
+            return;
+        };
+        let entries = corpus.manifest().unwrap();
+        let outcomes = sheaf_doc::forms::corpus::each_entry(&entries, |entry| {
+            opens_alike(&corpus.path(entry))
+        });
+        let differ: Vec<(&str, &str)> = entries
+            .iter()
+            .zip(&outcomes)
+            .filter_map(|(entry, alike)| Some((entry.path.as_str(), alike.err()?)))
+            .collect();
+        eprintln!(
+            "{} files: {} open neither way, {} otherwise in the app",
+            entries.len(),
+            outcomes.iter().filter(|o| **o == Ok(false)).count(),
+            differ.len()
+        );
+        assert!(differ.is_empty(), "{differ:#?}");
+    }
+
+    #[test]
+    fn the_status_bar_counts_the_pages_read() {
+        use sheaf_ops::Progress;
+        let reading = sheaf_ops::Tracker::new();
+        assert_eq!(opening_line(None), "Opening…");
+        assert_eq!(opening_line(Some(&reading)), "Opening…");
+        reading.set_total(Some(40_000), Default::default());
+        reading.set(12_000);
+        assert_eq!(
+            opening_line(Some(&reading)),
+            "Opening: page 12000 of 40000…"
+        );
+        // The pages are read: the rest of the facts.
+        reading.set(40_000);
+        assert_eq!(opening_line(Some(&reading)), "Opening…");
     }
 }

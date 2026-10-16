@@ -40,7 +40,7 @@ use super::field::{
     Action, Border, BorderStyle, Choice, Color, Field, FieldId, FieldKind, Mk, Trigger, Value,
     Widget,
 };
-use crate::attachments::{Objects, resolve};
+use crate::attachments::{Objects, once, resolve};
 use crate::file::pdf_text_bytes;
 use crate::model::SourceId;
 use crate::source::{FormLimits, Limits, PageFacts, Source};
@@ -55,8 +55,8 @@ pub const MAX_COORD: f32 = 1_000_000.0;
 pub struct FileForm {
     pub facts: FormFacts,
     /// Terminal fields, in tree order, with ids from 0 and source 0 (the
-    /// primary's, at open): `Document::set_initial_fields` takes them as
-    /// they are. None when the form is damaged.
+    /// primary's, at open): `Document::ready` takes them as they are.
+    /// None when the form is damaged.
     pub fields: Vec<Field>,
     /// Their widgets on pages, by page index, each page's in `/Annots`
     /// order. A widget on two pages is on both.
@@ -1074,16 +1074,6 @@ fn document_scripts(pdf: &LazyPdf, limits: &FormLimits) -> (usize, usize) {
         }
     }
     (scripts, checks)
-}
-
-/// `o` resolved, unless it's a reference `seen` already has.
-fn once<'a>(pdf: &'a LazyPdf, seen: &mut HashSet<ObjectId>, o: &'a Object) -> Option<&'a Object> {
-    if let Ok(id) = o.as_reference()
-        && !seen.insert(id)
-    {
-        return None;
-    }
-    resolve(pdf, o)
 }
 
 #[cfg(test)]

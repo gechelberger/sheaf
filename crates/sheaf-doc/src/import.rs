@@ -6,9 +6,10 @@
 //! The mark keeps the annotation's `/NM` ([`Annot::name`]), so replies to
 //! it still find it, and a save puts the mark where the annotation was.
 
-use lopdf::{Dictionary, Document as Pdf, Object};
+use lopdf::{Dictionary, Object};
 
 use crate::annot::{Annot, AnnotId, AnnotKind, Box2, PageGeom, Pt, REVIEW};
+use crate::attachments::Objects;
 use crate::file::{pdf_text, thread_name};
 
 /// What a conversion may do beyond reading the dictionary.
@@ -36,8 +37,8 @@ pub enum NotAMark {
 /// with `geom`. A replacement's StrikeOut, grouped under its Caret, is
 /// folded into the Caret's mark. `pdf` resolves references (`/IRT`, `/AP`,
 /// `/FS`).
-pub fn convert_page(
-    pdf: &Pdf,
+pub fn convert_page<P: Objects + ?Sized>(
+    pdf: &P,
     dicts: &[&Dictionary],
     geom: &PageGeom,
     opts: Options,
@@ -88,8 +89,8 @@ pub fn convert_page(
 }
 
 /// `dict` as a mark on a page with `geom`.
-pub fn convert(
-    pdf: &Pdf,
+pub fn convert<P: Objects + ?Sized>(
+    pdf: &P,
     dict: &Dictionary,
     geom: &PageGeom,
     opts: Options,
@@ -299,7 +300,7 @@ fn measured(dict: &Dictionary) -> Option<crate::measure::Measured> {
 }
 
 /// Its `/Measure` as a scale.
-fn scale(pdf: &Pdf, dict: &Dictionary) -> Option<crate::measure::Scale> {
+fn scale<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary) -> Option<crate::measure::Scale> {
     let (_, m) = pdf.dereference(dict.get(b"Measure").ok()?).ok()?;
     crate::measure::scale_of(pdf, m.as_dict().ok()?)
 }
@@ -328,7 +329,7 @@ fn measure(
 
 /// A stamp: its appearance as one of ours, in the cache, when it has one
 /// sheaf can read; else a text stamp saying its name.
-fn stamp(pdf: &Pdf, dict: &Dictionary, rect: Box2) -> AnnotKind {
+fn stamp<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary, rect: Box2) -> AnnotKind {
     let name = dict
         .get(b"Name")
         .ok()
@@ -372,7 +373,7 @@ fn stamp(pdf: &Pdf, dict: &Dictionary, rect: Box2) -> AnnotKind {
 }
 
 /// An attachment, its embedded file copied into the cache.
-fn attachment(pdf: &Pdf, dict: &Dictionary, rect: Box2) -> Option<AnnotKind> {
+fn attachment<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary, rect: Box2) -> Option<AnnotKind> {
     let deref_dict = |o: &Object| pdf.dereference(o).ok()?.1.as_dict().ok().cloned();
     let fs = deref_dict(dict.get(b"FS").ok()?)?;
     let ef = deref_dict(fs.get(b"EF").ok()?)?;
@@ -427,7 +428,7 @@ fn is_grouped(dict: &Dictionary) -> bool {
 
 /// What `/IRT` names: the annotation it refers to, by its name, or (as
 /// XFDF gives it) the name itself.
-pub fn irt_name(pdf: &Pdf, dict: &Dictionary) -> Option<String> {
+pub fn irt_name<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary) -> Option<String> {
     match dict.get(b"IRT").ok()? {
         Object::Reference(id) => pdf.get_dictionary(*id).ok().map(thread_name),
         o @ Object::String(..) => Some(pdf_text(o)).filter(|n| !n.is_empty()),
@@ -435,7 +436,7 @@ pub fn irt_name(pdf: &Pdf, dict: &Dictionary) -> Option<String> {
     }
 }
 
-fn floats(pdf: &Pdf, a: &[Object]) -> Vec<f32> {
+fn floats<P: Objects + ?Sized>(pdf: &P, a: &[Object]) -> Vec<f32> {
     a.iter()
         .map(|o| {
             pdf.dereference(o)
@@ -446,7 +447,7 @@ fn floats(pdf: &Pdf, a: &[Object]) -> Vec<f32> {
         .collect()
 }
 
-fn numbers(pdf: &Pdf, dict: &Dictionary, key: &[u8]) -> Option<Vec<f32>> {
+fn numbers<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary, key: &[u8]) -> Option<Vec<f32>> {
     let (_, o) = pdf.dereference(dict.get(key).ok()?).ok()?;
     Some(floats(pdf, o.as_array().ok()?))
 }
@@ -491,7 +492,7 @@ fn inset(r: Box2, d: f32) -> Box2 {
 }
 
 /// `/BS /W`, else `/Border`'s width, else 1.
-fn border_width(pdf: &Pdf, dict: &Dictionary) -> f32 {
+fn border_width<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary) -> f32 {
     let bs = dict
         .get(b"BS")
         .ok()
@@ -508,13 +509,13 @@ fn border_width(pdf: &Pdf, dict: &Dictionary) -> f32 {
         .unwrap_or(1.0)
 }
 
-fn border_style(pdf: &Pdf, dict: &Dictionary) -> Option<Vec<u8>> {
+fn border_style<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary) -> Option<Vec<u8>> {
     let (_, bs) = pdf.dereference(dict.get(b"BS").ok()?).ok()?;
     Some(bs.as_dict().ok()?.get(b"S").ok()?.as_name().ok()?.to_vec())
 }
 
 /// `/C` or `/IC` as RGB: gray, RGB or CMYK; none when empty.
-fn color_of(pdf: &Pdf, dict: &Dictionary, key: &[u8]) -> Option<[u8; 3]> {
+fn color_of<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary, key: &[u8]) -> Option<[u8; 3]> {
     let c = numbers(pdf, dict, key)?;
     let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
     match c.as_slice() {

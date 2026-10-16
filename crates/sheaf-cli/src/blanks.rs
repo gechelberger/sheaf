@@ -62,7 +62,7 @@ pub fn run(args: BlanksArgs, quiet: bool) -> anyhow::Result<()> {
             }
         }
     }
-    let mut doc = sheaf_ops::open(&args.input, args.password.as_deref())?;
+    let mut doc = sheaf_doc::open::file(&args.input, args.password.as_deref())?.doc;
     let snap = doc.snapshot();
     let pages = match &args.pages {
         Some(r) => Some(

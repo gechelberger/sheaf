@@ -122,7 +122,7 @@ pub fn find(
     let mut done = 0;
     for (sid, list) in by_source {
         let info = snap.source(sid).context("unknown source")?;
-        let engine = crate::open::engine_for(info)?;
+        let engine = crate::engine_for(info)?;
         for i in list {
             progress.check()?;
             done += 1;

@@ -6,7 +6,7 @@ use std::collections::HashSet;
 
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId};
 
-use crate::attachments::resolve;
+use crate::attachments::{Objects, once, resolve};
 use crate::file::pdf_text;
 
 /// An optional content group: its object number in the file.
@@ -28,7 +28,7 @@ pub struct Layer {
 /// The file's layers in display order: `/D /Order` if it has one (nested
 /// arrays give depth; a string first in an array is a heading), then any
 /// group the order leaves out. Empty when the file has no layers.
-pub fn layers_in(pdf: &Pdf) -> Vec<Layer> {
+pub fn layers_in<P: Objects + ?Sized>(pdf: &P) -> Vec<Layer> {
     let Some(props) = oc_properties(pdf) else {
         return Vec::new();
     };
@@ -74,12 +74,13 @@ pub fn layers_in(pdf: &Pdf) -> Vec<Layer> {
 
     let mut out = Vec::new();
     let mut listed = HashSet::new();
+    let mut seen = HashSet::new();
     if let Some(order) = d
         .and_then(|d| d.get(b"Order").ok())
-        .and_then(|o| resolve(pdf, o))
+        .and_then(|o| once(pdf, &mut seen, o))
         .and_then(|o| o.as_array().ok())
     {
-        walk_order(pdf, order, 0, &mut |id, label, depth| match id {
+        walk_order(pdf, order, 0, &mut seen, &mut |id, label, depth| match id {
             Some(id) if groups.contains(&id) || pdf.get_dictionary(id).is_ok() => {
                 if listed.insert(id) {
                     out.push(Layer {
@@ -115,10 +116,13 @@ pub fn layers_in(pdf: &Pdf) -> Vec<Layer> {
     out
 }
 
-fn walk_order(
-    pdf: &Pdf,
+/// `/Order`'s items below `depth`, each array reached by reference once
+/// (an order may hold itself).
+fn walk_order<P: Objects + ?Sized>(
+    pdf: &P,
     items: &[Object],
     depth: u16,
+    seen: &mut HashSet<ObjectId>,
     f: &mut impl FnMut(Option<ObjectId>, String, u16),
 ) {
     if depth > 32 {
@@ -136,16 +140,20 @@ fn walk_order(
     for o in it {
         match o {
             Object::Reference(id) => match pdf.get_object(*id) {
-                Ok(Object::Array(a)) => walk_order(pdf, a, depth + 1, f),
+                Ok(Object::Array(a)) => {
+                    if seen.insert(*id) {
+                        walk_order(pdf, a, depth + 1, seen, f);
+                    }
+                }
                 _ => f(Some(*id), String::new(), depth),
             },
-            Object::Array(a) => walk_order(pdf, a, depth + 1, f),
+            Object::Array(a) => walk_order(pdf, a, depth + 1, seen, f),
             _ => {}
         }
     }
 }
 
-fn oc_properties(pdf: &Pdf) -> Option<&Dictionary> {
+fn oc_properties<P: Objects + ?Sized>(pdf: &P) -> Option<&Dictionary> {
     pdf.catalog()
         .ok()?
         .get(b"OCProperties")
@@ -248,8 +256,10 @@ mod tests {
 
     #[test]
     fn lists_in_order_with_headings_and_states() {
-        let (pdf, a, b, c) = sample();
+        let (mut pdf, a, b, c) = sample();
         let l = layers_in(&pdf);
+        // Read from a source, as a file opens: the same rows.
+        assert_eq!(layers_in(crate::open::tests::lazily(&mut pdf).pdf()), l);
         let rows: Vec<(Option<ObjectId>, &str, bool, bool, u16)> = l
             .iter()
             .map(|l| (l.id, l.name.as_str(), l.on, l.locked, l.depth))

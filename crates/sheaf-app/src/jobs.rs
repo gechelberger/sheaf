@@ -144,6 +144,9 @@ impl DocView {
         window: &mut gpui::Window,
         cx: &mut Context<Self>,
     ) {
+        if self.still_opening(cx) {
+            return;
+        }
         let State::Ready(doc) = &self.state else {
             return;
         };

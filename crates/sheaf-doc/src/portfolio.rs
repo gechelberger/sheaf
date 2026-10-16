@@ -2,11 +2,11 @@
 //! is its embedded files, with folders, metadata columns and a cover
 //! sheet. Read only.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use lopdf::{Dictionary, Document as Pdf, Object};
+use lopdf::{Dictionary, Object, ObjectId};
 
-use crate::attachments::resolve;
+use crate::attachments::{Objects, once, resolve};
 use crate::file::pdf_text;
 
 /// One metadata column of the portfolio (`/Schema`).
@@ -45,7 +45,7 @@ pub struct Collection {
 }
 
 /// The catalog's `/Collection`, if this file is a portfolio.
-pub fn collection(pdf: &Pdf) -> Option<Collection> {
+pub fn collection<P: Objects + ?Sized>(pdf: &P) -> Option<Collection> {
     let c = pdf
         .catalog()
         .ok()?
@@ -81,7 +81,7 @@ pub fn collection(pdf: &Pdf) -> Option<Collection> {
     Some(Collection { fields, initial })
 }
 
-fn field(pdf: &Pdf, key: String, d: &Dictionary) -> Field {
+fn field<P: Objects + ?Sized>(pdf: &P, key: String, d: &Dictionary) -> Field {
     let kind = match d.get(b"Subtype").ok().and_then(|o| o.as_name().ok()) {
         Some(b"D") => FieldKind::Date,
         Some(b"N") => FieldKind::Number,
@@ -123,8 +123,9 @@ fn field(pdf: &Pdf, key: String, d: &Dictionary) -> Field {
 
 /// Folder paths by folder `/ID`: "Tax/2024" for a folder two levels down;
 /// the root folder is "".
-pub fn folder_paths(pdf: &Pdf) -> HashMap<i64, String> {
+pub fn folder_paths<P: Objects + ?Sized>(pdf: &P) -> HashMap<i64, String> {
     let mut out = HashMap::new();
+    let mut seen = HashSet::new();
     let root = pdf
         .catalog()
         .ok()
@@ -132,23 +133,26 @@ pub fn folder_paths(pdf: &Pdf) -> HashMap<i64, String> {
         .and_then(|o| resolve(pdf, o))
         .and_then(|o| o.as_dict().ok())
         .and_then(|c| c.get(b"Folders").ok())
-        .and_then(|o| resolve(pdf, o))
+        .and_then(|o| once(pdf, &mut seen, o))
         .and_then(|o| o.as_dict().ok());
     if let Some(root) = root {
         if let Some(id) = folder_id(pdf, root) {
             out.insert(id, String::new());
         }
-        walk_folders(pdf, root, "", &mut out, 0);
+        walk_folders(pdf, root, "", &mut out, 0, &mut seen);
     }
     out
 }
 
-fn walk_folders(
-    pdf: &Pdf,
+/// The folders below `parent`, each reached by reference once: a folder
+/// that's its own child or sibling, or another's again, ends the run.
+fn walk_folders<P: Objects + ?Sized>(
+    pdf: &P,
     parent: &Dictionary,
     path: &str,
     out: &mut HashMap<i64, String>,
     depth: u8,
+    seen: &mut HashSet<ObjectId>,
 ) {
     if depth > 32 {
         return;
@@ -156,14 +160,9 @@ fn walk_folders(
     let mut next = parent
         .get(b"Child")
         .ok()
-        .and_then(|o| resolve(pdf, o))
+        .and_then(|o| once(pdf, seen, o))
         .and_then(|o| o.as_dict().ok());
-    let mut guard = 0;
     while let Some(f) = next {
-        guard += 1;
-        if guard > 10_000 {
-            break;
-        }
         let name = f
             .get(b"Name")
             .ok()
@@ -178,16 +177,16 @@ fn walk_folders(
         if let Some(id) = folder_id(pdf, f) {
             out.insert(id, here.clone());
         }
-        walk_folders(pdf, f, &here, out, depth + 1);
+        walk_folders(pdf, f, &here, out, depth + 1, seen);
         next = f
             .get(b"Next")
             .ok()
-            .and_then(|o| resolve(pdf, o))
+            .and_then(|o| once(pdf, seen, o))
             .and_then(|o| o.as_dict().ok());
     }
 }
 
-fn folder_id(pdf: &Pdf, f: &Dictionary) -> Option<i64> {
+fn folder_id<P: Objects + ?Sized>(pdf: &P, f: &Dictionary) -> Option<i64> {
     f.get(b"ID")
         .ok()
         .and_then(|o| resolve(pdf, o))
@@ -196,7 +195,7 @@ fn folder_id(pdf: &Pdf, f: &Dictionary) -> Option<i64> {
 
 /// A `/CI` value as text: strings, numbers, dates, or a collection
 /// sub-item (`/D` data with an optional `/P` prefix).
-pub fn field_text(pdf: &Pdf, v: &Object) -> String {
+pub fn field_text<P: Objects + ?Sized>(pdf: &P, v: &Object) -> String {
     let Some(v) = resolve(pdf, v) else {
         return String::new();
     };
@@ -217,7 +216,7 @@ pub fn field_text(pdf: &Pdf, v: &Object) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lopdf::dictionary;
+    use lopdf::{Document as Pdf, dictionary};
 
     #[test]
     fn reads_schema_folders_and_initial_file() {
@@ -252,6 +251,10 @@ mod tests {
         assert_eq!(paths[&0], "");
         assert_eq!(paths[&1], "Tax");
         assert_eq!(paths[&2], "Tax/2024");
+        // Read from a source, as a file opens: the same.
+        let src = crate::open::tests::lazily(&mut pdf);
+        assert_eq!(collection(src.pdf()), Some(c));
+        assert_eq!(folder_paths(src.pdf()), paths);
     }
 
     #[test]

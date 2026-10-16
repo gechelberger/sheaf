@@ -48,19 +48,6 @@ impl Job {
     }
 }
 
-/// One bookmark, in pre-order with its depth, so a tree can be stored flat.
-#[derive(Debug, Clone)]
-pub struct OutlineItem {
-    pub id: u32,
-    pub title: String,
-    pub page: Option<u32>,
-    pub depth: u16,
-    pub has_children: bool,
-    /// Where on `page` it lands, when the file says (an `/XYZ` position
-    /// in the page's displayed space, or another destination kind as is).
-    pub view: Option<sheaf_core::DestView>,
-}
-
 /// Axis-aligned rectangle in page points, top-left origin, in the page's
 /// *displayed* orientation (i.e. after /Rotate).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -118,8 +105,6 @@ pub trait Renderer {
     /// The document's form, as the engine classes it.
     fn form_type(&self) -> FormType;
     fn page_size(&self, page: PageIndex) -> Result<PageSize>;
-    /// The bookmark tree, flattened in pre-order.
-    fn outline(&self) -> Result<Vec<OutlineItem>>;
     /// All matches of `query` on one page.
     fn search_page(&self, page: PageIndex, query: &str, match_case: bool)
     -> Result<Vec<SearchHit>>;
@@ -188,13 +173,15 @@ pub mod pdfium {
     use super::*;
     use parking_lot::{FairMutex, FairMutexGuard};
     use pdfium_render::prelude::*;
-    use std::collections::HashMap;
     use std::mem::ManuallyDrop;
     use std::sync::OnceLock;
 
+    #[cfg(test)]
+    mod bookmarks;
+
     /// Held across every use of PDFium, from a load to the document's
-    /// drop: a call into an engine, or a page or bookmark of a walk over
-    /// the whole document. pdfium-render's `thread_safe` feature isn't
+    /// drop: a call into an engine, such as one page of a walk over the
+    /// whole document's page sizes. pdfium-render's `thread_safe` feature isn't
     /// enough: 185 of the 467 functions it binds (0.9.4) take no lock,
     /// among them `FPDFDOC_InitFormFillEnvironment` (every load makes it)
     /// and the page size, text and bitmap calls. PDFium's parser keeps
@@ -425,161 +412,6 @@ pub mod pdfium {
                 width: r.width().value,
                 height: r.height().value,
             })
-        }
-
-        fn outline(&self) -> Result<Vec<OutlineItem>> {
-            const MAX_DEPTH: u16 = 32;
-            const MAX_ITEMS: usize = 200_000;
-
-            /// The bookmark's page and position, from its `/Dest` or its
-            /// GoTo action.
-            fn locate(
-                b: &PdfBookmark<'_>,
-                doc: &PdfDocument<'_>,
-                frames: &mut HashMap<u32, Option<sheaf_core::PageFrame>>,
-            ) -> (Option<u32>, Option<sheaf_core::DestView>) {
-                let mut from = |d: &PdfDestination<'_>| {
-                    let page = d.page_index().ok().map(|i| i as u32);
-                    let view = page.and_then(|p| view_of(d, p, doc, frames));
-                    (page, view)
-                };
-                if let Some(d) = b.destination() {
-                    return from(&d);
-                }
-                let Some(action) = b.action() else {
-                    return (None, None);
-                };
-                let Some(local) = action.as_local_destination_action() else {
-                    return (None, None);
-                };
-                match local.destination() {
-                    Ok(d) => from(&d),
-                    Err(_) => (None, None),
-                }
-            }
-
-            /// The page's visible box (CropBox, else MediaBox) and `/Rotate`,
-            /// for converting positions.
-            fn frame_of(doc: &PdfDocument<'_>, index: u32) -> Option<sheaf_core::PageFrame> {
-                let page = doc.pages().get(index as i32).ok()?;
-                let bounds = page.boundaries();
-                let b = bounds.crop().or_else(|_| bounds.media()).ok()?.bounds;
-                let rotate = match page.rotation().ok()? {
-                    PdfPageRenderRotation::None => 0,
-                    PdfPageRenderRotation::Degrees90 => 90,
-                    PdfPageRenderRotation::Degrees180 => 180,
-                    PdfPageRenderRotation::Degrees270 => 270,
-                };
-                let (l, r) = (b.left().value, b.right().value);
-                let (bt, t) = (b.bottom().value, b.top().value);
-                Some(sheaf_core::PageFrame {
-                    media: [l.min(r), bt.min(t), l.max(r), bt.max(t)],
-                    rotate,
-                })
-            }
-
-            fn view_of(
-                d: &PdfDestination<'_>,
-                page: u32,
-                doc: &PdfDocument<'_>,
-                frames: &mut HashMap<u32, Option<sheaf_core::PageFrame>>,
-            ) -> Option<sheaf_core::DestView> {
-                use PdfDestinationViewSettings as V;
-                use sheaf_core::DestView;
-                let pt = |p: Option<PdfPoints>| p.map(|p| p.value);
-                let other = |kind: &str, params: Vec<Option<f32>>| {
-                    Some(DestView::Other {
-                        kind: kind.into(),
-                        params,
-                    })
-                };
-                match d.view_settings().ok()? {
-                    V::SpecificCoordinatesAndZoom(x, y, zoom) => {
-                        let (left, top) = match (x, y) {
-                            (None, None) => (None, None),
-                            (x, y) => {
-                                let frame =
-                                    *frames.entry(page).or_insert_with(|| frame_of(doc, page));
-                                frame?.to_display(pt(x), pt(y))
-                            }
-                        };
-                        if left.is_none() && top.is_none() && zoom.is_none() {
-                            return None;
-                        }
-                        Some(DestView::Xyz { left, top, zoom })
-                    }
-                    V::FitPageToWindow => other("Fit", vec![]),
-                    V::FitPageHorizontallyToWindow(y) => other("FitH", vec![pt(y)]),
-                    V::FitPageVerticallyToWindow(x) => other("FitV", vec![pt(x)]),
-                    V::FitPageToRectangle(r) => other(
-                        "FitR",
-                        vec![
-                            Some(r.left().value),
-                            Some(r.bottom().value),
-                            Some(r.right().value),
-                            Some(r.top().value),
-                        ],
-                    ),
-                    V::FitBoundsToWindow => other("FitB", vec![]),
-                    V::FitBoundsHorizontallyToWindow(y) => other("FitBH", vec![pt(y)]),
-                    V::FitBoundsVerticallyToWindow(x) => other("FitBV", vec![pt(x)]),
-                    V::Unknown => None,
-                }
-            }
-
-            fn walk(
-                first: Option<PdfBookmark<'_>>,
-                depth: u16,
-                doc: &PdfDocument<'_>,
-                frames: &mut HashMap<u32, Option<sheaf_core::PageFrame>>,
-                out: &mut Vec<OutlineItem>,
-            ) {
-                let mut node = first;
-                while let Some(b) = node {
-                    if out.len() >= MAX_ITEMS {
-                        return;
-                    }
-                    // Locked a bookmark at a time, so other documents
-                    // get turns during a long outline.
-                    let pdfium = lock();
-                    let child = b.first_child();
-                    let (page, view) = locate(&b, doc, frames);
-                    out.push(OutlineItem {
-                        id: out.len() as u32,
-                        title: b.title().unwrap_or_default(),
-                        page,
-                        depth,
-                        has_children: child.is_some(),
-                        view,
-                    });
-                    drop(pdfium);
-                    if depth < MAX_DEPTH {
-                        walk(child, depth + 1, doc, frames, out);
-                    }
-                    let _pdfium = lock();
-                    node = b.next_sibling();
-                }
-            }
-
-            let root = {
-                let _pdfium = lock();
-                self.doc.bookmarks().root()
-            };
-            if root.is_some() {
-                // A destination's page index walks the page tree for each
-                // page PDFium hasn't loaded yet, so load every page's
-                // dictionary first, a page at a time: 60 ms at 7,000
-                // pages, where 2,000 bookmarks took 1.2 s without. It goes
-                // when M10.5 slice 4 reads the outline from the source.
-                for i in 0..self.page_count() {
-                    let _pdfium = lock();
-                    let _ = self.doc.pages().page_size(i as i32);
-                }
-            }
-            let mut out = Vec::new();
-            let mut frames = HashMap::new();
-            walk(root, 0, &self.doc, &mut frames, &mut out);
-            Ok(out)
         }
 
         fn search_page(
@@ -989,7 +821,6 @@ pub enum Matcher {
 
 enum Msg {
     Render(RenderRequest, oneshot::Sender<Result<Rendered>>),
-    Outline(oneshot::Sender<Result<Vec<OutlineItem>>>),
     TextBoxes {
         page: u32,
         rect: Rect,
@@ -1193,13 +1024,6 @@ impl RenderHandle {
         rx
     }
 
-    /// Fetch the bookmark tree.
-    pub fn outline(&self) -> oneshot::Receiver<Result<Vec<OutlineItem>>> {
-        let (tx, rx) = oneshot::channel();
-        self.send(Msg::Outline(tx));
-        rx
-    }
-
     /// Start a document-wide search. Events stream until `Done`; dropping
     /// the receiver cancels the search. A new search replaces a running one.
     pub fn search(
@@ -1283,9 +1107,6 @@ fn worker_loop(engine: impl Renderer, rx: mpsc::Receiver<Msg>) {
                     } else {
                         latest.push((req, reply));
                     }
-                }
-                Msg::Outline(reply) => {
-                    let _ = reply.send(engine.outline());
                 }
                 Msg::TextBoxes { page, rect, reply } => {
                     let _ = reply.send(engine.text_boxes_in_rect(PageIndex(page), rect));

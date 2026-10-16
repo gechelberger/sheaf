@@ -11,7 +11,9 @@
 //!   A file's module comes from its path, and inline `mod`s nest;
 //! - **a path that names it:** one that holds the row's last two segments
 //!   in a row, after a leading `crate`, `self`, `super` or `sheaf_*`, in
-//!   code or in a `use`;
+//!   code or in a `use`; for a row of one segment, an item at a crate's
+//!   root, one that starts with it there (`w::OutlineItem` is another
+//!   module's);
 //! - **its last segment alone,** as a method, the function a call calls, a
 //!   type, a struct literal's or pattern's path, or a field, unless that
 //!   name is in [`QUALIFIED_ONLY`]. A plain value, such as a local
@@ -83,6 +85,36 @@ const RETIRED: &[(&str, u8)] = &[
     ("properties::linearized", 3),
     ("properties_dialog::PropertiesContext::password", 3),
     ("properties_dialog::PropertiesContext::bytes", 3),
+    ("file::read_open", 4),
+    ("file::facts_in", 4),
+    ("file::FileFacts", 4),
+    ("file::outline_styles", 4),
+    ("file::OutlineStyle", 4),
+    ("file::style_flat_items", 4),
+    ("model::Document::set_initial_outline_styles", 4),
+    ("docview::Doc::pending_outline_styles", 4),
+    ("docview::Incoming::outline_styles", 4),
+    ("docview::flat_item", 4),
+    ("Renderer::outline", 4),
+    ("pdfium::PdfiumEngine::outline", 4),
+    ("RenderHandle::outline", 4),
+    ("Msg::Outline", 4),
+    ("OutlineItem", 4),
+    ("open::open", 4),
+    ("open::open_with_foreign", 4),
+    ("open::describe", 4),
+    ("model::Document::set_initial_outline", 4),
+    ("model::Document::set_initial_labels", 4),
+    ("model::Document::set_initial_header_footer", 4),
+    ("model::Document::set_initial_annots", 4),
+    ("model::Document::set_initial_fields", 4),
+    ("model::Document::opened_state_mut", 4),
+    ("docview::DocView::fetch_outline", 4),
+    ("docview::DocView::load_sheaf_annots", 4),
+    ("docview::Doc::outline_loaded", 4),
+    ("docview::Doc::facts_loaded", 4),
+    ("form_bar::Doc::take_form", 4),
+    ("labels::page_labels", 4),
 ];
 
 /// Last segments only a path matches: names the new design uses again
@@ -107,6 +139,11 @@ const QUALIFIED_ONLY: &[&str] = &[
     "open",
     "linearized",
     "path",
+    "outline",
+    "Outline",
+    "OutlineItem",
+    "describe",
+    "page_labels",
 ];
 
 #[test]
@@ -176,6 +213,21 @@ mod tests {
             (11, "incremental::Mode", 9),
         ]
     );
+}
+
+#[test]
+fn a_root_item_is_named_from_its_root() {
+    const ROWS: &[(&str, u8)] = &[("OutlineItem", 4)];
+    let src = r#"
+use sheaf_render::OutlineItem;
+fn read(item: w::OutlineItem) -> api::types::OutlineItem {
+    let _ = crate::OutlineItem::default();
+    w::OutlineItem { depth: 0 }
+}
+"#;
+    let hits = scan(src, Vec::new(), ROWS).unwrap();
+    // Not lines 3's and 5's, other modules' `OutlineItem`s.
+    assert_eq!(hits, [(2, "OutlineItem", 4), (4, "OutlineItem", 4)]);
 }
 
 #[test]
@@ -326,7 +378,13 @@ impl Scan {
         let path = &path[anchors..];
         for &(row, slice) in self.rows {
             let row_path: Vec<&str> = row.split("::").collect();
-            let tail = &row_path[row_path.len().saturating_sub(2)..];
+            if let [name] = row_path[..] {
+                if path.first().is_some_and(|first| *first == name) {
+                    self.hit(path[0], row, slice);
+                }
+                continue;
+            }
+            let tail = &row_path[row_path.len() - 2..];
             if let Some(run) = path.windows(tail.len()).find(|w| w.iter().eq(tail)) {
                 self.hit(run[0], row, slice);
             }

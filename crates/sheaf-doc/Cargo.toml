@@ -13,6 +13,8 @@ fixtures = []
 # Random mark ids, so copies of a file never hand out the same one.
 fastrand = "2"
 sheaf-core.workspace = true
+# How far an open has read (M10.5 §14.2).
+sheaf-progress.workspace = true
 lopdf.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true

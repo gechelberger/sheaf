@@ -130,7 +130,7 @@ impl DocView {
                 .p_2()
                 .text_sm()
                 .text_color(theme::TEXT_MUTED)
-                .child(if doc.facts_loaded {
+                .child(if doc.model.is_ready() {
                     "This document has no layers"
                 } else {
                     "Reading layers…"

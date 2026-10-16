@@ -14,6 +14,7 @@ use sheaf_core::{DestView, PageSize, Rotation};
 use crate::annot::{Annot, AnnotId, AnnotKind};
 use crate::forms::{Field, FieldId, FileForm, Widget};
 use crate::history::{HistoryPolicy, HistoryStats};
+use crate::open::{Facts, ViewFacts};
 use crate::prim::{HeapSize, Key, Prim, Rec, Val, same};
 use crate::store::{BlobKind, Src, Store};
 use crate::text_layer::TextLayer;
@@ -109,6 +110,9 @@ pub struct OutlineNode {
     pub view: Option<DestView>,
     pub color: Option<[u8; 3]>,
     pub style: TextStyle,
+    /// Whether its children show, as the file has it: a save writes a
+    /// closed one's `/Count` negative.
+    pub open: bool,
     pub children: Vector<OutlineNode>,
 }
 
@@ -136,12 +140,22 @@ pub struct FlatOutlineItem {
     /// Where on `page` it lands (see [`OutlineNode::view`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view: Option<DestView>,
-    /// `/C` and `/F`, which PDFium's outline leaves out (see
-    /// `file::style_flat_items`).
+    /// `/C` and `/F`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<[u8; 3]>,
     #[serde(default, skip_serializing_if = "TextStyle::is_plain")]
     pub style: TextStyle,
+    /// Its `/Count` isn't negative (see [`OutlineNode::open`]).
+    #[serde(default = "yes", skip_serializing_if = "is_yes")]
+    pub open: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn is_yes(b: &bool) -> bool {
+    *b
 }
 
 /// One bookmark of a subtree inserted by [`Edit::OutlineInsertTree`], in
@@ -159,7 +173,7 @@ pub struct NewOutlineItem {
 /// One immutable snapshot of the document. Only tests compare whole
 /// states; history knows what an edit changed from its prims.
 #[derive(Debug, Clone)]
-#[cfg_attr(test, derive(PartialEq))]
+#[cfg_attr(any(test, feature = "fixtures"), derive(PartialEq))]
 pub struct DocState {
     pub pages: Vector<PageRef>,
     pub outline: Vector<OutlineNode>,
@@ -561,6 +575,13 @@ pub struct Damaged {
     pub version: VersionId,
 }
 
+/// An edit came while the file is still opening: its facts aren't read
+/// yet, so there's nothing to edit (M10.5 proposal 28). Slice 11 makes it
+/// `EditError::NotReady`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("the file is still opening")]
+pub struct NotReady;
+
 /// A save that wrote a version.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Saved {
@@ -732,15 +753,43 @@ pub struct Document {
     /// A save made one form of forms whose scripts came from more than one
     /// file (see [`Document::scripts_mixed`]).
     scripts_mixed: bool,
+    /// The opened version holds the file's facts: until then edits are
+    /// refused (see [`NotReady`]).
+    ready: bool,
 }
 
 impl Document {
     /// A document showing `primary`, a source in `store`, in its
-    /// entirety.
+    /// entirety, with `outline` and nothing else: a file sheaf has just
+    /// made, which says nothing more about itself. A file that's opened
+    /// opens through [`crate::open`], which reads what it says.
     pub fn new(
         store: Arc<Store>,
         primary: SourceInfo,
         outline: &[FlatOutlineItem],
+        policy: Box<dyn HistoryPolicy>,
+    ) -> Self {
+        let mut doc = Self::loading(store, primary, policy);
+        let facts = Facts {
+            outline: outline.to_vec(),
+            ..Default::default()
+        };
+        let (state, _) = doc.opened(facts);
+        let root = doc.root;
+        doc.versions
+            .get_mut(&root)
+            .expect("the opened version")
+            .state = Some(state);
+        doc.ready = true;
+        doc
+    }
+
+    /// A document showing `primary` while it opens: its pages, from the
+    /// page table its source read as it opened, and nothing else, until
+    /// [`ready`](Self::ready). See [`crate::open::start`].
+    pub(crate) fn loading(
+        store: Arc<Store>,
+        primary: SourceInfo,
         policy: Box<dyn HistoryPolicy>,
     ) -> Self {
         let source = SourceId(0);
@@ -767,6 +816,7 @@ impl Document {
             saved_fields: im::OrdMap::new(),
             forms: HashMap::new(),
             scripts_mixed: false,
+            ready: false,
         };
         doc.debug_assert_ours(&primary);
         let pages: Vector<PageRef> = (0..primary.src.page_count())
@@ -778,9 +828,6 @@ impl Document {
             })
             .collect();
         doc.sources.insert(source, Arc::new(primary));
-        let by_index: Vec<PageId> = pages.iter().map(|p| p.id).collect();
-        let outline = doc.outline_from_flat(outline, &by_index);
-        doc.saved_outline = outline.clone();
         doc.versions.insert(
             VersionId(0),
             Version {
@@ -794,7 +841,7 @@ impl Document {
                 sources: vec![source],
                 state: Some(DocState {
                     pages,
-                    outline,
+                    outline: Vector::new(),
                     annots: im::HashMap::new(),
                     text_layers: im::HashMap::new(),
                     removed_comments: im::HashMap::new(),
@@ -813,21 +860,109 @@ impl Document {
         doc
     }
 
+    /// The file has opened: `facts`, as [`crate::open::finish`] read them,
+    /// make the opened version complete. It's a new version in place of
+    /// the one with the pages alone, which no longer resolves; the current
+    /// and saved versions are this one, so the document isn't dirty and
+    /// there's nothing to undo. Gives what the view shows beside the
+    /// document. Only once, while the file opens: there are no late facts
+    /// (M10.5 proposal 28).
+    pub fn ready(&mut self, facts: Facts) -> Result<ViewFacts> {
+        if self.ready {
+            bail!("the file has opened already");
+        }
+        let (state, view) = self.opened(facts);
+        let old = self.root;
+        let mut v = self.versions.remove(&old).expect("the opened version");
+        v.state = Some(state);
+        self.replace(old, v);
+        self.ready = true;
+        Ok(view)
+    }
+
+    /// Whether the file's facts are in: until then edits are refused.
+    pub fn is_ready(&self) -> bool {
+        self.ready
+    }
+
+    /// The opened version's state: its pages, and what `facts` say about
+    /// them, each page index mapped to its page once. That's what the
+    /// primary file holds, so the `saved_*` baselines, the header/footer
+    /// drawn into the file and the primary's form are set from it. Gives
+    /// back what the state doesn't hold.
+    fn opened(&mut self, facts: Facts) -> (DocState, ViewFacts) {
+        let pages = self.state().pages.clone();
+        let by_index: Vec<PageId> = pages.iter().map(|p| p.id).collect();
+        let at = |index: usize| by_index.get(index).copied();
+        let outline = self.outline_from_flat(&facts.outline, &by_index);
+        let annots: im::HashMap<PageId, Vector<Annot>> = facts
+            .marks
+            .into_iter()
+            .filter_map(|(index, list)| Some((at(index as usize)?, list.into_iter().collect())))
+            .collect();
+        let labels = facts
+            .labels
+            .map(|ranges| -> Vector<_> {
+                crate::labels::to_specs(&ranges, &by_index)
+                    .into_iter()
+                    .collect()
+            })
+            .filter(|specs| !specs.is_empty());
+        let header_footer = facts.header_footer.map(|(mut hf, scope)| {
+            hf.pages = scope.map(|ix| ix.into_iter().filter_map(at).collect());
+            Arc::new(hf)
+        });
+        let form = facts.form;
+        let fields: im::OrdMap<FieldId, Field> = form
+            .fields
+            .iter()
+            .map(|f| {
+                let mut f = f.clone();
+                f.source = self.primary;
+                (f.id, f)
+            })
+            .collect();
+        let widgets = form
+            .widgets
+            .iter()
+            .filter_map(|(&index, list)| {
+                Some((at(index as usize)?, list.iter().cloned().collect()))
+            })
+            .collect();
+        self.ids
+            .fields_from(fields.keys().next_back().map_or(0, |id| id.0 + 1));
+        self.saved_outline = outline.clone();
+        self.saved_labels = labels.clone();
+        self.baked_header_footer = header_footer.clone();
+        self.saved_annots = annots.clone();
+        self.saved_fields = fields.clone();
+        let view = ViewFacts {
+            foreign: facts.foreign,
+            attachments: facts.attachments,
+            collection: facts.collection,
+            layers: facts.layers,
+            form: form.facts.clone(),
+        };
+        if !form.fields.is_empty() {
+            self.forms.insert(self.primary, Arc::new(form));
+        }
+        let state = DocState {
+            pages,
+            outline,
+            annots,
+            text_layers: im::HashMap::new(),
+            removed_comments: im::HashMap::new(),
+            labels,
+            header_footer,
+            fields,
+            widgets,
+        };
+        (state, view)
+    }
+
     /// Who the versions made from now on are by.
     pub fn set_author(&mut self, name: impl Into<String>) {
         self.author = name.into();
-    }
-
-    /// Edits are only loaded into the opened version before any edit.
-    fn opened_state_mut(&mut self, what: &str) -> Result<&mut DocState> {
-        if self.versions.len() != 1 {
-            bail!("{what} can only be loaded before editing");
-        }
-        Ok(self
-            .versions
-            .get_mut(&self.root)
-            .and_then(|v| v.state.as_mut())
-            .expect("the opened version keeps its state"))
     }
 
     pub fn primary(&self) -> SourceId {
@@ -995,99 +1130,9 @@ impl Document {
         Some(sentences.join(". "))
     }
 
-    /// The outline also arrives after open. Only valid before any edit.
-    pub fn set_initial_outline(&mut self, outline: &[FlatOutlineItem]) -> Result<()> {
-        let by_index: Vec<PageId> = self
-            .opened_state_mut("the outline")?
-            .pages
-            .iter()
-            .map(|p| p.id)
-            .collect();
-        let outline = self.outline_from_flat(outline, &by_index);
-        self.opened_state_mut("the outline")?.outline = outline.clone();
-        self.saved_outline = outline;
-        Ok(())
-    }
-
-    /// Markup read back from the primary file (annotations sheaf wrote
-    /// earlier), keyed by source page index. Only valid before any edit.
     /// The header/footer differs from what the primary file has drawn.
     pub fn header_footer_dirty(&self) -> bool {
         self.state().header_footer != self.baked_header_footer
-    }
-
-    /// The header/footer sheaf drew into the file, read after open (page
-    /// scope by index).
-    pub fn set_initial_header_footer(
-        &mut self,
-        mut hf: crate::stamps::HeaderFooter,
-        indexes: Option<Vec<usize>>,
-    ) -> Result<()> {
-        let st = self.opened_state_mut("the header/footer")?;
-        let ids: Vec<PageId> = st.pages.iter().map(|p| p.id).collect();
-        hf.pages = indexes.map(|ix| ix.iter().filter_map(|&i| ids.get(i).copied()).collect());
-        let hf = Some(Arc::new(hf));
-        st.header_footer = hf.clone();
-        self.baked_header_footer = hf;
-        Ok(())
-    }
-
-    /// The file's page labels, read after open: ranges by page index.
-    pub fn set_initial_labels(&mut self, ranges: &[crate::labels::LabelRange]) -> Result<()> {
-        let st = self.opened_state_mut("page labels")?;
-        let ids: Vec<PageId> = st.pages.iter().map(|p| p.id).collect();
-        let specs: Vector<_> = crate::labels::to_specs(ranges, &ids).into_iter().collect();
-        let specs = (!specs.is_empty()).then_some(specs);
-        st.labels = specs.clone();
-        self.saved_labels = specs;
-        Ok(())
-    }
-
-    pub fn set_initial_annots(&mut self, by_index: HashMap<u32, Vec<Annot>>) -> Result<()> {
-        let st = self.opened_state_mut("annotations")?;
-        let ids: Vec<PageId> = st.pages.iter().map(|p| p.id).collect();
-        let mut map = im::HashMap::new();
-        for (index, list) in by_index {
-            if let Some(&pid) = ids.get(index as usize) {
-                map.insert(pid, list.into_iter().collect());
-            }
-        }
-        st.annots = map.clone();
-        self.saved_annots = map;
-        Ok(())
-    }
-
-    /// The primary file's form, read after open (`forms::read`): its
-    /// fields keep their ids, and their widgets go to the pages they're on
-    /// by index. Only before any edit, like the other `set_initial_*`.
-    pub fn set_initial_fields(&mut self, form: &crate::forms::FileForm) -> Result<()> {
-        let primary = self.primary;
-        let st = self.opened_state_mut("form fields")?;
-        let ids: Vec<PageId> = st.pages.iter().map(|p| p.id).collect();
-        let fields: im::OrdMap<FieldId, Field> = form
-            .fields
-            .iter()
-            .map(|f| {
-                let mut f = f.clone();
-                f.source = primary;
-                (f.id, f)
-            })
-            .collect();
-        let mut widgets = im::HashMap::new();
-        for (&index, list) in &form.widgets {
-            if let Some(&pid) = ids.get(index as usize) {
-                widgets.insert(pid, list.iter().cloned().collect());
-            }
-        }
-        let next = fields.keys().next_back().map_or(0, |id| id.0 + 1);
-        st.fields = fields.clone();
-        st.widgets = widgets;
-        self.saved_fields = fields;
-        self.ids.fields_from(next);
-        if !form.fields.is_empty() {
-            self.forms.insert(primary, Arc::new(form.clone()));
-        }
-        Ok(())
     }
 
     /// Fields that differ from what's in the primary file: changed, added
@@ -1147,42 +1192,6 @@ impl Document {
             }
         }
         dirty
-    }
-
-    /// Bookmark colors and styles read from the file (which PDFium's
-    /// outline leaves out), matched to the loaded bookmarks in pre-order by
-    /// title. Only before any edit, like the other `set_initial_*`.
-    pub fn set_initial_outline_styles(
-        &mut self,
-        styles: &[crate::file::OutlineStyle],
-    ) -> Result<()> {
-        if styles.is_empty() {
-            return Ok(());
-        }
-        fn walk(
-            nodes: &Vector<OutlineNode>,
-            styles: &mut std::slice::Iter<crate::file::OutlineStyle>,
-        ) -> Vector<OutlineNode> {
-            nodes
-                .iter()
-                .map(|n| {
-                    let mut n = n.clone();
-                    if let Some(s) = styles.next()
-                        && s.title.trim() == n.title.trim()
-                    {
-                        n.color = s.color;
-                        n.style = s.style;
-                    }
-                    n.children = walk(&n.children, styles);
-                    n
-                })
-                .collect()
-        }
-        let st = self.opened_state_mut("bookmark styles")?;
-        let styled = walk(&st.outline, &mut styles.iter());
-        st.outline = styled.clone();
-        self.saved_outline = styled;
-        Ok(())
     }
 
     pub fn state(&self) -> &DocState {
@@ -1292,6 +1301,7 @@ impl Document {
     /// replayed across a save. The new version holds the saved file's
     /// registration. M10.5 slice 9 deletes this.
     pub fn rebase_to_saved(&mut self, saved: SourceInfo) -> SourceId {
+        debug_assert!(self.is_ready(), "a save of a file still opening");
         // The forms it was made of are one now; whether their scripts
         // were from more than one is the session's to remember.
         self.scripts_mixed |= self.script_sources().len() > 1;
@@ -1490,7 +1500,11 @@ impl Document {
         Some((&v.steps, &v.sources))
     }
 
+    /// Run `edit` as a new version. Refused with [`NotReady`] while the
+    /// file opens, as are [`apply_batch`](Self::apply_batch) and
+    /// [`apply_in_job`](Self::apply_in_job).
     pub fn apply(&mut self, edit: Edit, label: impl Into<String>) -> Result<EditOutcome> {
+        self.check_ready()?;
         let (state, outcome, step) = self.step(self.state().clone(), edit)?;
         if step.prims.is_empty() {
             return Ok(outcome);
@@ -1507,6 +1521,7 @@ impl Document {
         edits: Vec<Edit>,
         label: impl Into<String>,
     ) -> Result<EditOutcome> {
+        self.check_ready()?;
         let mut state = self.state().clone();
         let mut total = EditOutcome::default();
         let mut steps = Vec::with_capacity(edits.len());
@@ -1552,6 +1567,7 @@ impl Document {
         edit: Edit,
         label: impl Into<String>,
     ) -> Result<EditOutcome> {
+        self.check_ready()?;
         let (state, outcome, step) = self.step(self.state().clone(), edit)?;
         if step.prims.is_empty() {
             return Ok(outcome);
@@ -1616,6 +1632,12 @@ impl Document {
             stack.extend(v.children.iter().copied());
         }
         false
+    }
+
+    /// Edits wait for the file's facts: there are none to edit before
+    /// them, and none come after.
+    fn check_ready(&self) -> Result<(), NotReady> {
+        if self.ready { Ok(()) } else { Err(NotReady) }
     }
 
     /// Run `edit` on `state` as a new step, recording what it changed and
@@ -2235,6 +2257,7 @@ impl Document {
                 view: item.target.and(item.view.clone()),
                 color: None,
                 style: TextStyle::default(),
+                open: true,
                 children: Vector::new(),
             };
             stack.push((item.depth, node));
@@ -2272,6 +2295,7 @@ impl Document {
                 view: item.view.clone(),
                 color: item.color,
                 style: item.style,
+                open: item.open,
                 children: Vector::new(),
             };
             stack.push((item.depth, node));
@@ -2544,6 +2568,7 @@ impl Document {
                     target,
                     color: None,
                     style: TextStyle::default(),
+                    open: true,
                     children: Vector::new(),
                 };
                 let outline = outline_insert(&rec.outline, parent, after, node)?;
@@ -3296,6 +3321,16 @@ mod tests {
         Document::new(store, primary, outline, policy)
     }
 
+    /// `n` blank pages opened as a file opens, saying `facts`: started on
+    /// its pages, then ready.
+    pub(super) fn opened_doc(n: u32, facts: Facts, policy: Box<dyn HistoryPolicy>) -> Document {
+        let store = Store::new();
+        let primary = SourceInfo::blank(&store, n);
+        let mut d = crate::open::start(store, primary, policy);
+        d.ready(facts).unwrap();
+        d
+    }
+
     pub(super) fn flat(items: &[(&str, Option<u32>, u16)]) -> Vec<FlatOutlineItem> {
         items
             .iter()
@@ -3306,6 +3341,7 @@ mod tests {
                 view: None,
                 color: None,
                 style: Default::default(),
+                open: true,
             })
             .collect()
     }
@@ -3361,11 +3397,100 @@ mod tests {
             .id
     }
 
+    /// While the file opens, every edit is refused before it draws an id
+    /// or makes a version; once it's ready, the same edits are taken.
+    #[test]
+    fn an_edit_before_ready_is_not_ready() {
+        let store = Store::new();
+        let primary = SourceInfo::blank(&store, 3);
+        let mut d = crate::open::start(store, primary, Box::new(FixedCount(10)));
+        assert!(!d.is_ready());
+        let page = id_at(&d, 0);
+        let duplicate = || Edit::DuplicatePages { ids: vec![page] };
+        let bookmark = || Edit::OutlineInsert {
+            parent: None,
+            after: None,
+            title: "One".into(),
+            target: Some(page),
+            view: None,
+        };
+        let drawn = |d: &Document| {
+            [&d.ids.page, &d.ids.outline, &d.ids.field].map(|c| c.load(Ordering::Relaxed))
+        };
+        let before = (d.current_version(), d.next_version, drawn(&d));
+        let job = d.begin_job();
+        let refused = [
+            d.apply(duplicate(), "Duplicate").unwrap_err(),
+            d.apply_batch(vec![duplicate(), bookmark()], "Both")
+                .unwrap_err(),
+            d.apply_in_job(job, bookmark(), "Bookmark").unwrap_err(),
+        ];
+        for e in &refused {
+            assert!(e.is::<NotReady>(), "{e:#}");
+        }
+        assert_eq!((d.current_version(), d.next_version, drawn(&d)), before);
+        assert_eq!(d.versions.len(), 1);
+        d.ready(Facts::default()).unwrap();
+        d.apply(duplicate(), "Duplicate").unwrap();
+        d.apply_batch(vec![duplicate(), bookmark()], "Both")
+            .unwrap();
+        d.apply_in_job(job, bookmark(), "Bookmark").unwrap();
+        assert_eq!((d.page_count(), d.state().outline.len()), (5, 2));
+        assert_eq!(d.versions.len(), 4);
+    }
+
+    /// `ready` puts the complete opened version in place of the one with
+    /// the pages alone: the facts are on the pages the document showed
+    /// while it opened, and there's nothing to save or undo. It's taken
+    /// once.
+    #[test]
+    fn ready_replaces_the_opened_version() {
+        let store = Store::new();
+        let bytes = crate::forms::fixture::every_fact().bytes();
+        let primary = file(&store, bytes, "facts.pdf");
+        let src = primary.src.clone();
+        let mut d = crate::open::start(store, primary, Box::new(FixedCount(10)));
+        let loading = d.current_version();
+        let pages: Vec<PageId> = d.state().pages.iter().map(|p| p.id).collect();
+        let st = d.state();
+        assert_eq!(pages.len(), 3);
+        assert!(st.outline.is_empty() && st.annots.is_empty() && st.fields.is_empty());
+        assert!(st.labels.is_none() && st.header_footer.is_none());
+        let view = d
+            .ready(crate::open::finish(&src, &sheaf_progress::NoProgress))
+            .unwrap();
+        assert!(d.is_ready());
+        let opened = d.current_version();
+        assert_ne!(opened, loading);
+        assert!(!d.versions.contains_key(&loading));
+        assert!(d.jump(loading).is_err());
+        assert_eq!((d.root, d.saved), (opened, Some(opened)));
+        let now: Vec<PageId> = d.state().pages.iter().map(|p| p.id).collect();
+        assert_eq!(now, pages);
+        crate::open::tests::assert_every_fact(d.state());
+        assert_eq!(view.form.fields, 1);
+        assert!(!d.is_dirty() && !d.can_undo() && !d.can_redo());
+        let snap = d.snapshot();
+        assert!(!snap.outline_dirty && !snap.labels_dirty && !snap.header_footer_dirty);
+        assert!(snap.annots_dirty.is_empty() && snap.fields_dirty.is_empty());
+        assert!(!snap.removes_content && !snap.form_changed);
+        // Facts that came again would be late: they're refused.
+        assert!(
+            d.ready(crate::open::finish(&src, &sheaf_progress::NoProgress))
+                .is_err()
+        );
+        assert_eq!(d.current_version(), opened);
+        crate::open::tests::assert_every_fact(d.state());
+    }
+
     #[test]
     fn form_fields_follow_their_pages() {
         let form = crate::forms::read(&crate::forms::fixture::every_kind().source());
-        let mut d = new_doc(2, &[], Box::new(FixedCount(10)));
-        d.set_initial_fields(&form).unwrap();
+        let facts = Facts {
+            form,
+            ..Default::default()
+        };
+        let mut d = opened_doc(2, facts, Box::new(FixedCount(10)));
         let (p1, p2) = (id_at(&d, 0), id_at(&d, 1));
         let st = d.state();
         assert_eq!(st.fields.len(), 9);
@@ -3384,7 +3509,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(on(&d, p2), 4);
-        assert!(d.set_initial_fields(&form).is_err());
+        // The file's facts came once: none come after.
+        let again = crate::forms::read(&crate::forms::fixture::every_kind().source());
+        let late = Facts {
+            form: again,
+            ..Default::default()
+        };
+        assert!(d.ready(late).is_err());
         d.apply(Edit::DeletePages { ids: vec![p2] }, "delete")
             .unwrap();
         assert_eq!((on(&d, p2), d.state().fields.len()), (0, 9));
@@ -3410,11 +3541,16 @@ mod tests {
     #[test]
     fn fields_dirty_compares_with_the_saved_form() {
         let form = crate::forms::read(&crate::forms::fixture::every_kind().source());
-        let mut d = new_doc(2, &[], Box::new(FixedCount(10)));
-        d.set_initial_fields(&form).unwrap();
-        // A field changed, one gone and one added, as edits will do.
+        let facts = Facts {
+            form,
+            ..Default::default()
+        };
+        let mut d = opened_doc(2, facts, Box::new(FixedCount(10)));
+        // A field changed, one gone and one added in the state `ready` set,
+        // as edits will do.
         let (changed, gone, added) = (FieldId(0), FieldId(1), FieldId(99));
-        let st = d.opened_state_mut("test").unwrap();
+        let root = d.root;
+        let st = d.versions.get_mut(&root).unwrap().state.as_mut().unwrap();
         let mut f = st.fields.get(&changed).unwrap().clone();
         f.value = Some(crate::forms::Value::Text("Bo Ng".into()));
         st.fields.insert(changed, f.clone());
@@ -4160,33 +4296,45 @@ mod tests {
     }
 
     #[test]
-    fn bookmark_styles_arriving_after_the_outline_are_matched_by_title() {
-        use crate::file::OutlineStyle;
-        let mut d = doc();
-        let style = |title: &str, bold| OutlineStyle {
-            title: title.into(),
-            color: Some([0, 0, 255]),
-            style: TextStyle {
-                bold,
-                italic: false,
-            },
+    fn bookmark_styles_come_from_the_file() {
+        use lopdf::{Object, dictionary};
+        let mut f = crate::forms::fixture::Form::new(3);
+        let item = |title: &str, color: Option<f32>, flags: i64| {
+            let mut d = dictionary! { "Title" => Object::string_literal(title), "F" => flags };
+            if let Some(blue) = color {
+                d.set("C", vec![0.into(), 0.into(), blue.into()]);
+            }
+            d
         };
-        // In pre-order: A, A1, A2, B, C. The third doesn't match its title.
-        d.set_initial_outline_styles(&[
-            style("A", true),
-            style("A1", false),
-            style("Not A2", false),
-            style("B", false),
-        ])
-        .unwrap();
+        crate::forms::fixture::outline_tree(
+            &mut f,
+            vec![
+                (0, item("A", Some(1.0), 2)),
+                (1, item("A1", Some(1.0), 0)),
+                (1, item("A2", None, 0)),
+                (0, item("B", Some(1.0), 1)),
+                (0, item("C", None, 0)),
+            ],
+        );
+        let store = Store::new();
+        let src = store
+            .open(f.bytes().into(), BlobKind::file(Path::new("a.pdf"), None))
+            .unwrap();
+        let outline = crate::open::outline(&src);
+        let primary = SourceInfo {
+            src,
+            name: "a.pdf".into(),
+            derived: None,
+        };
+        let d = Document::new(store, primary, &outline, Box::new(FixedCount(5)));
         let flat = d.state().outline_flat();
         let by = |t: &str| flat.iter().find(|(_, n)| n.title == t).unwrap().1.clone();
         assert!(by("A").style.bold);
         assert_eq!(by("A1").color, Some([0, 0, 255]));
         assert_eq!(by("A2").color, None);
-        assert_eq!(by("B").color, Some([0, 0, 255]));
-        assert_eq!(by("C").color, None);
-        // Loaded, not edited: nothing to save.
+        assert!(by("B").style.italic && by("B").color == Some([0, 0, 255]));
+        assert!(by("C").color.is_none() && by("C").style.is_plain());
+        // Read, not edited: nothing to save.
         assert!(!d.is_dirty());
     }
 
@@ -4905,11 +5053,14 @@ mod tests {
 
     #[test]
     fn an_added_mark_costs_its_page_not_the_document() {
-        let mut d = new_doc(2000, &[], Box::new(FixedCount(10)));
         let marks = (0..2000u32)
             .map(|i| (i, (1..=10).map(|j| square(u64::from(i) * 10 + j)).collect()))
             .collect();
-        d.set_initial_annots(marks).unwrap();
+        let facts = Facts {
+            marks,
+            ..Default::default()
+        };
+        let mut d = opened_doc(2000, facts, Box::new(FixedCount(10)));
         let page = id_at(&d, 1000);
         d.apply(
             Edit::AnnotAdd {

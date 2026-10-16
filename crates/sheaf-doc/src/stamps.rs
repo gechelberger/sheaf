@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use sheaf_core::PageSize;
 
 use crate::annot::{PageGeom, Pt};
+use crate::attachments::Objects;
 use crate::model::PageId;
 
 /// Bates numbering: `<prefix><number, zero-padded to digits><suffix>`,
@@ -561,7 +562,7 @@ pub fn to_catalog(hf: &HeaderFooter, pages: &[PageId]) -> Object {
 
 /// Settings read back from a file's catalog: the header/footer and the
 /// page indexes it was on (none: every page).
-pub fn from_catalog(pdf: &Pdf) -> Option<(HeaderFooter, Option<Vec<usize>>)> {
+pub fn from_catalog<P: Objects + ?Sized>(pdf: &P) -> Option<(HeaderFooter, Option<Vec<usize>>)> {
     let catalog = pdf.catalog().ok()?;
     let s = catalog.get(CATALOG_KEY.as_bytes()).ok()?.as_str().ok()?;
     let stored: Stored = serde_json::from_slice(s).ok()?;

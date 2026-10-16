@@ -118,17 +118,75 @@ blob, and a source parses the blob in place:
   header and footer stripped) is a memory blob, written nowhere; blank and
   image pages are read back from the generated cache once, into blobs.
   `LazyPdf` can also read a file by position (`FileBytes`).
-- **What still loads eagerly:** the form, File > Properties and the
-  signature check read the source, but the rest of what the open reads
-  (marks, other tools' comments, labels, header and footer, attachments,
-  layers, outline styles) comes from one eager lopdf load of the blob
-  until M10.5 slice 4, and the old writers load their sources eagerly
-  until slice 9.
+- **The open reads every fact from the source** (M10.5 slice 4; see
+  Opening a file): its marks, other tools' comments, labels, header and
+  footer, form, attachments, layers and outline, as File > Properties
+  and the signature check read theirs. Nothing it reads loads the file
+  eagerly. The old writers still load their sources eagerly until
+  slice 9.
 
 At 7,000 pages the open (the geometry walk, asserted by the 7k gate
 harness, `crates/sheaf-ops/tests/gate_7k.rs`) takes 48 ms on the
 synthetic fixture and 72–80 ms on the heavy one, against gates of 100 and
 250 ms.
+
+## Opening a file (M10.5 slice 4)
+
+A file opens once, the same way in the app, on the command line and in
+every other headless caller (`sheaf_doc::open`; `open::file` takes the
+three steps in a row):
+
+- **`start` makes the document from its pages.** Its one version holds
+  the pages from the page table the source built as it opened, and
+  nothing else, so the first page paints at once. It reads nothing of
+  its own. (`Document::new` is for a file sheaf has just made, which says
+  nothing more about itself: it's complete at once, with only an
+  outline.)
+- **`finish` reads the rest, on any thread, from the source alone:**
+  sheaf's marks and other tools' comments in one pass over the page
+  table's annotations (what a mark keeps in this machine's cache is made
+  again from the file where it's missing), the form, the page labels,
+  the header and footer sheaf drew, attachments, the portfolio schema,
+  layers, and the outline with its colors, styles and closed state
+  (`/C`, `/F`, a negative `/Count`). Of a page it reads the dictionary
+  and the annotations, never its content. Each reader passes over what
+  it can't read, so `finish` doesn't fail once the source has opened,
+  and reads a tree a node at a time however often the file lists a node
+  (a name or number tree, the layers' order, a portfolio's folders, the
+  outline), so it ends. It counts the pages of its first pass to the
+  progress it's given. The outline's destinations (`/Dest`, named
+  destinations, a GoTo action's `/D`) are found through the page table,
+  and their views are read as PDFium reads them; the renderer is never
+  asked for the outline.
+- **`Document::ready(facts)` builds the complete opened version once**
+  and puts it in the loading version's place under a new `VersionId`,
+  the way a save or a job's amend does. The pages keep their ids, and the
+  current and saved versions follow it, so the document isn't dirty and
+  there's nothing to undo. It gives back what the view shows beside the
+  model: other tools' comments, attachments, the portfolio, layers and
+  what sheaf says about the form. A second call is refused.
+- **Until then the document is loading.** `apply`, `apply_batch` and
+  `apply_in_job` return `NotReady`, making no version and drawing no ids.
+  The app greys out what edits the document or writes it out (saves,
+  exports, print, split, extract, comment import, page and bookmark
+  edits, the markup tools, undo and redo) and every plugin command, says
+  "Opening…" in the status bar, with the page the first pass is on, and
+  refuses any of them run by its keys with a notice (an insert or a
+  replace before it reads the file it was given). A plugin call given
+  meanwhile (a command, a panel action, an event) waits: once the file is
+  ready, plugins get `opened`, then the calls that waited run, in order,
+  each seeing the document as it is then. Only a plugin's newest region
+  event waits, and a file closed before it's ready drops what waited,
+  saying `closed` only after an `opened` (a recovery opens a file again).
+- **There are no late facts.** Everything the file says arrives in the
+  one `ready`, so nothing is read after an edit and dropped; a file
+  that's slow to read keeps edits waiting longer, with its progress
+  shown.
+
+On the heavy 7k fixture, ready (the source's open, `finish` and `ready`,
+`open::file` in the 7k gate harness) takes 391–406 ms against a gate of
+1 s, asserted; the scanned one's 539–545 ms and 514 MB at its peak, the
+474 MB file's bytes and little more.
 
 ## Undo/redo: snapshots, not inverse commands
 
@@ -187,10 +245,9 @@ Prim      { key: Key, before: Option<Val>, after: Option<Val> }
   return `Err(Damaged)` instead of doing nothing, and a debug build
   panics.
 - **A VersionId names one state, which never changes.** A job's amend
-  (see Text layers) and a save each put a new version, with a new id, in
-  the old one's place under the same parent, and the old id stops
-  resolving. The one exception until M10.5 slice 4: the `set_initial_*`
-  loaders fill in the opened version before the first edit.
+  (see Text layers), a save and the end of a file's opening
+  (`Document::ready`) each put a new version, with a new id, in the old
+  one's place under the same parent, and the old id stops resolving.
 - **One `IdAlloc`.** Page, bookmark and field ids come from counters that
   only go up, so an id is never handed out twice, whatever undo does. The
   prims hold the ids an edit drew, so a replay draws none. Mark ids are
@@ -282,7 +339,8 @@ bookmarks that targeted it.
   thumbnails become the primary editing surface (drag to reorder,
   multi-select, keyboard rotate/delete).
 - Sizes come from the sources' page tables (`Geom`) from the first paint,
-  and the outline from `DocState`; the worker is never asked for either.
+  and the outline from `DocState`, which the open reads from the source;
+  the worker is never asked for either.
 
 ## Saving
 

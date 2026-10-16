@@ -99,7 +99,7 @@ pub fn plan(
         let file = sheaf_doc::file::load_source(info)?;
         let objs: Vec<_> = file.get_pages().into_values().collect();
         let engine = match spec {
-            CropSpec::TrimWhite { .. } => Some(crate::open::engine_for(info)?),
+            CropSpec::TrimWhite { .. } => Some(crate::engine_for(info)?),
             CropSpec::Margins(_) => None,
         };
         let mut boxes = Vec::new();

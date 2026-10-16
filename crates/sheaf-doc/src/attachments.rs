@@ -2,9 +2,12 @@
 //! `/EmbeddedFiles` name tree and those on file-attachment annotations.
 //! Listed when a file opens; bytes are read on demand.
 
+use std::collections::HashSet;
+
 use anyhow::{Context, Result, bail};
 use lopdf::{Dictionary, Document as Pdf, LazyPdf, Object, ObjectId};
 
+use crate::Source;
 use crate::file::pdf_text;
 
 /// Where an attachment lives, stable across reloads of the same file.
@@ -43,11 +46,14 @@ impl Attachment {
 }
 
 /// Every attachment in the file: named ones in name-tree order, then
-/// annotation ones by page.
-pub fn attachments_in(pdf: &Pdf) -> Vec<Attachment> {
+/// annotation ones by page. `pages` are the page objects, by index.
+pub fn attachments_in<P: Objects + ?Sized>(
+    pdf: &P,
+    pages: impl IntoIterator<Item = ObjectId>,
+) -> Vec<Attachment> {
     let mut out = Vec::new();
     let folders = crate::portfolio::folder_paths(pdf);
-    for (key, spec) in named_files(pdf) {
+    for (key, spec) in name_tree(pdf, b"EmbeddedFiles") {
         if let Some(d) = resolve(pdf, spec).and_then(|o| o.as_dict().ok()) {
             let mut a = describe(pdf, AttachmentRef::Named(key.clone()), d);
             // Portfolio files are keyed "<folder id>name".
@@ -65,7 +71,7 @@ pub fn attachments_in(pdf: &Pdf) -> Vec<Attachment> {
             out.push(a);
         }
     }
-    for (page_no, (_, page_id)) in pdf.get_pages().into_iter().enumerate() {
+    for (page_no, page_id) in pages.into_iter().enumerate() {
         let mut n = 0;
         for annot in page_annots(pdf, page_id) {
             if annot.get(b"Subtype").and_then(Object::as_name).ok() != Some(b"FileAttachment") {
@@ -98,26 +104,26 @@ pub fn attachments_in(pdf: &Pdf) -> Vec<Attachment> {
     out
 }
 
-/// The bytes of attachment `at` in `file`, a PDF opened with `password`.
-pub fn read_attachment(file: &[u8], password: Option<&str>, at: &AttachmentRef) -> Result<Vec<u8>> {
-    if let AttachmentRef::Cached(stem) = at {
-        let p = crate::generated::blob_path(stem)
-            .with_context(|| format!("{stem:?} isn't a cache name"))?;
-        return std::fs::read(&p).with_context(|| format!("reading {}", p.display()));
-    }
-    let pdf = crate::file::load_pdf_mem(file, password)?;
-    attachment_bytes(&pdf, at)
+/// The bytes of attachment `at` in `src`, its pages numbered as its page
+/// table numbers them, as they're listed.
+pub fn read_attachment(src: &Source, at: &AttachmentRef) -> Result<Vec<u8>> {
+    attachment_bytes(src.pdf(), src.page_ids(), at)
 }
 
-/// The bytes of attachment `at` in a loaded file.
-pub fn attachment_bytes(pdf: &Pdf, at: &AttachmentRef) -> Result<Vec<u8>> {
+/// The bytes of attachment `at` in a file whose page objects, by index,
+/// are `pages`.
+pub fn attachment_bytes<P: Objects + ?Sized>(
+    pdf: &P,
+    pages: impl IntoIterator<Item = ObjectId>,
+    at: &AttachmentRef,
+) -> Result<Vec<u8>> {
     if let AttachmentRef::Cached(stem) = at {
         let p = crate::generated::blob_path(stem)
             .with_context(|| format!("{stem:?} isn't a cache name"))?;
         return std::fs::read(&p).with_context(|| format!("reading {}", p.display()));
     }
     let spec = match at {
-        AttachmentRef::Named(key) => named_files(pdf)
+        AttachmentRef::Named(key) => name_tree(pdf, b"EmbeddedFiles")
             .into_iter()
             .find(|(k, _)| k == key)
             .and_then(|(_, o)| resolve(pdf, o))
@@ -125,9 +131,9 @@ pub fn attachment_bytes(pdf: &Pdf, at: &AttachmentRef) -> Result<Vec<u8>> {
             .with_context(|| format!("no embedded file named {key:?}"))?,
         AttachmentRef::Cached(_) => unreachable!("read from the cache above"),
         AttachmentRef::Annot { page, n } => {
-            let page_id = *pdf
-                .get_pages()
-                .get(&(page + 1))
+            let page_id = pages
+                .into_iter()
+                .nth(*page as usize)
                 .with_context(|| format!("no page {}", page + 1))?;
             page_annots(pdf, page_id)
                 .into_iter()
@@ -163,7 +169,7 @@ pub fn attachment_bytes(pdf: &Pdf, at: &AttachmentRef) -> Result<Vec<u8>> {
 }
 
 /// A file specification's name, description and parameters.
-fn describe(pdf: &Pdf, at: AttachmentRef, fs: &Dictionary) -> Attachment {
+fn describe<P: Objects + ?Sized>(pdf: &P, at: AttachmentRef, fs: &Dictionary) -> Attachment {
     let text = |d: &Dictionary, k: &[u8]| {
         d.get(k)
             .ok()
@@ -227,50 +233,57 @@ fn describe(pdf: &Pdf, at: AttachmentRef, fs: &Dictionary) -> Attachment {
     }
 }
 
-/// `/Names /EmbeddedFiles`, flattened: (key, file spec) in tree order.
-fn named_files(pdf: &Pdf) -> Vec<(String, &Object)> {
+/// One of the catalog's `/Names` trees, flattened: (key, value) in tree
+/// order. `/EmbeddedFiles` maps names to file specs, `/Dests` to
+/// destinations. A node or array the tree reaches again is read once.
+pub(crate) fn name_tree<'a, P: Objects + ?Sized>(
+    pdf: &'a P,
+    tree: &[u8],
+) -> Vec<(String, &'a Object)> {
     let mut out = Vec::new();
+    let mut seen = HashSet::new();
     let tree = pdf
         .catalog()
         .ok()
         .and_then(|c| c.get(b"Names").ok())
         .and_then(|o| resolve(pdf, o))
         .and_then(|o| o.as_dict().ok())
-        .and_then(|n| n.get(b"EmbeddedFiles").ok())
-        .and_then(|o| resolve(pdf, o))
+        .and_then(|n| n.get(tree).ok())
+        .and_then(|o| once(pdf, &mut seen, o))
         .and_then(|o| o.as_dict().ok());
     if let Some(t) = tree {
-        walk_names(pdf, t, &mut out, 0);
+        walk_names(pdf, t, &mut out, 0, &mut seen);
     }
     out
 }
 
-fn walk_names<'a>(
-    pdf: &'a Pdf,
+fn walk_names<'a, P: Objects + ?Sized>(
+    pdf: &'a P,
     node: &'a Dictionary,
     out: &mut Vec<(String, &'a Object)>,
     depth: u8,
+    seen: &mut HashSet<ObjectId>,
 ) {
     if depth > 32 {
         return;
     }
-    if let Some(Object::Array(names)) = node.get(b"Names").ok().and_then(|o| resolve(pdf, o)) {
+    if let Some(Object::Array(names)) = node.get(b"Names").ok().and_then(|o| once(pdf, seen, o)) {
         for pair in names.as_chunks::<2>().0 {
             if let Some(k) = resolve(pdf, &pair[0]).filter(|o| o.as_str().is_ok()) {
                 out.push((pdf_text(k), &pair[1]));
             }
         }
     }
-    if let Some(Object::Array(kids)) = node.get(b"Kids").ok().and_then(|o| resolve(pdf, o)) {
+    if let Some(Object::Array(kids)) = node.get(b"Kids").ok().and_then(|o| once(pdf, seen, o)) {
         for kid in kids {
-            if let Some(Ok(d)) = resolve(pdf, kid).map(Object::as_dict) {
-                walk_names(pdf, d, out, depth + 1);
+            if let Some(Ok(d)) = once(pdf, seen, kid).map(Object::as_dict) {
+                walk_names(pdf, d, out, depth + 1, seen);
             }
         }
     }
 }
 
-fn page_annots(pdf: &Pdf, page: ObjectId) -> Vec<&Dictionary> {
+fn page_annots<P: Objects + ?Sized>(pdf: &P, page: ObjectId) -> Vec<&Dictionary> {
     pdf.get_dictionary(page)
         .ok()
         .and_then(|p| p.get(b"Annots").ok())
@@ -292,12 +305,29 @@ fn folder_key(key: &str) -> Option<(i64, &str)> {
 }
 
 /// What objects are read from: a source's [`LazyPdf`], or an eager
-/// document the old writers load, so [`resolve`] and `forms::xfa::read`
-/// serve both. Transitional (M10.5): it goes with the eager documents in
+/// document the old writers load, so the readers serve both. Its reads
+/// are lopdf's, by their names, so a reader's body reads the same over
+/// either. Transitional (M10.5): it goes with the eager documents in
 /// slice 9.
-pub(crate) trait Objects {
+pub trait Objects {
+    /// Object `id`, its references followed.
+    fn get_object(&self, id: ObjectId) -> lopdf::Result<&Object>;
+
+    fn get_dictionary(&self, id: ObjectId) -> lopdf::Result<&Dictionary>;
+
+    /// `object`, or what its chain of references ends at, with the last
+    /// reference's id.
+    fn dereference<'a>(
+        &'a self,
+        object: &'a Object,
+    ) -> lopdf::Result<(Option<ObjectId>, &'a Object)>;
+
+    fn catalog(&self) -> lopdf::Result<&Dictionary>;
+
     /// Object `id`, its references followed; None when it can't be read.
-    fn object(&self, id: ObjectId) -> Option<&Object>;
+    fn object(&self, id: ObjectId) -> Option<&Object> {
+        self.get_object(id).ok()
+    }
 
     fn dictionary(&self, id: ObjectId) -> Option<&Dictionary> {
         self.object(id)?.as_dict().ok()
@@ -305,14 +335,44 @@ pub(crate) trait Objects {
 }
 
 impl Objects for Pdf {
-    fn object(&self, id: ObjectId) -> Option<&Object> {
-        self.get_object(id).ok()
+    fn get_object(&self, id: ObjectId) -> lopdf::Result<&Object> {
+        Pdf::get_object(self, id)
+    }
+
+    fn get_dictionary(&self, id: ObjectId) -> lopdf::Result<&Dictionary> {
+        Pdf::get_dictionary(self, id)
+    }
+
+    fn dereference<'a>(
+        &'a self,
+        object: &'a Object,
+    ) -> lopdf::Result<(Option<ObjectId>, &'a Object)> {
+        Pdf::dereference(self, object)
+    }
+
+    fn catalog(&self) -> lopdf::Result<&Dictionary> {
+        Pdf::catalog(self)
     }
 }
 
 impl Objects for LazyPdf {
-    fn object(&self, id: ObjectId) -> Option<&Object> {
-        self.get_object(id).ok()
+    fn get_object(&self, id: ObjectId) -> lopdf::Result<&Object> {
+        LazyPdf::get_object(self, id)
+    }
+
+    fn get_dictionary(&self, id: ObjectId) -> lopdf::Result<&Dictionary> {
+        LazyPdf::get_dictionary(self, id)
+    }
+
+    fn dereference<'a>(
+        &'a self,
+        object: &'a Object,
+    ) -> lopdf::Result<(Option<ObjectId>, &'a Object)> {
+        LazyPdf::dereference(self, object)
+    }
+
+    fn catalog(&self) -> lopdf::Result<&Dictionary> {
+        LazyPdf::catalog(self)
     }
 }
 
@@ -321,6 +381,22 @@ pub(crate) fn resolve<'a, P: Objects + ?Sized>(pdf: &'a P, o: &'a Object) -> Opt
         Object::Reference(id) => pdf.object(*id),
         o => Some(o),
     }
+}
+
+/// `o` resolved, unless it's a reference `seen` already has: a tree's walk
+/// reads each node it reaches by reference once, however often it's
+/// listed, and so ends.
+pub(crate) fn once<'a, P: Objects + ?Sized>(
+    pdf: &'a P,
+    seen: &mut HashSet<ObjectId>,
+    o: &'a Object,
+) -> Option<&'a Object> {
+    if let Ok(id) = o.as_reference()
+        && !seen.insert(id)
+    {
+        return None;
+    }
+    resolve(pdf, o)
 }
 
 #[cfg(test)]
@@ -393,7 +469,7 @@ pub(crate) mod tests {
     #[test]
     fn lists_named_and_annotation_attachments() {
         let pdf = sample();
-        let list = attachments_in(&pdf);
+        let list = attachments_in(&pdf, pdf.page_iter());
         let names: Vec<&str> = list.iter().map(|a| a.name.as_str()).collect();
         assert_eq!(names, ["notes.txt", "w2.pdf", "support.xlsx"]);
         assert_eq!(list[0].description, "Client notes");
@@ -407,14 +483,31 @@ pub(crate) mod tests {
     #[test]
     fn reads_bytes_plain_and_compressed() {
         let pdf = sample();
-        let list = attachments_in(&pdf);
-        assert_eq!(attachment_bytes(&pdf, &list[0].at).unwrap(), b"hello");
-        assert_eq!(
-            attachment_bytes(&pdf, &list[1].at).unwrap(),
-            b"%PDF-1.4 tiny"
-        );
-        assert_eq!(attachment_bytes(&pdf, &list[2].at).unwrap(), b"annot bytes");
-        assert!(attachment_bytes(&pdf, &AttachmentRef::Named("nope".into())).is_err());
+        let list = attachments_in(&pdf, pdf.page_iter());
+        let bytes = |at: &AttachmentRef| attachment_bytes(&pdf, pdf.page_iter(), at);
+        assert_eq!(bytes(&list[0].at).unwrap(), b"hello");
+        assert_eq!(bytes(&list[1].at).unwrap(), b"%PDF-1.4 tiny");
+        assert_eq!(bytes(&list[2].at).unwrap(), b"annot bytes");
+        assert!(bytes(&AttachmentRef::Named("nope".into())).is_err());
+        assert!(bytes(&AttachmentRef::Annot { page: 1, n: 0 }).is_err());
+    }
+
+    /// Read from a source, as a file opens, the sample lists as it does
+    /// loaded, and each attachment reads the same bytes.
+    #[test]
+    fn a_source_lists_and_reads_as_the_loaded_file() {
+        let mut pdf = sample();
+        let src = crate::open::tests::lazily(&mut pdf);
+        let list = attachments_in(&pdf, pdf.page_iter());
+        assert_eq!(attachments_in(src.pdf(), src.page_ids()), list);
+        for a in &list {
+            assert_eq!(
+                read_attachment(&src, &a.at).unwrap(),
+                attachment_bytes(&pdf, pdf.page_iter(), &a.at).unwrap(),
+                "{}",
+                a.name
+            );
+        }
     }
 
     #[test]

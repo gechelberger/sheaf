@@ -63,7 +63,7 @@ pub fn run(args: SplitArgs, quiet: bool) -> anyhow::Result<()> {
             .unwrap_or_else(|| PathBuf::from("."))
     });
     let stem = args.name.clone().unwrap_or_else(|| stem_of(&args.input));
-    let doc = sheaf_ops::open(&args.input, args.password.as_deref())?;
+    let doc = sheaf_doc::open::file(&args.input, args.password.as_deref())?.doc;
     let snap = doc.snapshot();
     let files = crate::progress::run("splitting", quiet, |p| {
         sheaf_ops::split::split(&snap, &by, &dir, &stem, args.force, p)

@@ -17,6 +17,8 @@ use anyhow::{Context, Result, bail};
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
 use sheaf_core::PageSize;
 
+use crate::attachments::Objects;
+
 /// Marks a stamp page's dynamic text template (`<<initials>> <<date>>`),
 /// drawn over the page when it's placed.
 pub const TEXT_KEY: &str = "SheafStampText";
@@ -422,7 +424,7 @@ pub fn page_forms(
 
 /// A one-page PDF of the Form XObject `form` in `src`: a placed stamp's
 /// page, back from its saved appearance.
-pub fn form_to_pdf(src: &Pdf, form: ObjectId) -> Result<Vec<u8>> {
+pub fn form_to_pdf<P: Objects + ?Sized>(src: &P, form: ObjectId) -> Result<Vec<u8>> {
     let Object::Stream(s) = src.get_object(form)? else {
         bail!("not a form");
     };

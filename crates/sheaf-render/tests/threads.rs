@@ -82,15 +82,14 @@ fn corpus() -> Docs {
         .collect()
 }
 
-/// What the app does with a document: open it, size its pages, read its
-/// bookmarks and the first page's text; and if `draw`, draw that page, as
-/// the page view does and as a viewer of appearances only does.
+/// What the app does with a document: open it, size its pages and read
+/// the first page's text; and if `draw`, draw that page, as the page view
+/// does and as a viewer of appearances only does.
 fn use_document(bytes: &Arc<[u8]>, draw: bool) -> anyhow::Result<()> {
     let engine = PdfiumEngine::open_bytes(bytes.clone(), None)?;
     for i in 0..engine.page_count() {
         engine.page_size(PageIndex(i))?;
     }
-    engine.outline()?;
     engine.page_text(PageIndex(0))?;
     if draw {
         engine.render_page(PageIndex(0), 40, PixelFormat::Bgra)?;

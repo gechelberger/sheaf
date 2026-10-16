@@ -162,6 +162,12 @@ impl Source {
         &self.pages
     }
 
+    /// Every page's object, in that order: how a reader that walks pages
+    /// numbers them.
+    pub fn page_ids(&self) -> impl ExactSizeIterator<Item = ObjectId> + Clone + '_ {
+        self.pages.iter().map(|page| page.id)
+    }
+
     /// Page `index`'s size as shown; past the last page, a page's with no
     /// boxes, Letter.
     pub fn page_size(&self, index: u32) -> PageSize {

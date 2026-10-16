@@ -31,6 +31,11 @@ pub fn scratch(name: &str) -> PathBuf {
     dir
 }
 
+/// `path` opened as the app opens it.
+pub fn open(path: &Path) -> Document {
+    sheaf_doc::open::file(path, None).unwrap().doc
+}
+
 pub fn write(dir: &Path, name: &str, form: &mut Form) -> PathBuf {
     let path = dir.join(name);
     std::fs::write(&path, form.bytes()).unwrap();

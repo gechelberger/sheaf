@@ -14,6 +14,7 @@ use im::Vector;
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, StringFormat, dictionary};
 
 use crate::annot::{Annot, AnnotId, AnnotKind, PageGeom};
+use crate::attachments::Objects;
 use crate::forms::merge::{CopyMaps, FormCopy};
 use crate::model::{DocState, OutlineNode, PageId, PageRef, Snapshot, SourceId, SourceInfo};
 use crate::source::Source;
@@ -170,6 +171,7 @@ fn prune_outline(nodes: &Vector<OutlineNode>, keep: &HashSet<PageId>) -> Vector<
                 target,
                 color: n.color,
                 style: n.style,
+                open: n.open,
                 children,
             })
         })
@@ -1213,7 +1215,7 @@ pub(crate) fn reserve_pages(
 }
 
 /// A page or a node of the page tree.
-pub(crate) fn is_page_node(pdf: &Pdf, id: ObjectId) -> bool {
+pub(crate) fn is_page_node<P: Objects + ?Sized>(pdf: &P, id: ObjectId) -> bool {
     matches!(
         pdf.get_object(id),
         Ok(Object::Dictionary(d)) if d
@@ -1227,8 +1229,8 @@ pub(crate) fn is_page_node(pdf: &Pdf, id: ObjectId) -> bool {
 /// `id` copied into `dst`, or None for a page that isn't being copied
 /// (bug 14: following a link, or a page's `/Parent`, used to copy the
 /// whole file it came from).
-pub(crate) fn copy_object(
-    src: &Pdf,
+pub(crate) fn copy_object<P: Objects + ?Sized>(
+    src: &P,
     id: ObjectId,
     dst: &mut Pdf,
     map: &mut HashMap<ObjectId, ObjectId>,
@@ -1252,8 +1254,8 @@ pub(crate) fn copy_object(
 /// `obj` from `src` in `dst`, copying what it references. A page is never
 /// copied this way: one in `map` (being copied too) is referred to there,
 /// and any other becomes null, for [`crate::kept::keep_only`] to tidy.
-pub(crate) fn remap(
-    src: &Pdf,
+pub(crate) fn remap<P: Objects + ?Sized>(
+    src: &P,
     obj: &Object,
     dst: &mut Pdf,
     map: &mut HashMap<ObjectId, ObjectId>,
@@ -1326,6 +1328,8 @@ fn outline_dest(page: ObjectId, view: Option<&DestView>, frame: Option<PageFrame
 
 /// Write the outline tree. `frame` gives a page's geometry (before any
 /// rotation added in sheaf) for converting bookmark positions to user space.
+/// A `/Count` is how many items show below an open item, and that many
+/// negated for a closed one: how many would show were it opened.
 pub(crate) fn write_outline(
     pdf: &mut Pdf,
     nodes: &Vector<OutlineNode>,
@@ -1340,7 +1344,8 @@ pub(crate) fn write_outline(
         frame: &dyn Fn(PageId) -> Option<PageFrame>,
     ) -> (Option<ObjectId>, Option<ObjectId>, i64) {
         let ids: Vec<ObjectId> = nodes.iter().map(|_| pdf.new_object_id()).collect();
-        let mut total = 0;
+        // How many items show below `parent` while it's open.
+        let mut shown = 0;
         for (i, node) in nodes.iter().enumerate() {
             let mut dict = dictionary! { "Title" => text_string(&node.title), "Parent" => parent };
             if i > 0 {
@@ -1368,16 +1373,16 @@ pub(crate) fn write_outline(
             if flags != 0 {
                 dict.set("F", flags);
             }
-            let (first, last, count) = level(pdf, ids[i], &node.children, page_obj, frame);
+            let (first, last, below) = level(pdf, ids[i], &node.children, page_obj, frame);
             if let (Some(f), Some(l)) = (first, last) {
                 dict.set("First", f);
                 dict.set("Last", l);
-                dict.set("Count", count);
+                dict.set("Count", if node.open { below } else { -below });
             }
-            total += 1 + count;
+            shown += 1 + if node.open { below } else { 0 };
             pdf.objects.insert(ids[i], Object::Dictionary(dict));
         }
-        (ids.first().copied(), ids.last().copied(), total)
+        (ids.first().copied(), ids.last().copied(), shown)
     }
     let outlines_id = pdf.new_object_id();
     let (first, last, count) = level(pdf, outlines_id, nodes, page_obj, frame);
@@ -1997,6 +2002,7 @@ mod tests {
             view,
             color: None,
             style: Default::default(),
+            open: true,
         };
         let mut model = open(
             &a,
@@ -2074,6 +2080,7 @@ mod tests {
                     view: None,
                     color: None,
                     style: Default::default(),
+                    open: true,
                 },
                 FlatOutlineItem {
                     title: "Three".into(),
@@ -2082,6 +2089,7 @@ mod tests {
                     view: None,
                     color: None,
                     style: Default::default(),
+                    open: true,
                 },
             ],
             Box::new(FixedCount(10)),
@@ -2112,6 +2120,7 @@ mod tests {
                     view: None,
                     color: None,
                     style: Default::default(),
+                    open: true,
                 },
                 FlatOutlineItem {
                     title: "Child é".into(),
@@ -2120,6 +2129,7 @@ mod tests {
                     view: None,
                     color: None,
                     style: Default::default(),
+                    open: true,
                 },
             ],
             Box::new(FixedCount(10)),
@@ -2224,6 +2234,7 @@ mod tests {
                 view: None,
                 color: None,
                 style: Default::default(),
+                open: true,
             }],
             Box::new(FixedCount(10)),
         );
@@ -2549,22 +2560,8 @@ mod tests {
             pdf.get_dictionary_mut(third).unwrap().set("F", 3);
             pdf.save(&path).unwrap();
         }
-        let styles = crate::file::outline_styles(&Pdf::load(&path).unwrap());
-        assert_eq!(styles.len(), 3);
-        // As PDFium hands them over: no colors or styles.
-        let mut items: Vec<FlatOutlineItem> = ["Red", "Plain", "Both"]
-            .iter()
-            .enumerate()
-            .map(|(i, t)| FlatOutlineItem {
-                title: t.to_string(),
-                page: Some(i as u32),
-                depth: 0,
-                view: None,
-                color: None,
-                style: Default::default(),
-            })
-            .collect();
-        crate::file::style_flat_items(&mut items, &styles);
+        let items = crate::open::outline(&info(&Store::new(), &path).src);
+        assert_eq!(items.len(), 3);
         assert_eq!(items[0].color, Some([255, 0, 0]));
         assert!(items[1].color.is_none() && items[1].style.is_plain());
         assert!(items[2].style.bold && items[2].style.italic);
@@ -2590,11 +2587,109 @@ mod tests {
             } else {
                 rewrite(&model.snapshot()).unwrap()
             };
-            let back = crate::file::outline_styles(&Pdf::load_mem(&bytes).unwrap());
+            let back = crate::open::outline(&crate::forms::fixture::source(bytes));
             assert_eq!(back.len(), 3, "{incremental}");
             assert_eq!(back[0].color, Some([255, 0, 0]), "{incremental}");
             assert_eq!(back[1].title, "Renamed");
             assert!(back[2].style.bold && back[2].style.italic, "{incremental}");
+        }
+    }
+
+    /// A closed bookmark comes in closed and goes out closed: its
+    /// `/Count` negative, how many would show were it opened, and an open
+    /// one's positive, whether the save rewrites the file or appends.
+    #[test]
+    fn a_closed_bookmark_stays_closed_through_a_rewrite() {
+        let dir = tempdir();
+        let mut f = crate::forms::fixture::Form::new(3);
+        let p = f.pages.clone();
+        let item = |title: &str, page: usize| {
+            dictionary! { "Title" => text_string(title), "Dest" => vec![p[page].into(), "Fit".into()] }
+        };
+        let mut closed = item("Closed", 0);
+        closed.set("Count", -2);
+        crate::forms::fixture::outline_tree(
+            &mut f,
+            vec![
+                (0, closed),
+                (1, item("Under closed", 1)),
+                (2, item("Deeper", 1)),
+                (0, item("Open", 2)),
+                (1, item("Under open", 2)),
+            ],
+        );
+        let path = dir.join("closed.pdf");
+        std::fs::write(&path, f.bytes()).unwrap();
+        let items = crate::open::outline(&info(&Store::new(), &path).src);
+        let open_flags =
+            |items: &[FlatOutlineItem]| items.iter().map(|i| i.open).collect::<Vec<_>>();
+        assert_eq!(open_flags(&items), [false, true, true, true, true]);
+        /// (title, `/Count`) of each item below `first`, in pre-order.
+        fn counts(pdf: &Pdf, first: Option<ObjectId>, out: &mut Vec<(String, Option<i64>)>) {
+            let mut next = first;
+            while let Some(id) = next {
+                let d = pdf.get_dictionary(id).unwrap();
+                let count = d.get(b"Count").and_then(Object::as_i64).ok();
+                out.push((crate::file::pdf_text(d.get(b"Title").unwrap()), count));
+                counts(
+                    pdf,
+                    d.get(b"First").and_then(Object::as_reference).ok(),
+                    out,
+                );
+                next = d.get(b"Next").and_then(Object::as_reference).ok();
+            }
+        }
+        for incremental in [true, false] {
+            let mut model = open(&path, &items, Box::new(FixedCount(10)));
+            // A bookmark edit, so the incremental save rewrites the outline.
+            let leaf = model.state().outline[1].children[0].id;
+            model
+                .apply(
+                    Edit::OutlineEdit {
+                        id: leaf,
+                        title: Some("Renamed".into()),
+                        target: None,
+                        color: None,
+                        view: None,
+                        style: None,
+                    },
+                    "rename",
+                )
+                .unwrap();
+            let bytes = if incremental {
+                crate::incremental::incremental(&model.snapshot()).unwrap()
+            } else {
+                rewrite(&model.snapshot()).unwrap()
+            };
+            let pdf = Pdf::load_mem(&bytes).unwrap();
+            let root = pdf
+                .catalog()
+                .unwrap()
+                .get(b"Outlines")
+                .and_then(Object::as_reference)
+                .unwrap();
+            let root = pdf.get_dictionary(root).unwrap();
+            // Shown: Closed, Open and what's under Open.
+            assert_eq!(root.get(b"Count").unwrap().as_i64().unwrap(), 3);
+            let mut got = Vec::new();
+            counts(
+                &pdf,
+                root.get(b"First").and_then(Object::as_reference).ok(),
+                &mut got,
+            );
+            let want: Vec<(String, Option<i64>)> = [
+                ("Closed", Some(-2)),
+                ("Under closed", Some(1)),
+                ("Deeper", None),
+                ("Open", Some(1)),
+                ("Renamed", None),
+            ]
+            .into_iter()
+            .map(|(t, c)| (t.to_string(), c))
+            .collect();
+            assert_eq!(got, want, "{incremental}");
+            let back = crate::open::outline(&crate::forms::fixture::source(bytes));
+            assert_eq!(open_flags(&back), open_flags(&items), "{incremental}");
         }
     }
 
@@ -2672,6 +2767,20 @@ mod tests {
 
     fn opened(path: &Path) -> Document {
         open(path, &[], Box::new(FixedCount(10)))
+    }
+
+    /// `path` opened as a file opens, saying it has `marks`, sheaf's own
+    /// as read from it.
+    fn opened_with(path: &Path, marks: HashMap<u32, Vec<Annot>>) -> Document {
+        let store = Store::new();
+        let primary = info(&store, path);
+        let mut d = crate::open::start(store, primary, Box::new(FixedCount(10)));
+        let facts = crate::open::Facts {
+            marks,
+            ..Default::default()
+        };
+        d.ready(facts).unwrap();
+        d
     }
 
     #[test]
@@ -2834,8 +2943,7 @@ mod tests {
         assert_eq!(reply.parent.as_deref(), Some(ours[0].name().as_str()));
 
         for incremental in [true, false] {
-            let mut model = opened(&path);
-            model.set_initial_annots(found.sheaf.clone()).unwrap();
+            let mut model = opened_with(&path, found.sheaf.clone());
             let p0 = model.page(0).unwrap().id;
             let mut note = model.state().annots_on(p0).unwrap()[0].clone();
             note.contents = "ours, edited".into();
@@ -3033,8 +3141,7 @@ mod tests {
                 .collect()
         };
         for incremental in [true, false] {
-            let mut model = opened(&path);
-            model.set_initial_annots(found.sheaf.clone()).unwrap();
+            let mut model = opened_with(&path, found.sheaf.clone());
             let p0 = model.page(0).unwrap().id;
             // Theirs, by name.
             model
@@ -3098,8 +3205,7 @@ mod tests {
             crate::file::read_annots(&path, None).unwrap().foreign,
             found.foreign
         );
-        let mut model = opened(&path);
-        model.set_initial_annots(found.sheaf.clone()).unwrap();
+        let mut model = opened_with(&path, found.sheaf.clone());
         let p0 = model.page(0).unwrap().id;
         model
             .apply(
@@ -3220,11 +3326,14 @@ mod tests {
             .decompressed_content()
             .unwrap();
         assert_eq!(embedded, bytes);
-        assert!(crate::attachments::attachments_in(&pdf).is_empty());
-        // Elsewhere, without the cache: back from the file.
+        assert!(crate::attachments::attachments_in(&pdf, pdf.page_iter()).is_empty());
+        // Elsewhere, without the cache: back from the file, as it opens.
         let path = crate::generated::blob_path(&stem).unwrap();
         std::fs::remove_file(&path).unwrap();
-        crate::file::recover_cached(&pdf);
+        crate::open::finish(
+            &crate::forms::fixture::source(out),
+            &sheaf_progress::NoProgress,
+        );
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
         let _ = std::fs::remove_file(&path);
     }
@@ -3329,9 +3438,13 @@ mod tests {
         }
         assert_eq!(forms.len(), 1);
 
-        // On a machine without the stamp, it comes back from the file.
+        // On a machine without the stamp, it comes back from the file as
+        // it opens.
         std::fs::remove_file(&path).unwrap();
-        crate::file::recover_cached(&pdf);
+        crate::open::finish(
+            &crate::forms::fixture::source(bytes),
+            &sheaf_progress::NoProgress,
+        );
         let back = Pdf::load_mem(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(back.get_pages().len(), 1);
         let _ = std::fs::remove_file(&path);
@@ -3461,8 +3574,7 @@ mod tests {
         assert!(back.foreign.is_empty(), "{:?}", back.foreign);
 
         // Saved again from the reopened file: the companion isn't doubled.
-        let mut model2 = open(&out, &[], Box::new(FixedCount(10)));
-        model2.set_initial_annots(back.sheaf).unwrap();
+        let mut model2 = opened_with(&out, back.sheaf);
         let p = model2.page(0).unwrap().id;
         let mut changed = model2.state().annots_on(p).unwrap()[0].clone();
         changed.contents = "newer words".into();
@@ -3580,8 +3692,7 @@ mod tests {
         // Reopen, delete one, save again: no duplicates.
         let out2 = dir.join("inc2.pdf");
         std::fs::copy(&out, &out2).unwrap();
-        let mut model2 = open(&out2, &[], Box::new(FixedCount(10)));
-        model2.set_initial_annots(back).unwrap();
+        let mut model2 = opened_with(&out2, back);
         let p0b = model2.page(0).unwrap().id;
         let first = model2.state().annots_on(p0b).unwrap()[0].clone();
         model2
@@ -3694,10 +3805,7 @@ mod tests {
         // first now goes to its neighbour, and page 3 comes back to it.
         let out = dir.join("g2.pdf");
         std::fs::write(&out, &bytes).unwrap();
-        let mut model = opened(&out);
-        model
-            .set_initial_annots(crate::file::read_sheaf_annots(&out).unwrap())
-            .unwrap();
+        let mut model = opened_with(&out, crate::file::read_sheaf_annots(&out).unwrap());
         let p0 = model.page(0).unwrap().id;
         model
             .apply(
@@ -3843,6 +3951,7 @@ mod tests {
                     view: None,
                     color: None,
                     style: Default::default(),
+                    open: true,
                 },
                 FlatOutlineItem {
                     title: "Second".into(),
@@ -3851,6 +3960,7 @@ mod tests {
                     view: None,
                     color: None,
                     style: Default::default(),
+                    open: true,
                 },
             ],
             Box::new(FixedCount(10)),
@@ -4047,6 +4157,7 @@ mod tests {
                 view: None,
                 color: None,
                 style: Default::default(),
+                open: true,
             }],
             Box::new(FixedCount(10)),
         );
@@ -4109,6 +4220,7 @@ mod tests {
                     view: None,
                     color: None,
                     style: Default::default(),
+                    open: true,
                 },
                 FlatOutlineItem {
                     title: "Second".into(),
@@ -4117,6 +4229,7 @@ mod tests {
                     view: None,
                     color: None,
                     style: Default::default(),
+                    open: true,
                 },
                 FlatOutlineItem {
                     title: "Fourth".into(),
@@ -4125,6 +4238,7 @@ mod tests {
                     view: None,
                     color: None,
                     style: Default::default(),
+                    open: true,
                 },
                 FlatOutlineItem {
                     title: "Third".into(),
@@ -4133,6 +4247,7 @@ mod tests {
                     view: None,
                     color: None,
                     style: Default::default(),
+                    open: true,
                 },
             ],
             Box::new(FixedCount(10)),
@@ -4271,6 +4386,12 @@ mod tests {
         let (stored, scope) = crate::stamps::from_catalog(&pdf).unwrap();
         assert_eq!(stored.texts, hf.texts);
         assert_eq!(scope, None);
+        // Read from a source, as it opens: the same.
+        let src = crate::forms::fixture::source(std::fs::read(&out).unwrap());
+        assert_eq!(
+            crate::stamps::from_catalog(src.pdf()),
+            Some((stored, scope))
+        );
         // Stripped, both pages come back clean.
         let bytes = derived_copy(
             &info(&Store::new(), &out),
@@ -4382,6 +4503,7 @@ mod tests {
                 view: None,
                 color: None,
                 style: Default::default(),
+                open: true,
             }],
             Box::new(FixedCount(10)),
         );

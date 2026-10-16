@@ -460,7 +460,7 @@ impl DocView {
                 }
             }));
 
-        if !doc.outline_loaded {
+        if !doc.model.is_ready() {
             return container
                 .p_2()
                 .text_sm()

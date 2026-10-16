@@ -37,9 +37,9 @@
 //! (15), Bates apply and the live-token reorder (17), and the flattened
 //! export's RSS (19). The rows today's code has no counterpart for come
 //! with those slices; idle CPU is the app's (12, 13). So far slice 1's
-//! history bench and slice 3's geometry walk assert, after their tables
-//! print. The 200 OCR versions take about 5 GB until slice 12 bounds
-//! history, and skip with less memory available.
+//! history bench, slice 3's geometry walk and slice 4's ready assert,
+//! after their tables print. The 200 OCR versions take about 5 GB until
+//! slice 12 bounds history, and skip with less memory available.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -48,6 +48,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use sheaf_core::{PageIndex, PageSize, Rotation};
+use sheaf_doc::open::Facts;
 use sheaf_doc::save::Strategy;
 use sheaf_doc::stamps::{Bates, HeaderFooter};
 use sheaf_doc::store::BlobKind;
@@ -343,21 +344,21 @@ fn gates(kind: Kind) {
     });
     rows.push(Row::time("geometry walk", walk, base.walk_ms, gate));
 
-    // Ready: open to edits enabled.
+    // Ready: open to edits enabled, as the app opens a file and every
+    // headless caller does: the source read, the document started on its
+    // pages, the facts read and the opened version made of them (slice 4).
+    // The app's PDFium engine opens beside it for the first paint, and
+    // isn't counted.
     let mut opened = None;
     let (ready, ready_mem) = measure(RUNS, || {
         drop(opened.take());
-        let (t, (doc, _foreign)) =
-            timed(|| sheaf_ops::open::open_with_foreign(&work, None).unwrap());
-        opened = Some(doc);
+        let (t, o) = timed(|| sheaf_doc::open::file(&work, None).unwrap());
+        opened = Some(o.doc);
         t
     });
     let mut doc = opened.expect("opened above");
-    let gate = if kind == Kind::Heavy {
-        "< 1 s, slice 4"
-    } else {
-        ""
-    };
+    let ready_gate = (kind == Kind::Heavy).then_some(Duration::from_secs(1));
+    let gate = ready_gate.map_or(String::new(), |g| format!("< {} s, asserted", g.as_secs()));
     rows.push(Row::time("ready", ready, base.ready_ms, gate));
     rows.push(Row::peak("ready", ready_mem, base.ready_rss_mb, ""));
     rows.push(Row::added("ready", ready_mem, base.ready_added_mb, ""));
@@ -586,6 +587,9 @@ fn gates(kind: Kind) {
             "the geometry walk took {walk:?}, over {gate:?}"
         );
     }
+    if let Some(gate) = ready_gate {
+        assert!(ready < gate, "ready took {ready:?}, over {gate:?}");
+    }
 }
 
 /// The flatten's rows on the `kind` fixture, from the file as opened:
@@ -597,7 +601,7 @@ fn flatten(kind: Kind) {
     let dir = path.parent().expect("the fixture is in the gate directory");
     let base = kind.baseline();
     let file_mb = mb(std::fs::metadata(&path).unwrap().len());
-    let (doc, _foreign) = sheaf_ops::open::open_with_foreign(&path, None).unwrap();
+    let doc = sheaf_doc::open::file(&path, None).unwrap().doc;
     let snap = doc.snapshot();
     let out = dir.join(format!("{}-flattened.pdf", kind.name()));
     let (flatten, mem) = measure(RUNS, || {
@@ -657,7 +661,6 @@ fn set_header_footer(doc: &mut Document, hf: &HeaderFooter) -> Vec<RenderHandle>
 #[test]
 #[ignore = "gate: cargo test -p sheaf-ops --release --test gate_7k -- --ignored --nocapture --test-threads=1"]
 fn history_at_7k_pages_and_20k_marks() {
-    let mut d = blank(PAGES);
     let mut marks: HashMap<u32, Vec<Annot>> = HashMap::new();
     for i in 0..20_000 {
         marks
@@ -665,7 +668,14 @@ fn history_at_7k_pages_and_20k_marks() {
             .or_default()
             .push(square(u64::from(i) + 1));
     }
-    d.set_initial_annots(marks).unwrap();
+    let store = Store::new();
+    let primary = SourceInfo::blank(&store, PAGES);
+    let mut d = sheaf_doc::open::start(store, primary, sheaf_doc::history::default_policy());
+    d.ready(Facts {
+        marks,
+        ..Default::default()
+    })
+    .unwrap();
     let mut adds = Vec::new();
     for i in 0..21 {
         let page = d.page(i * 333).unwrap().id;

@@ -129,7 +129,7 @@ running any plugin code.
 | `api` | Semver requirement on the API, e.g. `"^0.3"`. sheaf serves 0.3 and 0.2, and refuses a plugin whose range takes neither. |
 | `[[commands]]` | `id`; `label` (`&` marks the menu mnemonic); `icon`, an SVG in the plugin folder such as `"icons/scan.svg"` (see [Icons](#icons)); `help`, a sentence or two of plain text shown in tooltips and the command palette. Optional: `keywords` (more words the palette finds it by), `category` (palette prefix; defaults to `name`), `menu` (a path like `"Tools/Workpapers"`; menus and submenus are created as needed), `keys` (a default binding in `keymap.json` syntax; the user's keymap overrides it), `keys-context` (where `keys` applies, as a keymap context such as `"DocView && !TextInput"`; by default anywhere in the window, text fields included, so give single-key bindings a context), `when` (what must hold for it to run, all of: `"document"` a document is open, `"selection"` an annotation is selected, `"pages"` pages are selected in the thumbnails, `"region"` a region is Shift+dragged; menus and the palette grey the command out otherwise, and sheaf decides without running plugin code). `icon` and `help` are required. |
 | `[[panels]]` | `id`, `label`. Each gets a dock tab and a **View → Plugin Panels** entry. |
-| `events` | Document events to receive: any of `"opened"`, `"edited"`, `"saved"`, `"selection-changed"`, `"closed"`, `"region"` (the region the user Shift+drags on a page, live while dragging, and its clearing). |
+| `events` | Document events to receive: any of `"opened"` (once the file has opened: its marks, form, bookmarks and the rest are read), `"edited"`, `"saved"`, `"selection-changed"`, `"closed"`, `"region"` (the region the user Shift+drags on a page, live while dragging, and its clearing). |
 | `[[presets]]` | `name`, `regex`: pattern-search presets shown (read-only) in the Patterns panel. |
 | `[marks]` | `tickmarks = [{ name, marks = ["Σ", …] }]` and `stamps = ["PBC", …]` for the markup toolbar. |
 | `[permissions]` | `read = ["~/Documents/Clients"]`, `write = [...]`: absolute paths or `~/…`. `network = ["api.example.com"]`: hosts the plugin may make HTTP requests to (`"*.example.com"` includes subdomains, `"host:8080"` limits the port). See [Trust model](#trust-model). |
@@ -308,6 +308,14 @@ call's limit. There are no raw sockets.
   one, newer ones replace each other and only the newest is sent next. For
   live work, fetch a page's words once and filter them yourself, as
   `plugins/subtotal` does.
+- **While a file opens**, its pages show before sheaf has read the rest
+  of it, and a plugin's commands are greyed out. A call given meanwhile
+  (a command by its keys, a panel action, an event) waits: once the file
+  is read, `opened` comes first, then the calls that waited, in order,
+  each seeing the document as it is then. Of region events only the
+  newest waits. A file closed before it's read drops the calls that
+  waited, and `closed` comes only to a document that had `opened` (a
+  recovery opens a file again).
 
 ## Versioning
 

@@ -78,8 +78,8 @@ impl PdfFile {
 
 use std::collections::HashMap;
 
-use crate::annot::{Annot, Box2, PART, PageGeom, Pt, from_json};
-use crate::model::{FlatOutlineItem, TextStyle};
+use crate::annot::{Annot, AnnotKind, Box2, PART, PageGeom, Pt, from_json};
+use crate::attachments::Objects;
 
 /// The mark an annotation dictionary carries, if this build can read it.
 pub(crate) fn sheaf_mark(dict: &lopdf::Dictionary) -> Option<Annot> {
@@ -90,7 +90,7 @@ pub(crate) fn sheaf_mark(dict: &lopdf::Dictionary) -> Option<Annot> {
 /// read, or a companion of one (see `annot::PART`)? A `/SheafAnnot` it
 /// can't read, from a newer sheaf, isn't: it's kept like any other tool's
 /// annotation, so a save here never loses it.
-pub(crate) fn is_ours(pdf: &lopdf::Document, entry: &lopdf::Object) -> bool {
+pub(crate) fn is_ours<P: Objects + ?Sized>(pdf: &P, entry: &lopdf::Object) -> bool {
     let Some(dict) = pdf
         .dereference(entry)
         .ok()
@@ -266,173 +266,18 @@ pub fn load_pdf(path: &Path, password: Option<&str>) -> Result<lopdf::Document> 
     Ok(pdf)
 }
 
-/// What sheaf shows about a file besides its pages and marks, read once
-/// when it opens.
-#[derive(Debug, Default)]
-pub struct FileFacts {
-    /// The file's `/PageLabels` ranges, by page index.
-    pub label_ranges: Option<Vec<crate::labels::LabelRange>>,
-    /// The header/footer sheaf drew into the file, and the page indexes
-    /// it's on (none: all).
-    pub header_footer: Option<(crate::stamps::HeaderFooter, Option<Vec<usize>>)>,
-    /// Embedded files, document-level and on annotations.
-    pub attachments: Vec<crate::attachments::Attachment>,
-    /// Set when the file is a PDF Portfolio.
-    pub collection: Option<crate::portfolio::Collection>,
-    /// Optional content groups, in display order.
-    pub layers: Vec<crate::layers::Layer>,
-    /// Each bookmark's color and style, in pre-order; empty when none has
-    /// either (see [`outline_styles`]).
-    pub outline_styles: Vec<OutlineStyle>,
-    /// The form: its fields and widgets, and what sheaf shows about it.
-    /// [`read_open`] reads it from the source; [`facts_in`] leaves it
-    /// empty.
-    pub form: crate::forms::FileForm,
-}
-
-/// A bookmark's `/C` and `/F`, which PDFium's outline doesn't carry.
-#[derive(Debug, Clone, PartialEq)]
-pub struct OutlineStyle {
-    pub title: String,
-    pub color: Option<[u8; 3]>,
-    pub style: TextStyle,
-}
-
-/// Each bookmark's title, color and style, in pre-order (the order PDFium
-/// lists them), or nothing when no bookmark has a color or style. Matched to
-/// PDFium's items by position, checked by title.
-pub fn outline_styles(pdf: &lopdf::Document) -> Vec<OutlineStyle> {
-    let first = pdf
-        .catalog()
-        .ok()
-        .and_then(|c| c.get(b"Outlines").ok())
-        .and_then(|o| pdf.dereference(o).ok())
-        .and_then(|(_, o)| o.as_dict().ok())
-        .and_then(|d| d.get(b"First").ok())
-        .and_then(|f| f.as_reference().ok());
-    let mut out = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    // (item, depth); children before siblings, as in pre-order.
-    let mut stack: Vec<(lopdf::ObjectId, u16)> = first.into_iter().map(|f| (f, 0)).collect();
-    while let Some((id, depth)) = stack.pop() {
-        if !seen.insert(id) || out.len() >= 100_000 {
-            continue;
-        }
-        let Ok(item) = pdf.get_dictionary(id) else {
-            continue;
-        };
-        let color = item
-            .get(b"C")
-            .ok()
-            .and_then(|c| pdf.dereference(c).ok())
-            .and_then(|(_, c)| c.as_array().ok())
-            .filter(|a| a.len() == 3)
-            .map(|a| {
-                let v = |i: usize| {
-                    (a[i].as_float().unwrap_or(0.0).clamp(0.0, 1.0) * 255.0).round() as u8
-                };
-                [v(0), v(1), v(2)]
-            })
-            // Black is the default; don't call it a color.
-            .filter(|c| *c != [0, 0, 0]);
-        let flags = item
-            .get(b"F")
-            .ok()
-            .and_then(|f| f.as_i64().ok())
-            .unwrap_or(0);
-        out.push(OutlineStyle {
-            title: item.get(b"Title").map(pdf_text).unwrap_or_default(),
-            color,
-            style: TextStyle {
-                italic: flags & 1 != 0,
-                bold: flags & 2 != 0,
-            },
-        });
-        if let Ok(next) = item.get(b"Next").and_then(|n| n.as_reference()) {
-            stack.push((next, depth));
-        }
-        if depth < 64
-            && let Ok(child) = item.get(b"First").and_then(|c| c.as_reference())
-        {
-            stack.push((child, depth + 1));
-        }
-    }
-    if out
-        .iter()
-        .all(|s| s.color.is_none() && s.style == TextStyle::default())
-    {
-        out.clear();
-    }
-    out
-}
-
-/// Give PDFium's flattened bookmarks their colors and styles: the `i`th
-/// takes the `i`th style when their titles agree.
-pub fn style_flat_items(items: &mut [FlatOutlineItem], styles: &[OutlineStyle]) {
-    for (item, s) in items.iter_mut().zip(styles) {
-        if item.title.trim() == s.title.trim() {
-            item.color = s.color;
-            item.style = s.style;
-        }
-    }
-}
-
-/// The facts sheaf reads from an open file's catalog, but its form.
-pub fn facts_in(pdf: &lopdf::Document) -> FileFacts {
-    FileFacts {
-        label_ranges: crate::labels::label_ranges(pdf),
-        header_footer: crate::stamps::from_catalog(pdf),
-        attachments: crate::attachments::attachments_in(pdf),
-        collection: crate::portfolio::collection(pdf),
-        layers: crate::layers::layers_in(pdf),
-        outline_styles: outline_styles(pdf),
-        form: Default::default(),
-    }
-}
-
-/// Everything read from a source when it opens: annotations and facts.
-/// The form is read from the source; the rest from one eager load of its
-/// bytes, until the open reads it all from the source (M10.5 slice 4).
-pub fn read_open(src: &crate::Source) -> Result<(AnnotsInFile, FileFacts)> {
-    let pdf = load_pdf_mem(src.bytes(), src.password())?;
-    let found = annots_in(&pdf);
-    recover_cached(&pdf);
-    let mut facts = facts_in(&pdf);
-    facts.form = crate::forms::read(src);
-    Ok((found, facts))
-}
-
 /// What our marks keep in this machine's cache, when it isn't there (a
 /// file from someone else): a stamp's page, made again from its saved
-/// appearance, and an attachment's file, from its embedded copy.
-pub fn recover_cached(pdf: &lopdf::Document) {
-    for (_, page_id) in pdf.get_pages() {
-        let Ok(page) = pdf.get_dictionary(page_id) else {
-            continue;
-        };
-        let Some(list) = page
-            .get(b"Annots")
-            .ok()
-            .and_then(|a| pdf.dereference(a).ok())
-            .and_then(|(_, a)| a.as_array().ok())
-        else {
-            continue;
-        };
-        for entry in list {
-            let Some(dict) = pdf
-                .dereference(entry)
-                .ok()
-                .and_then(|(_, o)| o.as_dict().ok())
-            else {
-                continue;
-            };
-            let mark = sheaf_mark(dict);
-            if let Some(Annot {
-                kind: crate::annot::AnnotKind::FileAttachment { file, .. },
-                ..
-            }) = &mark
-                && !crate::generated::blob_path(file).is_some_and(|p| p.exists())
-            {
+/// appearance, and an attachment's file, from its embedded copy. `marks`
+/// are the ones [`annots_and_cached`] found, with the dictionaries they
+/// were read from.
+pub(crate) fn recover_cached<P: Objects + ?Sized>(pdf: &P, marks: &[(Annot, &lopdf::Dictionary)]) {
+    for (mark, dict) in marks {
+        match &mark.kind {
+            AnnotKind::FileAttachment { file, .. } => {
+                if crate::generated::blob_path(file).is_some_and(|p| p.exists()) {
+                    continue;
+                }
                 let bytes = dict
                     .get(b"FS")
                     .ok()
@@ -455,79 +300,77 @@ pub fn recover_cached(pdf: &lopdf::Document) {
                     Some(Err(e)) => log::warn!("recovering attachment {file}: {e:#}"),
                     None => log::warn!("attachment {file} has no embedded file"),
                 }
-                continue;
             }
-            let Some(Annot {
-                kind: crate::annot::AnnotKind::PageStamp { stamp, .. },
-                ..
-            }) = mark
-            else {
-                continue;
-            };
-            if crate::generated::path_of(&stamp).is_some_and(|p| p.exists()) {
-                continue;
+            AnnotKind::PageStamp { stamp, .. } => {
+                if crate::generated::path_of(stamp).is_some_and(|p| p.exists()) {
+                    continue;
+                }
+                // /AP /N → its /Resources /XObject /SheafStamp.
+                let form = dict
+                    .get(b"AP")
+                    .ok()
+                    .and_then(|o| pdf.dereference(o).ok())
+                    .and_then(|(_, o)| o.as_dict().ok())
+                    .and_then(|ap| ap.get(b"N").ok())
+                    .and_then(|n| n.as_reference().ok())
+                    .and_then(|n| match pdf.get_object(n) {
+                        Ok(lopdf::Object::Stream(s)) => Some(s.dict.clone()),
+                        _ => None,
+                    })
+                    .and_then(|n| {
+                        let res = pdf
+                            .dereference(n.get(b"Resources").ok()?)
+                            .ok()?
+                            .1
+                            .as_dict()
+                            .ok()?
+                            .clone();
+                        let xo = pdf
+                            .dereference(res.get(b"XObject").ok()?)
+                            .ok()?
+                            .1
+                            .as_dict()
+                            .ok()?
+                            .clone();
+                        xo.get(b"SheafStamp").ok()?.as_reference().ok()
+                    });
+                let made = form
+                    .ok_or_else(|| anyhow::anyhow!("no saved appearance"))
+                    .and_then(|f| crate::stamp_lib::form_to_pdf(pdf, f))
+                    .and_then(|bytes| crate::generated::store_as(stamp, &bytes));
+                if let Err(e) = made {
+                    log::warn!("recovering stamp {stamp}: {e:#}");
+                }
             }
-            // /AP /N → its /Resources /XObject /SheafStamp.
-            let form = dict
-                .get(b"AP")
-                .ok()
-                .and_then(|o| pdf.dereference(o).ok())
-                .and_then(|(_, o)| o.as_dict().ok())
-                .and_then(|ap| ap.get(b"N").ok())
-                .and_then(|n| n.as_reference().ok())
-                .and_then(|n| match pdf.get_object(n) {
-                    Ok(lopdf::Object::Stream(s)) => Some(s.dict.clone()),
-                    _ => None,
-                })
-                .and_then(|n| {
-                    let res = pdf
-                        .dereference(n.get(b"Resources").ok()?)
-                        .ok()?
-                        .1
-                        .as_dict()
-                        .ok()?
-                        .clone();
-                    let xo = pdf
-                        .dereference(res.get(b"XObject").ok()?)
-                        .ok()?
-                        .1
-                        .as_dict()
-                        .ok()?
-                        .clone();
-                    xo.get(b"SheafStamp").ok()?.as_reference().ok()
-                });
-            let made = form
-                .ok_or_else(|| anyhow::anyhow!("no saved appearance"))
-                .and_then(|f| crate::stamp_lib::form_to_pdf(pdf, f))
-                .and_then(|bytes| crate::generated::store_as(&stamp, &bytes));
-            if let Err(e) = made {
-                log::warn!("recovering stamp {stamp}: {e:#}");
-            }
+            _ => {}
         }
     }
 }
 
 /// Annotations sheaf wrote into `path` earlier, keyed by page index.
-pub fn read_sheaf_annots(path: impl AsRef<Path>) -> Result<HashMap<u32, Vec<Annot>>> {
+#[cfg(test)]
+pub(crate) fn read_sheaf_annots(path: impl AsRef<Path>) -> Result<HashMap<u32, Vec<Annot>>> {
     Ok(read_annots(path, None)?.sheaf)
 }
 
 /// Same as `read_sheaf_annots`, from bytes already in memory.
-pub fn read_sheaf_annots_mem(bytes: &[u8]) -> Result<HashMap<u32, Vec<Annot>>> {
-    let pdf = lopdf::Document::load_mem(bytes)?;
-    Ok(annots_in(&pdf).sheaf)
+#[cfg(test)]
+pub(crate) fn read_sheaf_annots_mem(bytes: &[u8]) -> Result<HashMap<u32, Vec<Annot>>> {
+    Ok(read_annots_mem(bytes)?.sheaf)
 }
 
 /// All annotations in a file's bytes.
-pub fn read_annots_mem(bytes: &[u8]) -> Result<AnnotsInFile> {
+#[cfg(test)]
+pub(crate) fn read_annots_mem(bytes: &[u8]) -> Result<AnnotsInFile> {
     let pdf = lopdf::Document::load_mem(bytes)?;
-    Ok(annots_in(&pdf))
+    Ok(annots_in(&pdf, pdf.page_iter()))
 }
 
 /// All annotations in `path`.
-pub fn read_annots(path: impl AsRef<Path>, password: Option<&str>) -> Result<AnnotsInFile> {
+#[cfg(test)]
+pub(crate) fn read_annots(path: impl AsRef<Path>, password: Option<&str>) -> Result<AnnotsInFile> {
     let pdf = load_pdf(path.as_ref(), password)?;
-    Ok(annots_in(&pdf))
+    Ok(annots_in(&pdf, pdf.page_iter()))
 }
 
 /// Decode a PDF text string: UTF-16BE with BOM, else PDFDoc/Latin-1.
@@ -571,9 +414,24 @@ fn is_comment_subtype(s: &str) -> bool {
     )
 }
 
-fn annots_in(pdf: &lopdf::Document) -> AnnotsInFile {
+/// Every annotation on `pages`, the file's page objects by index.
+pub fn annots_in<P: Objects + ?Sized>(
+    pdf: &P,
+    pages: impl IntoIterator<Item = lopdf::ObjectId>,
+) -> AnnotsInFile {
+    annots_and_cached(pdf, pages).0
+}
+
+/// [`annots_in`], and the marks it found that keep something in this
+/// machine's cache (a stamp's page, an attachment's file), with the
+/// dictionaries they were read from, for [`recover_cached`].
+pub(crate) fn annots_and_cached<P: Objects + ?Sized>(
+    pdf: &P,
+    pages: impl IntoIterator<Item = lopdf::ObjectId>,
+) -> (AnnotsInFile, Vec<(Annot, &lopdf::Dictionary)>) {
     let mut out = AnnotsInFile::default();
-    for (i, page_id) in pdf.get_pages().into_values().enumerate() {
+    let mut cached = Vec::new();
+    for (i, page_id) in pages.into_iter().enumerate() {
         let Ok(page) = pdf.get_dictionary(page_id) else {
             continue;
         };
@@ -596,6 +454,12 @@ fn annots_in(pdf: &lopdf::Document) -> AnnotsInFile {
             };
             let Ok(dict) = obj.as_dict() else { continue };
             if let Some(a) = sheaf_mark(dict) {
+                if matches!(
+                    a.kind,
+                    AnnotKind::FileAttachment { .. } | AnnotKind::PageStamp { .. }
+                ) {
+                    cached.push((a.clone(), dict));
+                }
                 out.sheaf.entry(i as u32).or_default().push(a);
                 continue;
             }
@@ -693,11 +557,11 @@ fn annots_in(pdf: &lopdf::Document) -> AnnotsInFile {
             }
         }
     }
-    out
+    (out, cached)
 }
 
 /// The visible box and /Rotate of a page (inherited attributes resolved).
-pub fn page_geom(pdf: &lopdf::Document, page: lopdf::ObjectId) -> PageGeom {
+pub fn page_geom<P: Objects + ?Sized>(pdf: &P, page: lopdf::ObjectId) -> PageGeom {
     let mut media = None;
     let mut crop = None;
     let mut rotate = None;
@@ -854,7 +718,7 @@ mod tests {
         );
         let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
         pdf.trailer.set("Root", catalog);
-        let found = annots_in(&pdf).foreign;
+        let found = annots_in(&pdf, pdf.page_iter()).foreign;
         assert_eq!(found.len(), 4);
         assert_eq!(found[0].name, "p");
         assert_eq!(found[0].parent, None);
@@ -930,7 +794,7 @@ mod tests {
 
         let mine: Vec<bool> = list.iter().map(|e| is_ours(&pdf, e)).collect();
         assert_eq!(mine, vec![true, true, false, false]);
-        let found = annots_in(&pdf);
+        let found = annots_in(&pdf, pdf.page_iter());
         assert_eq!(found.sheaf[&0], vec![ours]);
         // The newer sheaf's mark and its companion are listed like another
         // tool's, and kept.
@@ -1006,7 +870,7 @@ mod tests {
         let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
         pdf.trailer.set("Root", catalog);
 
-        let found = annots_in(&pdf);
+        let found = annots_in(&pdf, pdf.page_iter());
         assert_eq!(found.sheaf[&0], vec![ours]);
         assert_eq!(found.foreign.len(), 1, "{:?}", found.foreign);
         let f = &found.foreign[0];
@@ -1019,5 +883,104 @@ mod tests {
             (f.rect.x, f.rect.y, f.rect.w, f.rect.h),
             (100.0, 72.0, 20.0, 20.0)
         );
+    }
+
+    /// One page with a mark and its companion, another tool's comment and
+    /// a reply to it, a stamp with an appearance and a file attachment:
+    /// read from a source, as a file opens, they read as they do loaded,
+    /// the stamp converted through its appearance.
+    #[test]
+    fn annotations_read_from_a_source_as_loaded() {
+        let mut pdf = lopdf::Document::with_version("1.7");
+        let pages_id = pdf.new_object_id();
+        let rect = || Object::Array(vec![10.into(), 10.into(), 20.into(), 20.into()]);
+        let text = |s: &str| Object::string_literal(s);
+        let ours = Annot {
+            id: crate::annot::AnnotId(9),
+            kind: crate::annot::AnnotKind::Note {
+                pos: Pt { x: 1.0, y: 2.0 },
+            },
+            color: [1, 2, 3],
+            opacity: 1.0,
+            stroke: 1.0,
+            author: "me".into(),
+            contents: "mine".into(),
+            modified: String::new(),
+            created: String::new(),
+            fill: None,
+            dashed: false,
+            cloudy: false,
+            name: String::new(),
+        };
+        let geom = PageGeom {
+            media: [0.0, 0.0, 612.0, 792.0],
+            rotate: 0,
+        };
+        let main = crate::annot::to_pdf(&ours, &geom, &mut pdf).main;
+        let main = pdf.add_object(main);
+        let part = pdf.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "Caret", "Rect" => rect(),
+            "IRT" => main, PART => true,
+        });
+        let note = pdf.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "Text", "Rect" => rect(), "NM" => text("n"),
+            "T" => text("Reviewer"), "Contents" => text("Why?"),
+        });
+        let reply = pdf.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "Text", "Rect" => rect(), "IRT" => note,
+            "Contents" => text("Because."),
+        });
+        // The same content every run, so its stamp page is one cache file.
+        let form = pdf.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject", "Subtype" => "Form",
+                "BBox" => vec![0.into(), 0.into(), 100.into(), 40.into()],
+            },
+            b"0 0 1 rg 0 0 100 40 re f".to_vec(),
+        ));
+        let stamp = pdf.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "Stamp", "Name" => "SBApproved",
+            "Rect" => vec![100.into(), 600.into(), 200.into(), 640.into()],
+            "AP" => dictionary! { "N" => form },
+        });
+        let file = pdf.add_object(Stream::new(dictionary! {}, b"attached".to_vec()));
+        let attached = pdf.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "FileAttachment", "Rect" => rect(),
+            "FS" => dictionary! {
+                "Type" => "Filespec", "F" => text("a.txt"), "EF" => dictionary! { "F" => file },
+            },
+        });
+        let list: Vec<Object> = [main, part, note, reply, stamp, attached]
+            .into_iter()
+            .map(Object::Reference)
+            .collect();
+        let page = pdf.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Annots" => list,
+        });
+        pdf.objects.insert(
+            pages_id,
+            dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 }.into(),
+        );
+        let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        pdf.trailer.set("Root", catalog);
+
+        let src = crate::open::tests::lazily(&mut pdf);
+        let loaded = annots_in(&pdf, pdf.page_iter());
+        let read = annots_in(src.pdf(), src.page_ids());
+        assert_eq!(read.sheaf, loaded.sheaf);
+        assert_eq!(read.foreign, loaded.foreign);
+        assert_eq!(loaded.sheaf[&0], vec![ours]);
+        let subtypes: Vec<&str> = loaded.foreign.iter().map(|f| f.subtype.as_str()).collect();
+        assert_eq!(subtypes, ["Text", "Text", "Stamp", "FileAttachment"]);
+        assert_eq!(loaded.foreign[1].parent.as_deref(), Some("n"));
+        assert!(matches!(
+            loaded.foreign[2].mark.as_deref(),
+            Some(Annot {
+                kind: crate::annot::AnnotKind::PageStamp { .. },
+                ..
+            })
+        ));
     }
 }

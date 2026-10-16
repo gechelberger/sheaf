@@ -17,7 +17,7 @@ use sheaf_core::PageIndex;
 use sheaf_doc::forms::check;
 use sheaf_doc::forms::fixture::Form;
 use sheaf_doc::save::Strategy;
-use sheaf_doc::{Document, Edit, EditOutcome, PageId};
+use sheaf_doc::{Document, Edit, EditOutcome, PageId, SourceInfo};
 use sheaf_ops::combine::{CombineItem, CombineParams};
 use sheaf_render::pdfium::render_appearances;
 
@@ -32,11 +32,11 @@ fn insert(
     range: Option<Range<u32>>,
     before: Option<PageId>,
 ) -> EditOutcome {
-    let (info, _) = sheaf_ops::open::describe(doc.store(), path, None).unwrap();
+    let info = SourceInfo::read(doc.store(), path, None).unwrap();
     let range = range.unwrap_or(0..info.src.page_count());
-    let (_, facts) = sheaf_doc::file::read_open(&info.src).unwrap();
+    let form = sheaf_doc::forms::read(&info.src);
     let sid = doc.add_source(info);
-    doc.set_source_form(sid, facts.form);
+    doc.set_source_form(sid, form);
     doc.apply(
         Edit::InsertPages {
             source: sid,
@@ -139,7 +139,7 @@ fn an_inserted_form_joins_the_documents() {
     let dir = scratch("merge-insert");
     let a = write(&dir, "a.pdf", &mut form_a());
     let b = write(&dir, "b.pdf", &mut form_b());
-    let mut doc = sheaf_ops::open(&a, None).unwrap();
+    let mut doc = open(&a);
     let out = insert(&mut doc, &b, None, None);
     // No name is taken: nothing's renamed.
     assert!(out.forms_renamed.is_empty());
@@ -172,7 +172,7 @@ fn one_page_brings_only_its_widgets() {
     let dir = scratch("merge-one-page");
     let a = write(&dir, "a.pdf", &mut form_a());
     let b = write(&dir, "b.pdf", &mut form_b());
-    let mut doc = sheaf_ops::open(&a, None).unwrap();
+    let mut doc = open(&a);
     insert(&mut doc, &b, Some(1..2), None);
     assert_eq!(names(&doc), ["a", "a2", "both"]);
     for (strategy, bytes) in written_both_ways(&doc) {
@@ -193,7 +193,7 @@ fn one_page_brings_only_its_widgets() {
 fn a_form_inserted_into_itself_goes_under_its_files_name() {
     let dir = scratch("merge-itself");
     let path = write(&dir, "form.pdf", &mut form_a());
-    let mut doc = sheaf_ops::open(&path, None).unwrap();
+    let mut doc = open(&path);
     let out = insert(&mut doc, &path, None, None);
     assert_eq!(out.forms_renamed.len(), 1);
     assert_eq!(out.forms_renamed[0].0, "form");
@@ -236,7 +236,7 @@ fn a_clash_on_a_parent_renames_the_whole_form() {
     b.group("top", &[y]);
     let pa = write(&dir, "a.pdf", &mut a);
     let pb = write(&dir, "b.pdf", &mut b);
-    let mut doc = sheaf_ops::open(&pa, None).unwrap();
+    let mut doc = open(&pa);
     insert(&mut doc, &pb, None, None);
     assert_eq!(names(&doc), ["top.x", "b.top.y"]);
     for (strategy, bytes) in written_both_ways(&doc) {
@@ -259,7 +259,7 @@ fn a_font_of_the_same_name_comes_in_renamed() {
     b.dict(helv).set("BaseFont", "Times-Roman");
     let pa = write(&dir, "a.pdf", &mut form_a());
     let pb = write(&dir, "b.pdf", &mut b);
-    let mut doc = sheaf_ops::open(&pa, None).unwrap();
+    let mut doc = open(&pa);
     insert(&mut doc, &pb, None, None);
     for (strategy, bytes) in written_both_ways(&doc) {
         let what = format!("{strategy:?}");
@@ -278,7 +278,7 @@ fn a_font_of_the_same_name_comes_in_renamed() {
 /// Save `doc` in place as the app does: then it shows the saved file.
 fn save_in_place(doc: &mut Document, path: &Path) -> Strategy {
     let strategy = sheaf_doc::save::save_to_path(&doc.snapshot(), path).unwrap();
-    let (info, _) = sheaf_ops::open::describe(doc.store(), path, None).unwrap();
+    let info = SourceInfo::read(doc.store(), path, None).unwrap();
     doc.rebase_to_saved(info);
     strategy
 }
@@ -287,7 +287,7 @@ fn save_in_place(doc: &mut Document, path: &Path) -> Strategy {
 fn a_duplicated_page_gets_fields_of_its_own() {
     let dir = scratch("merge-duplicate");
     let path = write(&dir, "form.pdf", &mut form_a());
-    let mut doc = sheaf_ops::open(&path, None).unwrap();
+    let mut doc = open(&path);
     let first = doc.state().pages[0].id;
     let out = doc
         .apply(Edit::DuplicatePages { ids: vec![first] }, "Duplicate")
@@ -322,7 +322,7 @@ fn saving_twice_writes_each_field_once() {
     let dir = scratch("merge-twice");
     let path = write(&dir, "form.pdf", &mut form_a());
     let b = write(&dir, "b.pdf", &mut form_b());
-    let mut doc = sheaf_ops::open(&path, None).unwrap();
+    let mut doc = open(&path);
     let first = doc.state().pages[0].id;
     doc.apply(Edit::DuplicatePages { ids: vec![first] }, "Duplicate")
         .unwrap();
@@ -354,7 +354,7 @@ fn duplicating_a_copy_or_a_cropped_page_gets_fields_of_its_own() {
     let dir = scratch("merge-duplicate-copies");
     let path = write(&dir, "form.pdf", &mut form_a());
     let b = write(&dir, "b.pdf", &mut form_b());
-    let mut doc = sheaf_ops::open(&path, None).unwrap();
+    let mut doc = open(&path);
     insert(&mut doc, &b, None, None);
     // B's first page, duplicated; then form.pdf's first page cropped and
     // duplicated.
@@ -415,12 +415,12 @@ fn replaced_pages_bring_their_form() {
     let dir = scratch("merge-replace");
     let a = write(&dir, "a.pdf", &mut form_a());
     let b = write(&dir, "b.pdf", &mut form_b());
-    let mut doc = sheaf_ops::open(&a, None).unwrap();
+    let mut doc = open(&a);
     let second = doc.state().pages[1].id;
-    let (info, _) = sheaf_ops::open::describe(doc.store(), &b, None).unwrap();
-    let (_, facts) = sheaf_doc::file::read_open(&info.src).unwrap();
+    let info = SourceInfo::read(doc.store(), &b, None).unwrap();
+    let form = sheaf_doc::forms::read(&info.src);
     let sid = doc.add_source(info);
-    doc.set_source_form(sid, facts.form);
+    doc.set_source_form(sid, form);
     doc.apply(
         Edit::ReplacePages {
             ids: vec![second],
@@ -469,7 +469,7 @@ fn undo_takes_the_form_out_again() {
     let dir = scratch("merge-undo");
     let a = write(&dir, "a.pdf", &mut form_a());
     let b = write(&dir, "b.pdf", &mut form_b());
-    let mut doc = sheaf_ops::open(&a, None).unwrap();
+    let mut doc = open(&a);
     insert(&mut doc, &b, None, None);
     doc.undo().unwrap().unwrap();
     assert_eq!(names(&doc), ["a", "a2"]);
@@ -547,7 +547,7 @@ fn scripts_from_two_forms_are_off_and_kept_apart() {
     let pa = write(&dir, "a.pdf", &mut a);
     let pb = write(&dir, "b.pdf", &mut b);
 
-    let mut doc = sheaf_ops::open(&pa, None).unwrap();
+    let mut doc = open(&pa);
     assert!(!doc.scripts_mixed());
     let out = insert(&mut doc, &pb, None, None);
     assert!(doc.scripts_mixed());
@@ -721,7 +721,7 @@ fn corpus_a_duplicated_page_is_a_form_of_its_own() {
     let Some(f1040) = corpus_path("forms/irs/f1040.pdf") else {
         return;
     };
-    let mut doc = sheaf_ops::open(&f1040, None).unwrap();
+    let mut doc = open(&f1040);
     let first = doc.state().pages[0].id;
     let on_first = doc.state().widgets_on(first).map_or(0, |w| w.len());
     doc.apply(Edit::DuplicatePages { ids: vec![first] }, "Duplicate")

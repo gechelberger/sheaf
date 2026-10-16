@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 
 use proptest::prelude::*;
 
-use super::tests::{connector, flat, header, new_doc, square, tl};
+use super::tests::{connector, flat, header, new_doc, opened_doc, square, tl};
 use super::*;
 use crate::history::FixedCount;
 use crate::labels::{LabelSpec, Style};
@@ -71,13 +71,13 @@ impl Run {
     /// Six pages with two bookmarks and a form, beside a file with the same
     /// form, keeping no snapshot it may drop.
     fn new() -> Self {
-        let mut d = new_doc(
-            6,
-            &flat(&[("A", Some(0), 0), ("B", Some(3), 0)]),
-            Box::new(FixedCount(1)),
-        );
         let form = crate::forms::read(&crate::forms::fixture::every_kind().source());
-        d.set_initial_fields(&form).unwrap();
+        let facts = Facts {
+            outline: flat(&[("A", Some(0), 0), ("B", Some(3), 0)]),
+            form: form.clone(),
+            ..Default::default()
+        };
+        let mut d = opened_doc(6, facts, Box::new(FixedCount(1)));
         let other = d.add_source(SourceInfo::blank(d.store(), 4));
         d.set_source_form(other, form);
         // The opened version holds it, so any version may bring its pages
