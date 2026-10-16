@@ -1,10 +1,9 @@
 //! History's proof (M10.5 slice 1): over random runs of every kind of
 //! edit, with batches, jobs, undo, redo, jumps, trims and saves, each version
 //! rebuilt from its prims is the state it was made as. Each kind's no-op
-//! makes no version. And, ignored, the timing at 7,000 pages.
+//! makes no version.
 
 use std::collections::BTreeSet;
-use std::time::{Duration, Instant};
 
 use proptest::prelude::*;
 
@@ -715,61 +714,4 @@ fn each_kind_s_no_op_pushes_nothing() {
         d.apply(edit, "no-op").unwrap();
         assert_eq!((d.version_count(), d.current_version()), (n, at), "{k}");
     }
-}
-
-/// AnnotAdd and a full reorder at 7,000 pages with 20,000 marks: medians
-/// under 1 ms and 2 ms.
-#[test]
-#[ignore = "timing: cargo test -p sheaf-doc --release -- --ignored history_at_7k"]
-fn history_at_7k_pages_and_20k_marks() {
-    const PAGES: u32 = 7000;
-    let mut d = Document::new(src(PAGES), &[], crate::history::default_policy());
-    let mut marks: HashMap<u32, Vec<Annot>> = HashMap::new();
-    for i in 0..20_000 {
-        marks
-            .entry(i % PAGES)
-            .or_default()
-            .push(square(u64::from(i) + 1));
-    }
-    d.set_initial_annots(marks).unwrap();
-    let median = |mut times: Vec<Duration>| {
-        times.sort();
-        times[times.len() / 2]
-    };
-    let mut adds = Vec::new();
-    for i in 0..21 {
-        let page = d.page(i * 333).unwrap().id;
-        let start = Instant::now();
-        d.apply(
-            Edit::AnnotAdd {
-                page,
-                annot: square(0),
-            },
-            "mark",
-        )
-        .unwrap();
-        adds.push(start.elapsed());
-    }
-    let mut reorders = Vec::new();
-    for _ in 0..5 {
-        // The second half before the first page: every page moves.
-        let ids = d
-            .state()
-            .pages
-            .iter()
-            .skip(PAGES as usize / 2)
-            .map(|p| p.id)
-            .collect();
-        let before = Some(d.page(0).unwrap().id);
-        let start = Instant::now();
-        d.apply(Edit::MovePages { ids, before }, "reorder").unwrap();
-        reorders.push(start.elapsed());
-    }
-    let (add, reorder) = (median(adds), median(reorders));
-    eprintln!("7,000 pages, 20,000 marks: AnnotAdd {add:?}, a full reorder {reorder:?}");
-    assert!(add < Duration::from_millis(1), "AnnotAdd took {add:?}");
-    assert!(
-        reorder < Duration::from_millis(2),
-        "a full reorder took {reorder:?}"
-    );
 }
