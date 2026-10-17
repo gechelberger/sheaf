@@ -2,7 +2,7 @@ id = "currency-convert"
 name = "Currency Convert"
 version = "0.2.1"
 api = "^0.3"
-homepage = "https://github.com/gechelberger/sheaf/tree/main/plugins/currency-convert"
+homepage = "https://github.com/sheaf-pdf/sheaf/tree/main/plugins/currency-convert"
 description = "Finds foreign-currency amounts (€1.234,56, GBP 980.00, 1 200 CHF, …) and notes each one's value in your chosen currency at the ECB rate for a date you pick."
 
 [[commands]]

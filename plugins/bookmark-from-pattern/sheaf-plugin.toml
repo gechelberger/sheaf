@@ -2,7 +2,7 @@ id = "bookmark-from-pattern"
 name = "Bookmark from Pattern"
 version = "0.2.1"
 api = "^0.3"
-homepage = "https://github.com/gechelberger/sheaf/tree/main/plugins/bookmark-from-pattern"
+homepage = "https://github.com/sheaf-pdf/sheaf/tree/main/plugins/bookmark-from-pattern"
 description = "Bookmarks every match of a pattern, at the match, titled from it: invoice numbers, account numbers, check numbers, anything a regular expression can find."
 
 [[commands]]

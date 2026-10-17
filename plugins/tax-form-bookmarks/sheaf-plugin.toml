@@ -2,7 +2,7 @@ id = "tax-form-bookmarks"
 name = "Tax Form Bookmarks"
 version = "0.2.2"
 api = "^0.3"
-homepage = "https://github.com/gechelberger/sheaf/tree/main/plugins/tax-form-bookmarks"
+homepage = "https://github.com/sheaf-pdf/sheaf/tree/main/plugins/tax-form-bookmarks"
 description = "Bookmarks each tax form in a return or source-document binder: Form 1040, Schedule C, W-2, 1099-INT — Chase, and so on."
 
 [[commands]]
