@@ -237,14 +237,14 @@ impl DocView {
         let Some(src) = doc.model.source(doc.model.primary()) else {
             return;
         };
-        let src = src.src.clone();
+        let (src, assets) = (src.src.clone(), doc.model.assets().clone());
         let at: AttachmentRef = a.at.clone();
         let name = a.name.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let bytes = sheaf_doc::attachments::read_attachment(&src, &at)?;
+                    let bytes = sheaf_doc::attachments::read_attachment(&src, &assets, &at)?;
                     let (dest, open) = match then {
                         Then::SaveTo(p) => (p, false),
                         Then::Open => (temp_path(&name)?, true),

@@ -45,3 +45,17 @@ path = "fuzz_targets/sheaf_annot.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "lexer"
+path = "fuzz_targets/lexer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "splice"
+path = "fuzz_targets/splice.rs"
+test = false
+doc = false
+bench = false

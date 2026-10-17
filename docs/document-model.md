@@ -104,7 +104,11 @@ blob, and a source parses the blob in place:
 - **One `Limits`** caps every reader of a source: lopdf's (256 MiB a
   stream decompressed, 1,024 sections, 8,388,607 objects and twice as
   many cross-reference stream entries, references 64 deep), the page
-  tree's (1,024 levels, fewer than 0xFFFFF pages) and the form reader's.
+  tree's (1,024 levels, fewer than 0xFFFFF pages), the form reader's and,
+  from slice 6, the content lexer's (`Limits.content`: 256 MiB of a
+  page's streams decompressed together, 65,536 operands before an
+  operator, arrays, dictionaries and marked content 512 deep, and 64 MiB
+  of an inline image's data).
   Breaking one, a `/Kids` cycle, a `/Parent` loop or an object that
   doesn't decrypt is a typed error, never a panic, a hang or memory
   without bound; nothing is repaired. So the app doesn't open such a
@@ -118,7 +122,8 @@ blob, and a source parses the blob in place:
 - **Bytes stay in memory.** PDFium opens the blob's own `Arc<[u8]>`
   (`RenderHandle::open_bytes`). A derived copy (cropped, watermarked, a
   header and footer stripped) is a memory blob, written nowhere; blank and
-  image pages are read back from the generated cache once, into blobs.
+  image pages, and a stamp or attachment nothing else holds (see Page
+  content), are read back from the generated cache once, into blobs.
   `LazyPdf` can also read a file by position (`FileBytes`).
 - **The open reads every fact from the source** (M10.5 slice 4; see
   Opening a file): its marks, other tools' comments, labels, header and
@@ -146,24 +151,26 @@ three steps in a row):
   outline.)
 - **`finish` reads the rest, on any thread, from the source alone:**
   sheaf's marks and other tools' comments in one pass over the page
-  table's annotations (what a mark keeps in this machine's cache is made
-  again from the file where it's missing; a mark another tool has edited
-  since sheaf wrote it, whose `/SheafAnnot` digest no longer matches, is
-  that tool's comment; copies of marks another program made, which say
-  ids earlier marks have, get new ones), the form, the page labels,
-  the header and footer sheaf drew, attachments, the portfolio schema,
-  layers, and the outline with its colors, styles and closed state
-  (`/C`, `/F`, a negative `/Count`). Of a page it reads the dictionary
-  and the annotations, never its content. Each reader passes over what
-  it can't read, so `finish` doesn't fail once the source has opened,
-  and reads a tree a node at a time however often the file lists a node
-  (a name or number tree, the layers' order, a portfolio's folders, the
-  outline), so it ends. It counts the pages of its first pass to the
-  progress it's given. The outline's destinations (`/Dest`, named
-  destinations, a GoTo action's `/D`) are found through the page table,
-  and their views are read as PDFium reads them, their positions kept in
-  PageSpace as the file has them; the renderer is never asked for the
-  outline.
+  table's annotations (a page stamp's page and an attachment's file are
+  found in the file, not in this machine's cache, and a mark whose file
+  doesn't hold them is another tool's comment; a mark another tool has
+  edited since sheaf wrote it, whose `/SheafAnnot` digest no longer
+  matches, is that tool's comment; copies of marks another program made,
+  which say ids earlier marks have, get new ones), the form, the page
+  labels, the header and footer sheaf drew, attachments, the portfolio
+  schema, layers, and the outline with its colors, styles and closed
+  state (`/C`, `/F`, a negative `/Count`). Of a page it reads the
+  dictionary and the annotations, never its content (`Source::blocks`
+  reads that when an op first asks; see Page content). Each reader
+  passes over what it can't read, so `finish` doesn't fail once the
+  source has opened, and reads a tree a node at a time however often the
+  file lists a node (a name or number tree, the layers' order, a
+  portfolio's folders, the outline), so it ends. It counts the pages of
+  its first pass to the progress it's given. The outline's destinations
+  (`/Dest`, named destinations, a GoTo action's `/D`) are found through
+  the page table, and their views are read as PDFium reads them, their
+  positions kept in PageSpace as the file has them; the renderer is
+  never asked for the outline.
 - **`Document::ready(facts)` builds the complete opened version once**
   and puts it in the loading version's place under a new `VersionId`,
   the way a save or a job's amend does. The pages keep their ids, and the
@@ -346,6 +353,224 @@ pane's rotation, crop boxes and media boxes off the origin (a property
 test, `geom.rs`), and `to_view` is PDFium's page-to-device mapping on
 every corpus page and widget checked (`sheaf-render`'s
 `pdfium::frames`).
+
+## Page content: the toolkit (M10.5 slice 6)
+
+sheaf reads and writes page content through `sheaf-doc`'s `content`
+module, brought forward from M11, never through lopdf's
+`Content::decode` and `encode`, which re-encode what they read, drop
+comments and spacing, and end an inline image at the first `EI` they
+meet. The watermark's install and read (until slice 16) and the flatten
+(until 19) are their last users, and a clippy ban lands when the flatten
+goes (the plan's lint ledger).
+
+- **Lexing** (`content::lex`) gives each token with its bytes as
+  written and where they are: an operator, an operand (a number, name,
+  string, array or dictionary, each one token, nested strings, escapes
+  and all), or an inline image, `BI` to `EI`. Comments are skipped, and a
+  stray closing delimiter is an operand of its own, which PDFium skips
+  too. An error (`LexError`: a string, array, dictionary or image that
+  doesn't end, or a cap) says where; lexing stops there, never panics or
+  loops, and is linear in what it reads.
+- **A page's content is one concatenation.** PDFium lexes a page's
+  `/Contents` streams joined with a space between each, so a string or a
+  marked range may open in one stream and close in the next.
+  `PageContent::read` decodes them within `Limits.content` (see the
+  Core idea) into one buffer (`Concat`), and maps any place in it back
+  to a stream and an offset (`Pos`, `SpanAcross`). A missing entry reads
+  as nothing, as PDFium draws nothing for it; a stream that won't decode
+  is a fault, never its raw bytes. `forms::check` reads a `/DA`'s font
+  (the last `Tf`'s name) by lexing it, and the stamp library's page form
+  takes its page's content through the concatenation, so a page of
+  several streams, state carried across them, draws as it shows.
+- **Inline images end where PDFium ends them** (`ReadInlineStream`'s
+  rules, in order): unfiltered data by its exact count (rows padded; no
+  `/CS`, or a name the resources don't have, counts as one 1-bit
+  component, as in PDFium); `/AHx`, `/A85` and `/RL` data at its end of
+  data; DCT at the JPEG's end of image, the search remembered so many
+  such images stay linear; then `/L` or `/Length`; and only then a scan
+  for `EI` with white-space either side. After the first four the image
+  ends at the next `EI` operator. An image whose end marker or exact
+  count runs past the content is an error; PDFium loses the rest of the
+  page then. An ignored test compares the lexer's painting operators by
+  kind (text, paths, images inline or not, forms, shadings) with
+  PDFium's page objects on the 402-file pool: they agree on all 23,628
+  pages.
+- **Marked content, balance and names.** `marked` gives every marked
+  range with its tag, its property list (inline, or named in the
+  resources' `/Properties`) and how deep it is; marked content that
+  doesn't balance is an error, which no page in the corpus or the pool
+  has. `balance` is the `q`/`Q` count: what's left open at the end
+  (`net`) and the lowest it went (`min_prefix`). `names_used` gives the
+  resource names the content uses (fonts, XObjects, graphics states,
+  shadings, color spaces and patterns, named property lists), for slice
+  16's pruning.
+- **Splicing is safe or refused.** `splice` takes ranges out of a page's
+  streams and keeps every other byte as it was; a stream nothing is taken
+  from is borrowed, and a space goes where what's kept either side of a
+  cut (or of cuts that touch) would join two tokens. A range is taken out
+  only when that can't change what's drawn after it, lexically. It sets
+  no graphics state outside a `q`…`Q` of its own (no `cm`, color, line
+  style, `gs`, clip or text state, which would last past it). Outside a
+  text object its `q`s and `Q`s and its `BT`s and `ET`s balance on their
+  own. Inside one it stays inside, its `q`s balance, it moves no line
+  (`Td TD Tm T* ' "`, which `q` doesn't save), and if it shows text no
+  text is shown after it before the line moves or the object ends, since
+  shown text moves the next on; setting text state doesn't move a line.
+  It starts and ends outside a path being made. Marked content draws
+  nothing, but for optional content (`/OC`), which hides what it marks:
+  so a range may open marked content, none of it optional, that a later
+  range closes, as long as no marked content is kept between them, and
+  closes only what it or an earlier range opened. A range must also
+  start and end between operators, never inside a token or a comment or
+  between an operator and its operands. Anything else is refused:
+  removing a running head drawn in the middle of a text object can't
+  shift the body text, and a color an artifact sets can't leak onto what
+  follows. An op reports a refusal as a `ContentError` that names the
+  page ("page 12's content can't be changed without changing what else
+  it draws; nothing was changed"; one that can't be read, "page 12's
+  content can't be read; nothing was changed").
+- **What a page draws, classified: `Source::blocks(i)`**, a
+  `PageBlocks`, read the first time an op asks and kept by the source,
+  one per page, for as long as the source lives: a fact of the bytes,
+  never history, and never read at open. Its streams are read without
+  being kept (`LazyPdf::object_unkept`, a vendor patch), so classifying
+  7,000 pages keeps none of their content. It holds the artifact ranges
+  and sheaf's marked blocks, the **pagination artifacts** (an
+  `/Artifact` range whose `/Subtype` is `/Header`, `/Footer`,
+  `/Watermark` or `/Background`, the outermost one) with who drew each,
+  sheaf's blocks by stream marker (`/SheafBlock`) and by marked-content
+  marker (`/SheafGen`, `/SheafOcrBlock`), the isolating streams
+  (`/SheafBlock << /K /Isolate >>`), the OCR layer sheaf wrote before
+  (its `q` and its layer, marked `/SheafOcrLayer`), the balance, and
+  whether a form the page draws outside its pagination artifacts has one
+  inside, which removing the page's would leave in place. A source reads
+  each XObject its pages draw once, whatever names and pages draw it
+  (`DrawnForms`); a form with no resources of its own draws with its
+  page's, so it's read for each page. Forms are read within what the
+  page's streams leave of `Limits.content.decompressed`: one past the
+  cap, or met once that's spent, counts as having an artifact inside.
+  Who drew an artifact (`PagOrigin`):
+  - **`Sheaf`:** it's in a `/SheafBlock` stream or its list has
+    `/SheafGen` (nothing writes these until slices 16 to 18);
+  - **`SheafLegacy`:** sheaf before M10.5: `/SheafStamp` or
+    `/SheafSettings` in its list, drawn in the `/SheafHF` font, or in a
+    `/SheafOcrLayer` stream;
+  - **`Acrobat`:** it paints nothing but forms, at least one, and each
+    has `/PieceInfo /ADBE_CompoundType /Private` a pagination kind;
+  - **`Authored`:** any other, the author's own running heads, as Word,
+    LibreOffice and InDesign mark them, which sheaf never removes
+    unasked.
+
+  On the corpus's 24,256 pages Acrobat drew 117 headers, 45 watermarks
+  and 30 backgrounds, and authors 3,122 headers, 3,638 footers, 70
+  watermarks and 7 backgrounds; 246 Word and LibreOffice files mark
+  2,323 artifacts, every one `Authored`. Spliced out alone, as a strip
+  cuts them, 191 of Acrobat's 192 go (the one left has the body's `q`
+  and `BT` inside its range), and 2,443 of the authors' 6,837: theirs
+  set color and fonts at the top level of a text object, or nest `q`
+  and marked content across each other.
+- **Removing the header and footer** (`stamps::strip`, until slice 17's
+  generators) splices the page's streams, writes each it changed as a
+  new object and rewrites `/Contents`, so a stream another page shares is
+  never changed under it. It removes the asked-for kinds that sheaf or
+  Acrobat drew and leaves an author's own (proposal 31,
+  `stamps::stripped`); removing those too is slice 17's
+  `include_authored`. Acrobat opens the first artifact on a page with
+  the `Q` that ends the `q` it put before the page's content: that run
+  of `Q`s stays (`Pagination::cuts`), the artifact's start and the rest
+  of it cut either side, as sheaf's own header keeps its `Q` outside its
+  range. The pages to strip are the ones whose blocks have such
+  artifacts (`derive::strip_stamps` and the watermark's), so a source
+  with none is never loaded, and the scan that decompressed every page
+  to look is gone.
+- **`ContentWriter`** writes content the same bytes for the same calls,
+  on any thread: `q`/`Q` and `cm`, gray, RGB and CMYK colors, graphics
+  states (`/ExtGState` with opacity and blend mode), line styles, paths
+  and their painting and clipping, text through a `Font`, images, and
+  `place_form`, which maps a form's `/Matrix`·`/BBox` onto a box.
+  Numbers have at most four decimals, never an exponent or `-0`; strings
+  are literal, or hex when a byte is a control code. Marked content names
+  its property list in the resources' `/Properties`: lists are never
+  written inline. Resources are held by what they are (`Res`, named by a
+  `ResId`, a digest of their objects) and named only when the content is
+  finished: `/Sh` and six base32 characters of the digest, the next name
+  up where the resources already bind it to something else, and the
+  same name again where they bind it to the same thing, so a header
+  written again keeps its list's name. The old writers' legacy names,
+  `/SheafHF` (until slice 17) and `/SheafOcr` (until 18), are given, and
+  never made for anything else. Until slice 9's emitter names and writes
+  them, `content::ResObjects` writes a content's resources into the
+  file, one object a resource a save.
+- **Fonts** (`content::Font`: `encode`, `advance`, `wrap`, `covers`,
+  `resource`). `Std14` is the 14 standard fonts with Adobe's Core 14 AFM
+  widths (`crates/sheaf-doc/assets/afm`, with Adobe's notice) and exact
+  encoders: WinAnsi as cp1252, and Symbol's and ZapfDingbats' own, glyph
+  names read by the Adobe Glyph List; text is composed (NFC) first.
+  `Glyphless` is the OCR layer's: Tesseract's glyphless font, each UTF-16
+  code unit a CID, read back through its ToUnicode, so it draws any
+  text. A font sheaf embeds keeps its glyph ids (CID = GID); Glyphless,
+  whose one glyph serves every CID, is the exception, and the rule is
+  for M10 slice 7's Noto subsets. These replace four encoders and three
+  width tables (the header and footer's, the marks', the watermark's
+  UTF-8 written as WinAnsi, and the summary's); marks, tapes, the header
+  and footer, the watermark's text, OCR layers and the comment summary
+  all draw through them. A tick draws ZapfDingbats' heavy check and
+  cross (✔ ✘), as it always has.
+- **Text a font can't draw shows as `?`** in the drawing only:
+  `/Contents`, the mark's JSON and the header's spec keep the exact text
+  (ZapfDingbats has no `?`, so there the character is left out). An edit
+  whose drawing would lose characters says so in its outcome
+  (`EditOutcome.unencodable`: adding or changing a mark or a connector,
+  the marks pages bring with them when inserted or replacing others, a
+  header and footer, and the app's watermark), and
+  `Document::unencodable_notice` gives the notice once a document: "Some
+  characters can't be drawn in the built-in fonts and show as “?” in the
+  file; the text itself is kept". A tape's minus and subtotal sign, which
+  Helvetica lacks, draw in Symbol. M10 slice 7's Noto fallback ends it.
+- **The words a page draws** (`text_bag`) are decoded through its fonts
+  (`FontDecoders`: a `/ToUnicode` CMap, else a simple font's encoding
+  and `/Differences`, else Symbol's or ZapfDingbats' own, else the code
+  as it is) and counted as NFC words, so the same text in two subsets
+  with different codes gives equal bags. Slice 10's removal check
+  compares them.
+- **Stamps and attachments come from the document** until slice 8 puts
+  them in the marks themselves. A mark still names its stamp's page and
+  its attachment's file by a stem, and the document's `MarkAssets`
+  (`assets.rs`, outside history, shared with its snapshots) says where
+  each is: the form a file's saved appearance draws, or the embedded file
+  it holds (what `file::annots_in` finds; registered at ready, for files
+  whose pages come in, and for the file a save wrote); a stamp placed
+  from the library or a mark pasted (the clipboard carries their bytes);
+  and last the generated cache by path, read once (a library stamp a
+  plugin names, until slice 19, and an attachment not yet saved, until
+  8). A stem names the same bytes wherever it's found, but nothing checks
+  that, so what's known stays: a file whose pages come in, a paste or a
+  placement can't put other bytes behind a stem the document knows. Only
+  the file a save wrote takes the place of what was known, since the
+  save wrote each from the table. Nothing is made again in the cache at
+  open, so a file opens with its stamps and attachments on a machine
+  that never saw them. A page
+  stamp whose appearance draws no page, or an attachment with no
+  embedded file, opens as another tool's comment, as a stale mark does,
+  and a save keeps it so. The stamp library's page form bakes its page's
+  rotation and visible box into the form's `/Matrix`, so a stamp from a
+  cropped or turned page lands as PDFium shows that page.
+- **Stamp and tape pictures are made in memory**: the app renders a
+  stamp's page and a turned tape with PDFium, transparent where nothing
+  is drawn, and keeps the pictures for the session, a stamp's by its
+  stem and a tape's by what it is. One that can't be made isn't asked
+  for again until it may be: from bytes given, never; from a document's
+  stamps, once what they know has changed (`MarkAssets::generation`).
+  Nothing is written to disk for them.
+
+Every corpus page's content (24,256 pages, 575 MB, and the 5,273 forms
+they draw) reads, lexes into tokens that tile it, splices back to each
+stream's own bytes read apart, balances as lopdf's decoder counts it, is
+classified, and has each pagination artifact spliced out, in about 8 s
+in the test profile; classifying every page of the 7k fixtures, cold,
+takes 141 ms (synthetic), 203 ms (heavy) and 77 ms (scanned), which is
+most of what a first Bates apply costs there.
 
 ## Undo/redo: snapshots, not inverse commands
 
@@ -532,6 +757,22 @@ page, a mark, a bookmark, OCR text replaced: `Snapshot::removes_content`),
 since an incremental save would leave it in the earlier revision. It writes
 a page's `/Rotate` only where the page's rotation isn't its source page's
 (then explicitly, 0 too), and marks as a rewrite writes them.
+
+Either way, what a save draws goes through the content toolkit's
+`ContentWriter` (see Page content): marks' appearances, tapes, the header
+and footer, OCR layers and the watermark's text, in the built-in fonts'
+exact encodings, where a character a font can't draw is a `?` in the
+drawing and the text itself is kept. The resources they draw with are
+named `/Sh` and six characters of their digest, and are one object a
+save whichever marks and pages use them (`annot::WriteCx`, with
+`content::ResObjects`; bug 19): one mark of every kind draws with three
+fonts and two graphics states between them. A page stamp's page is
+written once a save, as a form drawn under such a name (`/SheafStamp` is
+only read), and an attachment's file once, as its source stores it. Both
+come from the document's table, not this machine's cache, and the file
+being saved over keeps its own in place, so an incremental save doesn't
+append another copy. The header and footer's marked content names its
+property list in the page's `/Properties`.
 
 Either way the save runs on a background thread from a cloned snapshot. On
 completion the saved file is read back into the store as a fresh single
@@ -952,9 +1193,13 @@ recognized) and the engine's name. It lives in
 `DocState.text_layers: im::HashMap<PageId, Arc<TextLayer>>`.
 
 - **Presence means unsaved.** A save writes every layer into its page as an
-  invisible text layer (text render mode 3 with Tesseract's glyphless
-  embedded font, `/Contents` turned into `[q, original…, layer]`), and
-  `rebase_to_saved` drops them. The model never reads layers back: once
+  invisible text layer (text render mode 3 in `content::Glyphless`,
+  Tesseract's glyphless font embedded, each UTF-16 code unit of a word a
+  CID and the text read back through its ToUnicode, written by
+  `ContentWriter` under the legacy name `/SheafOcr`; `/Contents` turned
+  into `[q, original…, layer]`, the `q` and the layer marked
+  `/SheafOcrLayer`, until slice 18's blocks), and `rebase_to_saved` drops
+  them. The model never reads layers back: once
   in the file, PDFium owns the text.
   Older versions keep their layers, so undo across a save still works.
 - **Edits**: `SetTextLayers` and `ClearTextLayers`. Delete removes a page's

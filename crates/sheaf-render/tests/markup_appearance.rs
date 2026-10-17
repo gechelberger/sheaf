@@ -15,7 +15,7 @@ use sheaf_doc::{
     Annot, AnnotId, AnnotKind, Box2, Document, Edit, FixedCount, Pt, SourceInfo, Store,
 };
 use sheaf_image::raster::PixelFormat;
-use sheaf_render::pdfium::PdfiumEngine;
+use sheaf_render::pdfium::{PdfiumEngine, appearance_text};
 use sheaf_render::{Job, Renderer};
 
 fn tempdir() -> PathBuf {
@@ -80,8 +80,9 @@ fn placed(model: &Document, a: Annot) -> Annot {
     a.to_page(&model.geom(model.page(0).unwrap()))
 }
 
-/// A one-page red stamp, 100 × 50, in the generated-file cache; its name.
-fn red_stamp() -> String {
+/// A one-page red stamp, 100 × 50, placed in `model` as the stamps panel
+/// places one; its name.
+fn red_stamp(model: &Document) -> String {
     let mut pdf = Pdf::with_version("1.5");
     let pages_id = pdf.new_object_id();
     let content = pdf.add_object(Stream::new(
@@ -102,7 +103,8 @@ fn red_stamp() -> String {
     pdf.trailer.set("Root", catalog);
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();
-    sheaf_doc::generated::stem_of(&sheaf_doc::generated::store(&bytes).unwrap())
+    model.assets().intern_stamp("red", bytes.into());
+    "red".into()
 }
 
 fn row(y: f32) -> Box2 {
@@ -169,7 +171,7 @@ fn check(rotate: i64) {
                     w: 100.0,
                     h: 50.0,
                 },
-                stamp: red_stamp(),
+                stamp: red_stamp(&model),
                 name: "Red".into(),
                 text: None,
             },
@@ -550,5 +552,41 @@ fn clouds_and_callouts_draw() {
     let leader = count(255, 320, 335, 395, &blue);
     assert!(edge > 10, "box's left edge: {edge}");
     assert!(leader > 10, "leader: {leader}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A FreeText in characters WinAnsi has beyond Latin-1 (the euro, the em
+/// dash, curly quotes) reads back from its appearance: PDFium flattens it
+/// into the page, as a viewer that draws only appearances shows it, and
+/// reads the page's text through the codes and font it's drawn with.
+#[test]
+fn free_text_reads_back_from_its_appearance() {
+    let dir = tempdir();
+    let src = dir.join("src.pdf");
+    blank_pdf(&src, 0);
+    let store = Store::new();
+    let primary = SourceInfo::read(&store, &src, None).unwrap();
+    let mut model = Document::new(store, primary, &[], Box::new(FixedCount(10)));
+    let page = model.page(0).unwrap().id;
+    let text = "é € — “ ”";
+    let mut note = mark(
+        AnnotKind::FreeText {
+            rect: Box2 {
+                x: 100.0,
+                y: 100.0,
+                w: 300.0,
+                h: 40.0,
+            },
+            size: 14.0,
+        },
+        BLUE,
+    );
+    note.contents = text.into();
+    let annot = placed(&model, note);
+    let out = model.apply(Edit::AnnotAdd { page, annot }, "note").unwrap();
+    assert!(!out.unencodable, "WinAnsi has every one");
+    let bytes = sheaf_doc::save::rewrite(&model.snapshot()).unwrap();
+    let read = appearance_text(&bytes, None, PageIndex(0)).unwrap();
+    assert!(read.contains(text), "{read:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }

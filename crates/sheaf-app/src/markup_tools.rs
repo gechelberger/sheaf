@@ -11,11 +11,15 @@
 //! once; [`Annot::to_frame`] brings one back into the frame to be moved,
 //! reshaped or copied.
 
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
+
 use gpui::{
     AnyElement, Context, CursorStyle, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     PathBuilder, Pixels, Point, Window, canvas, div, prelude::*, px, rgb,
 };
 use sheaf_core::{PageSize, Rotation};
+use sheaf_doc::assets::MarkAssets;
 use sheaf_doc::geom::{Affine, Geom};
 use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, Edit, PageId, Pt};
 use sheaf_ui::theme;
@@ -1310,11 +1314,9 @@ impl DocView {
                 div()
                     .absolute()
                     .inset_0()
-                    .children(
-                        shown
-                            .iter()
-                            .flat_map(|m| crate::docview::annot_elements(m, &to_pane, size, k)),
-                    )
+                    .children(shown.iter().flat_map(|m| {
+                        crate::docview::annot_elements(m, doc.model.assets(), &to_pane, size, k)
+                    }))
                     .into_any_element(),
             );
         }
@@ -1389,7 +1391,13 @@ impl DocView {
                     div()
                         .absolute()
                         .inset_0()
-                        .children(crate::docview::annot_elements(&m, &to_pane, size, k))
+                        .children(crate::docview::annot_elements(
+                            &m,
+                            doc.model.assets(),
+                            &to_pane,
+                            size,
+                            k,
+                        ))
                         .into_any_element(),
                 )
             }
@@ -1516,6 +1524,62 @@ struct CopiedMarks {
 /// held them in the frame the file displayed, before PageSpace).
 const COPIED_MARKS: u32 = 2;
 
+/// What the marks copied last hold, by stem: each page stamp's page, a
+/// one-page PDF, and each attachment's bytes (M10.5 §14.1's clipboard
+/// blob cache). A paste in any window gives them to its document, whose
+/// files may have neither. It holds one copy's, as the clipboard does.
+#[derive(Default)]
+struct CopiedAssets {
+    stamps: HashMap<String, Arc<[u8]>>,
+    files: HashMap<String, Arc<[u8]>>,
+}
+
+static COPIED_ASSETS: LazyLock<Mutex<CopiedAssets>> = LazyLock::new(Default::default);
+
+impl CopiedAssets {
+    /// What `marks` hold, from `assets`, their document's.
+    fn of(marks: &[Annot], assets: &MarkAssets) -> CopiedAssets {
+        let mut held = CopiedAssets::default();
+        for a in marks {
+            match &a.kind {
+                AnnotKind::PageStamp { stamp, .. } => {
+                    if let Some(pdf) = assets.stamp_pdf(stamp) {
+                        held.stamps.insert(stamp.clone(), pdf);
+                    }
+                }
+                AnnotKind::FileAttachment { file, name, .. } => match assets.file_bytes(file) {
+                    Ok(bytes) => {
+                        held.files.insert(file.clone(), bytes);
+                    }
+                    Err(e) => log::warn!("copying attachment {name}: {e:#}"),
+                },
+                _ => {}
+            }
+        }
+        held
+    }
+
+    /// What `marks` name of these, given to `assets`, the document they're
+    /// pasted into.
+    fn give(&self, marks: &[Annot], assets: &MarkAssets) {
+        for a in marks {
+            match &a.kind {
+                AnnotKind::PageStamp { stamp, .. } => {
+                    if let Some(pdf) = self.stamps.get(stamp) {
+                        assets.intern_stamp(stamp, pdf.clone());
+                    }
+                }
+                AnnotKind::FileAttachment { file, .. } => {
+                    if let Some(bytes) = self.files.get(file) {
+                        assets.intern_file(file, bytes.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 /// `marks`, copied from the page whose edit frame is `from`: as the page
 /// shows them, each turned relative to it ([`Annot::to_frame`]), so a paste
 /// onto any page puts them where they were seen.
@@ -1596,6 +1660,10 @@ impl DocView {
         if marks.is_empty() {
             return false;
         }
+        let held = CopiedAssets::of(&marks, doc.model.assets());
+        if let Ok(mut copied) = COPIED_ASSETS.lock() {
+            *copied = held;
+        }
         let text = marks
             .iter()
             .map(|a| {
@@ -1648,6 +1716,9 @@ impl DocView {
         else {
             return false;
         };
+        if let Ok(held) = COPIED_ASSETS.lock() {
+            held.give(&copied.marks, doc.model.assets());
+        }
         let before = doc.model.state().annots_on(page).map_or(0, |l| l.len());
         let shift = if in_place { 0.0 } else { 10.0 };
         let now = sheaf_doc::pdf_date_now();
@@ -1982,6 +2053,22 @@ mod tests {
         for t in Tool::ALL {
             assert!(COLORS.iter().any(|(c, _)| *c == t.default_color()), "{t:?}");
         }
+    }
+
+    /// Copied marks take their stamps' pages and files with them, and a
+    /// paste gives them to a document that has neither.
+    #[test]
+    fn copied_marks_take_what_they_hold() {
+        use sheaf_doc::forms::fixture::{self, MARK_FILE, MARK_FILE_BYTES, MARK_STAMP};
+        let every = fixture::every_mark_kind();
+        let marks = [every[17].clone(), every[23].clone(), every[1].clone()];
+        let held = CopiedAssets::of(&marks, &fixture::mark_assets());
+        assert_eq!((held.stamps.len(), held.files.len()), (1, 1));
+        let other = MarkAssets::new(sheaf_doc::Store::new());
+        assert!(other.stamp(MARK_STAMP).is_none());
+        held.give(&marks, &other);
+        assert!(other.stamp_pdf(MARK_STAMP).is_some());
+        assert_eq!(&*other.file_bytes(MARK_FILE).unwrap(), MARK_FILE_BYTES);
     }
 
     fn mark(kind: AnnotKind) -> Annot {

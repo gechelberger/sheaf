@@ -25,11 +25,12 @@ use std::sync::{Arc, OnceLock};
 use lopdf::{LazyPdf, Object, ObjectId, XrefFacts};
 use sheaf_core::PageSize;
 
+use crate::content::{ContentError, DrawnForms, PageBlocks};
 use crate::geom::Geom;
 use crate::store::{Blob, BlobCollision, BlobId};
 
 pub use conformance::{Conformance, PdfA};
-pub use limits::{FormLimits, Limits, PageTreeLimits};
+pub use limits::{ContentLimits, FormLimits, Limits, PageTreeLimits};
 pub use pages::{PageFacts, Parent};
 
 /// A PDF, parsed: its blob, read lazily, and its page table.
@@ -38,6 +39,10 @@ pub struct Source {
     pdf: LazyPdf,
     limits: Limits,
     pages: Arc<[PageFacts]>,
+    /// Each page's blocks, once asked for, and what's known of the forms
+    /// its pages draw.
+    blocks: Box<[OnceLock<Arc<PageBlocks>>]>,
+    forms: DrawnForms,
     conformance: OnceLock<Conformance>,
 }
 
@@ -92,11 +97,13 @@ impl Source {
     /// and page table.
     pub(crate) fn open(blob: Blob, limits: &Limits) -> Result<Source, OpenError> {
         let pdf = LazyPdf::open(blob.bytes().clone(), blob.password(), &limits.reader)?;
-        let pages = pages::table(&pdf, &limits.page_tree)?.into();
+        let pages: Arc<[PageFacts]> = pages::table(&pdf, &limits.page_tree)?.into();
         Ok(Source {
             blob,
             pdf,
             limits: *limits,
+            blocks: pages.iter().map(|_| OnceLock::new()).collect(),
+            forms: DrawnForms::default(),
             pages,
             conformance: OnceLock::new(),
         })
@@ -178,6 +185,36 @@ impl Source {
     /// Page `index`'s size as shown.
     pub fn page_size(&self, index: u32) -> PageSize {
         self.geom(index).shown()
+    }
+
+    /// Page `index`'s content classified (§13): its pagination artifacts
+    /// and who drew them, sheaf's blocks, its balance. Read once, its
+    /// streams without keeping them; never at open. Past the last page, a
+    /// page's with nothing on it.
+    pub fn blocks(&self, index: u32) -> Result<Arc<PageBlocks>, ContentError> {
+        let (Some(slot), Some(page)) = (self.blocks.get(index as usize), self.page(index)) else {
+            return Ok(Arc::default());
+        };
+        if let Some(blocks) = slot.get() {
+            return Ok(blocks.clone());
+        }
+        let blocks = PageBlocks::read(
+            &self.pdf,
+            &page.contents,
+            page.resources.as_deref(),
+            &self.limits,
+            &self.forms,
+        )
+        .map_err(|fault| ContentError::Read { page: index, fault })?;
+        Ok(slot.get_or_init(|| Arc::new(blocks)).clone())
+    }
+
+    /// Whether page `index`'s blocks have been read.
+    #[cfg(test)]
+    pub(crate) fn blocks_known(&self, index: u32) -> bool {
+        self.blocks
+            .get(index as usize)
+            .is_some_and(|slot| slot.get().is_some())
     }
 
     /// What its XMP metadata claims it conforms to: PDF/A and PDF/UA.

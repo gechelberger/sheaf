@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use sheaf_core::{DestView, PageSize, Rotation};
 
 use crate::annot::{Annot, AnnotId, AnnotKind};
+use crate::assets::{MarkAssets, SourceAssets};
 use crate::forms::{Field, FieldId, FileForm, Widget};
 use crate::geom::Geom;
 use crate::history::{HistoryPolicy, HistoryStats};
@@ -521,6 +522,10 @@ pub struct EditOutcome {
     /// Files whose signed fields came in with their pages: the signatures
     /// don't cover this file (M10 proposal 7).
     pub signatures_in: Vec<SourceId>,
+    /// Text it added or changed (a mark's, a header's or footer's) has
+    /// characters the built-in fonts can't draw: they show as `?` in the
+    /// file (see [`Document::unencodable_notice`]).
+    pub unencodable: bool,
 }
 
 /// A version in the history tree. It names one state, which never changes:
@@ -660,6 +665,9 @@ pub struct Snapshot {
     /// Each source's marks the open gave new ids (see
     /// `Document::set_source_renamed`).
     pub(crate) renamed: HashMap<SourceId, Arc<Renames>>,
+    /// The stamps and attachments the marks name (see
+    /// [`Document::assets`]).
+    pub assets: Arc<MarkAssets>,
 }
 
 /// A source's marks the open gave new ids ([`Renamed`]): by page index,
@@ -811,9 +819,15 @@ pub struct Document {
     /// Each source's marks the open gave new ids (`set_source_renamed`),
     /// which its pages name by the old ones until a save writes them.
     renamed: HashMap<SourceId, Arc<Renames>>,
+    /// The stamps and attachments the marks name, outside history.
+    assets: Arc<MarkAssets>,
     /// A save made one form of forms whose scripts came from more than one
     /// file (see [`Document::scripts_mixed`]).
     scripts_mixed: bool,
+    /// The reader has been told some text shows as `?` in the file
+    /// ([`Document::unencodable_notice`]). Outside history: undo doesn't
+    /// make it news again.
+    told_unencodable: bool,
     /// The opened version holds the file's facts: until then edits are
     /// refused (see [`NotReady`]).
     ready: bool,
@@ -855,6 +869,7 @@ impl Document {
     ) -> Self {
         let source = SourceId(0);
         let mut doc = Self {
+            assets: Arc::new(MarkAssets::new(store.clone())),
             store,
             sources: HashMap::new(),
             primary: source,
@@ -878,6 +893,7 @@ impl Document {
             forms: HashMap::new(),
             renamed: HashMap::new(),
             scripts_mixed: false,
+            told_unencodable: false,
             ready: false,
         };
         doc.debug_assert_ours(&primary);
@@ -999,6 +1015,7 @@ impl Document {
             .filter_map(|r| Some((at(r.page as usize)?, r.was)))
             .collect();
         self.set_source_renamed(self.primary, &facts.renamed);
+        self.set_source_assets(self.primary, &facts.assets);
         self.saved_outline = outline.clone();
         self.saved_labels = labels.clone();
         self.baked_header_footer = header_footer.clone();
@@ -1122,6 +1139,33 @@ impl Document {
         }
     }
 
+    /// What source `id`'s marks hold, as `open::finish` read it: their
+    /// stamps' pages and attachments' files, which marks naming them draw
+    /// and embed from now on where the document didn't know them. Call it
+    /// before the edit that brings its pages.
+    pub fn set_source_assets(&self, id: SourceId, assets: &SourceAssets) {
+        if let Some(info) = self.sources.get(&id) {
+            self.assets.register(&info.src, assets);
+        }
+    }
+
+    /// What source `id`, the file a save wrote, holds for the marks: what
+    /// they draw and embed from now on, in place of what the save took
+    /// them from.
+    pub fn set_saved_assets(&self, id: SourceId, assets: &SourceAssets) {
+        if let Some(info) = self.sources.get(&id) {
+            self.assets.register_saved(&info.src, assets);
+        }
+    }
+
+    /// The stamps and attachments the marks name: those the document's
+    /// files hold, those placed or pasted since, and, failing those, the
+    /// generated cache's. Outside history: a stamp placed and undone is
+    /// still known, and every version's marks find theirs here.
+    pub fn assets(&self) -> &Arc<MarkAssets> {
+        &self.assets
+    }
+
     /// Sources whose fields in the document, or the document scripts
     /// beside them, have scripts. More than one, and scripts are off by
     /// default (M10 proposal 5): document scripts share one scope.
@@ -1221,6 +1265,21 @@ impl Document {
         Some(sentences.join(". "))
     }
 
+    /// What to tell the reader when an edit brought text the built-in
+    /// fonts can't draw ([`EditOutcome::unencodable`]): once a document,
+    /// the first time, and never again after.
+    pub fn unencodable_notice(&mut self, out: &EditOutcome) -> Option<String> {
+        if !out.unencodable || self.told_unencodable {
+            return None;
+        }
+        self.told_unencodable = true;
+        Some(
+            "Some characters can't be drawn in the built-in fonts and show as “?” in the file; \
+             the text itself is kept"
+                .into(),
+        )
+    }
+
     /// The header/footer differs from what the primary file has drawn.
     pub fn header_footer_dirty(&self) -> bool {
         self.state().header_footer != self.baked_header_footer
@@ -1305,6 +1364,7 @@ impl Document {
             removes_content: self.removes_content(),
             form_changed: self.form_changed(),
             renamed: self.renamed.clone(),
+            assets: self.assets.clone(),
         }
     }
 
@@ -1640,6 +1700,7 @@ impl Document {
             total.bookmarks_added += out.bookmarks_added;
             total.forms_renamed.extend(out.forms_renamed);
             total.signatures_in.extend(out.signatures_in);
+            total.unencodable |= out.unencodable;
         }
         coalesce(&mut steps);
         if steps.iter().any(|s| !s.prims.is_empty()) {
@@ -2526,7 +2587,7 @@ impl Document {
                         (page != PageId(u64::MAX)).then_some((page, list))
                     })
                     .collect();
-                import_marks(rec, incoming);
+                out.unencodable = import_marks(rec, incoming);
                 let shown: Vec<(u32, PageId)> = range.map(|i| (i, by_index[i as usize])).collect();
                 if let Some(under) = self.take_in_fields(rec, source, &shown) {
                     out.forms_renamed.push((under, source));
@@ -2647,7 +2708,7 @@ impl Document {
                     .into_iter()
                     .filter_map(|(index, list)| Some((*shown_by.get(&index)?, list)))
                     .collect();
-                import_marks(rec, incoming);
+                out.unencodable = import_marks(rec, incoming);
                 let mut shown: Vec<(u32, PageId)> = shown_by.into_iter().collect();
                 shown.sort();
                 if let Some(under) = self.take_in_fields(rec, source, &shown) {
@@ -2807,6 +2868,7 @@ impl Document {
                     bail!("page not found");
                 }
                 annot.id = fresh_annot_id(rec, &mut HashSet::new());
+                out.unencodable = annot.unencodable();
                 let mut list = rec.annots.get(&page).cloned().unwrap_or_default();
                 list.push_back(annot);
                 rec.put(Key::AnnotsOf(page), Some(Val::Annots(list)));
@@ -2821,6 +2883,7 @@ impl Document {
                     .iter()
                     .position(|a| a.id == annot.id)
                     .context("annotation not found")?;
+                out.unencodable = annot.unencodable();
                 list.set(i, annot);
                 rec.put(Key::AnnotsOf(page), Some(Val::Annots(list)));
             }
@@ -2894,6 +2957,7 @@ impl Document {
                 if let AnnotKind::Connector { partner, .. } = &mut b.kind {
                     *partner = Some(a.id);
                 }
+                out.unencodable = a.unencodable() || b.unencodable();
                 for (page, annot) in [(page_a, a), (page_b, b)] {
                     let mut list = rec.annots.get(&page).cloned().unwrap_or_default();
                     list.push_back(annot);
@@ -2916,6 +2980,7 @@ impl Document {
             }
             Edit::SetHeaderFooter { header_footer } => {
                 let hf = header_footer.filter(|h| !h.is_empty());
+                out.unencodable = hf.as_ref().is_some_and(|h| h.unencodable());
                 rec.put(
                     Key::HeaderFooter,
                     hf.map(|h| Val::HeaderFooter(Arc::new(h))),
@@ -3256,8 +3321,10 @@ fn field_nodes<'a>(names: impl IntoIterator<Item = &'a str>) -> HashSet<&'a str>
 
 /// Marks that came with pages from another file, onto their new pages in
 /// `rec`. They get fresh ids (the file's could clash with ours), and a
-/// connector keeps its partner only if the partner came too.
-fn import_marks(rec: &mut Rec, incoming: Vec<(PageId, Vec<Annot>)>) {
+/// connector keeps its partner only if the partner came too. Whether any
+/// draws text the built-in fonts can't ([`Annot::unencodable`]).
+fn import_marks(rec: &mut Rec, incoming: Vec<(PageId, Vec<Annot>)>) -> bool {
+    let unencodable = incoming.iter().flat_map(|(_, l)| l).any(Annot::unencodable);
     let mut taken = HashSet::new();
     let mut ids = HashMap::new();
     for (_, list) in &incoming {
@@ -3278,6 +3345,7 @@ fn import_marks(rec: &mut Rec, incoming: Vec<(PageId, Vec<Annot>)>) {
             rec.put(Key::AnnotsOf(page), Some(Val::Annots(on_page)));
         }
     }
+    unencodable
 }
 
 /// Remove nodes targeting deleted pages, promoting their children.
@@ -4572,6 +4640,73 @@ mod tests {
             turn: Rotation::R0,
             name: String::new(),
         }
+    }
+
+    /// Text the built-in fonts can't draw (M10.5 proposal 22): a FreeText
+    /// in Japanese draws a `?` for each character, its `/Contents` keeps
+    /// the text exactly, and the reader is told once however many such
+    /// edits come. A header/footer is read the same way.
+    #[test]
+    fn cjk_text_draws_question_marks_and_is_told_once() {
+        use crate::annot::{AnnotKind, Box2};
+        let mut d = doc();
+        let page = id_at(&d, 0);
+        let text = "日本語のメモ";
+        let mut note = mark(
+            0,
+            AnnotKind::FreeText {
+                rect: Box2 {
+                    x: 10.0,
+                    y: 10.0,
+                    w: 200.0,
+                    h: 40.0,
+                },
+                size: 12.0,
+            },
+        );
+        note.contents = text.into();
+        let add = |d: &mut Document, annot: Annot| {
+            d.apply(Edit::AnnotAdd { page, annot }, "add").unwrap()
+        };
+        let first = add(&mut d, note.clone());
+        assert!(first.unencodable);
+        assert!(d.unencodable_notice(&first).is_some());
+        let second = add(&mut d, note);
+        assert!(second.unencodable);
+        assert_eq!(d.unencodable_notice(&second), None, "told once");
+        let plain = add(&mut d, square(0));
+        assert!(!plain.unencodable);
+
+        let written = &d.state().annots[&page][0];
+        let mut pdf = lopdf::Document::with_version("1.7");
+        let main = crate::annot::to_pdf(written, &mut pdf).main;
+        let utf16: Vec<u8> = [0xFE, 0xFF]
+            .into_iter()
+            .chain(text.encode_utf16().flat_map(u16::to_be_bytes))
+            .collect();
+        assert_eq!(main.get(b"Contents").unwrap().as_str().unwrap(), utf16);
+        let ap = main.get(b"AP").unwrap().as_dict().unwrap();
+        let ap = ap.get(b"N").unwrap().as_reference().unwrap();
+        let content = &pdf.get_object(ap).unwrap().as_stream().unwrap().content;
+        let drawn = b"(??????) Tj";
+        assert!(
+            content.windows(drawn.len()).any(|w| w == drawn),
+            "{}",
+            String::from_utf8_lossy(content)
+        );
+
+        let mut hf = crate::stamps::HeaderFooter::default();
+        hf.texts[1] = "<<file>>".into();
+        hf.file = "報告.pdf".into();
+        let set = |d: &mut Document, hf: &crate::stamps::HeaderFooter| {
+            let header_footer = Some(hf.clone());
+            d.apply(Edit::SetHeaderFooter { header_footer }, "hf")
+                .unwrap()
+        };
+        assert!(set(&mut d, &hf).unencodable);
+        hf.file = "report.pdf".into();
+        hf.texts[2] = "Page <<1>> of <<N>> – <<date>>".into();
+        assert!(!set(&mut d, &hf).unencodable);
     }
 
     pub(super) fn square(id: u64) -> Annot {

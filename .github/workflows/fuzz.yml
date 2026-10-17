@@ -21,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [lazy_reader, page_tree, sheaf_annot]
+        target: [lazy_reader, page_tree, sheaf_annot, lexer, splice]
     steps:
       - uses: actions/checkout@v4
 
@@ -48,8 +48,9 @@ jobs:
       # The fixtures the stable test mutates, built in code, so the
       # repository holds no PDF: from nothing, libFuzzer seldom gets past a
       # file's header and cross-reference sections. sheaf_annot's are a
-      # page's annotation objects, the others' six files. Tests run in
-      # their crate's directory, hence the absolute path.
+      # page's annotation objects, lexer's and splice's page content, the
+      # others' six files. Tests run in their crate's directory, hence the
+      # absolute path.
       - name: Seed the corpus
         env:
           SHEAF_FUZZ_SEEDS: ${{ github.workspace }}/fuzz/corpus/${{ matrix.target }}

@@ -97,6 +97,14 @@ Marked `sheaf:` in the source.
     `/Size`, the largest cross-reference stream number, `/ID`, the
     header's offset, whether a section is hybrid, linearization, the
     number of sections).
+  - `object_unkept` (M10.5 slice 6) reads an object as `object` does
+    but doesn't keep it, unless it was kept already. `get` keeps every
+    object it reads for as long as the `LazyPdf` lives, and the content
+    toolkit's `blocks` fact lexes every page's content streams, 7,000
+    pages of them in a large file, once each: kept, they'd all stay in
+    memory beside the file's bytes. What the read resolves on the way (an
+    indirect `/Length`) and a failure the bytes alone decide are kept as
+    `get` keeps them.
   - The bytes are a `ByteSource`: an `Arc<[u8]>`, which a parse sees
     from its offset to the end as the eager reader does, or
     `FileBytes`, a file read by position. A parse of a file is given a
@@ -218,6 +226,21 @@ Marked `sheaf:` in the source.
     object by object as it was; one that encrypts only its attachment
     through `/EFF` holds only that encrypted, and reads as it was; and a
     filter `/CF` doesn't have fails the open.
+- `document.rs`, `traverse_objects`, and `processor.rs`,
+  `prune_objects` (M10.5 slice 6): the references found are kept as a
+  set beside their list, and pruning looks each object up in a set. At
+  the commit both searched the list, the one for each reference it met
+  and the other for each object, so pruning and renumbering took time
+  that grew with the square of a document's objects, and more again with
+  each reference that many objects share. The list's order, and so
+  everything both do, is as it was. sheaf's Rewrite runs both. Once a
+  save's marks drew with one font and one ExtGState, a Rewrite of 7,000
+  pages and 20,000 marks spent 1.5 s pruning and 1.6 s renumbering; with
+  the patch, 36 ms and 65 ms. Rewrites of the synthetic and heavy 7k
+  fixtures went from 300 ms and 3,082 ms (slice 2's baselines) to 131 ms
+  and 801 ms, and the heavy's flattened export from 3,489 ms to
+  1,594 ms. sheaf-ops' `gate_7k` measures them; the save tests cover
+  what a Rewrite keeps.
 
 ## What else the commit brings
 
@@ -243,8 +266,9 @@ A release with #598 is no longer enough. `LazyPdf` and the `ByteSource`
 and `Resolve` seams it reads through reshape the reader, `Object::Real`
 as an `f64` changes lopdf's API, and the encryption fixes change what
 every encrypted file reads as. So going back means upstreaming the
-patch: each stream read once and each reading fix above as a pull
-request of its own, then f64 reals, the encryption fixes and `LazyPdf`.
+patch: each stream read once, each reading fix above and the
+traversal's set as a pull request of its own, then f64 reals, the
+encryption fixes and `LazyPdf`.
 Until a release has all of it, sheaf carries the patch.
 
 When one does, delete this directory, its line in the root

@@ -11,15 +11,15 @@ pub mod fdf;
 pub mod xfdf;
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId};
 
 use crate::annot::AnnotId;
+use crate::assets::MarkAssets;
 use crate::file::{ForeignAnnot, thread_name};
 use crate::import::{NotAMark, Options};
-use crate::model::{DocState, Edit, PageId, SourceId, SourceInfo};
+use crate::model::{Edit, PageId, Snapshot, SourceId};
 
 /// Comments as dictionaries, each with its page (from 0). `pdf` holds
 /// what they refer to: appearances, files, the comments their `/IRT`
@@ -165,17 +165,20 @@ impl Imported {
     }
 }
 
-/// The edits that bring `comments` into the document `st` (with the other
-/// tools' comments read from its sources, `foreign`): one comment whose
-/// `/NM` is one of our marks' updates it; one whose `/NM` is another
+/// The edits that bring `comments` into the document `snap` (with the
+/// other tools' comments read from its sources, `foreign`): one comment
+/// whose `/NM` is one of our marks' updates it; one whose `/NM` is another
 /// tool's comment here takes its place, as making it editable does; the
 /// rest are added. Pages are counted in the document's order, and a
-/// comment reads upright as its page shows.
+/// comment reads upright as its page shows. What our marks hold, a page
+/// stamp's page and an attachment's file, goes into the document's
+/// stamps and files where it has none of its own.
 pub fn import(
-    st: &DocState,
+    snap: &Snapshot,
     foreign: &[(SourceId, ForeignAnnot)],
     comments: &Comments,
 ) -> Imported {
+    let st = &snap.state;
     let mut out = Imported::default();
     let ours: HashMap<String, (PageId, AnnotId)> = st
         .annots
@@ -219,6 +222,7 @@ pub fn import(
             let own = crate::file::sheaf_mark(&comments.pdf, entry, pref.rotation, &page_annots);
             let mark = match own {
                 Some(mut a) => {
+                    bring_held(&comments.pdf, dict, &a, &snap.assets);
                     if a.name.is_empty() {
                         a.name = a.name();
                     }
@@ -266,19 +270,48 @@ pub fn import(
     out
 }
 
-/// Comments to write out: our marks and other tools' comments, as
-/// dictionaries in a [`Comments`], replies pointing at what they reply to
-/// when it's written too. `ours` and `foreign` (indexes into
+/// What `a`, one of our marks, holds in `pdf`, its dictionary `dict`, put
+/// in `assets` where they have no copy: its stamp's page, as a one-page
+/// PDF, or its file's bytes.
+fn bring_held(pdf: &Pdf, dict: &Dictionary, a: &crate::Annot, assets: &MarkAssets) {
+    use crate::annot::AnnotKind;
+    match &a.kind {
+        AnnotKind::PageStamp { stamp, .. } if assets.stamp(stamp).is_none() => {
+            let page = crate::file::stamp_page(pdf, dict)
+                .map(|form| crate::stamp_lib::form_to_pdf(pdf, form));
+            match page {
+                Some(Ok(page)) => assets.intern_stamp(stamp, page.into()),
+                Some(Err(e)) => log::warn!("stamp {stamp}: {e:#}"),
+                None => {}
+            }
+        }
+        AnnotKind::FileAttachment { file, .. } if assets.file(file).is_none() => {
+            let bytes = crate::file::attached_file(pdf, dict)
+                .and_then(|id| pdf.get_object(id).ok()?.as_stream().ok())
+                .map(crate::attachments::file_bytes);
+            match bytes {
+                Some(Ok(bytes)) => assets.intern_file(file, bytes.into()),
+                Some(Err(e)) => log::warn!("attachment {file}: {e:#}"),
+                None => {}
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Comments to write out of `snap`: our marks and other tools' comments,
+/// as dictionaries in a [`Comments`], replies pointing at what they reply
+/// to when it's written too. `ours` and `foreign` (indexes into
 /// `foreign_all`) say which; pages are counted in the document's order.
 pub fn gather(
-    st: &DocState,
-    sources: &HashMap<SourceId, Arc<SourceInfo>>,
+    snap: &Snapshot,
     foreign_all: &[(SourceId, ForeignAnnot)],
     ours: &[(PageId, AnnotId)],
     foreign: &[usize],
 ) -> Result<Comments> {
+    let (st, sources) = (&snap.state, &snap.sources);
     let mut out = Comments::new();
-    let mut forms = HashMap::new();
+    let mut cx = crate::annot::WriteCx::new(snap.assets.clone());
     // Each written comment's name and parent's name, to link them after.
     let mut names: HashMap<String, ObjectId> = HashMap::new();
     let mut parents: Vec<(ObjectId, String)> = Vec::new();
@@ -292,7 +325,7 @@ pub fn gather(
         else {
             continue;
         };
-        let written = crate::annot::to_pdf_in(a, &mut out.pdf, &mut forms);
+        let written = crate::annot::to_pdf_in(a, &mut out.pdf, &mut cx);
         let mut main = written.main;
         main.set("Page", index as i64);
         let main_id = out.pdf.add_object(Object::Dictionary(main));

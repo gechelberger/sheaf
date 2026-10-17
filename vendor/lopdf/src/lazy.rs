@@ -517,6 +517,38 @@ impl LazyPdf {
         self.read(id).cloned()
     }
 
+    /// sheaf: the object `id` as [`LazyPdf::object`] gives it, but read without keeping it when
+    /// it isn't kept already: a reader that passes once over many large streams, such as every
+    /// page's content, doesn't hold them all. What the read reads on the way, such as an
+    /// indirect `/Length`, is kept, and so is a failure the bytes alone decide. An object
+    /// stream's member is read as `object` reads it, its object stream decoded and kept: a
+    /// stream is never a member.
+    pub fn object_unkept(&self, id: ObjectId) -> Result<Arc<Object>> {
+        let entry = self.xref.get(id.0).ok_or(Error::MissingXrefEntry)?;
+        let XrefEntry::Normal { offset, generation } = *entry else {
+            return self.object(id);
+        };
+        if generation != id.1 {
+            return Err(Error::MissingXrefEntry);
+        }
+        let slot = self.slot(id.0)?;
+        if let Some(read) = slot.get() {
+            return kept(read).cloned();
+        }
+        let cx = self.cx();
+        let read = self.enter(id, &mut HashSet::new(), &cx, |path| {
+            self.parse(id, offset as usize, path, &cx)
+        });
+        match (read, cx.fatal.get()) {
+            (_, Some(fatal)) => Err(fatal.error()),
+            (Ok(object), None) => Ok(Arc::new(object)),
+            (Err(e), None) => match Failure::of(&e) {
+                Some(failure) => kept(slot.get_or_init(|| Err(failure))).cloned(),
+                None => Err(e),
+            },
+        }
+    }
+
     /// The object `id`, following references, as [`Document::get_object`] does.
     pub fn get_object(&self, id: ObjectId) -> Result<&Object> {
         self.dereference(self.get(id)?).map(|(_, object)| object)

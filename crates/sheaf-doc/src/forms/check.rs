@@ -32,6 +32,7 @@ use quick_xml::events::{BytesStart, Event};
 
 use super::read::FormClass;
 use crate::attachments::resolve;
+use crate::content::{self, ResCx, Tok};
 use crate::file::pdf_text;
 use crate::source::{FormLimits, Limits};
 
@@ -758,15 +759,25 @@ fn da_of<'a>(pdf: &'a Pdf, d: &'a Dictionary) -> Option<&'a [u8]> {
     (da.len() <= LIMITS.da).then_some(da)
 }
 
-/// The font a `/DA` sets.
+/// The font a `/DA` sets: its last `Tf`'s first operand, when that's a
+/// name, up to what can't be lexed.
 fn da_font(da: &[u8]) -> Option<Vec<u8>> {
-    let content = lopdf::content::Content::decode(da).ok()?;
-    let tf = content
-        .operations
-        .iter()
-        .rev()
-        .find(|op| op.operator == "Tf")?;
-    Some(tf.operands.first()?.as_name().ok()?.to_vec())
+    let mut operands = Vec::new();
+    let mut font = None;
+    for token in content::lex(da, &ResCx::none(), &Limits::DEFAULT) {
+        let Ok((_, token)) = token else { break };
+        match token {
+            Tok::Operand(operand) => operands.push(operand),
+            Tok::Op(op) => {
+                if op == b"Tf" {
+                    font = operands.first().and_then(|&o| content::name(o));
+                }
+                operands.clear();
+            }
+            Tok::InlineImage(_) => operands.clear(),
+        }
+    }
+    Some(font?.into_owned())
 }
 
 /// Fonts named by the `/DA` each widget uses (its own, its field's, or
@@ -1233,4 +1244,99 @@ fn examples(names: &[String]) -> String {
         })
         .collect();
     format!(" (e.g. {})", shown.join(", "))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use super::*;
+    use crate::forms::corpus::{Corpus, each_entry};
+
+    /// The font a `/DA` sets, as `da_font` read it through lopdf's
+    /// `Content::decode` before it lexed: what it must still find.
+    fn decoded_font(da: &[u8]) -> Option<Vec<u8>> {
+        let content = lopdf::content::Content::decode(da).ok()?;
+        let tf = content
+            .operations
+            .iter()
+            .rev()
+            .find(|op| op.operator == "Tf")?;
+        Some(tf.operands.first()?.as_name().ok()?.to_vec())
+    }
+
+    /// Every `/DA` in `pdf` the check would read: a widget's, a field's
+    /// and the form's among them.
+    fn every_da(pdf: &Pdf) -> Vec<&[u8]> {
+        let mut out = Vec::new();
+        let mut todo: Vec<&Object> = pdf.objects.values().collect();
+        while let Some(object) = todo.pop() {
+            let dict = match object {
+                Object::Dictionary(d) => d,
+                Object::Stream(s) => &s.dict,
+                Object::Array(items) => {
+                    todo.extend(items);
+                    continue;
+                }
+                _ => continue,
+            };
+            out.extend(da_of(pdf, dict));
+            todo.extend(dict.iter().map(|(_, v)| v));
+        }
+        out
+    }
+
+    #[test]
+    fn da_fonts_are_the_last_tf_names() {
+        for (da, font) in [
+            (&b"/Helv 12 Tf 0 g"[..], Some(&b"Helv"[..])),
+            (b"0 g /F1 9 Tf /F#202 10 Tf", Some(b"F 2")),
+            (b"/F1 0 Tf 12 Tf", None),
+            (b"0 0 1 rg", None),
+            (b"/Helv 12 Tf (open", Some(b"Helv")),
+        ] {
+            assert_eq!(
+                da_font(da).as_deref(),
+                font,
+                "{}",
+                String::from_utf8_lossy(da)
+            );
+            assert_eq!(da_font(da), decoded_font(da));
+        }
+    }
+
+    /// The lexer finds the font lopdf's `Content::decode` found in every
+    /// `/DA` the corpus's forms hold.
+    #[test]
+    fn corpus_da_fonts_are_as_decoded() {
+        let Some(corpus) = Corpus::or_skip() else {
+            return;
+        };
+        let entries = corpus.manifest().unwrap();
+        let started = Instant::now();
+        let outcomes = each_entry(&entries, |entry| {
+            let Ok(bytes) = std::fs::read(corpus.path(entry)) else {
+                return (0, Vec::new());
+            };
+            let Ok(pdf) = crate::file::load_pdf_mem(&bytes, None) else {
+                return (0, Vec::new());
+            };
+            let das = every_da(&pdf);
+            let differ: Vec<String> = das
+                .iter()
+                .filter(|da| da_font(da) != decoded_font(da))
+                .map(|da| format!("{}: {:?}", entry.path, String::from_utf8_lossy(da)))
+                .collect();
+            (das.len(), differ)
+        });
+        let read: usize = outcomes.iter().map(|(n, _)| n).sum();
+        let differ: Vec<&String> = outcomes.iter().flat_map(|(_, d)| d).collect();
+        eprintln!(
+            "{read} /DA strings in {} forms, {} differ, in {:?}",
+            entries.len(),
+            differ.len(),
+            started.elapsed()
+        );
+        assert!(differ.is_empty(), "{differ:#?}");
+    }
 }

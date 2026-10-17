@@ -814,7 +814,10 @@ impl PrintDialog {
             {
                 let (to_view, k) = (geom.to_view(), w / shown.width.max(1.0));
                 for a in list.iter() {
-                    page = page.children(crate::docview::annot_elements(a, &to_view, shown, k));
+                    let assets = &self.ctx.snapshot.assets;
+                    page = page.children(crate::docview::annot_elements(
+                        a, assets, &to_view, shown, k,
+                    ));
                 }
             }
             sheet = sheet.w(px(p.sheet_w * s)).h(px(p.sheet_h * s)).child(page);

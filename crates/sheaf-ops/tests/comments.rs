@@ -176,6 +176,41 @@ fn px(r: &Raster, x: f32, y: f32) -> [u8; 3] {
     [r.data[i], r.data[i + 1], r.data[i + 2]]
 }
 
+/// The same summary gives the same pages, twice and on two threads:
+/// their content and resources, byte for byte, the file's creation date
+/// aside.
+#[test]
+fn the_summary_writes_the_same_pages_every_time() {
+    let dir = scratch("same");
+    let (doc, foreign) = opened(&dir);
+    let snap = doc.snapshot();
+    let write = || {
+        let bytes = comments::summary_pdf(
+            &snap,
+            &foreign,
+            &CommentFilter::default(),
+            "",
+            Layout::Pages,
+            "review.pdf",
+        )
+        .unwrap();
+        let mut pdf = Pdf::load_mem(&bytes).unwrap();
+        let info = pdf.trailer.remove(b"Info").unwrap();
+        pdf.objects.remove(&info.as_reference().unwrap());
+        let mut out = Vec::new();
+        pdf.save_to(&mut out).unwrap();
+        out
+    };
+    let first = write();
+    assert_eq!(write(), first);
+    std::thread::scope(|s| {
+        let threads: Vec<_> = (0..2).map(|_| s.spawn(write)).collect();
+        for t in threads {
+            assert_eq!(t.join().unwrap(), first);
+        }
+    });
+}
+
 #[test]
 fn the_summary_lists_every_comment_and_thread() {
     let dir = scratch("only");

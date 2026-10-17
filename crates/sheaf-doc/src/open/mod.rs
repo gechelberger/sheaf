@@ -5,11 +5,12 @@
 //! [`Document::ready`] makes that the opened version, after which edits
 //! are taken. [`file`] does the three in a row.
 //!
-//! What [`finish`] reads: the file's marks and the other tools' comments,
-//! its page labels, the header/footer sheaf drew into it, its form,
-//! attachments, portfolio schema and layers, and its bookmarks
-//! ([`outline`]). Marks another program copied, which say an id an
-//! earlier mark has, are given new ids. All of it is read from the
+//! What [`finish`] reads: the file's marks, the stamps' pages and the
+//! files they hold, and the other tools' comments, its page labels, the
+//! header/footer sheaf drew into it, its form, attachments, portfolio
+//! schema and layers, and its bookmarks ([`outline`]). Marks another
+//! program copied, which say an id an earlier mark has, are given new
+//! ids. All of it is read from the
 //! source alone, its [`LazyPdf`](lopdf::LazyPdf) and page table, with no
 //! eager load of the file. Nothing in it lexes a page's content: of a
 //! page it reads its dictionary and annotations, and elsewhere only the
@@ -23,6 +24,7 @@ use anyhow::Result;
 use sheaf_progress::{NoProgress, Progress, Unit};
 
 use crate::annot::{Annot, AnnotId, AnnotKind};
+use crate::assets::SourceAssets;
 use crate::attachments::Attachment;
 use crate::file::ForeignAnnot;
 use crate::forms::{FileForm, FormFacts};
@@ -51,6 +53,8 @@ pub struct Facts {
     pub renamed: Vec<Renamed>,
     /// Every other tool's comments.
     pub foreign: Vec<ForeignAnnot>,
+    /// What sheaf's marks hold: their stamps' pages and attachments' files.
+    pub assets: SourceAssets,
     /// The file's `/PageLabels` ranges.
     pub labels: Option<Vec<LabelRange>>,
     /// The header/footer sheaf drew into the file, and the pages it's on
@@ -124,18 +128,16 @@ pub fn file(path: &Path, password: Option<&str>) -> Result<Opened> {
 }
 
 /// Everything `src` says about itself besides its pages. One pass over
-/// the page table's annotations finds the marks and the other tools'
-/// comments, and what the marks keep in this machine's cache is made
-/// again from the file where it's missing; then the form, the catalog's
-/// facts and the outline. Each reader passes over what it can't read, so
+/// the page table's annotations finds the marks, what they hold, and the
+/// other tools' comments; then the form, the catalog's facts and the
+/// outline. Each reader passes over what it can't read, so
 /// this never fails once the source has opened. `p` counts the pages of
 /// the first pass, the longest.
 pub fn finish(src: &Source, p: &dyn Progress) -> Facts {
     let pdf = src.pdf();
     p.set_total(Some(u64::from(src.page_count())), Unit::Pages);
     let pages = src.page_ids().inspect(|_| p.inc(1));
-    let (mut found, cached) = crate::file::annots_and_cached(pdf, pages);
-    crate::file::recover_cached(pdf, &cached);
+    let mut found = crate::file::annots_in(pdf, pages);
     let hash = src.id().hash;
     let mut rng = fastrand::Rng::with_seed(hash as u64 ^ (hash >> 64) as u64);
     let renamed = fresh_ids(&mut found.sheaf, &mut rng);
@@ -144,6 +146,7 @@ pub fn finish(src: &Source, p: &dyn Progress) -> Facts {
         marks: found.sheaf,
         renamed,
         foreign: found.foreign,
+        assets: found.assets,
         labels: crate::labels::label_ranges(pdf),
         header_footer: crate::stamps::from_catalog(pdf),
         form: crate::forms::read(src),

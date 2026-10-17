@@ -126,6 +126,22 @@ impl Affine {
         Box2::from_corners(near, far)
     }
 
+    /// The smallest rectangle that holds the image of `r`: its four
+    /// corners' images, bounded. A form's box on the page is its
+    /// `/Matrix`'s bounds of its `/BBox`.
+    pub fn bounds(self, r: Rect) -> Rect {
+        let corners = [(r.x0, r.y0), (r.x1, r.y0), (r.x0, r.y1), (r.x1, r.y1)]
+            .map(|(x, y)| self.apply(Pt { x, y }));
+        let low = |f: fn(&Pt) -> f32| corners.iter().map(f).fold(f32::INFINITY, f32::min);
+        let high = |f: fn(&Pt) -> f32| corners.iter().map(f).fold(f32::NEG_INFINITY, f32::max);
+        Rect {
+            x0: low(|p| p.x),
+            y0: low(|p| p.y),
+            x1: high(|p| p.x),
+            y1: high(|p| p.y),
+        }
+    }
+
     /// A point some of whose coordinates may be missing, as an `/XYZ`'s
     /// are: under a quarter-turn map each coordinate of the image comes
     /// from one of the point's, so it's missing where that one is.
@@ -334,6 +350,26 @@ mod tests {
             (None, Some(92.0))
         );
         assert_eq!(upright.to_view().apply_axes(None, None), (None, None));
+    }
+
+    /// A box's image under a turn or a shear is bounded by its corners'.
+    #[test]
+    fn bounds_hold_every_corner() {
+        let r = Rect::new(0.0, 0.0, 100.0, 50.0);
+        let turn = Affine {
+            a: 0.0,
+            b: 1.0,
+            c: -1.0,
+            d: 0.0,
+            e: 10.0,
+            f: 20.0,
+        };
+        assert_eq!(turn.bounds(r), Rect::new(-40.0, 20.0, 10.0, 120.0));
+        let shear = Affine {
+            c: 1.0,
+            ..Affine::IDENTITY
+        };
+        assert_eq!(shear.bounds(r), Rect::new(0.0, 0.0, 150.0, 50.0));
     }
 
     fn geoms() -> impl Strategy<Value = Geom> {

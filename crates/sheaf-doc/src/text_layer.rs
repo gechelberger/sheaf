@@ -13,19 +13,22 @@
 //! was recognized; lines run along that frame's x, which the writer turns
 //! the text to.
 //!
-//! The written layer uses Tesseract's approach (`pdfrenderer.cpp`): a
-//! Type0 font with an embedded glyphless TrueType whose every CID advances
-//! half an em, so a word is fitted to its box by horizontal scaling alone
-//! and any Unicode text round-trips.
+//! The written layer is in [`Glyphless`], Tesseract's approach
+//! (`pdfrenderer.cpp`): a Type0 font with an embedded glyphless TrueType
+//! whose every CID advances half an em, so a word is fitted to its box by
+//! horizontal scaling alone and any Unicode text round-trips.
 
 use std::cmp::Ordering;
 use std::ops::Range;
 
-use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
+use lopdf::{Dictionary, Document as Pdf, Object, Stream, dictionary};
 use serde::{Deserialize, Serialize};
 use sheaf_core::Rotation;
 
 use crate::annot::{Box2, Pt};
+use crate::content::{
+    self, ContentWriter, Font, Glyphless, ResObjects, Reserved, ResourceNeeds, TextMode,
+};
 use crate::geom::{Affine, Geom};
 
 /// One recognized word.
@@ -322,148 +325,48 @@ fn hit_from_span(layer: &TextLayer, t: &PageText, start: usize, end: usize) -> O
 
 // ----- PDF writing ------------------------------------------------------------
 
-/// Resource name of the layer's font on a page.
+/// Resource name of the layer's font on a page, until slice 18's blocks.
 pub(crate) const FONT_NAME: &str = "SheafOcr";
 /// Marks the content streams we add, so a re-save can find and replace them.
 const MARKER: &str = "SheafOcrLayer";
-/// Tesseract's glyphless font (Apache-2.0; see `assets/LICENSE-pdf.ttf`).
-static GLYPHLESS_TTF: &[u8] = include_bytes!("../assets/pdf.ttf");
-
-const TO_UNICODE: &str = "/CIDInit /ProcSet findresource begin
-12 dict begin
-begincmap
-/CIDSystemInfo
-<<
-  /Registry (Adobe)
-  /Ordering (UCS)
-  /Supplement 0
->> def
-/CMapName /Adobe-Identity-UCS def
-/CMapType 2 def
-1 begincodespacerange
-<0000> <FFFF>
-endcodespacerange
-1 beginbfrange
-<0000> <FFFF> <0000>
-endbfrange
-endcmap
-CMapName currentdict /CMap defineresource pop
-end
-end
-";
-
-/// The shared objects every layer in a file uses, created on first use.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct OcrObjects {
-    /// The Type0 font.
-    pub font: ObjectId,
-    /// A content stream holding just `q`, prepended to the page content.
-    pub q: ObjectId,
-}
-
-fn add_stream(pdf: &mut Pdf, dict: Dictionary, content: Vec<u8>, compress: bool) -> ObjectId {
-    let mut s = Stream::new(dict, content);
-    if compress {
-        let _ = s.compress();
-    } else {
-        s.allows_compression = false;
-    }
-    pdf.add_object(Object::Stream(s))
-}
-
-pub(crate) fn ocr_objects(pdf: &mut Pdf, cache: &mut Option<OcrObjects>) -> OcrObjects {
-    if let Some(o) = *cache {
-        return o;
-    }
-    let ff2 = add_stream(
-        pdf,
-        dictionary! { "Length1" => GLYPHLESS_TTF.len() as i64 },
-        GLYPHLESS_TTF.to_vec(),
-        true,
-    );
-    // Every CID maps to glyph 1, the font's one (empty) glyph.
-    let mut map = vec![0u8; 2 * 65536];
-    for b in map.iter_mut().skip(1).step_by(2) {
-        *b = 1;
-    }
-    let c2g = add_stream(pdf, dictionary! {}, map, true);
-    let cmap = add_stream(pdf, dictionary! {}, TO_UNICODE.as_bytes().to_vec(), true);
-    let descriptor = pdf.add_object(dictionary! {
-        "Type" => "FontDescriptor",
-        "FontName" => "GlyphLessFont",
-        "Flags" => 5i64, // FixedPitch + Symbolic
-        "FontBBox" => vec![0.into(), 0.into(), 500.into(), 1000.into()],
-        "Ascent" => 1000i64,
-        "Descent" => -1i64,
-        "CapHeight" => 1000i64,
-        "ItalicAngle" => 0i64,
-        "StemV" => 80i64,
-        "FontFile2" => ff2,
-    });
-    let cid = pdf.add_object(dictionary! {
-        "Type" => "Font",
-        "Subtype" => "CIDFontType2",
-        "BaseFont" => "GlyphLessFont",
-        "CIDSystemInfo" => dictionary! {
-            "Registry" => Object::string_literal("Adobe"),
-            "Ordering" => Object::string_literal("Identity"),
-            "Supplement" => 0i64,
-        },
-        "FontDescriptor" => descriptor,
-        "DW" => 500i64,
-        "CIDToGIDMap" => c2g,
-    });
-    let font = pdf.add_object(dictionary! {
-        "Type" => "Font",
-        "Subtype" => "Type0",
-        "BaseFont" => "GlyphLessFont",
-        "Encoding" => "Identity-H",
-        "DescendantFonts" => vec![Object::Reference(cid)],
-        "ToUnicode" => cmap,
-    });
-    let q = add_stream(pdf, dictionary! { MARKER => true }, b"q\n".to_vec(), false);
-    let o = OcrObjects { font, q };
-    *cache = Some(o);
-    o
-}
-
-fn utf16_hex(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() * 4);
-    for u in s.encode_utf16() {
-        out.push_str(&format!("{u:04X}"));
-    }
-    out
-}
 
 /// The content stream for `layer`: invisible text, one `Tj` per word,
-/// fitted to the word's box by horizontal scaling. Text runs along the
-/// upright frame's x, so it's turned by [`TextLayer::upright`]. Starts
-/// with `Q` to close the `q` that precedes the original content.
-pub(crate) fn to_content(layer: &TextLayer) -> Vec<u8> {
+/// fitted to the word's box by horizontal scaling, in [`Glyphless`] named
+/// [`FONT_NAME`]; and the font it needs. Text runs along the upright
+/// frame's x, so it's turned by [`TextLayer::upright`]. Starts with `Q` to
+/// close the `q` that precedes the original content.
+pub(crate) fn to_content(layer: &TextLayer) -> (Vec<u8>, ResourceNeeds) {
     let to_user = Affine::upright(layer.upright).inverse();
     let theta = layer.upright.degrees() as f32;
     let (cs, sn) = (theta.to_radians().cos(), theta.to_radians().sin());
     let tm = |x: f32, y: f32| {
         let o = to_user.apply(Pt { x, y });
-        format!(
-            "{cs:.4} {sn:.4} {:.4} {cs:.4} {:.3} {:.3} Tm",
-            -sn, o.x, o.y
-        )
+        Affine {
+            a: cs,
+            b: sn,
+            c: -sn,
+            d: cs,
+            e: o.x,
+            f: o.y,
+        }
     };
-    let mut s = String::from("Q\nBT\n3 Tr\n");
+    let mut w = ContentWriter::new();
+    w.restore();
+    w.begin_text();
+    w.text_mode(TextMode::Invisible);
     let mut last_fs: Option<f32> = None;
     for line in &layer.lines {
         let mut prev_right: Option<f32> = None;
-        for w in &layer.words[line.clone()] {
-            let r = layer.upright_box(w);
-            let n = w.text.encode_utf16().count();
+        for word in &layer.words[line.clone()] {
+            let r = layer.upright_box(word);
+            let n = word.text.encode_utf16().count();
             if n == 0 || r.h < 0.1 || r.w <= 0.0 {
                 prev_right = None;
                 continue;
             }
             let fs = r.h;
             if last_fs.is_none_or(|f| (fs - f).abs() > 1e-3) {
-                s.push_str(&format!("/{FONT_NAME} {fs:.2} Tf\n"));
+                w.font(&Glyphless, fs);
                 last_fs = Some(fs);
             }
             // The gap to the previous word becomes a real space so viewers
@@ -471,46 +374,48 @@ pub(crate) fn to_content(layer: &TextLayer) -> Vec<u8> {
             if let Some(pr) = prev_right {
                 let gap = r.x - pr;
                 if gap > 0.1 {
-                    s.push_str(&format!(
-                        "{} {:.2} Tz <0020> Tj\n",
-                        tm(pr, r.bottom()),
-                        200.0 * gap / fs
-                    ));
+                    w.text_matrix(tm(pr, r.bottom()));
+                    w.horizontal_scale(200.0 * gap / fs);
+                    w.text(" ");
                 }
             }
             // Each CID advances half an em, so scale n half-ems to the box.
-            s.push_str(&format!(
-                "{} {:.2} Tz <{}> Tj\n",
-                tm(r.x, r.bottom()),
-                200.0 * r.w / (fs * n as f32),
-                utf16_hex(&w.text)
-            ));
+            w.text_matrix(tm(r.x, r.bottom()));
+            w.horizontal_scale(200.0 * r.w / (fs * n as f32));
+            w.text(&word.text);
             prev_right = Some(r.right());
         }
     }
-    s.push_str("ET\n");
-    s.into_bytes()
+    w.end_text();
+    w.finish(
+        &Reserved::default(),
+        &[(Glyphless.resource().id, FONT_NAME)],
+    )
 }
 
 /// Add `layer` to `page` (an owned, flattened page dictionary about to be
 /// written): `/Contents` becomes `[q, original…, layer]` and `/Resources`
-/// is inlined with the layer's font. An earlier layer of ours is removed
-/// first. No-op for an empty layer.
+/// is inlined with the layer's font, the `q` and the font written once a
+/// save through `res`. An earlier layer of ours is removed first. No-op
+/// for an empty layer.
 pub(crate) fn install(
     pdf: &mut Pdf,
     page: &mut Dictionary,
     layer: &TextLayer,
-    objects: &mut Option<OcrObjects>,
+    res: &mut ResObjects,
 ) {
     strip(pdf, page);
     if layer.is_empty() {
         return;
     }
-    let o = ocr_objects(pdf, objects);
-    let ocr = add_stream(pdf, dictionary! { MARKER => true }, to_content(layer), true);
+    let (content, needs) = to_content(layer);
+    let q = res.stream(pdf, dictionary! { MARKER => true }, b"q\n".to_vec());
+    let mut stream = Stream::new(dictionary! { MARKER => true }, content);
+    let _ = stream.compress();
+    let ocr = pdf.add_object(stream);
     // Never decode the original streams: array entries are concatenated
     // with whitespace, and the q/Q pair isolates whatever state they leave.
-    let mut entries = vec![Object::Reference(o.q)];
+    let mut entries = vec![Object::Reference(q)];
     match page.get(b"Contents").ok().cloned() {
         None => {}
         Some(Object::Array(a)) => entries.extend(a),
@@ -522,20 +427,11 @@ pub(crate) fn install(
     }
     entries.push(Object::Reference(ocr));
     page.set("Contents", Object::Array(entries));
-
-    let deref_dict = |pdf: &Pdf, o: Option<&Object>| -> Dictionary {
-        o.and_then(|o| pdf.dereference(o).ok())
-            .and_then(|(_, o)| o.as_dict().ok().cloned())
-            .unwrap_or_default()
-    };
-    let mut resources = deref_dict(pdf, page.get(b"Resources").ok());
-    let mut fonts = deref_dict(pdf, resources.get(b"Font").ok());
-    fonts.set(FONT_NAME, Object::Reference(o.font));
-    resources.set("Font", Object::Dictionary(fonts));
+    let mut resources = content::resources_of(pdf, page);
+    res.bind(pdf, &needs, &mut resources);
     page.set("Resources", Object::Dictionary(resources));
 }
 
-/// Remove a layer we wrote earlier from the page's `/Contents`.
 /// Whether the page has an OCR layer of ours in its content.
 pub(crate) fn has_layer(pdf: &Pdf, page: &Dictionary) -> bool {
     let mut probe = page.clone();
@@ -543,6 +439,7 @@ pub(crate) fn has_layer(pdf: &Pdf, page: &Dictionary) -> bool {
     probe.get(b"Contents").ok() != page.get(b"Contents").ok()
 }
 
+/// Remove a layer we wrote earlier from the page's `/Contents`.
 pub(crate) fn strip(pdf: &Pdf, page: &mut Dictionary) {
     let Some(entries) = page
         .get(b"Contents")
@@ -792,54 +689,68 @@ mod tests {
             ],
             Rotation::R0,
         );
-        let c = String::from_utf8(to_content(&l)).unwrap();
+        let (c, needs) = to_content(&l);
+        let c = String::from_utf8(c).unwrap();
         assert!(c.starts_with("Q\nBT\n3 Tr\n"), "{c}");
-        assert!(c.contains("/SheafOcr 10.00 Tf"), "{c}");
+        assert!(c.contains("/SheafOcr 10 Tf\n"), "{c}");
         // 5 code units, size 10, width 40 → 200*40/(10*5) = 160.
         assert!(
-            c.contains(
-                "1.0000 0.0000 -0.0000 1.0000 72.000 682.000 Tm 160.00 Tz <00480065006C006C006F> Tj"
-            ),
+            c.contains("1 0 0 1 72 682 Tm\n160 Tz\n<00480065006C006C006F> Tj\n"),
             "{c}"
         );
         // The 10 pt gap becomes a space scaled to fit it.
-        assert!(c.contains("112.000 682.000 Tm 200.00 Tz <0020> Tj"), "{c}");
+        assert!(c.contains("1 0 0 1 112 682 Tm\n200 Tz\n<0020> Tj\n"), "{c}");
         assert!(c.ends_with("ET\n"));
         assert_eq!(c.matches(" Tf").count(), 1, "font size emitted once");
+        let [font] = &needs.0[..] else {
+            panic!("{needs:?}")
+        };
+        assert_eq!(font.name, b"SheafOcr");
+        assert_eq!(font.res, Glyphless.resource().into());
     }
 
     /// The text runs along the upright frame's x: turned with the page it
     /// was recognized on, starting at its word's bottom-left as it read.
+    /// The same layer gives the same bytes and names, twice and on two
+    /// threads.
+    #[test]
+    fn identical_layers_write_identical_bytes() {
+        fn write() -> (Vec<u8>, ResourceNeeds) {
+            let words = vec![
+                word("Hello", 72.0, 100.0, 50.0, 10.0),
+                word("wörld", 130.0, 100.0, 50.0, 10.0),
+                word("日本", 72.0, 120.0, 30.0, 10.0),
+            ];
+            to_content(&layer(words, Rotation::R90))
+        }
+        let first = write();
+        assert_eq!(write(), first);
+        let threads: Vec<_> = (0..2).map(|_| std::thread::spawn(write)).collect();
+        for t in threads {
+            assert_eq!(t.join().unwrap(), first);
+        }
+    }
+
     #[test]
     fn content_turns_with_the_upright_frame() {
         let matrix = |geom: Geom| {
             let l = TextLayer::from_engine(vec![word("Hi", 10.0, 20.0, 20.0, 10.0)], &geom, "t");
-            let c = String::from_utf8(to_content(&l)).unwrap();
-            let tm = c.lines().find(|l| l.ends_with("Tj")).unwrap();
-            tm.split(" Tm").next().unwrap().to_string()
+            let c = String::from_utf8(to_content(&l).0).unwrap();
+            let tm = c.lines().find(|l| l.ends_with(" Tm")).unwrap();
+            tm.trim_end_matches(" Tm").to_string()
         };
         let turned = |r| matrix(letter(r));
-        assert!(turned(Rotation::R0).starts_with("1.0000 0.0000 -0.0000 1.0000"));
-        assert!(turned(Rotation::R90).starts_with("-0.0000 1.0000 -1.0000 -0.0000"));
-        assert!(turned(Rotation::R180).starts_with("-1.0000 -0.0000 0.0000 -1.0000"));
-        assert!(turned(Rotation::R270).starts_with("0.0000 -1.0000 1.0000 0.0000"));
         // Upright: the word's bottom-left, (10, 30) down the page, is
         // (10, 762) up it.
-        assert!(
-            turned(Rotation::R0).ends_with("10.000 762.000"),
-            "{}",
-            turned(Rotation::R0)
-        );
+        assert_eq!(turned(Rotation::R0), "1 0 0 1 10 762");
         // Turned 90°: (10, 30) as shown is user (30, 10).
-        assert!(
-            turned(Rotation::R90).ends_with("30.000 10.000"),
-            "{}",
-            turned(Rotation::R90)
-        );
+        assert_eq!(turned(Rotation::R90), "0 1 -1 0 30 10");
+        assert!(turned(Rotation::R180).starts_with("-1 0 0 -1 "));
+        assert!(turned(Rotation::R270).starts_with("0 -1 1 0 "));
         // A media box off the origin moves the text with it.
         let media = Rect::new(-37.0, 52.0, 575.0, 844.0);
         let off = matrix(Geom::read(Some(media), None, 0));
-        assert!(off.ends_with("-27.000 814.000"), "{off}");
+        assert_eq!(off, "1 0 0 1 -27 814");
     }
 
     #[test]
@@ -850,7 +761,7 @@ mod tests {
         let res = pdf.add_object(dictionary! { "Font" => dictionary! { "F1" => font } });
         let mut page = dictionary! { "Type" => "Page", "Contents" => orig, "Resources" => res };
         let l = layer(vec![word("Hi", 10.0, 20.0, 20.0, 10.0)], Rotation::R0);
-        let mut objs = None;
+        let mut objs = ResObjects::default();
         install(&mut pdf, &mut page, &l, &mut objs);
         let contents = page.get(b"Contents").unwrap().as_array().unwrap().clone();
         assert_eq!(contents.len(), 3);
@@ -868,7 +779,7 @@ mod tests {
         assert!(fonts.has(b"F1"));
         assert_eq!(
             fonts.get(b"SheafOcr").unwrap(),
-            &Object::Reference(objs.unwrap().font)
+            &Object::Reference(objs.object(&mut pdf, &Glyphless.resource().into()))
         );
         // A second install replaces rather than stacks.
         let before = pdf.objects.len();
@@ -886,10 +797,21 @@ mod tests {
     #[test]
     fn font_objects_match_tesseract_layout() {
         let mut pdf = Pdf::with_version("1.5");
-        let mut cache = None;
-        let o = ocr_objects(&mut pdf, &mut cache);
-        assert_eq!(ocr_objects(&mut pdf, &mut cache).font, o.font, "cached");
-        let type0 = pdf.get_dictionary(o.font).unwrap();
+        let l = layer(vec![word("Hi", 10.0, 20.0, 20.0, 10.0)], Rotation::R0);
+        let mut res = ResObjects::default();
+        let mut pages = [dictionary! {}, dictionary! {}];
+        for page in &mut pages {
+            install(&mut pdf, page, &l, &mut res);
+        }
+        let font = |page: &Dictionary| {
+            let resources = page.get(b"Resources").unwrap().as_dict().unwrap();
+            let fonts = resources.get(b"Font").unwrap().as_dict().unwrap();
+            fonts.get(b"SheafOcr").unwrap().as_reference().unwrap()
+        };
+        let q = |page: &Dictionary| content::contents(page)[0];
+        assert_eq!(font(&pages[0]), font(&pages[1]), "one font a save");
+        assert_eq!(q(&pages[0]), q(&pages[1]), "one q a save");
+        let type0 = pdf.get_dictionary(font(&pages[0])).unwrap();
         assert_eq!(
             type0.get(b"Encoding").unwrap().as_name().unwrap(),
             b"Identity-H"
@@ -918,7 +840,7 @@ mod tests {
             .unwrap()
             .as_stream()
             .unwrap();
-        assert_eq!(ff2.decompressed_content().unwrap(), GLYPHLESS_TTF);
+        assert_eq!(ff2.decompressed_content().unwrap(), Glyphless::PROGRAM);
         let cmap = pdf
             .get_object(type0.get(b"ToUnicode").unwrap().as_reference().unwrap())
             .unwrap()
@@ -926,7 +848,8 @@ mod tests {
             .unwrap();
         let cmap = String::from_utf8(cmap.decompressed_content().unwrap()).unwrap();
         assert!(cmap.contains("beginbfrange"));
-        let q = pdf.get_object(o.q).unwrap().as_stream().unwrap();
+        let q = pdf.get_object(q(&pages[0])).unwrap().as_stream().unwrap();
         assert_eq!(q.content, b"q\n");
+        assert!(q.dict.has(MARKER.as_bytes()));
     }
 }

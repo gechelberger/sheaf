@@ -11,6 +11,7 @@ pub struct Limits {
     pub reader: lopdf::ReadLimits,
     pub page_tree: PageTreeLimits,
     pub forms: FormLimits,
+    pub content: ContentLimits,
 }
 
 /// The caps on the page table's walk.
@@ -56,6 +57,23 @@ pub struct FormLimits {
     pub xfa: usize,
 }
 
+/// The caps on reading a page's content (`content`): past one, the content
+/// can't be read, and an op that needs it fails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContentLimits {
+    /// What a page's streams decompress to, together.
+    pub decompressed: usize,
+    /// Operands before an operator. PDFium keeps the last 16; a real
+    /// operator takes at most 33 (`scn` with DeviceN's 32 components and
+    /// a pattern), but a stream may hold runs of numbers no operator ends.
+    pub operands: usize,
+    /// How deep arrays and dictionaries nest (PDFium's cap), and marked
+    /// content. `q` isn't capped: its balance is only counted.
+    pub depth: usize,
+    /// An inline image's data, in bytes.
+    pub inline_image: usize,
+}
+
 impl Limits {
     pub const DEFAULT: Limits = Limits {
         reader: lopdf::ReadLimits::DEFAULT,
@@ -76,6 +94,12 @@ impl Limits {
             da: 1024,
             scripts: 100_000,
             xfa: 64 << 20,
+        },
+        content: ContentLimits {
+            decompressed: 256 << 20,
+            operands: 1 << 16,
+            depth: 512,
+            inline_image: 64 << 20,
         },
     };
 }

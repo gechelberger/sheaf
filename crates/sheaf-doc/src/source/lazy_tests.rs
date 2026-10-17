@@ -591,6 +591,34 @@ fn a_stream_whose_length_the_parser_cant_read_spans_to_endobj() {
     }
 }
 
+/// `object_unkept` reads what `object` reads without keeping it, but for
+/// what it resolved on the way, and gives what's kept as it's kept.
+#[test]
+fn an_unkept_read_keeps_only_what_it_met() {
+    let bytes = with_table(&[
+        catalog(),
+        pages(),
+        (3, stream("/Length 4 0 R", b"abc")),
+        (4, b"3".to_vec()),
+        (5, b"<< /Kept true >>".to_vec()),
+        (6, b"<< /Broken".to_vec()),
+    ]);
+    let pdf = open(&bytes);
+    let unkept = pdf.object_unkept((3, 0)).unwrap();
+    assert_eq!(unkept.as_stream().unwrap().content, b"abc");
+    assert!(!pdf.is_read((3, 0)) && pdf.is_read((4, 0)));
+    assert_eq!(*unkept, *pdf.object((3, 0)).unwrap());
+    let kept = pdf.object((5, 0)).unwrap();
+    assert!(Arc::ptr_eq(&kept, &pdf.object_unkept((5, 0)).unwrap()));
+    // A failure the bytes decide is kept, as `get` keeps it.
+    assert!(pdf.object_unkept((6, 0)).is_err());
+    assert!(pdf.is_read((6, 0)));
+    assert!(matches!(
+        pdf.object_unkept((9, 0)),
+        Err(Error::MissingXrefEntry)
+    ));
+}
+
 #[test]
 fn a_length_cycle_is_a_typed_error() {
     // 3's /Length is 4, a stream whose /Length is 3; 5's is itself; and 6's

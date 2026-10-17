@@ -843,8 +843,7 @@ pub fn export_data(
             Item::Ours(..) => None,
         })
         .collect();
-    let comments =
-        sheaf_doc::exchange::gather(&snap.state, &snap.sources, foreign, &ours, &theirs)?;
+    let comments = sheaf_doc::exchange::gather(snap, foreign, &ours, &theirs)?;
     match format {
         DataFormat::Xfdf => sheaf_doc::exchange::xfdf::write(&comments),
         DataFormat::Fdf => sheaf_doc::exchange::fdf::write(&comments),
@@ -869,7 +868,7 @@ pub fn import_data(
     password: Option<&str>,
 ) -> Result<sheaf_doc::exchange::Imported> {
     let comments = sheaf_doc::exchange::read(bytes, password)?;
-    Ok(sheaf_doc::exchange::import(&snap.state, foreign, &comments))
+    Ok(sheaf_doc::exchange::import(snap, foreign, &comments))
 }
 
 /// A column of the CSV export.

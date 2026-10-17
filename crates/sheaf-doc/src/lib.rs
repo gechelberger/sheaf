@@ -8,7 +8,9 @@
 //! crates.
 
 pub mod annot;
+pub mod assets;
 pub mod attachments;
+pub mod content;
 pub mod describe;
 pub mod exchange;
 pub mod file;

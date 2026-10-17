@@ -306,7 +306,13 @@ pub(crate) fn draft_preview(
             gpui::div()
                 .absolute()
                 .inset_0()
-                .children(crate::docview::annot_elements(&m, &to_pane, size, k))
+                .children(crate::docview::annot_elements(
+                    &m,
+                    doc.model.assets(),
+                    &to_pane,
+                    size,
+                    k,
+                ))
                 .into_any_element(),
         );
     }

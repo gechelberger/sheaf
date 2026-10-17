@@ -196,6 +196,7 @@ impl DocView {
                 let mixed = doc.model.scripts_mixed();
                 doc.model.set_source_form(sid, incoming.form.clone());
                 doc.model.set_source_renamed(sid, &incoming.renamed);
+                doc.model.set_source_assets(sid, &incoming.assets);
                 match doc.model.apply(
                     Edit::ReplacePages {
                         ids,
@@ -215,6 +216,9 @@ impl DocView {
                         );
                         if let Some(form) = doc.model.form_notice(&out, false, mixed) {
                             notice = format!("{notice}. {form}");
+                        }
+                        if let Some(text) = doc.model.unencodable_notice(&out) {
+                            notice = format!("{notice}. {text}");
                         }
                         v.after_model_change(label, out, cx);
                         v.set_notice(notice, cx);
@@ -456,8 +460,12 @@ impl DocView {
                 match doc.model.apply_batch(edits, label) {
                     Ok(out) => {
                         doc.touched();
+                        let mut notice = format!("{label}: shown now, written when you save");
+                        if let Some(text) = doc.model.unencodable_notice(&out) {
+                            notice = format!("{notice}. {text}");
+                        }
                         v.after_model_change(label.to_string(), out, cx);
-                        v.set_notice(format!("{label}: shown now, written when you save"), cx);
+                        v.set_notice(notice, cx);
                     }
                     Err(e) => v.set_notice(crate::docview::failed(label, &e), cx),
                 }
@@ -520,6 +528,8 @@ impl DocView {
         } else {
             format!("Remove {}", what.to_lowercase())
         };
+        // Its text is drawn into the copies, out of the model's sight.
+        let unencodable = wm.as_ref().is_some_and(|w| w.unencodable());
         self.set_notice(format!("{label}…"), cx);
         cx.spawn(async move |this, cx| {
             let planned = cx
@@ -567,13 +577,16 @@ impl DocView {
                     .model
                     .apply(Edit::RebasePages { pages: rebases }, &label)
                 {
-                    Ok(out) => {
+                    Ok(mut out) => {
                         doc.touched();
+                        out.unencodable |= unencodable;
+                        let mut notice =
+                            format!("{label}: {n} page{}", if n == 1 { "" } else { "s" });
+                        if let Some(text) = doc.model.unencodable_notice(&out) {
+                            notice = format!("{notice}. {text}");
+                        }
                         v.after_model_change(label.clone(), out, cx);
-                        v.set_notice(
-                            format!("{label}: {n} page{}", if n == 1 { "" } else { "s" }),
-                            cx,
-                        );
+                        v.set_notice(notice, cx);
                     }
                     Err(e) => v.set_notice(crate::docview::failed(&label, &e), cx),
                 }

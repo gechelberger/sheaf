@@ -108,8 +108,9 @@ fn build(snap: &Snapshot, mode: Mode) -> Result<(usize, Vec<u8>)> {
     let mut pristine = None;
 
     let mut connectors = Vec::new();
-    let mut stamp_forms = crate::save::StampForms::new();
-    let mut ocr_objects = None;
+    // OCR's font and its isolating `q`, and what the marks draw with and
+    // embed, once a save; the original's where it has them.
+    let mut cx = crate::annot::WriteCx::new(snap.assets.clone()).owning(info.src.id());
     if tree_changed {
         let pages_id = pdf.new_object_id();
         let mut kids = Vec::with_capacity(snap.state.pages.len());
@@ -246,14 +247,8 @@ fn build(snap: &Snapshot, mode: Mode) -> Result<(usize, Vec<u8>)> {
                     let marks = list.into_iter().flatten();
                     let index = origin.map_or(pref.index, |(_, i)| i);
                     let renamed = snap.renamed_on(source, index);
-                    let w = write_page_annots(
-                        &mut pdf,
-                        &mut dict,
-                        marks,
-                        removed,
-                        renamed,
-                        &mut stamp_forms,
-                    );
+                    let w =
+                        write_page_annots(&mut pdf, &mut dict, marks, removed, renamed, &mut cx);
                     connectors.extend(w.connectors);
                     for id in w.touched {
                         changed.insert(id, pdf.get_object(id)?.clone());
@@ -266,7 +261,7 @@ fn build(snap: &Snapshot, mode: Mode) -> Result<(usize, Vec<u8>)> {
                         "a page's OCR text is replaced: a full save takes the old out of the file"
                     );
                 }
-                text_layer::install(&mut pdf, &mut dict, layer, &mut ocr_objects);
+                text_layer::install(&mut pdf, &mut dict, layer, &mut cx.res);
             }
             // The new tree's root has no /Rotate for it to inherit.
             if pref.rotation == Rotation::R0 {
@@ -322,7 +317,7 @@ fn build(snap: &Snapshot, mode: Mode) -> Result<(usize, Vec<u8>)> {
                             "a page's OCR text is replaced: a full save takes the old out of the file"
                         );
                     }
-                    text_layer::install(&mut pdf, &mut dict, layer, &mut ocr_objects);
+                    text_layer::install(&mut pdf, &mut dict, layer, &mut cx.res);
                 }
                 if snap.annots_dirty.contains(&pref.id) {
                     match (
@@ -338,7 +333,7 @@ fn build(snap: &Snapshot, mode: Mode) -> Result<(usize, Vec<u8>)> {
                                 marks,
                                 removed,
                                 snap.renamed_on(primary_id, pref.index),
-                                &mut stamp_forms,
+                                &mut cx,
                             );
                             connectors.extend(w.connectors);
                             for id in w.touched {

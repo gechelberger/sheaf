@@ -36,7 +36,12 @@
 //! engines after 200 groups and the thumbnail strip (13), crop commit
 //! (15), Bates apply and the live-token reorder (17), and the flattened
 //! export's RSS (19). The rows today's code has no counterpart for come
-//! with those slices; idle CPU is the app's (12, 13). So far slice 1's
+//! with those slices; idle CPU is the app's (12, 13). Slice 6's rows are
+//! every page's content classified cold (`Source::blocks`), with neither a
+//! baseline nor a gate, and a Rewrite of 20,000 of sheaf's marks, some of
+//! them text, beside the writer from before marks were drawn through the
+//! content toolkit, with no gate; from slice 6 Bates' apply classifies
+//! every page, cold, to find an old header to strip. So far slice 1's
 //! history bench, slice 3's geometry walk, slice 4's ready and slice 5's
 //! ready on 20,000 of sheaf's marks assert, after their tables print. The
 //! 200 OCR versions take about 5 GB until slice 12 bounds history, and
@@ -194,6 +199,19 @@ const MARKS_7K: MarksBaseline = MarksBaseline {
 /// the harness.
 const MARKS_7K_READY_MS: f64 = 499.0;
 
+/// A Rewrite of those marks, a fifth of them FreeText and a fifth text
+/// stamps, on slice 6's writer before marks were drawn through the content
+/// toolkit: the median of three runs of the harness, in milliseconds, and
+/// what it added to RSS, in megabytes. Much of the time was lopdf's prune
+/// and renumber, which grew with the square of the objects until slice 6
+/// patched them (`vendor/lopdf/SHEAF.md`).
+const MARKS_7K_REWRITE_MS: f64 = 2314.0;
+const MARKS_7K_REWRITE_ADDED_MB: f64 = 346.0;
+
+/// The marks those two save, and how many of them are copies.
+const SHEAF_MARKS: u32 = 20_000;
+const SHEAF_COPIES: u32 = 10_000;
+
 /// 200 OCR versions of 1,000 pages on slice 2's code: what history holds,
 /// by its estimate and by RSS, in megabytes.
 struct OcrBaseline {
@@ -333,11 +351,10 @@ fn gates(kind: Kind) {
     // The geometry walk: the cross-reference sections and the page table,
     // from bytes already interned, parsed again each run (slice 3; slice
     // 2's baseline is PDFium's page sizes).
+    let bytes = sheaf_core::read_file(&path).unwrap();
+    let file = || BlobKind::file(&path, None);
     let store = Store::new();
-    let file = BlobKind::file(&path, None);
-    let blob = store
-        .intern(sheaf_core::read_file(&path).unwrap(), file)
-        .unwrap();
+    let blob = store.intern(bytes.clone(), file()).unwrap();
     let (walk, _) = measure(RUNS, || timed(|| store.source(&blob).unwrap()).0);
     drop((blob, store));
     let walk_gate = match kind {
@@ -349,6 +366,29 @@ fn gates(kind: Kind) {
         format!("< {} ms, asserted", g.as_millis())
     });
     rows.push(Row::time("geometry walk", walk, base.walk_ms, gate));
+
+    // Every page's content classified, as Remove Header/Footer and the
+    // watermark pick their pages: each page's streams read, not kept,
+    // lexed and its pagination artifacts found, on a source parsed afresh
+    // each run, so nothing is remembered (slice 6). No baseline or gate.
+    let (classify, _) = measure(RUNS, || {
+        let store = Store::new();
+        let blob = store.intern(bytes.clone(), file()).unwrap();
+        let src = store.source(&blob).unwrap();
+        timed(|| {
+            for i in 0..src.page_count() {
+                src.blocks(i).unwrap();
+            }
+        })
+        .0
+    });
+    drop(bytes);
+    rows.push(Row::time(
+        "classify every page (blocks), cold",
+        classify,
+        f64::NAN,
+        "",
+    ));
 
     // Ready: open to edits enabled, as the app opens a file and every
     // headless caller does: the source read, the document started on its
@@ -544,7 +584,9 @@ fn gates(kind: Kind) {
     ));
 
     // Bates numbers on every page, as the app applies them, and the
-    // Rewrite that draws them.
+    // Rewrite that draws them. Each apply is a first one, on the file
+    // opened afresh (untimed): it classifies every page cold, where
+    // another on the same document would find their blocks known.
     let mut texts: [String; 6] = Default::default();
     texts[5] = "<<bates>>".into();
     let bates = HeaderFooter {
@@ -556,9 +598,9 @@ fn gates(kind: Kind) {
         ..Default::default()
     };
     let (apply, _) = measure(RUNS, || {
-        let (t, engines) = timed(|| set_header_footer(&mut doc, &bates));
-        drop(engines);
-        doc.undo().unwrap();
+        let mut fresh = sheaf_doc::open::file(&work, None).unwrap().doc;
+        let (t, engines) = timed(|| set_header_footer(&mut fresh, &bates));
+        drop((engines, fresh));
         t
     });
     let engines = set_header_footer(&mut doc, &bates);
@@ -743,25 +785,7 @@ fn history_at_7k_pages_and_20k_marks() {
 #[test]
 #[ignore = "gate: cargo test -p sheaf-ops --release --test gate_7k -- --ignored --nocapture --test-threads=1"]
 fn ready_at_7k_pages_and_20k_sheaf_marks() {
-    const MARKS: u32 = 20_000;
-    const COPIES: u32 = 10_000;
-    let mut marks: HashMap<u32, Vec<Annot>> = HashMap::new();
-    for i in 0..MARKS {
-        // The last COPIES say the first ones' ids.
-        let id = i % (MARKS - COPIES);
-        marks
-            .entry(i % PAGES)
-            .or_default()
-            .push(square(u64::from(id) + 1));
-    }
-    let store = Store::new();
-    let primary = SourceInfo::blank(&store, PAGES);
-    let mut d = sheaf_doc::open::start(store, primary, sheaf_doc::history::default_policy());
-    d.ready(Facts {
-        marks,
-        ..Default::default()
-    })
-    .unwrap();
+    let d = sheaf_marks(square);
     let dir = gate_dir();
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join(format!("marks-{PAGES}.pdf"));
@@ -776,8 +800,8 @@ fn ready_at_7k_pages_and_20k_sheaf_marks() {
     });
     let opened = opened.expect("opened above");
     let read: usize = opened.doc.state().annots.values().map(|l| l.len()).sum();
-    assert_eq!(read, MARKS as usize, "every mark is sheaf's");
-    assert_eq!(opened.view.renamed.len(), COPIES as usize);
+    assert_eq!(read, SHEAF_MARKS as usize, "every mark is sheaf's");
+    assert_eq!(opened.view.renamed.len(), SHEAF_COPIES as usize);
     print_table(
         &format!(
             "ready: 7,000 pages, 20,000 sheaf marks, {:.1} MB",
@@ -792,6 +816,66 @@ fn ready_at_7k_pages_and_20k_sheaf_marks() {
         )],
     );
     assert!(ready < Duration::from_secs(1), "ready took {ready:?}");
+}
+
+/// A Rewrite of the history bench's 7,000 pages and 20,000 marks, ready's
+/// above with every fifth a FreeText and every fifth a text stamp, so the
+/// writer draws text as well as squares: each mark's appearance written.
+/// The baseline is slice 6's writer before marks were drawn through the
+/// content toolkit; nothing is asserted.
+#[test]
+#[ignore = "gate: cargo test -p sheaf-ops --release --test gate_7k -- --ignored --nocapture --test-threads=1"]
+fn rewrite_of_7k_pages_and_20k_sheaf_marks() {
+    let d = sheaf_marks(|id| match id % 5 {
+        1 => free_text(id),
+        2 => text_stamp(id),
+        _ => square(id),
+    });
+    let snap = d.snapshot();
+    let (rewrite, mem) = measure(RUNS, || {
+        timed(|| sheaf_doc::save::rewrite(&snap).unwrap()).0
+    });
+    print_table(
+        "Rewrite: 7,000 pages, 20,000 sheaf marks, a fifth FreeText and a fifth text stamps",
+        "slice 6",
+        &[
+            Row::time(
+                "Rewrite, 20,000 sheaf marks",
+                rewrite,
+                MARKS_7K_REWRITE_MS,
+                "",
+            ),
+            Row::added(
+                "Rewrite, 20,000 sheaf marks",
+                mem,
+                MARKS_7K_REWRITE_ADDED_MB,
+                "",
+            ),
+        ],
+    );
+}
+
+/// The history bench's marks on [`PAGES`] blank pages, ready: [`SHEAF_MARKS`]
+/// of them, each `mark(id)`, the last [`SHEAF_COPIES`] saying the first
+/// ones' ids.
+fn sheaf_marks(mark: impl Fn(u64) -> Annot) -> Document {
+    let mut marks: HashMap<u32, Vec<Annot>> = HashMap::new();
+    for i in 0..SHEAF_MARKS {
+        let id = i % (SHEAF_MARKS - SHEAF_COPIES);
+        marks
+            .entry(i % PAGES)
+            .or_default()
+            .push(mark(u64::from(id) + 1));
+    }
+    let store = Store::new();
+    let primary = SourceInfo::blank(&store, PAGES);
+    let mut d = sheaf_doc::open::start(store, primary, sheaf_doc::history::default_policy());
+    d.ready(Facts {
+        marks,
+        ..Default::default()
+    })
+    .unwrap();
+    d
 }
 
 /// 200 OCR runs over a 1,000-page scan, each a version: what history
@@ -964,6 +1048,40 @@ fn square(id: u64) -> Annot {
     }
 }
 
+/// A FreeText of two short lines, `id` as [`square`]'s.
+fn free_text(id: u64) -> Annot {
+    Annot {
+        kind: AnnotKind::FreeText {
+            rect: Box2 {
+                x: 20.0,
+                y: 20.0,
+                w: 120.0,
+                h: 40.0,
+            },
+            size: 10.0,
+        },
+        contents: "Checked against the ledger, see exhibit 4".into(),
+        ..square(id)
+    }
+}
+
+/// A text stamp, `id` as [`square`]'s.
+fn text_stamp(id: u64) -> Annot {
+    Annot {
+        kind: AnnotKind::TextStamp {
+            rect: Box2 {
+                x: 200.0,
+                y: 20.0,
+                w: 110.0,
+                h: 36.0,
+            },
+            text: "APPROVED\nby t".into(),
+            status: false,
+        },
+        ..square(id)
+    }
+}
+
 /// A Letter page's OCR text: 30 lines of 10 words down the page, picked
 /// by `seed`.
 fn ocr_layer(seed: usize) -> TextLayer {
@@ -1053,13 +1171,13 @@ fn print_table(title: &str, against: &str, rows: &[Row]) {
             Some(v) if r.baseline > 0.0 => format!("{:.2}", v / r.baseline),
             _ => "n/a".into(),
         };
+        let baseline = match r.baseline {
+            b if b.is_nan() => "n/a".into(),
+            b => amount(b, r.unit),
+        };
         println!(
             "  {:<44} {:>14} {:>14} {:>6}  {}",
-            r.what,
-            now,
-            amount(r.baseline, r.unit),
-            ratio,
-            r.gate
+            r.what, now, baseline, ratio, r.gate
         );
     }
 }

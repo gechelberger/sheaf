@@ -761,12 +761,52 @@ pub fn note() -> Annot {
     }
 }
 
+/// The stem [`every_mark_kind`]'s page stamp names its page by: no name
+/// the generated cache gives, so writing and reading it never touches the
+/// cache. [`mark_assets`] holds it.
+pub const MARK_STAMP: &str = "fixture-stamp";
+
+/// The stem [`every_mark_kind`]'s attachment names its file by, as
+/// [`MARK_STAMP`] is.
+pub const MARK_FILE: &str = "fixture-file";
+
+/// The bytes of [`every_mark_kind`]'s attachment.
+pub const MARK_FILE_BYTES: &[u8] = b"fixture notes\n";
+
+/// What [`every_mark_kind`]'s stamp and attachment name, as a document
+/// holds them: a page 100 by 50 points with a blue square in its corner
+/// and [`MARK_FILE_BYTES`].
+pub fn mark_assets() -> std::sync::Arc<crate::assets::MarkAssets> {
+    let mut pdf = Pdf::with_version("1.7");
+    let pages_id = pdf.new_object_id();
+    let content = pdf.add_object(Stream::new(
+        dictionary! {},
+        b"0 0 1 rg 0 0 20 20 re f".to_vec(),
+    ));
+    let page = pdf.add_object(dictionary! {
+        "Type" => "Page", "Parent" => pages_id, "Contents" => content,
+        "MediaBox" => vec![0.into(), 0.into(), 100.into(), 50.into()],
+    });
+    pdf.objects.insert(
+        pages_id,
+        dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 }.into(),
+    );
+    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    pdf.trailer.set("Root", catalog);
+    let mut bytes = Vec::new();
+    pdf.save_to(&mut bytes).unwrap();
+    let assets = crate::assets::MarkAssets::new(Store::new());
+    assets.intern_stamp(MARK_STAMP, bytes.into());
+    assets.intern_file(MARK_FILE, MARK_FILE_BYTES.into());
+    std::sync::Arc::new(assets)
+}
+
 /// One mark of every kind, not turned, in PageSpace within a visible box
 /// of (−17, 62)–(555, 824), and after them the measurements of a
 /// perimeter and an area, which a file holds as `/Vertices` where a
 /// distance is `/L`: ids from 1, the reply and the status in the note's
-/// thread, and the stamp and the attachment naming no file in the cache,
-/// so writing and reading them never touches it.
+/// thread, and the stamp and the attachment naming [`MARK_STAMP`] and
+/// [`MARK_FILE`], which [`mark_assets`] holds.
 pub fn every_mark_kind() -> Vec<Annot> {
     use crate::annot::{Box2, REVIEW};
     use crate::measure::{Measured, Scale};
@@ -852,7 +892,7 @@ pub fn every_mark_kind() -> Vec<Annot> {
         },
         AnnotKind::PageStamp {
             rect: b(60.0, 300.0, 100.0, 50.0),
-            stamp: "absent".into(),
+            stamp: MARK_STAMP.into(),
             name: "Approved".into(),
             text: Some("GE".into()),
         },
@@ -880,9 +920,9 @@ pub fn every_mark_kind() -> Vec<Annot> {
         AnnotKind::FileAttachment {
             pos: p(500.0, 700.0),
             icon: "Paperclip".into(),
-            file: "absent".into(),
+            file: MARK_FILE.into(),
             name: "notes.txt".into(),
-            size: 12,
+            size: MARK_FILE_BYTES.len() as u64,
         },
         AnnotKind::Measure {
             what: Measured::Distance,

@@ -7,7 +7,7 @@ use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
 use sheaf_core::Rotation;
 
 use super::*;
-use crate::annot::AnnotId;
+use crate::annot::{AnnotId, WriteCx};
 use crate::forms::corpus::{Corpus, Entry, each_entry};
 use crate::forms::fixture::{Form, every_fact, note, outline_tree};
 use crate::labels::Style;
@@ -199,8 +199,8 @@ fn marked(degrees: i32, marks: &[Annot]) -> Form {
     dict.set("MediaBox", MEDIA.map(num).to_vec());
     dict.set("CropBox", CROP.map(num).to_vec());
     dict.set("Rotate", i64::from(degrees));
-    let mut forms = Default::default();
-    crate::save::write_page_annots(&mut f.pdf, &mut dict, marks.iter(), None, &[], &mut forms);
+    let mut cx = WriteCx::new(crate::forms::fixture::mark_assets());
+    crate::save::write_page_annots(&mut f.pdf, &mut dict, marks.iter(), None, &[], &mut cx);
     *f.dict(page) = dict;
     f
 }
@@ -428,6 +428,54 @@ fn a_stale_mark_is_another_tools_comment() {
     }
 }
 
+/// A page stamp written where its page couldn't be found, and an
+/// attachment written without its file, hold neither: each opens as
+/// another tool's comment, as a stale mark does, and a save of an edit of
+/// the page's other mark keeps them as they are.
+#[test]
+fn a_mark_without_its_page_or_file_is_another_tools_comment() {
+    let every = crate::forms::fixture::every_mark_kind();
+    // The note (2), the page stamp (18) and the attachment (24).
+    let marks = [every[1].clone(), every[17].clone(), every[23].clone()];
+    let mut f = Form::new(1);
+    let mut page = f.dict(f.pages[0]).clone();
+    // A document that has neither.
+    let assets = crate::assets::MarkAssets::new(Store::new());
+    let mut cx = WriteCx::new(std::sync::Arc::new(assets));
+    crate::save::write_page_annots(&mut f.pdf, &mut page, marks.iter(), None, &[], &mut cx);
+    *f.dict(f.pages[0]) = page;
+    let Opened { mut doc, view } = opened(f.bytes());
+    let page = doc.page(0).unwrap().id;
+    let mut note = doc.state().annots_on(page).unwrap()[0].clone();
+    assert_eq!(note.id, AnnotId(2));
+    assert_eq!(doc.state().annots_on(page).unwrap().len(), 1);
+    let theirs = |foreign: &[crate::file::ForeignAnnot]| -> Vec<(String, String)> {
+        foreign
+            .iter()
+            .map(|f| (f.name.clone(), f.subtype.clone()))
+            .collect()
+    };
+    let want = [
+        ("sheaf:18".to_string(), "Stamp".to_string()),
+        ("sheaf:24".to_string(), "FileAttachment".to_string()),
+    ];
+    assert_eq!(theirs(&view.foreign), want);
+    note.contents = "Edited in sheaf".into();
+    doc.apply(Edit::AnnotUpdate { page, annot: note }, "Edit")
+        .unwrap();
+    let snap = doc.snapshot();
+    for saved in [
+        crate::save::rewrite(&snap).unwrap(),
+        crate::incremental::incremental(&snap).unwrap(),
+    ] {
+        let pdf = Pdf::load_mem(&saved).unwrap();
+        let found = crate::file::annots_in(&pdf, pdf.page_iter());
+        assert_eq!(found.sheaf[&0].len(), 1);
+        assert_eq!(theirs(&found.foreign), want);
+        assert!(found.assets.stamps.is_empty() && found.assets.files.is_empty());
+    }
+}
+
 /// A mark another tool has only written out again stays sheaf's: its
 /// reals reformatted (whole ones as integers, integers as reals, the rest
 /// to three decimals, as many writers write them), `/Contents` as UTF-16BE
@@ -561,8 +609,8 @@ fn a_page_copied_by_another_tool_gets_fresh_ids() {
     let marks = [every[1].clone(), every[3].clone(), every[15].clone()];
     let mut f = Form::new(2);
     let mut page = f.dict(f.pages[0]).clone();
-    let mut forms = Default::default();
-    crate::save::write_page_annots(&mut f.pdf, &mut page, marks.iter(), None, &[], &mut forms);
+    let mut cx = WriteCx::new(crate::forms::fixture::mark_assets());
+    crate::save::write_page_annots(&mut f.pdf, &mut page, marks.iter(), None, &[], &mut cx);
     *f.dict(f.pages[0]) = page;
     let originals = f.annots(0);
     let mut copies: Vec<ObjectId> = originals

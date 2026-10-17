@@ -39,7 +39,7 @@ impl BlobId {
     }
 }
 
-/// What a blob is. PDFs only, for now: images and attachments come with
+/// What a blob is: a PDF, or a file a mark attaches. Images come with
 /// what interns them.
 pub enum BlobKind {
     Pdf {
@@ -47,6 +47,8 @@ pub enum BlobKind {
         password: Option<Zeroizing<String>>,
         origin: Origin,
     },
+    /// The bytes of a file an attachment mark holds.
+    Attachment,
 }
 
 impl BlobKind {
@@ -73,6 +75,9 @@ pub enum MemoryKind {
     /// A copy sheaf made of another source's pages: cropped, watermarked,
     /// a header and footer stripped. Gone when those are edits (slice 17).
     Derived,
+    /// A page stamp's one-page PDF, from the stamp library or made from a
+    /// placed stamp's page, as one placed or pasted is.
+    Library,
 }
 
 /// Two different byte strings with one [`BlobId`]: the second isn't
@@ -234,6 +239,7 @@ impl Blob {
     pub fn password(&self) -> Option<&str> {
         match &self.0.kind {
             BlobKind::Pdf { password, .. } => password.as_deref().map(String::as_str),
+            BlobKind::Attachment => None,
         }
     }
 }
@@ -313,7 +319,9 @@ mod tests {
         let second = store.intern(bytes.into(), from_file("b.pdf")).unwrap();
         assert!(Arc::ptr_eq(&first.0, &second.0));
         assert_eq!(store.bytes(), first.len());
-        let BlobKind::Pdf { origin, .. } = second.kind();
+        let BlobKind::Pdf { origin, .. } = second.kind() else {
+            panic!("a PDF")
+        };
         assert_eq!(origin, &Origin::File(Path::new("a.pdf").into()));
         assert!(Arc::ptr_eq(&store.get(first.id()).unwrap().0, &first.0));
         let other = intern(&store, b"other bytes");

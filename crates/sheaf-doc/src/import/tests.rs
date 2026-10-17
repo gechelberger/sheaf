@@ -58,8 +58,7 @@ fn close(a: &serde_json::Value, b: &serde_json::Value) -> bool {
 fn round_trip(a: &Annot, turn: Rotation) {
     let a = &Annot { turn, ..a.clone() };
     let mut pdf = Pdf::with_version("1.7");
-    let mut forms = Default::default();
-    let mut main = crate::annot::to_pdf_in(a, &mut pdf, &mut forms).main;
+    let mut main = crate::annot::to_pdf(a, &mut pdf).main;
     main.remove(b"SheafAnnot");
     let back = convert(&pdf, &main, turn, Options::default())
         .unwrap_or_else(|e| panic!("{:?}: {e:?}", a.kind));

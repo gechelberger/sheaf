@@ -359,20 +359,7 @@ pub mod pdfium {
         let doc = pdfium()?
             .load_pdf_from_byte_slice(bytes, password)
             .context("pdfium loading")?;
-        let mut p = doc.pages().get(page.0 as i32)?;
-        // pdfium-render flattens what would print; make that what shows.
-        for mut a in p.annotations_mut().iter() {
-            let no_state = a.as_form_field().is_some_and(|f| {
-                let button = matches!(
-                    f.field_type(),
-                    PdfFormFieldType::Checkbox | PdfFormFieldType::RadioButton
-                );
-                button && f.appearance_stream().is_none()
-            });
-            let shown = !a.is_hidden() && !a.is_printable_but_not_viewable() && !no_state;
-            a.set_is_printed(shown)?;
-        }
-        p.flatten()?;
+        let p = flattened(&doc, page)?;
         let w = width.max(1);
         let h = ((w as f32) * p.height().value / p.width().value.max(1.0))
             .round()
@@ -389,6 +376,42 @@ pub mod pdfium {
             format: PixelFormat::Rgba,
             data: bmp.as_rgba_bytes(),
         })
+    }
+
+    /// Page `page`'s text as a viewer that draws only appearance streams
+    /// has it: the text PDFium reads from the page flattened as
+    /// [`render_appearances`] flattens it, so an annotation's text is
+    /// read from the codes and fonts its appearance draws with.
+    pub fn appearance_text(
+        bytes: &[u8],
+        password: Option<&str>,
+        page: PageIndex,
+    ) -> Result<String> {
+        let _pdfium = lock();
+        let doc = pdfium()?
+            .load_pdf_from_byte_slice(bytes, password)
+            .context("pdfium loading")?;
+        Ok(flattened(&doc, page)?.text()?.all())
+    }
+
+    /// Page `page` of `doc` with the appearances a viewer shows drawn into
+    /// it (see [`render_appearances`]).
+    fn flattened<'a>(doc: &PdfDocument<'a>, page: PageIndex) -> Result<PdfPage<'a>> {
+        let mut p = doc.pages().get(page.0 as i32)?;
+        // pdfium-render flattens what would print; make that what shows.
+        for mut a in p.annotations_mut().iter() {
+            let no_state = a.as_form_field().is_some_and(|f| {
+                let button = matches!(
+                    f.field_type(),
+                    PdfFormFieldType::Checkbox | PdfFormFieldType::RadioButton
+                );
+                button && f.appearance_stream().is_none()
+            });
+            let shown = !a.is_hidden() && !a.is_printable_but_not_viewable() && !no_state;
+            a.set_is_printed(shown)?;
+        }
+        p.flatten()?;
+        Ok(p)
     }
 
     impl Renderer for PdfiumEngine {

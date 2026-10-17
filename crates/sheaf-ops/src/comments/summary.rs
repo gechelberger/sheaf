@@ -3,17 +3,20 @@
 //! comments, with the numbers on the page where they are. The list is
 //! [`list`]'s, in its order and with its numbers, so it matches the CSV
 //! and text exports. Text is Helvetica in WinAnsi, as all of sheaf's
-//! generated text is (decision 11).
+//! generated text is (decision 11), a tickmark's check or cross in
+//! ZapfDingbats; each sheet is written with the content toolkit's
+//! [`ContentWriter`].
 
 use std::collections::BTreeMap;
-use std::io::Write;
 
 use anyhow::{Context, Result, bail};
-use lopdf::{Document as Pdf, Object, ObjectId, Stream, dictionary};
+use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
 use sheaf_core::PageSize;
+use sheaf_doc::content::{
+    Color, ContentWriter, Font, Paint, Res, ResObjects, Reserved, Std14, wrap_with,
+};
 use sheaf_doc::file::ForeignAnnot;
-use sheaf_doc::geom::Geom;
-use sheaf_doc::stamps::{helvetica_advance, pdf_literal};
+use sheaf_doc::stamp_lib::PageForm;
 use sheaf_doc::{Box2, Pt, Snapshot, SourceId};
 
 use super::{CommentFilter, Listing, Sort, Thread, list, meta, numbers};
@@ -102,8 +105,8 @@ fn comments_only(
         y: w.size.height - margin,
     };
     let sheet = w.sheet();
-    for line in wrap(title, f.x1 - f.x0, 16.0, true) {
-        sheet.text(f.x0, f.y - 16.0, 16.0, true, BLACK, &line);
+    for line in wrap_with(title, f.x1 - f.x0, |t| measure(t, 16.0, true)) {
+        sheet.label(f.x0, f.y - 16.0, 16.0, true, BLACK, &line);
         f.y -= 20.0;
     }
     let about = format!(
@@ -112,12 +115,13 @@ fn comments_only(
         if listing.count == 1 { "" } else { "s" },
         cf.sort.label().to_lowercase()
     );
-    sheet.text(f.x0, f.y - 9.0, 9.0, false, GRAY, &about);
+    sheet.label(f.x0, f.y - 9.0, 9.0, false, GRAY, &about);
     f.y -= 13.0;
     let filtered = cf.describe();
     if !filtered.is_empty() {
-        for line in wrap(&format!("Filtered: {filtered}"), f.x1 - f.x0, 9.0, false) {
-            sheet.text(f.x0, f.y - 9.0, 9.0, false, GRAY, &line);
+        let filtered = format!("Filtered: {filtered}");
+        for line in wrap_with(&filtered, f.x1 - f.x0, |t| measure(t, 9.0, false)) {
+            sheet.label(f.x0, f.y - 9.0, 9.0, false, GRAY, &line);
             f.y -= 13.0;
         }
     }
@@ -126,7 +130,7 @@ fn comments_only(
     f.y -= 10.0;
     if listing.count == 0 {
         w.sheet()
-            .text(f.x0, f.y - 10.0, 10.0, false, GRAY, "No comments to list.");
+            .label(f.x0, f.y - 10.0, 10.0, false, GRAY, "No comments to list.");
         return;
     }
     let mut n = 0;
@@ -139,10 +143,10 @@ fn comments_only(
             sheet.fill_rect(x, f.y - 10.0, 9.0, 9.0, rgb(c));
             x += 14.0;
         }
-        sheet.text(x, f.y - 11.0, 11.0, true, BLACK, &g.label);
+        sheet.label(x, f.y - 11.0, 11.0, true, BLACK, &g.label);
         let count = format!("  ·  {}", g.threads.len());
-        sheet.text(
-            x + width(&g.label, 11.0, true),
+        sheet.label(
+            x + measure(&g.label, 11.0, true),
             f.y - 11.0,
             9.0,
             false,
@@ -177,7 +181,7 @@ fn pages(
         w.new_sheet();
         let (x, y) = (w.margin, w.size.height - w.margin);
         w.sheet()
-            .text(x, y - 10.0, 10.0, false, GRAY, "No comments to list.");
+            .label(x, y - 10.0, 10.0, false, GRAY, "No comments to list.");
         return Ok(());
     }
     let st = &snap.state;
@@ -196,10 +200,9 @@ fn pages(
     let forms = sheaf_doc::stamp_lib::page_forms(&printed, &printed_pages, &mut w.pdf)?;
     let (width, height, margin) = (w.size.width, w.size.height, w.margin);
     let mid = width / 2.0;
-    for ((&page, threads), (form, geom)) in by_page.iter().zip(forms) {
+    for ((&page, threads), form) in by_page.iter().zip(forms) {
         let picture = Picture {
             form,
-            geom,
             area: [
                 margin,
                 margin + FOOTER,
@@ -227,7 +230,7 @@ fn pages(
             } else {
                 heading.clone()
             };
-            w.sheet().text(f.x0, f.y - 12.0, 12.0, true, BLACK, &label);
+            w.sheet().label(f.x0, f.y - 12.0, 12.0, true, BLACK, &label);
             f.y -= 17.0;
             w.sheet().hline(f.x0, f.x1, f.y, RULE, 0.5);
             f.y -= 7.0;
@@ -244,10 +247,10 @@ fn pages(
 
 /// A page drawn on a sheet, with its comments' numbers.
 struct Picture {
-    form: ObjectId,
-    /// The printed page's boxes and rotation. It's the page's user space,
-    /// so the comments' places, in PageSpace, are on it.
-    geom: Geom,
+    /// The printed page as a form, which draws it as it shows. Its
+    /// geometry is the page's user space, so the comments' places, in
+    /// PageSpace, are on it.
+    form: PageForm,
     /// Where it goes: x, y, width, height.
     area: [f32; 4],
     /// Each comment's place, color and number.
@@ -260,7 +263,7 @@ impl Picture {
         let PageSize {
             width: dw,
             height: dh,
-        } = self.geom.shown();
+        } = self.form.geom.shown();
         if dw <= 0.0 || dh <= 0.0 {
             return;
         }
@@ -268,22 +271,21 @@ impl Picture {
         let (pw, ph) = (dw * s, dh * s);
         let left = bx + (bw - pw) / 2.0;
         let top = by + bh;
-        // User space → the sheet: shown on the page, then scaled into place.
-        let to_view = self.geom.to_view();
-        let at = |u: Pt| {
-            let d = to_view.apply(u);
-            (left + d.x * s, top - d.y * s)
-        };
-        let o = at(Pt { x: 0.0, y: 0.0 });
-        let ex = at(Pt { x: 1.0, y: 0.0 });
-        let ey = at(Pt { x: 0.0, y: 1.0 });
-        let m = [ex.0 - o.0, ex.1 - o.1, ey.0 - o.0, ey.1 - o.1, o.0, o.1];
-        let name = w.use_form(self.form);
         let sheet = w.sheet();
-        sheet.place(&name, m, [left, top - ph, pw, ph]);
+        let PageForm {
+            id, bbox, matrix, ..
+        } = self.form;
+        let shown = Box2 {
+            x: left,
+            y: top - ph,
+            w: pw,
+            h: ph,
+        };
+        sheet.place_form(Res::written(id), bbox, matrix, shown);
         sheet.stroke_rect(left, top - ph, pw, ph, RULE, 0.75);
         // Each number at its comment's top-left as the page shows.
         const R: f32 = 7.0;
+        let to_view = self.form.geom.to_view();
         for &(rect, color, n) in &self.markers {
             let r = to_view.apply_box(rect);
             let cx = (left + r.x * s).clamp(left + R, left + pw - R);
@@ -297,8 +299,8 @@ impl Picture {
             } else {
                 [1.0, 1.0, 1.0]
             };
-            sheet.text(
-                cx - width(&label, size, true) / 2.0,
+            sheet.label(
+                cx - measure(&label, size, true) / 2.0,
                 cy - size * 0.36,
                 size,
                 true,
@@ -344,14 +346,16 @@ fn draw_thread(
         let c = &e.comment;
         let x = f.x0 + e.depth.min(3) as f32 * INDENT;
         let tx = x + TEXT_X;
-        let number_w = width(&number, 9.0, true) + 6.0;
+        let number_w = measure(&number, 9.0, true) + 6.0;
         let about = meta(e, thread, labels, sort);
-        let about_lines = wrap(&about, (f.x1 - tx - number_w).max(40.0), META_SIZE, false);
+        let about_lines = wrap_with(&about, (f.x1 - tx - number_w).max(40.0), |t| {
+            measure(t, META_SIZE, false)
+        });
         let body = if c.state.is_none() { &c.body[..] } else { "" };
         let body_lines = if body.is_empty() {
             Vec::new()
         } else {
-            wrap(body, f.x1 - tx, BODY_SIZE, false)
+            wrap_with(body, f.x1 - tx, |t| measure(t, BODY_SIZE, false))
         };
         // An entry's first lines stay together.
         let first = META_LH + if body_lines.is_empty() { 0.0 } else { BODY_LH };
@@ -361,130 +365,84 @@ fn draw_thread(
             Some(col) => sheet.fill_rect(x, f.y - 8.5, 7.0, 7.0, rgb(col)),
             None => sheet.stroke_rect(x, f.y - 8.5, 7.0, 7.0, GRAY, 0.5),
         }
-        sheet.text(tx, f.y - 9.0, 9.0, true, BLACK, &number);
+        sheet.label(tx, f.y - 9.0, 9.0, true, BLACK, &number);
         for (i, line) in about_lines.iter().enumerate() {
             if i > 0 {
                 room(w, f, META_LH, fresh);
             }
             let lx = if i == 0 { tx + number_w } else { tx };
-            w.sheet().text(lx, f.y - 9.0, META_SIZE, false, GRAY, line);
+            w.sheet().label(lx, f.y - 9.0, META_SIZE, false, GRAY, line);
             f.y -= META_LH;
         }
         for line in &body_lines {
             room(w, f, BODY_LH, fresh);
             w.sheet()
-                .text(tx, f.y - 10.0, BODY_SIZE, false, BLACK, line);
+                .label(tx, f.y - 10.0, BODY_SIZE, false, BLACK, line);
             f.y -= BODY_LH;
         }
         f.y -= 5.0;
     }
 }
 
-/// One sheet of the summary: its drawing, and the pages drawn on it.
-#[derive(Default)]
-struct Sheet {
-    ops: Vec<u8>,
-    forms: Vec<(String, ObjectId)>,
+/// What the summary draws on a sheet, in the shapes it draws.
+trait Draw {
+    /// `s` from (`x`, `y`), as [`runs`] splits it.
+    fn label(&mut self, x: f32, y: f32, size: f32, bold: bool, color: [f32; 3], s: &str);
+    fn fill_rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: [f32; 3]);
+    fn stroke_rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: [f32; 3], line: f32);
+    fn hline(&mut self, x0: f32, x1: f32, y: f32, color: [f32; 3], line: f32);
+    /// A filled circle.
+    fn disc(&mut self, cx: f32, cy: f32, r: f32, color: [f32; 3]);
 }
 
-impl Sheet {
-    /// `s` from (`x`, `y`), in Helvetica; a tickmark's check or cross in
-    /// ZapfDingbats, as the tickmark itself is drawn.
-    fn text(&mut self, x: f32, y: f32, size: f32, bold: bool, color: [f32; 3], s: &str) {
-        let [r, g, b] = color;
-        let font = if bold { "F2" } else { "F1" };
-        let _ = write!(self.ops, "BT {r:.3} {g:.3} {b:.3} rg {x:.2} {y:.2} Td");
-        let mut run = String::new();
-        let flush = |ops: &mut Vec<u8>, run: &mut String, font: &str| {
-            if !run.is_empty() {
-                let _ = write!(ops, " /{font} {size} Tf (");
-                ops.extend(pdf_literal(run));
-                ops.extend_from_slice(b") Tj");
-                run.clear();
-            }
-        };
-        for c in s.chars() {
-            match dingbat(c) {
-                Some(d) => {
-                    flush(&mut self.ops, &mut run, font);
-                    run.push(d);
-                    flush(&mut self.ops, &mut run, "F3");
-                }
-                None => run.push(c),
-            }
+impl Draw for ContentWriter<'static> {
+    fn label(&mut self, x: f32, y: f32, size: f32, bold: bool, color: [f32; 3], s: &str) {
+        self.begin_text();
+        self.fill_color(Color::Rgb(color));
+        self.text_move(x, y);
+        for (font, run) in runs(s, bold) {
+            self.font(font, size);
+            self.text(&run);
         }
-        flush(&mut self.ops, &mut run, font);
-        self.ops.extend_from_slice(b" ET\n");
+        self.end_text();
     }
 
     fn fill_rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: [f32; 3]) {
-        let [r, g, b] = color;
-        let _ = writeln!(
-            self.ops,
-            "{r:.3} {g:.3} {b:.3} rg {x:.2} {y:.2} {w:.2} {h:.2} re f"
-        );
+        self.fill_color(Color::Rgb(color));
+        self.rect(x, y, w, h);
+        self.paint(Paint::Fill);
     }
 
     fn stroke_rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: [f32; 3], line: f32) {
-        let [r, g, b] = color;
-        let _ = writeln!(
-            self.ops,
-            "q {line} w {r:.3} {g:.3} {b:.3} RG {x:.2} {y:.2} {w:.2} {h:.2} re S Q"
-        );
+        self.save();
+        self.line_width(line);
+        self.stroke_color(Color::Rgb(color));
+        self.rect(x, y, w, h);
+        self.paint(Paint::Stroke);
+        self.restore();
     }
 
     fn hline(&mut self, x0: f32, x1: f32, y: f32, color: [f32; 3], line: f32) {
-        let [r, g, b] = color;
-        let _ = writeln!(
-            self.ops,
-            "q {line} w {r:.3} {g:.3} {b:.3} RG {x0:.2} {y:.2} m {x1:.2} {y:.2} l S Q"
-        );
+        self.save();
+        self.line_width(line);
+        self.stroke_color(Color::Rgb(color));
+        self.move_to(x0, y);
+        self.line_to(x1, y);
+        self.paint(Paint::Stroke);
+        self.restore();
     }
 
-    /// A filled circle, as four Béziers.
+    /// Four Béziers.
     fn disc(&mut self, cx: f32, cy: f32, r: f32, color: [f32; 3]) {
         let k = r * 0.5523;
-        let [cr, cg, cb] = color;
-        let _ = writeln!(
-            self.ops,
-            "{cr:.3} {cg:.3} {cb:.3} rg {:.2} {cy:.2} m \
-             {:.2} {:.2} {:.2} {:.2} {cx:.2} {:.2} c \
-             {:.2} {:.2} {:.2} {:.2} {:.2} {cy:.2} c \
-             {:.2} {:.2} {:.2} {:.2} {cx:.2} {:.2} c \
-             {:.2} {:.2} {:.2} {:.2} {:.2} {cy:.2} c f",
-            cx + r,
-            cx + r,
-            cy + k,
-            cx + k,
-            cy + r,
-            cy + r,
-            cx - k,
-            cy + r,
-            cx - r,
-            cy + k,
-            cx - r,
-            cx - r,
-            cy - k,
-            cx - k,
-            cy - r,
-            cy - r,
-            cx + k,
-            cy - r,
-            cx + r,
-            cy - k,
-            cx + r,
-        );
-    }
-
-    /// The form `name` drawn with matrix `m`, clipped to `clip`.
-    fn place(&mut self, name: &str, m: [f32; 6], clip: [f32; 4]) {
-        let [a, b, c, d, e, f] = m;
-        let [x, y, w, h] = clip;
-        let _ = writeln!(
-            self.ops,
-            "q {x:.2} {y:.2} {w:.2} {h:.2} re W n \
-             {a:.5} {b:.5} {c:.5} {d:.5} {e:.3} {f:.3} cm /{name} Do Q"
-        );
+        let at = |x: f32, y: f32| Pt { x, y };
+        self.fill_color(Color::Rgb(color));
+        self.move_to(cx + r, cy);
+        self.curve_to(at(cx + r, cy + k), at(cx + k, cy + r), at(cx, cy + r));
+        self.curve_to(at(cx - k, cy + r), at(cx - r, cy + k), at(cx - r, cy));
+        self.curve_to(at(cx - r, cy - k), at(cx - k, cy - r), at(cx, cy - r));
+        self.curve_to(at(cx + k, cy - r), at(cx + r, cy - k), at(cx + r, cy));
+        self.paint(Paint::Fill);
     }
 }
 
@@ -493,7 +451,7 @@ struct Writer {
     pdf: Pdf,
     size: PageSize,
     margin: f32,
-    sheets: Vec<Sheet>,
+    sheets: Vec<ContentWriter<'static>>,
 }
 
 impl Writer {
@@ -523,25 +481,14 @@ impl Writer {
     }
 
     fn new_sheet(&mut self) {
-        self.sheets.push(Sheet::default());
+        self.sheets.push(ContentWriter::new());
     }
 
-    fn sheet(&mut self) -> &mut Sheet {
+    fn sheet(&mut self) -> &mut ContentWriter<'static> {
         if self.sheets.is_empty() {
             self.new_sheet();
         }
         self.sheets.last_mut().expect("a sheet")
-    }
-
-    /// The name the current sheet draws `form` by.
-    fn use_form(&mut self, form: ObjectId) -> String {
-        let sheet = self.sheet();
-        if let Some((name, _)) = sheet.forms.iter().find(|(_, f)| *f == form) {
-            return name.clone();
-        }
-        let name = format!("P{}", sheet.forms.len());
-        sheet.forms.push((name.clone(), form));
-        name
     }
 
     /// The file: every sheet with its footer, titled `title`.
@@ -549,34 +496,18 @@ impl Writer {
         if self.sheets.is_empty() {
             self.new_sheet();
         }
-        let font = |pdf: &mut Pdf, base: &str| {
-            pdf.add_object(dictionary! {
-                "Type" => "Font",
-                "Subtype" => "Type1",
-                "BaseFont" => base,
-                "Encoding" => "WinAnsiEncoding",
-            })
-        };
-        let regular = font(&mut self.pdf, "Helvetica");
-        let bold = font(&mut self.pdf, "Helvetica-Bold");
-        let dingbats = self.pdf.add_object(dictionary! {
-            "Type" => "Font",
-            "Subtype" => "Type1",
-            "BaseFont" => "ZapfDingbats",
-        });
-        let fonts = self
-            .pdf
-            .add_object(dictionary! { "F1" => regular, "F2" => bold, "F3" => dingbats });
+        // Each font once in the file, however many sheets draw in it.
+        let mut res = ResObjects::default();
         let pages_id = self.pdf.new_object_id();
         let total = self.sheets.len();
         let (w, h, margin) = (self.size.width, self.size.height, self.margin);
         let mut kids = Vec::new();
         for (i, mut sheet) in std::mem::take(&mut self.sheets).into_iter().enumerate() {
             let number = format!("Page {} of {total}", i + 1);
-            let number_w = width(&number, 8.0, false);
+            let number_w = measure(&number, 8.0, false);
             let name = fit(title, w - 2.0 * margin - number_w - 24.0, 8.0);
-            sheet.text(margin, margin - 4.0, 8.0, false, GRAY, &name);
-            sheet.text(
+            sheet.label(margin, margin - 4.0, 8.0, false, GRAY, &name);
+            sheet.label(
                 w - margin - number_w,
                 margin - 4.0,
                 8.0,
@@ -584,17 +515,12 @@ impl Writer {
                 GRAY,
                 &number,
             );
-            let mut content = Stream::new(dictionary! {}, sheet.ops);
+            let (ops, needs) = sheet.finish(&Reserved::default(), &[]);
+            let mut content = Stream::new(dictionary! {}, ops);
             let _ = content.compress();
             let content = self.pdf.add_object(content);
-            let mut resources = dictionary! { "Font" => fonts };
-            if !sheet.forms.is_empty() {
-                let mut xobjects = lopdf::Dictionary::new();
-                for (name, id) in sheet.forms {
-                    xobjects.set(name, id);
-                }
-                resources.set("XObject", xobjects);
-            }
+            let mut resources = Dictionary::new();
+            res.bind(&mut self.pdf, &needs, &mut resources);
             kids.push(Object::Reference(self.pdf.add_object(dictionary! {
                 "Type" => "Page",
                 "Parent" => pages_id,
@@ -628,67 +554,47 @@ impl Writer {
     }
 }
 
-fn width(s: &str, size: f32, bold: bool) -> f32 {
-    s.chars()
-        .map(|c| match dingbat(c) {
-            Some('4') => 846.0,
-            Some(_) => 778.0,
-            None => helvetica_advance(c, bold),
-        })
-        .sum::<f32>()
-        * size
-        / 1000.0
-}
-
-/// A tickmark's check or cross, as ZapfDingbats has it.
-fn dingbat(c: char) -> Option<char> {
-    match c {
-        '✓' | '✔' => Some('4'),
-        '✗' | '✘' => Some('8'),
-        _ => None,
-    }
-}
-
-/// `s` in lines no wider than `max`; a word wider than a line is broken.
-fn wrap(s: &str, max: f32, size: f32, bold: bool) -> Vec<String> {
-    let fits = |t: &str| width(t, size, bold) <= max;
-    let mut out = Vec::new();
-    for para in s.split('\n') {
-        let mut line = String::new();
-        for word in para.split(' ').filter(|w| !w.is_empty()) {
-            let joined = if line.is_empty() {
-                word.to_string()
-            } else {
-                format!("{line} {word}")
-            };
-            if fits(&joined) {
-                line = joined;
-                continue;
-            }
-            if !line.is_empty() {
-                out.push(std::mem::take(&mut line));
-            }
-            for c in word.chars() {
-                line.push(c);
-                if !fits(&line) && line.chars().count() > 1 {
-                    line.pop();
-                    out.push(std::mem::replace(&mut line, c.to_string()));
-                }
-            }
+/// `s` in runs by the font that draws them: Helvetica, bold or not, where
+/// it has the character, and ZapfDingbats where only it has. A
+/// tickmark's check or cross draws as the tickmark itself does
+/// (`annot::tick_glyph`).
+fn runs(s: &str, bold: bool) -> Vec<(&'static Std14, String)> {
+    let text = if bold {
+        &Std14::HelveticaBold
+    } else {
+        &Std14::Helvetica
+    };
+    let mut out: Vec<(&'static Std14, String)> = Vec::new();
+    for c in s.chars().map(sheaf_doc::annot::tick_glyph) {
+        let font = if !text.covers(c) && Std14::ZapfDingbats.covers(c) {
+            &Std14::ZapfDingbats
+        } else {
+            text
+        };
+        match out.last_mut() {
+            Some((f, run)) if *f == font => run.push(c),
+            _ => out.push((font, c.to_string())),
         }
-        out.push(line);
     }
     out
 }
 
+/// How far `s` advances, drawn as [`Draw::label`] draws it.
+fn measure(s: &str, size: f32, bold: bool) -> f32 {
+    runs(s, bold)
+        .iter()
+        .map(|(font, run)| font.width(run, size))
+        .sum()
+}
+
 /// `s` cut to `max` wide, with "…" when cut.
 fn fit(s: &str, max: f32, size: f32) -> String {
-    if width(s, size, false) <= max {
+    if measure(s, size, false) <= max {
         return s.to_string();
     }
     let mut out = String::new();
     for c in s.chars() {
-        if width(&format!("{out}{c}…"), size, false) > max {
+        if measure(&format!("{out}{c}…"), size, false) > max {
             break;
         }
         out.push(c);
@@ -711,23 +617,43 @@ mod tests {
 
     #[test]
     fn text_wraps_at_words_and_breaks_long_ones() {
-        let lines = wrap(
-            "the quick brown fox",
-            width("brown fox", 10.0, false),
-            10.0,
-            false,
+        let lines = |s: &str, max: f32| wrap_with(s, max, |t| measure(t, 10.0, false));
+        assert_eq!(
+            lines("the quick brown fox", measure("brown fox", 10.0, false)),
+            ["the quick", "brown fox"]
         );
-        assert_eq!(lines, ["the quick", "brown fox"]);
-        let long = wrap("abcdefghij", width("abcd", 10.0, false), 10.0, false);
+        let long = lines("abcdefghij", measure("abcd", 10.0, false));
         assert!(long.len() >= 3 && long.concat() == "abcdefghij", "{long:?}");
-        assert_eq!(wrap("", 100.0, 10.0, false), [""]);
+        assert_eq!(lines("", 100.0), [""]);
+    }
+
+    /// Ticks draw in ZapfDingbats, the heavy check and cross, and are as
+    /// wide as it draws them; the rest is Helvetica's.
+    #[test]
+    fn ticks_draw_and_measure_in_zapf_dingbats() {
+        let found = runs("Tickmark ✓ ✗ ✔", false);
+        let fonts: Vec<_> = found.iter().map(|(f, run)| (**f, run.as_str())).collect();
+        assert_eq!(
+            fonts,
+            [
+                (Std14::Helvetica, "Tickmark "),
+                (Std14::ZapfDingbats, "✔"),
+                (Std14::Helvetica, " "),
+                (Std14::ZapfDingbats, "✘"),
+                (Std14::Helvetica, " "),
+                (Std14::ZapfDingbats, "✔"),
+            ]
+        );
+        assert_eq!(Std14::ZapfDingbats.encode("✔✘").0, b"48");
+        let width = measure("a✓", 10.0, true);
+        assert_eq!(width, (556.0 + 846.0) * 10.0 / 1000.0);
     }
 
     #[test]
     fn a_long_title_is_cut_to_fit() {
         let cut = fit("A rather long document title.pdf", 60.0, 8.0);
         assert!(
-            cut.ends_with('…') && width(&cut, 8.0, false) <= 60.0,
+            cut.ends_with('…') && measure(&cut, 8.0, false) <= 60.0,
             "{cut}"
         );
         assert_eq!(fit("short", 60.0, 8.0), "short");

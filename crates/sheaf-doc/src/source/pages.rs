@@ -240,14 +240,7 @@ impl<'a> Walk<'a> {
             user_unit,
             ..Geom::read(self.rect(media)?, self.rect(crop)?, degrees)
         };
-        let contents = match dict.get(b"Contents") {
-            Ok(Object::Reference(id)) => vec![*id],
-            Ok(Object::Array(streams)) => streams
-                .iter()
-                .filter_map(|s| s.as_reference().ok())
-                .collect(),
-            _ => Vec::new(),
-        };
+        let contents = crate::content::contents(dict);
         let annots = self.annots(dict)?;
         let page = PageFacts {
             id,

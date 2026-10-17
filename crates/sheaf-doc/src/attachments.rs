@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use lopdf::{Dictionary, Document as Pdf, LazyPdf, Object, ObjectId};
 
 use crate::Source;
+use crate::assets::MarkAssets;
 use crate::file::pdf_text;
 
 /// Where an attachment lives, stable across reloads of the same file.
@@ -17,8 +18,8 @@ pub enum AttachmentRef {
     Named(String),
     /// The `n`th file-attachment annotation on page `page` (file order).
     Annot { page: u32, n: u32 },
-    /// One of sheaf's, by its bytes' name in the cache
-    /// (`generated::store_blob`): saved or not yet.
+    /// One of sheaf's, by the stem its mark names its file by, which the
+    /// document's [`MarkAssets`] find: saved or not yet.
     Cached(String),
 }
 
@@ -111,22 +112,22 @@ pub fn attachments_in<P: Objects + ?Sized>(
 }
 
 /// The bytes of attachment `at` in `src`, its pages numbered as its page
-/// table numbers them, as they're listed.
-pub fn read_attachment(src: &Source, at: &AttachmentRef) -> Result<Vec<u8>> {
-    attachment_bytes(src.pdf(), src.page_ids(), at)
+/// table numbers them, as they're listed; one of sheaf's from `assets`,
+/// the document's.
+pub fn read_attachment(src: &Source, assets: &MarkAssets, at: &AttachmentRef) -> Result<Vec<u8>> {
+    attachment_bytes(src.pdf(), src.page_ids(), assets, at)
 }
 
 /// The bytes of attachment `at` in a file whose page objects, by index,
-/// are `pages`.
+/// are `pages`, in a document whose marks' files are `assets`.
 pub fn attachment_bytes<P: Objects + ?Sized>(
     pdf: &P,
     pages: impl IntoIterator<Item = ObjectId>,
+    assets: &MarkAssets,
     at: &AttachmentRef,
 ) -> Result<Vec<u8>> {
     if let AttachmentRef::Cached(stem) = at {
-        let p = crate::generated::blob_path(stem)
-            .with_context(|| format!("{stem:?} isn't a cache name"))?;
-        return std::fs::read(&p).with_context(|| format!("reading {}", p.display()));
+        return Ok(assets.file_bytes(stem)?.to_vec());
     }
     let spec = match at {
         AttachmentRef::Named(key) => name_tree(pdf, b"EmbeddedFiles")
@@ -135,7 +136,7 @@ pub fn attachment_bytes<P: Objects + ?Sized>(
             .and_then(|(_, o)| resolve(pdf, o))
             .and_then(|o| o.as_dict().ok())
             .with_context(|| format!("no embedded file named {key:?}"))?,
-        AttachmentRef::Cached(_) => unreachable!("read from the cache above"),
+        AttachmentRef::Cached(_) => unreachable!("read from the document's files above"),
         AttachmentRef::Annot { page, n } => {
             let page_id = pages
                 .into_iter()
@@ -165,6 +166,11 @@ pub fn attachment_bytes<P: Objects + ?Sized>(
         .and_then(|o| resolve(pdf, o))
         .and_then(|o| o.as_stream().ok())
         .context("embedded file stream missing")?;
+    file_bytes(stream)
+}
+
+/// An embedded file stream's bytes, decoded.
+pub(crate) fn file_bytes(stream: &lopdf::Stream) -> Result<Vec<u8>> {
     if stream.dict.get(b"Filter").is_err() {
         return Ok(stream.content.clone());
     }
@@ -493,7 +499,8 @@ pub(crate) mod tests {
     fn reads_bytes_plain_and_compressed() {
         let pdf = sample();
         let list = attachments_in(&pdf, pdf.page_iter());
-        let bytes = |at: &AttachmentRef| attachment_bytes(&pdf, pdf.page_iter(), at);
+        let assets = MarkAssets::new(crate::Store::new());
+        let bytes = |at: &AttachmentRef| attachment_bytes(&pdf, pdf.page_iter(), &assets, at);
         assert_eq!(bytes(&list[0].at).unwrap(), b"hello");
         assert_eq!(bytes(&list[1].at).unwrap(), b"%PDF-1.4 tiny");
         assert_eq!(bytes(&list[2].at).unwrap(), b"annot bytes");
@@ -509,10 +516,11 @@ pub(crate) mod tests {
         let src = crate::open::tests::lazily(&mut pdf);
         let list = attachments_in(&pdf, pdf.page_iter());
         assert_eq!(attachments_in(src.pdf(), src.page_ids()), list);
+        let assets = MarkAssets::new(crate::Store::new());
         for a in &list {
             assert_eq!(
-                read_attachment(&src, &a.at).unwrap(),
-                attachment_bytes(&pdf, pdf.page_iter(), &a.at).unwrap(),
+                read_attachment(&src, &assets, &a.at).unwrap(),
+                attachment_bytes(&pdf, pdf.page_iter(), &assets, &a.at).unwrap(),
                 "{}",
                 a.name
             );

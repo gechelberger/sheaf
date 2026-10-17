@@ -21,6 +21,7 @@ use gpui::{
     img, point, prelude::*, px, relative, rgb, rgba,
 };
 use sheaf_core::{PageIndex, PageSize, Rotation};
+use sheaf_doc::assets::MarkAssets;
 use sheaf_doc::geom::{Affine, Geom};
 use sheaf_doc::save;
 use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, Pt};
@@ -224,14 +225,16 @@ pub(crate) struct Doc {
 }
 
 /// What an inserted or replacing file brings besides its pages, read on
-/// a background thread: sheaf's own marks (which the edit carries in),
-/// other tools' comments, its bookmarks, and its form.
+/// a background thread: sheaf's own marks (which the edit carries in) and
+/// what they hold, other tools' comments, its bookmarks, and its form.
 #[derive(Default)]
 pub(crate) struct Incoming {
     pub marks: HashMap<u32, Vec<sheaf_doc::Annot>>,
     /// The marks given new ids as the file was read, with the ids their
     /// `/NM`s still say.
     pub renamed: Vec<sheaf_doc::open::Renamed>,
+    /// The marks' stamps' pages and attachments' files.
+    pub assets: sheaf_doc::assets::SourceAssets,
     pub foreign: Vec<sheaf_doc::file::ForeignAnnot>,
     pub outline: Vec<sheaf_doc::FlatOutlineItem>,
     pub form: sheaf_doc::forms::FileForm,
@@ -244,6 +247,7 @@ impl Incoming {
         Incoming {
             marks: facts.marks,
             renamed: facts.renamed,
+            assets: facts.assets,
             foreign: facts.foreign,
             outline: facts.outline,
             form: facts.form,
@@ -1382,6 +1386,10 @@ impl DocView {
                 if let Some(form) = doc.model.form_notice(&out, true, true) {
                     let n = doc.notice.take().unwrap_or_default();
                     doc.notice = Some(format!("{n}. {form}"));
+                }
+                if let Some(text) = doc.model.unencodable_notice(&out) {
+                    let n = doc.notice.take().unwrap_or_default();
+                    doc.notice = Some(format!("{n}. {text}"));
                 }
                 doc.touched();
                 self.after_model_change(label.to_string(), out, cx);
@@ -2742,6 +2750,7 @@ impl DocView {
                 let mixed = doc.model.scripts_mixed();
                 doc.model.set_source_form(sid, incoming.form.clone());
                 doc.model.set_source_renamed(sid, &incoming.renamed);
+                doc.model.set_source_assets(sid, &incoming.assets);
                 match doc.model.apply(
                     Edit::InsertPages {
                         source: sid,
@@ -2773,6 +2782,10 @@ impl DocView {
                         if let Some(form) = doc.model.form_notice(&out, false, mixed) {
                             let n = doc.notice.take().unwrap_or_default();
                             doc.notice = Some(format!("{n}. {form}"));
+                        }
+                        if let Some(text) = doc.model.unencodable_notice(&out) {
+                            let n = doc.notice.take().unwrap_or_default();
+                            doc.notice = Some(format!("{n}. {text}"));
                         }
                         if timing {
                             eprintln!(
@@ -3679,17 +3692,21 @@ fn drawn_marks(st: &sheaf_doc::DocState) -> Vec<(u32, Vec<String>)> {
 
 /// Read the third-party comments in `src`, the file a save wrote, in the
 /// background and list them as `source`'s (after a save, the file's pages
-/// have new numbers).
+/// have new numbers), and what sheaf's marks hold in it, which is where
+/// they're found from then on: a file attached since the last save is the
+/// saved file's.
 fn reread_foreign(source: SourceId, src: sheaf_doc::Src, cx: &mut Context<DocView>) {
     cx.spawn(async move |this, cx| {
-        let foreign = cx
+        let found = cx
             .background_executor()
-            .spawn(async move { sheaf_doc::file::annots_in(src.pdf(), src.page_ids()).foreign })
+            .spawn(async move { sheaf_doc::file::annots_in(src.pdf(), src.page_ids()) })
             .await;
         this.update(cx, |view, cx| {
             if let State::Ready(doc) = &mut view.state
                 && doc.model.primary() == source
             {
+                let foreign = found.foreign;
+                doc.model.set_saved_assets(source, &found.assets);
                 doc.foreign_annots.retain(|(s, _)| *s != source);
                 doc.foreign_annots
                     .extend(foreign.into_iter().map(|f| (source, f)));
@@ -4233,8 +4250,9 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
     if let Some(list) = doc.model.state().annots_on(pl.pref.id)
         && !doc.comments_hidden
     {
+        let assets = doc.model.assets();
         for a in list.iter().filter(|a| !doc.hidden_marks.contains(&a.id)) {
-            page_div = page_div.children(annot_elements(a, &to_pane, size, k));
+            page_div = page_div.children(annot_elements(a, assets, &to_pane, size, k));
         }
     }
     // Selection outlines; handles when one mark is selected and nothing is
@@ -5366,9 +5384,11 @@ fn caret_element(at: Box2, color: gpui::Rgba, m: &Affine, shown: PageSize, k: f3
 /// GPUI elements for one mark, positioned in page-local logical px:
 /// `to_pane` takes PageSpace onto the page as drawn, `shown` in size, at
 /// `k` logical px a point. The mark is laid out as it reads (upright),
-/// then turned onto the page, as the file draws it.
+/// then turned onto the page, as the file draws it; a page stamp's page
+/// is one of `assets`, its document's.
 pub(crate) fn annot_elements(
     a: &Annot,
+    assets: &Arc<MarkAssets>,
     to_pane: &Affine,
     shown: PageSize,
     k: f32,
@@ -5579,8 +5599,8 @@ pub(crate) fn annot_elements(
                 // GPUI can't turn text: a picture of the tape as the file
                 // draws it.
                 let el = match crate::stamp_preview::tape_picture(a) {
-                    Some(path) => {
-                        place(*rect).child(img(path).size_full().object_fit(ObjectFit::Fill))
+                    Some(image) => {
+                        place(*rect).child(img(image).size_full().object_fit(ObjectFit::Fill))
                     }
                     None => place(*rect)
                         .bg(paper)
@@ -5718,10 +5738,10 @@ pub(crate) fn annot_elements(
             name,
             text,
         } => {
-            let el = match crate::stamp_preview::picture(stamp) {
-                Some(path) => place(*rect)
+            let el = match crate::stamp_preview::picture(stamp, assets) {
+                Some(image) => place(*rect)
                     .opacity(a.opacity.clamp(0.0, 1.0))
-                    .child(img(path).size_full().object_fit(ObjectFit::Fill)),
+                    .child(img(image).size_full().object_fit(ObjectFit::Fill)),
                 // Until its picture is made (a moment), its name in a box.
                 None => place(*rect)
                     .border_1()
