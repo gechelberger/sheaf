@@ -1436,7 +1436,27 @@ fn progress_reports_and_cancels() {
     // Runs to the end without a tracker.
     run(&p, "count", None, ctx(&d)).unwrap();
 
-    let tracker = sheaf_progress::Tracker::new();
+    // And with one: its tasks are freed, so the step goes back to the
+    // call's own, which counts nothing, and the message stays.
+    let tracker = in_progress::Tracker::new();
+    let mut c = ctx(&d);
+    c.progress = Some(tracker.clone());
+    run(&p, "count", None, c).unwrap();
+    let s = tracker.snapshot();
+    assert_eq!(
+        (s.fraction, s.step.as_str(), s.total, s.message_count),
+        (Some(1.0), "", None, 1)
+    );
+
+    // A task left short of its total, which the host frees, fills its part.
+    let tracker = in_progress::Tracker::new();
+    let mut c = ctx(&d);
+    c.progress = Some(tracker.clone());
+    run(&p, "early", None, c).unwrap();
+    let s = tracker.snapshot();
+    assert_eq!((s.fraction, s.step.as_str()), (Some(1.0), ""));
+
+    let tracker = in_progress::Tracker::new();
     let mut c = ctx(&d);
     c.progress = Some(tracker.clone());
     let rx = p.run_command("count", None, c);
@@ -1447,7 +1467,7 @@ fn progress_reports_and_cancels() {
         if s.done >= 20 {
             assert_eq!(
                 s.message,
-                Some((sheaf_progress::Level::Info, "ten done".into()))
+                Some((in_progress::Level::Info, "ten done".into()))
             );
             assert!(s.fraction.unwrap() > 0.0);
             break;
@@ -1464,7 +1484,41 @@ fn progress_reports_and_cancels() {
         }
         other => panic!("expected a stop, got {other:?}"),
     }
+    // A stopped task keeps its place.
+    let s = tracker.snapshot();
+    assert!(s.cancelled && s.fraction.unwrap() < 1.0, "{s:?}");
     assert_eq!(p.status(), Status::Ready);
+}
+
+/// Tasks past the cap on live ones get trackers nobody sees: none of them
+/// moves the bar, takes the step or shows a message. Stopping the call
+/// still reaches them.
+#[test]
+fn tasks_past_the_cap_leave_the_bar_alone() {
+    let p = load("many-steps", Limits::default());
+    let d = doc(1);
+    let tracker = in_progress::Tracker::new();
+    let mut c = ctx(&d);
+    c.progress = Some(tracker.clone());
+    let rx = p.run_command("many-steps", None, c);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let s = tracker.snapshot();
+        if s.message.as_ref().is_some_and(|(_, m)| m == "made") {
+            assert_eq!(
+                (s.fraction, s.step.as_str(), s.message_count),
+                (Some(0.0), "Many", 1)
+            );
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "no message: {s:?}");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    tracker.cancel();
+    match block_on(rx).expect("reply") {
+        Err(PluginError::Failed(m)) => assert_eq!(m, "Stopped"),
+        other => panic!("expected a stop, got {other:?}"),
+    }
 }
 
 /// The 0.2 build of the test plugin (`fixtures/test-plugin-0.2`, built

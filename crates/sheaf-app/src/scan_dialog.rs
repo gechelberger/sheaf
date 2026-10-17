@@ -20,7 +20,7 @@ use sheaf_image::clean::{Mode, Stage};
 use sheaf_ocr::OcrConfig;
 use sheaf_ops::images::Paper;
 use sheaf_ops::scan::ScanOptions;
-use sheaf_ops::{Cancelled, NoProgress, Tracker};
+use sheaf_ops::{NoProgress, Tracker, was_cancelled};
 use sheaf_ui::button::{Button, Chip};
 use sheaf_ui::{dialog, theme};
 
@@ -395,7 +395,7 @@ impl ScanDialog {
                         path: out,
                         opts: d.opts.clone(),
                     }),
-                    Err(e) if e.is::<Cancelled>() => d.error = Some("Stopped".into()),
+                    Err(e) if was_cancelled(&e) => d.error = Some("Stopped".into()),
                     Err(e) => d.error = Some(format!("{e:#}")),
                 }
                 cx.notify();

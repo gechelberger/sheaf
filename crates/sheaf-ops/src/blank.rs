@@ -17,12 +17,12 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use anyhow::{Context, Result};
+use in_progress::Progress;
 use serde::{Deserialize, Serialize};
 use sheaf_core::{PageIndex, Rotation};
-use sheaf_doc::{Document, Edit, NewOutlineItem, PageId, Snapshot, SourceId};
+use sheaf_doc::{Document, Edit, NewOutlineItem, PAGES, PageId, Snapshot, SourceId};
 use sheaf_image::blank::{Sensitivity, Verdict, is_blank};
 use sheaf_image::raster::PixelFormat;
-use sheaf_progress::{Progress, Unit};
 use sheaf_render::{Job, Renderer};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,7 +113,7 @@ pub fn find(
         Some(ix) => ix.iter().copied().filter(|&i| i < pages.len()).collect(),
         None => (0..pages.len()).collect(),
     };
-    progress.set_total(Some(wanted.len() as u64), Unit::Pages);
+    progress.set_total(Some(wanted.len() as u64), PAGES);
     let mut by_source: BTreeMap<SourceId, Vec<usize>> = BTreeMap::new();
     for &i in &wanted {
         by_source.entry(pages[i].source).or_default().push(i);

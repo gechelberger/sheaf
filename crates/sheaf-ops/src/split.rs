@@ -6,9 +6,9 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
+use in_progress::{Level, Progress, Unit};
 use serde::{Deserialize, Serialize};
-use sheaf_doc::{PageId, Snapshot};
-use sheaf_progress::{Level, Progress, Unit};
+use sheaf_doc::{PAGES, PageId, Snapshot};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -160,7 +160,7 @@ pub fn split(
         bail!("{} already exists", p.display());
     }
     let step = progress.child("writing", 1.0);
-    step.set_total(Some(parts.len() as u64), Unit::Items);
+    step.set_total(Some(parts.len() as u64), Unit::ITEMS);
     for (i, (part, path)) in parts.iter().zip(&paths).enumerate() {
         step.check()?;
         sheaf_doc::save::extract_pages(snap, &part.pages, path)?;
@@ -180,7 +180,7 @@ fn by_size(snap: &Snapshot, max: u64, stem: &str, progress: &dyn Progress) -> Re
     if max == 0 {
         bail!("the size limit must be more than zero");
     }
-    progress.set_total(Some(pages.len() as u64), Unit::Pages);
+    progress.set_total(Some(pages.len() as u64), PAGES);
     let fits = |from: usize, to: usize| -> Result<bool> {
         progress.check()?;
         Ok(sheaf_doc::save::extract_bytes(snap, &pages[from..to])?.len() as u64 <= max)

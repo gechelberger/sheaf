@@ -266,9 +266,12 @@ and needs no permission for it. Declare its keys in the manifest
 **`progress`** (0.2.1): for long commands. `task(label, total, unit)` shows
 in the document's status bar as "label: 12 of 300 pages…" with a progress
 strip; `set`, `inc` and `set-total` move it, `message` replaces the line,
-and `child(label, weight)` makes a step covering part of it. Escape asks
-the command to stop: `is-cancelled` turns true, and the plugin should
-return (an error like "Stopped" is fine). The call's time limit still
+and `child(label, weight)` makes a step covering part of it. Dropping a
+task or step, or returning from the command, fills its part of the strip;
+one the user stopped stays where it was. Make one task per command: the
+strip follows the first, and a later one only changes the status line.
+Escape asks the command to stop: `is-cancelled` turns true, and the plugin
+should return (an error like "Stopped" is fine). The call's time limit still
 applies. The SDK's `progress::pages(label, n)` and `progress::check(&task)?`
 cover the usual loop:
 

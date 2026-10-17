@@ -114,10 +114,10 @@ fn a_file_opens_headless_with_every_fact() {
     let doc = opened.unwrap().doc;
     assert!(doc.is_ready() && !doc.is_dirty() && !doc.can_undo());
     assert_every_fact(doc.state());
-    let counted = sheaf_progress::Tracker::new();
+    let counted = in_progress::Tracker::new();
     finish(&f.source(), &counted);
     let s = counted.snapshot();
-    assert_eq!((s.done, s.total, s.unit), (3, Some(3), Unit::Pages));
+    assert_eq!((s.done, s.total, s.unit), (3, Some(3), crate::PAGES));
 }
 
 /// The open never reads a page's content stream, let alone lexes it, and

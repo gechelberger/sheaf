@@ -21,7 +21,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Result;
-use sheaf_progress::{NoProgress, Progress, Unit};
+use in_progress::{NoProgress, Progress};
 
 use crate::annot::{Annot, AnnotId, AnnotKind};
 use crate::assets::SourceAssets;
@@ -34,7 +34,7 @@ use crate::layers::Layer;
 use crate::model::{FlatOutlineItem, PageId};
 use crate::portfolio::Collection;
 use crate::stamps::HeaderFooter;
-use crate::{Document, Source, SourceInfo, Store};
+use crate::{Document, PAGES, Source, SourceInfo, Store};
 
 mod outline;
 #[cfg(test)]
@@ -135,7 +135,7 @@ pub fn file(path: &Path, password: Option<&str>) -> Result<Opened> {
 /// the first pass, the longest.
 pub fn finish(src: &Source, p: &dyn Progress) -> Facts {
     let pdf = src.pdf();
-    p.set_total(Some(u64::from(src.page_count())), Unit::Pages);
+    p.set_total(Some(u64::from(src.page_count())), PAGES);
     let pages = src.page_ids().inspect(|_| p.inc(1));
     let mut found = crate::file::annots_in(pdf, pages);
     let hash = src.id().hash;

@@ -720,6 +720,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6e44b0a4eaa4c82f441d50a963f2d5f05a787240aeee097597033e72accfd22f"
 
 [[package]]
+name = "in-progress"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b688f7dc59663fd2c84756e4e8bed087d461713bc6c9977db29c7d442b69425c"
+
+[[package]]
 name = "indexmap"
 version = "2.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1495,6 +1501,7 @@ dependencies = [
  "flate2",
  "im",
  "image",
+ "in-progress",
  "log",
  "lopdf",
  "quick-xml",
@@ -1503,7 +1510,6 @@ dependencies = [
  "serde_json",
  "sheaf-core",
  "sheaf-image",
- "sheaf-progress",
  "thiserror",
  "unicode-normalization",
  "zeroize",
@@ -1525,16 +1531,12 @@ dependencies = [
  "fax",
  "image",
  "imageproc",
+ "in-progress",
  "log",
  "png",
  "serde",
- "sheaf-progress",
  "tiff",
 ]
-
-[[package]]
-name = "sheaf-progress"
-version = "0.1.0-alpha.1"
 
 [[package]]
 name = "shlex"

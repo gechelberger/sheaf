@@ -151,7 +151,7 @@ pub struct CallContext {
     pub presets: Vec<Preset>,
     /// Where the plugin's `progress` tasks report, and how the call is
     /// cancelled. None: tasks report nowhere and are never cancelled.
-    pub progress: Option<sheaf_progress::Tracker>,
+    pub progress: Option<in_progress::Tracker>,
     /// The plugin's section of the user's `settings.toml`, as JSON (API
     /// 0.3's `storage.preferences`), taken when the call starts so it
     /// stays the same throughout. Empty for none.
@@ -681,7 +681,7 @@ impl HostState {
         self.call.as_ref()?.doc.as_ref()
     }
 
-    pub(crate) fn progress(&self) -> Option<&sheaf_progress::Tracker> {
+    pub(crate) fn progress(&self) -> Option<&in_progress::Tracker> {
         self.call.as_ref()?.progress.as_ref()
     }
 

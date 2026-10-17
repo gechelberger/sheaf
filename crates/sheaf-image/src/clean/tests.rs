@@ -3,7 +3,7 @@
 //! with a warm color cast.
 
 use super::*;
-use sheaf_progress::NoProgress;
+use in_progress::NoProgress;
 
 const PAGE: (u32, u32) = (850, 1100);
 

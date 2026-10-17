@@ -7,13 +7,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use in_progress::{Level, Progress};
 use serde::{Deserialize, Serialize};
 use sheaf_doc::images::placement;
-use sheaf_doc::{Box2, Document, Edit, SourceInfo, Store, TextLayer};
+use sheaf_doc::{Box2, Document, Edit, PAGES, SourceInfo, Store, TextLayer};
 use sheaf_image::clean::ScanParams;
 use sheaf_image::io::PageImage;
 use sheaf_ocr::{OcrConfig, OcrImage, OcrWord};
-use sheaf_progress::{Progress, Unit};
 
 use crate::images::Paper;
 
@@ -184,10 +184,10 @@ pub fn scan(
     let mut report = ScanReport::default();
     let mut pages = Vec::with_capacity(inputs.len());
     let mut words: Vec<Vec<sheaf_doc::OcrWord>> = Vec::new();
-    progress.set_total(Some(inputs.len() as u64), Unit::Pages);
+    progress.set_total(Some(inputs.len() as u64), PAGES);
     for (i, path) in inputs.iter().enumerate() {
         progress.check()?;
-        let share = 1.0 / inputs.len() as f32;
+        let share = 1.0 / inputs.len() as f64;
         let step = progress.child(&format!("page {}", i + 1), share);
         let cleaned = clean_one(path, &params, &*step.child("cleaning", 0.6))?;
         if cleaned.quad.is_some() {
@@ -195,15 +195,12 @@ pub fn scan(
         }
         if cleaned.turns != 0 {
             step.message(
-                sheaf_progress::Level::Info,
+                Level::Info,
                 &format!("{}: turned {}°", path.display(), cleaned.turns * 90),
             );
         }
         if opts.drop_blanks && is_blank_page(&cleaned.image) {
-            step.message(
-                sheaf_progress::Level::Info,
-                &format!("{}: blank, left out", path.display()),
-            );
+            step.message(Level::Info, &format!("{}: blank, left out", path.display()));
             report.dropped += 1;
             progress.set(i as u64 + 1);
             continue;

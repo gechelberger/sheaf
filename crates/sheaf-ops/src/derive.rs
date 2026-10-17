@@ -7,11 +7,11 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
+use in_progress::Progress;
 use sheaf_doc::content::{ContentError, PaginationKind};
 use sheaf_doc::geom::Geom;
 use sheaf_doc::store::{BlobKind, MemoryKind, Origin};
-use sheaf_doc::{Derived, PageId, Rebase, Snapshot, SourceId, SourceInfo, Store};
-use sheaf_progress::{Progress, Unit};
+use sheaf_doc::{Derived, PAGES, PageId, Rebase, Snapshot, SourceId, SourceInfo, Store};
 
 /// A generated PDF holding copies of some pages, and the rebases that
 /// move the document's pages onto it once it's a source.
@@ -73,7 +73,7 @@ pub fn strip_stamps(
     progress: &dyn Progress,
 ) -> Result<Vec<DerivedSource>> {
     let kinds = sheaf_doc::stamps::HEADER_FOOTER;
-    progress.set_total(Some(snap.state.pages.len() as u64), Unit::Pages);
+    progress.set_total(Some(snap.state.pages.len() as u64), PAGES);
     // (page, index in source, place in the document)
     let mut by_source: BTreeMap<SourceId, Vec<(PageId, u32, u32)>> = BTreeMap::new();
     for (n, p) in snap.state.pages.iter().enumerate() {
@@ -134,7 +134,7 @@ pub fn watermark(
     } else {
         sheaf_doc::stamps::WATERMARK
     };
-    progress.set_total(Some(snap.state.pages.len() as u64), Unit::Pages);
+    progress.set_total(Some(snap.state.pages.len() as u64), PAGES);
     // (page, index in source, place in the document, draw?, its rotation)
     let mut by_source: BTreeMap<SourceId, Vec<_>> = BTreeMap::new();
     for (n, p) in snap.state.pages.iter().enumerate() {

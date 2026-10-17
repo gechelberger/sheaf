@@ -5,12 +5,12 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use in_progress::{NoProgress, Progress, Unit};
 use serde::{Deserialize, Serialize};
 use sheaf_doc::open::Facts;
 use sheaf_doc::{
     Document, Edit, FlatOutlineItem, NewOutlineItem, PageId, SourceId, SourceInfo, Store,
 };
-use sheaf_progress::{NoProgress, Progress, Unit};
 
 use crate::images::Paper;
 
@@ -111,7 +111,7 @@ pub fn build(
     if items.is_empty() {
         bail!("nothing to combine");
     }
-    progress.set_total(Some(items.len() as u64), Unit::Items);
+    progress.set_total(Some(items.len() as u64), Unit::ITEMS);
     let store = Store::new();
     let mut doc: Option<Document> = None;
     let mut report = CombineReport::default();

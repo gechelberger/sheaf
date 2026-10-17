@@ -495,8 +495,10 @@ interface progress {
     enum unit { items, pages, bytes }
     enum level { info, warn, error }
 
-    /// Make one per call and use `child` for its steps. A second one made
-    /// in the same call starts where the first left off.
+    /// Make one per call and use `child` for its steps. Dropping a task, or
+    /// returning, fills its part of the bar unless the user stopped it. Only
+    /// the first task in a call moves the bar; a later one shows its label,
+    /// count and messages.
     resource task {
         /// `total` none while it isn't known yet.
         constructor(label: string, total: option<u64>, unit: unit);
@@ -510,8 +512,8 @@ interface progress {
         /// is fine). Check once per page or chunk; the call's time limit
         /// still applies.
         is-cancelled: func() -> bool;
-        /// A step covering `weight` (0 to 1) of this task, starting where
-        /// this one is now.
+        /// A step covering `weight` (0 to 1) of this task, after its count
+        /// and its earlier steps. Dropping it fills that part.
         child: func(label: string, weight: f32) -> task;
     }
 }

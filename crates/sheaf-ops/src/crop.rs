@@ -9,12 +9,12 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
+use in_progress::Progress;
 use serde::{Deserialize, Serialize};
 use sheaf_core::{PageIndex, PageSize, Rotation};
 use sheaf_doc::geom::Geom;
-use sheaf_doc::{Box2, PageId, Snapshot, SourceId, Store};
+use sheaf_doc::{Box2, PAGES, PageId, Snapshot, SourceId, Store};
 use sheaf_image::raster::{PixelFormat, content_bounds};
-use sheaf_progress::{Progress, Unit};
 use sheaf_render::pdfium::PdfiumEngine;
 use sheaf_render::{Job, Renderer};
 
@@ -52,7 +52,7 @@ pub fn plan(
     spec: CropSpec,
     progress: &dyn Progress,
 ) -> Result<Vec<CroppedSource>> {
-    progress.set_total(Some(ids.len() as u64), Unit::Pages);
+    progress.set_total(Some(ids.len() as u64), PAGES);
     // Pages grouped by the source they show now, each with its geometry as
     // it shows and the turn PDFium adds to its source page's.
     let mut by_source: BTreeMap<SourceId, Vec<(PageId, u32, Geom, Rotation)>> = BTreeMap::new();

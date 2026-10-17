@@ -121,8 +121,8 @@ Tier 1 platforms gate every release and run the perf budgets in CI.
 ├────────────────────────────┬────────────────────────────┤
 │  sheaf-cli (no GUI)        │  sheaf-ops: operations     │
 │  clap subcommands          │  shared by app and CLI;    │
-│                            │  sheaf-progress: progress  │
-│                            │  + cancel trait            │
+│                            │  progress + cancel: the    │
+│                            │  in-progress crate         │
 ├────────────────────────────┴────────────────────────────┤
 │  sheaf-ui           Reusable widgets: page canvas, tile  │
 │                     viewport, sidebars, command palette  │

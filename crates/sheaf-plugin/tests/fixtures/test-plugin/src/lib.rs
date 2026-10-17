@@ -57,6 +57,30 @@ impl Guest for TestPlugin {
                 }
                 Ok(())
             }
+            // Counts 3 of 10 and returns, leaving its task for the host
+            // to free.
+            "early" => {
+                let task = sheaf_plugin_api::progress::items("Early", 10);
+                task.set(3);
+                std::mem::forget(task);
+                Ok(())
+            }
+            // Holds 300 steps, past the host's cap on live tasks, and a
+            // second task past it with a message, says "made", then waits
+            // on its last step to be stopped: "Stopped".
+            "many-steps" => {
+                let task = sheaf_plugin_api::progress::items("Many", 1);
+                let steps: Vec<_> = (0..300)
+                    .map(|i| task.child(&format!("step {i}"), 0.002))
+                    .collect();
+                let late = sheaf_plugin_api::progress::items("Late", 1);
+                late.message(sheaf_plugin_api::progress::Level::Info, "hidden");
+                task.message(sheaf_plugin_api::progress::Level::Info, "made");
+                loop {
+                    sheaf_plugin_api::progress::check(&steps[299])?;
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
             // Two submits: two undo steps.
             "two-batches" => {
                 for title in ["one", "two"] {

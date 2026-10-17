@@ -13,7 +13,7 @@ use gpui::{
 };
 use sheaf_ops::combine::{CombineItem, CombineParams};
 use sheaf_ops::images::Paper;
-use sheaf_ops::{Cancelled, Tracker};
+use sheaf_ops::{Tracker, was_cancelled};
 use sheaf_ui::button::{Button, Chip};
 use sheaf_ui::text_input::{TextInput, TextInputEvent};
 use sheaf_ui::{dialog, theme};
@@ -334,7 +334,7 @@ impl CombineDialog {
                         path: out,
                         params: d.params.clone(),
                     }),
-                    Err(e) if e.is::<Cancelled>() => d.error = Some("Stopped".into()),
+                    Err(e) if was_cancelled(&e) => d.error = Some("Stopped".into()),
                     Err(e) => d.error = Some(format!("{e:#}")),
                 }
                 cx.notify();

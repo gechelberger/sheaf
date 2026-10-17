@@ -1326,6 +1326,11 @@ pub fn run(
     cx.spawn_in(window, async move |ws, cx| {
         use futures::FutureExt;
         let mut rx = rx.fuse();
+        // The last progress line shown, to clear when the call ends: by
+        // then its tasks are gone, and the snapshot no longer makes it.
+        // The final snapshot still makes "stopping…", which Escape may
+        // have put up since the last tick, so that goes too.
+        let mut shown: Option<String> = None;
         let result = loop {
             let mut tick = cx
                 .background_executor()
@@ -1338,7 +1343,8 @@ pub fn run(
             if let (Some(t), Some(d)) = (&tracker, weak.as_ref().and_then(|w| w.upgrade())) {
                 let line = progress_line(&label, &t.snapshot());
                 if let Some(line) = line {
-                    d.update(cx, |d, cx| d.set_notice(line, cx));
+                    d.update(cx, |d, cx| d.set_notice(line.clone(), cx));
+                    shown = Some(line);
                 }
             }
         }
@@ -1349,10 +1355,11 @@ pub fn run(
                 d.update(cx, |d, cx| {
                     d.plugin_run = None;
                     // The last progress line goes with the run.
-                    if let Some(t) = &tracker
-                        && let Some(line) = progress_line(&label, &t.snapshot())
-                    {
-                        d.clear_notice_if(&line, cx);
+                    let now = tracker
+                        .as_ref()
+                        .and_then(|t| progress_line(&label, &t.snapshot()));
+                    for line in shown.iter().chain(&now) {
+                        d.clear_notice_if(line, cx);
                     }
                 });
             }
@@ -2005,6 +2012,30 @@ mod tests {
         assert_eq!(annot.contents, "Checked by Pat Q. Smith at 9:00 AM");
         assert!(
             matches!(&annot.kind, AnnotKind::TextStamp { text, .. } if text == "REVIEWED\nPQS 10/15/2026")
+        );
+    }
+
+    /// A step's line goes with it: the snapshot's step goes back to the
+    /// call's tracker, which counts nothing. So the poll loop remembers the
+    /// last line it showed, to clear it when the call ends. "Stopping…"
+    /// needs no step, so the final snapshot still makes that one.
+    #[test]
+    fn a_finished_step_leaves_no_progress_line() {
+        use sheaf_ops::{Progress, Tracker};
+        let t = Tracker::new();
+        let step = t.child("Counting", 1.0);
+        step.set_total(Some(10), Default::default());
+        step.set(3);
+        assert_eq!(
+            progress_line("Count", &t.snapshot()).as_deref(),
+            Some("Counting: 3 of 10 items…")
+        );
+        drop(step);
+        assert_eq!(progress_line("Count", &t.snapshot()), None);
+        t.cancel();
+        assert_eq!(
+            progress_line("Count", &t.snapshot()).as_deref(),
+            Some("Count: stopping…")
         );
     }
 }

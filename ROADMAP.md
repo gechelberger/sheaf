@@ -389,8 +389,8 @@ archival requirements but not for daily binder work.
   question: plugins first, with an optional Rhai front end for quick macros
   if users want one.
 - Headless CLI batch mode (`sheaf batch …`). The split is in place: GUI-free
-  operations live in `sheaf-ops` (with `sheaf-progress` for progress and
-  cancellation), and `sheaf-cli` holds the subcommands. They're reachable
+  operations live in `sheaf-ops` (with the `in-progress` crate for progress
+  and cancellation), and `sheaf-cli` holds the subcommands. They're reachable
   as `sheaf <subcommand>` or through the GPUI-free `sheaf-cli` binary;
   `export`, `images-to-pdf` and `scan` ship today. Ops move into
   `sheaf-ops` as subcommands need them, and `batch` chains them.

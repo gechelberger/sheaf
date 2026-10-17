@@ -5,7 +5,7 @@
 use std::time::Duration;
 
 use gpui::Context;
-use sheaf_ops::{Cancelled, ProgressSnapshot as Snapshot, Tracker};
+use sheaf_ops::{ProgressSnapshot as Snapshot, Tracker, was_cancelled};
 
 use crate::docview::{DocView, State};
 
@@ -87,7 +87,7 @@ impl DocView {
                 v.job = None;
                 let line = match result {
                     Ok(out) => done(v, out, cx),
-                    Err(e) if e.is::<Cancelled>() => Some(format!("{name} stopped")),
+                    Err(e) if was_cancelled(&e) => Some(format!("{name} stopped")),
                     Err(e) => Some(format!("{name} failed: {e:#}")),
                 };
                 if let (Some(line), State::Ready(doc)) = (line, &mut v.state) {

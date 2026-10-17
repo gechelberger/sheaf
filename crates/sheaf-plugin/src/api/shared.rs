@@ -15,7 +15,7 @@ use sheaf_doc::{
     Annot, AnnotId, AnnotKind, Box2, DestView, Edit, NewOutlineItem, OutlineId, OutlineNode,
     PageId, PageRef, Pt, Snapshot, SourceId, TextHit,
 };
-use sheaf_progress::{Level, Progress, Tracker, Unit};
+use in_progress::{Level, Progress, Tracker, Unit};
 use wasmtime::component::Resource;
 
 use crate::progress::Task;
@@ -923,10 +923,10 @@ impl api::render::HostImage for HostState {
     }
 }
 
-fn unit(u: api::progress::Unit) -> Unit {
+pub(crate) fn unit(u: api::progress::Unit) -> Unit {
     match u {
-        api::progress::Unit::Items => Unit::Items,
-        api::progress::Unit::Pages => Unit::Pages,
+        api::progress::Unit::Items => Unit::ITEMS,
+        api::progress::Unit::Pages => sheaf_doc::PAGES,
         api::progress::Unit::Bytes => Unit::Bytes,
     }
 }
@@ -936,8 +936,8 @@ impl api::progress::Host for HostState {}
 impl api::progress::HostTask for HostState {
     fn new(&mut self, label: String, total: Option<u64>, u: api::progress::Unit) -> Resource<Task> {
         let t = match self.progress() {
-            Some(root) => root.child_tracker(&label, 1.0),
-            None => Tracker::new(),
+            Some(root) if self.has_task_room() => root.child_tracker(&label, 1.0),
+            _ => Tracker::new(),
         };
         t.set_total(total, unit(u));
         self.push_task(t)
@@ -974,14 +974,18 @@ impl api::progress::HostTask for HostState {
         }
     }
 
-    fn is_cancelled(&mut self, this: Resource<Task>) -> bool {
-        self.task(&this).is_some_and(|t| t.is_cancelled())
+    /// Only the call is ever cancelled, so ask it: a task past the cap
+    /// isn't under it.
+    fn is_cancelled(&mut self, _this: Resource<Task>) -> bool {
+        self.progress().is_some_and(|t| t.is_cancelled())
     }
 
     fn child(&mut self, this: Resource<Task>, label: String, weight: f32) -> Resource<Task> {
         let child = match self.task(&this) {
-            Some(t) => t.child_tracker(&label, if weight.is_finite() { weight } else { 0.0 }),
-            None => Tracker::new(),
+            Some(t) if self.has_task_room() => {
+                t.child_tracker(&label, if weight.is_finite() { f64::from(weight) } else { 0.0 })
+            }
+            _ => Tracker::new(),
         };
         self.push_task(child)
     }

@@ -54,3 +54,7 @@ pub use page_chars::{Glyph, PageChars};
 pub use source::Source;
 pub use store::{Blob, BlobId, Src, Store};
 pub use text_layer::{OcrWord, TextHit, TextLayer};
+
+/// What sheaf counts pages in, for progress. One spelling everywhere:
+/// `Unit::Count` compares the noun, so "page" wouldn't match.
+pub const PAGES: in_progress::Unit = in_progress::Unit::Count("pages");

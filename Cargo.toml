@@ -6,7 +6,6 @@ resolver = "3"
 exclude = ["plugins", "crates/sheaf-plugin/tests/fixtures", "vendor/lopdf", "fuzz"]
 members = [
     "crates/sheaf-core",
-    "crates/sheaf-progress",
     "crates/sheaf-ops",
     "crates/sheaf-image",
     "crates/sheaf-cli",
@@ -36,7 +35,6 @@ sheaf-ui = { path = "crates/sheaf-ui" }
 sheaf-ocr = { path = "crates/sheaf-ocr" }
 sheaf-print = { path = "crates/sheaf-print" }
 sheaf-plugin = { path = "crates/sheaf-plugin" }
-sheaf-progress = { path = "crates/sheaf-progress" }
 sheaf-ops = { path = "crates/sheaf-ops" }
 sheaf-image = { path = "crates/sheaf-image" }
 sheaf-cli = { path = "crates/sheaf-cli" }
@@ -65,6 +63,9 @@ regex = "1"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 schemars = { version = "1", default-features = false, features = ["derive", "std"] }
+# Progress and cooperative cancel for ops, the CLI bar and plugin tasks:
+# sheaf's own crate, published as sheaf-pdf/in-progress.
+in-progress = "0.1"
 
 # Zed's workspace patches that GPUI's Linux backend relies on. Mirrored from
 # zed/Cargo.toml [patch.crates-io] at the pinned rev; patches here are not

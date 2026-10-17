@@ -3612,7 +3612,7 @@ mod tests {
         assert!(st.outline.is_empty() && st.annots.is_empty() && st.fields.is_empty());
         assert!(st.labels.is_none() && st.header_footer.is_none());
         let view = d
-            .ready(crate::open::finish(&src, &sheaf_progress::NoProgress))
+            .ready(crate::open::finish(&src, &in_progress::NoProgress))
             .unwrap();
         assert!(d.is_ready());
         let opened = d.current_version();
@@ -3631,7 +3631,7 @@ mod tests {
         assert!(!snap.removes_content && !snap.form_changed);
         // Facts that came again would be late: they're refused.
         assert!(
-            d.ready(crate::open::finish(&src, &sheaf_progress::NoProgress))
+            d.ready(crate::open::finish(&src, &in_progress::NoProgress))
                 .is_err()
         );
         assert_eq!(d.current_version(), opened);
