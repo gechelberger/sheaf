@@ -21,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [lazy_reader, page_tree]
+        target: [lazy_reader, page_tree, sheaf_annot]
     steps:
       - uses: actions/checkout@v4
 
@@ -45,13 +45,15 @@ jobs:
           key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
           restore-keys: fuzz-corpus-${{ matrix.target }}-
 
-      # The six fixtures the stable test mutates, built in code, so the
+      # The fixtures the stable test mutates, built in code, so the
       # repository holds no PDF: from nothing, libFuzzer seldom gets past a
-      # file's header and cross-reference sections. Tests run in their
-      # crate's directory, hence the absolute path.
+      # file's header and cross-reference sections. sheaf_annot's are a
+      # page's annotation objects, the others' six files. Tests run in
+      # their crate's directory, hence the absolute path.
       - name: Seed the corpus
         env:
           SHEAF_FUZZ_SEEDS: ${{ github.workspace }}/fuzz/corpus/${{ matrix.target }}
+          SHEAF_FUZZ_TARGET: ${{ matrix.target }}
         run: cargo test -p sheaf-doc --lib -- --ignored --exact source::fuzz::tests::write_fuzz_seeds
 
       # rust-toolchain.toml pins stable for everything else.

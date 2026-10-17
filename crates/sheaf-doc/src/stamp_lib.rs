@@ -15,9 +15,10 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
-use sheaf_core::PageSize;
+use sheaf_core::{PageSize, Rotation};
 
 use crate::attachments::Objects;
+use crate::geom::Geom;
 
 /// Marks a stamp page's dynamic text template (`<<initials>> <<date>>`),
 /// drawn over the page when it's placed.
@@ -52,8 +53,6 @@ pub fn read_collection(pdf: &Pdf) -> (Option<String>, Vec<StampPage>) {
         .map(|(i, id)| {
             let dict = pdf.get_dictionary(id).ok();
             let geom = crate::file::page_geom(pdf, id);
-            let [x0, y0, x1, y1] = geom.media;
-            let (w, h) = (x1 - x0, y1 - y0);
             StampPage {
                 name: names
                     .get(&id)
@@ -63,17 +62,7 @@ pub fn read_collection(pdf: &Pdf) -> (Option<String>, Vec<StampPage>) {
                     .and_then(|d| d.get(TEXT_KEY.as_bytes()).ok())
                     .map(crate::file::pdf_text)
                     .filter(|t| !t.is_empty()),
-                size: if geom.rotate % 180 == 0 {
-                    PageSize {
-                        width: w,
-                        height: h,
-                    }
-                } else {
-                    PageSize {
-                        width: h,
-                        height: w,
-                    }
-                },
+                size: geom.shown(),
             }
         })
         .collect();
@@ -141,17 +130,20 @@ pub fn one_page(pdf: &Pdf, index: usize) -> Result<Vec<u8>> {
     let mut dict = page_without_extras(pdf, page, &mut out, &mut map)?;
     // What the page inherits, it takes along.
     let geom = crate::file::page_geom(pdf, page);
-    dict.set(
-        "MediaBox",
-        Object::Array(geom.media.iter().map(|v| Object::from(*v)).collect()),
-    );
-    if geom.rotate != 0 {
-        dict.set("Rotate", geom.rotate as i64);
+    dict.set("MediaBox", visible_array(&geom));
+    if geom.rotate != Rotation::R0 {
+        dict.set("Rotate", geom.rotate.degrees());
     }
     dict.set("Parent", pages_id);
     let page_id = map[&page];
     out.objects.insert(page_id, Object::Dictionary(dict));
     finish(&mut out, pages_id, vec![page_id], None, Vec::new())
+}
+
+/// A page's visible box as a PDF rectangle.
+fn visible_array(geom: &Geom) -> Object {
+    let v = geom.visible();
+    Object::Array([v.x0, v.y0, v.x1, v.y1].map(Object::from).to_vec())
 }
 
 /// A page copied into `dst` without what a stamp doesn't need: its
@@ -213,10 +205,9 @@ pub fn build_collection(
             .context("a stamp with no page")?;
         let mut map = HashMap::new();
         let mut dict = page_without_extras(&src, page, &mut out, &mut map)?;
-        let geom = crate::file::page_geom(&src, page);
         dict.set(
             "MediaBox",
-            Object::Array(geom.media.iter().map(|v| Object::from(*v)).collect()),
+            visible_array(&crate::file::page_geom(&src, page)),
         );
         dict.set("Parent", pages_id);
         dict.remove(TEXT_KEY.as_bytes());
@@ -358,24 +349,20 @@ pub fn page_form(stamp: &Pdf, dst: &mut Pdf) -> Result<(ObjectId, PageSize)> {
         .next()
         .context("a stamp with no page")?;
     let (id, geom) = page_forms(stamp, &[page], dst)?[0];
-    let [x0, y0, x1, y1] = geom.media;
+    let v = geom.visible();
     Ok((
         id,
         PageSize {
-            width: x1 - x0,
-            height: y1 - y0,
+            width: v.width(),
+            height: v.height(),
         },
     ))
 }
 
-/// `pages` of `src` as Form XObjects in `dst`, each with its visible box
-/// (the form's `/BBox`, in the page's user space) and `/Rotate`. What
-/// they share, fonts and images, is copied once.
-pub fn page_forms(
-    src: &Pdf,
-    pages: &[ObjectId],
-    dst: &mut Pdf,
-) -> Result<Vec<(ObjectId, crate::annot::PageGeom)>> {
+/// `pages` of `src` as Form XObjects in `dst`, each with its page's
+/// geometry: the form's `/BBox` is its visible box, in the page's user
+/// space. What they share, fonts and images, is copied once.
+pub fn page_forms(src: &Pdf, pages: &[ObjectId], dst: &mut Pdf) -> Result<Vec<(ObjectId, Geom)>> {
     // Copy from a trimmed clone, so annotations aren't copied at all, nor
     // the content, which goes in the form itself.
     let mut scratch = src.clone();
@@ -408,11 +395,10 @@ pub fn page_forms(
             );
         }
         let content = src.get_page_content(page);
-        let [x0, y0, x1, y1] = geom.media;
         let mut form = dictionary! {
             "Type" => "XObject",
             "Subtype" => "Form",
-            "BBox" => vec![Object::from(x0), Object::from(y0), Object::from(x1), Object::from(y1)],
+            "BBox" => visible_array(&geom),
         };
         if let Ok(r) = dict.get(b"Resources") {
             form.set("Resources", r.clone());

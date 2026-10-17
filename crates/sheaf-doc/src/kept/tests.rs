@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use lopdf::content::{Content, Operation};
 use lopdf::{Document as Pdf, Object, ObjectId, Stream, dictionary};
+use sheaf_core::Rotation;
 
 use crate::annot::{Annot, AnnotId, AnnotKind, Pt};
 use crate::history::FixedCount;
@@ -488,6 +489,7 @@ fn note(text: &str) -> Annot {
         fill: None,
         dashed: false,
         cloudy: false,
+        turn: Rotation::R0,
         name: String::new(),
     }
 }
@@ -550,11 +552,7 @@ fn replacing_saved_ocr_text_takes_the_old_out() {
                 },
                 confidence: 0.9,
             }],
-            sheaf_core::PageSize {
-                width: 612.0,
-                height: 792.0,
-            },
-            sheaf_core::Rotation::R0,
+            &crate::geom::Geom::read(None, None, 0),
             "test",
         ))
     };

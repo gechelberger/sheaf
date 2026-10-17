@@ -49,6 +49,7 @@ pub(crate) mod v02 {
 
 #[cfg(test)]
 mod tests {
+    use sheaf_core::Rotation;
     use sheaf_doc::measure::{Measured, Scale};
     use sheaf_doc::{Annot, AnnotId, AnnotKind, Edit, OutlineId, Pt};
 
@@ -66,6 +67,7 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            turn: Rotation::R0,
             name: String::new(),
         }
     }
@@ -128,13 +130,16 @@ mod tests {
     #[test]
     fn outline_edit_keeps_clear_vs_unchanged() {
         use super::bindings_v03::sheaf::plugin::types as w;
-        let e = super::v03::edit_from_wit(w::Edit::OutlineEdit(w::OutlineEdit {
-            id: 3,
-            title: None,
-            target: Some(None),
-            color: None,
-            view: None,
-        }));
+        let e = super::v03::edit_from_wit(
+            None,
+            w::Edit::OutlineEdit(w::OutlineEdit {
+                id: 3,
+                title: None,
+                target: Some(None),
+                color: None,
+                view: None,
+            }),
+        );
         assert_eq!(
             e,
             Edit::OutlineEdit {

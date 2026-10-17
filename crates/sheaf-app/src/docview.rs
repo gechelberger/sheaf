@@ -21,6 +21,7 @@ use gpui::{
     img, point, prelude::*, px, relative, rgb, rgba,
 };
 use sheaf_core::{PageIndex, PageSize, Rotation};
+use sheaf_doc::geom::{Affine, Geom};
 use sheaf_doc::save;
 use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, Pt};
 use sheaf_ui::button::Button;
@@ -29,7 +30,7 @@ use sheaf_ui::text_area::{TextArea, TextAreaEvent};
 use sheaf_ui::text_input::{TextInput, TextInputEvent};
 use sheaf_ui::theme;
 
-use crate::markup_tools::{Drag, Tool, arrow_head, rotate_pt, stroke_canvas, stroke_canvas_dashed};
+use crate::markup_tools::{Drag, Tool, arrow_head, stroke_canvas, stroke_canvas_dashed};
 pub(crate) use crate::pane::Zoom;
 use crate::pane::{Layout, LayoutSpec, MARGIN, PageMode, Pane, Spread};
 use crate::{ClearGuides, FullScreen, GoToPage, ReadMode, ToggleGrid, ToggleRulers};
@@ -37,7 +38,7 @@ use sheaf_doc::{
     Document, Edit, EditOutcome, OutlineId, PageId, PageRef, SourceId, SourceInfo, Store,
 };
 use sheaf_image::raster::PixelFormat;
-use sheaf_render::{Job, Rect, RenderHandle, RenderRequest, Rendered, SearchEvent, SearchHit};
+use sheaf_render::{Job, RenderHandle, RenderRequest, Rendered, SearchEvent, SearchHit};
 
 use crate::comments_panel::ExportKind;
 use crate::{
@@ -228,6 +229,9 @@ pub(crate) struct Doc {
 #[derive(Default)]
 pub(crate) struct Incoming {
     pub marks: HashMap<u32, Vec<sheaf_doc::Annot>>,
+    /// The marks given new ids as the file was read, with the ids their
+    /// `/NM`s still say.
+    pub renamed: Vec<sheaf_doc::open::Renamed>,
     pub foreign: Vec<sheaf_doc::file::ForeignAnnot>,
     pub outline: Vec<sheaf_doc::FlatOutlineItem>,
     pub form: sheaf_doc::forms::FileForm,
@@ -239,6 +243,7 @@ impl Incoming {
         let facts = sheaf_doc::open::finish(&info.src, &sheaf_ops::NoProgress);
         Incoming {
             marks: facts.marks,
+            renamed: facts.renamed,
             foreign: facts.foreign,
             outline: facts.outline,
             form: facts.form,
@@ -290,7 +295,8 @@ impl Doc {
         if !incoming.marks.is_empty()
             && let Some(handle) = self.handles.get(&source)
         {
-            drop(handle.hide_annots(marks_by_page(&incoming.marks)));
+            let renamed = incoming.renamed.iter().map(|r| (r.page, r.was));
+            drop(handle.hide_annots(marks_by_page(&incoming.marks, renamed)));
         }
         self.foreign_annots
             .extend(incoming.foreign.into_iter().map(|f| (source, f)));
@@ -324,6 +330,36 @@ impl Doc {
     /// mapping between page and screen, never for edits.
     pub(crate) fn shown_ref(&self, index: usize) -> Option<PageRef> {
         self.page_ref(index).map(|p| self.pane().shown(p))
+    }
+
+    /// Page `index` as the active pane draws it (M10.5 §5): its boxes,
+    /// turned by its rotation and the pane's rotate view. Its `to_view`
+    /// takes PageSpace to the page as drawn, in points from its top-left
+    /// (times the zoom's px per point), and `shown` is the size drawn.
+    pub(crate) fn pane_geom(&self, index: usize) -> Option<Geom> {
+        self.shown_ref(index).map(|p| self.model.geom(&p))
+    }
+
+    /// Page `index`'s edit frame: the page as it shows without rotate
+    /// view, in points from its top-left, y down, which is where gestures
+    /// build and edit marks. Its `from_view` takes them to PageSpace.
+    pub(crate) fn edit_geom(&self, index: usize) -> Option<Geom> {
+        self.page_ref(index).map(|p| self.model.geom(&p))
+    }
+
+    /// Bring `b`, a box in PageSpace on page `index`, into the active
+    /// pane's view.
+    pub(crate) fn reveal(&mut self, index: usize, b: Box2) {
+        let Some(geom) = self.pane_geom(index) else {
+            return;
+        };
+        let r = geom.to_view().apply_box(b);
+        let shown = geom.shown();
+        self.scroll_to(ScrollTo::Reveal {
+            page: index,
+            fx: (r.x + r.w / 2.0) / shown.width.max(1.0),
+            fy: (r.y + r.h / 2.0) / shown.height.max(1.0),
+        });
     }
 
     /// Scroll the active pane.
@@ -367,16 +403,7 @@ impl Doc {
                 out.push(Hit {
                     page: p.id,
                     order,
-                    rects: h
-                        .rects
-                        .into_iter()
-                        .map(|b| Rect {
-                            x: b.x,
-                            y: b.y,
-                            w: b.w,
-                            h: b.h,
-                        })
-                        .collect(),
+                    rects: h.rects,
                     text: h.text,
                 });
             }
@@ -387,9 +414,14 @@ impl Doc {
     /// Merge hits from the primary file's own text into `hits`, keeping
     /// document order. A page with an unsaved OCR layer is skipped: the
     /// layer's hits stand in for it (after a save the layer is in the file
-    /// and gone from the model, so nothing is counted twice).
+    /// and gone from the model, so nothing is counted twice). The engine's
+    /// boxes are on its page as the file shows it; they're kept in
+    /// PageSpace.
     pub(crate) fn merge_source_hits(&self, hits: &mut Vec<Hit>, incoming: Vec<SearchHit>) {
         let state = self.model.state();
+        let Some(primary) = self.model.source(self.model.primary()) else {
+            return;
+        };
         for h in incoming {
             let Some(order) = self.index_of_source_page(h.page) else {
                 continue;
@@ -398,13 +430,25 @@ impl Doc {
             if state.has_text_layer(page) {
                 continue;
             }
+            let from_view = primary.src.geom(h.page).from_view();
             let at = hits.partition_point(|x| x.order <= order);
             hits.insert(
                 at,
                 Hit {
                     page,
                     order,
-                    rects: h.rects,
+                    rects: h
+                        .rects
+                        .into_iter()
+                        .map(|r| {
+                            from_view.apply_box(Box2 {
+                                x: r.x,
+                                y: r.y,
+                                w: r.w,
+                                h: r.h,
+                            })
+                        })
+                        .collect(),
                     text: h.text,
                 },
             );
@@ -544,7 +588,7 @@ pub enum DocEvent {
     /// The selected region (Shift+drag) changed: live while dragging.
     Region {
         page: PageId,
-        /// Source-displayed space, like annotations.
+        /// PageSpace.
         rect: Box2,
     },
     /// The region was cleared.
@@ -625,8 +669,8 @@ pub struct DocView {
     pub(crate) tick_glyph: String,
     /// The Select tool is over text (the pointer is an I-beam).
     pub(crate) text_hover: bool,
-    /// Where the pointer last was over a page: page, point, and how near
-    /// counts as on text.
+    /// Where the pointer last was over a page: page, point (in PageSpace),
+    /// and how near counts as on text.
     pub(crate) last_hover: Option<(PageId, sheaf_doc::Pt, f32)>,
     /// Set while a plugin's edits are applied, so its own edits aren't
     /// reported back to it.
@@ -661,7 +705,8 @@ pub(crate) struct Hit {
     pub page: PageId,
     /// Display index when the hit was recorded; keeps hits in document order.
     pub order: usize,
-    pub rects: Vec<Rect>,
+    /// In PageSpace.
+    pub rects: Vec<Box2>,
     pub text: String,
 }
 
@@ -1178,7 +1223,20 @@ impl DocView {
                 self.launched.elapsed()
             );
         }
-        let drawn = drawn_marks(st);
+        let mut drawn = drawn_marks(st);
+        if !view.renamed.is_empty() {
+            let index: HashMap<PageId, u32> = st
+                .pages
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (p.id, i as u32))
+                .collect();
+            let at = |&(page, id): &(PageId, AnnotId)| Some((*index.get(&page)?, id));
+            hide_renamed(&mut drawn, view.renamed.iter().filter_map(at));
+        }
+        if doc.notice.is_none() {
+            doc.notice = renamed_notice(view.renamed.len());
+        }
         if !drawn.is_empty() {
             doc.drawn_marks = drawn.clone();
             let rx = doc.primary().hide_annots(drawn);
@@ -1866,8 +1924,9 @@ impl DocView {
 
     // ----- markup -------------------------------------------------------------
 
-    /// A new annotation with the document's defaults filled in.
-    /// A new mark by whoever `settings.toml` names (the OS user otherwise).
+    /// A new mark by whoever `settings.toml` names (the OS user otherwise),
+    /// with the document's defaults filled in. Its turn is R0: built in a
+    /// page's edit frame, it reads as it was drawn there.
     pub(crate) fn new_annot(&self, kind: AnnotKind, color: [u8; 3], cx: &App) -> Annot {
         Annot {
             id: sheaf_doc::AnnotId(0),
@@ -1882,11 +1941,32 @@ impl DocView {
             fill: None,
             dashed: false,
             cloudy: false,
+            turn: Rotation::R0,
             name: String::new(),
         }
     }
 
+    /// Add `annot`, a mark built in page `page`'s edit frame, as one undo
+    /// step called `label`; it lands in PageSpace through
+    /// [`Annot::to_page`](sheaf_doc::Annot::to_page).
     pub(crate) fn add_annot(
+        &mut self,
+        page: PageId,
+        annot: Annot,
+        label: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(edit) = self.edit_geom_of(page) else {
+            return;
+        };
+        let annot = annot.to_page(&edit);
+        self.add_page_annot(page, annot, label, cx);
+    }
+
+    /// Add `annot`, a mark already in PageSpace (text markups, which the
+    /// page's text places, and replies and statuses, which have no place),
+    /// as one undo step called `label`.
+    pub(crate) fn add_page_annot(
         &mut self,
         page: PageId,
         annot: Annot,
@@ -2054,6 +2134,10 @@ impl DocView {
             w: 22.0,
             h: 22.0,
         });
+        let (Some(at_a), Some(at_b)) = (self.edit_geom_of(p0), self.edit_geom_of(p1)) else {
+            return;
+        };
+        let (a, b) = (a.to_page(&at_a), b.to_page(&at_b));
         self.apply(
             Edit::ConnectorAdd {
                 a: (p0, a),
@@ -2657,6 +2741,7 @@ impl DocView {
                 let mut outcome = None;
                 let mixed = doc.model.scripts_mixed();
                 doc.model.set_source_form(sid, incoming.form.clone());
+                doc.model.set_source_renamed(sid, &incoming.renamed);
                 match doc.model.apply(
                     Edit::InsertPages {
                         source: sid,
@@ -2864,25 +2949,8 @@ impl DocView {
         let Some(index) = doc.model.index_of(hit.page) else {
             return;
         };
-        let Some(pref) = doc.shown_ref(index) else {
-            return;
-        };
-        let src = doc
-            .model
-            .source(pref.source)
-            .map(|s| s.src.page_size(pref.index))
-            .unwrap_or(PageSize {
-                width: 612.0,
-                height: 792.0,
-            });
         if let Some(r) = hit.rects.first() {
-            let r = rotate_rect(*r, src, pref.rotation);
-            let ps = src.rotated(pref.rotation);
-            doc.scroll_to(ScrollTo::Reveal {
-                page: index,
-                fx: (r.x + r.w / 2.0) / ps.width.max(1.0),
-                fy: (r.y + r.h / 2.0) / ps.height.max(1.0),
-            });
+            doc.reveal(index, *r);
         }
         cx.notify();
     }
@@ -3490,14 +3558,55 @@ pub(crate) fn needs_password(e: &anyhow::Error) -> bool {
     sheaf_doc::source::OpenError::is_password(e) || sheaf_render::OpenError::is_password(e)
 }
 
-/// Each page's marks as the `/NM`s PDFium should hide, by page index.
+/// Each page's marks as the `/NM`s PDFium should hide, by page index,
+/// with those the `renamed` ones had (by page index).
 pub(crate) fn marks_by_page(
     by_index: &std::collections::HashMap<u32, Vec<sheaf_doc::Annot>>,
+    renamed: impl Iterator<Item = (u32, AnnotId)>,
 ) -> Vec<(u32, Vec<String>)> {
-    by_index
+    let mut pages: Vec<(u32, Vec<String>)> = by_index
         .iter()
         .map(|(i, list)| (*i, list.iter().flat_map(|a| a.pdf_names()).collect()))
-        .collect()
+        .collect();
+    hide_renamed(&mut pages, renamed);
+    pages
+}
+
+/// `pages`, the `/NM`s PDFium hides by page index, with the names the
+/// marks given new ids at open had (`renamed`, by page index): the file
+/// says those until it's saved.
+fn hide_renamed(
+    pages: &mut Vec<(u32, Vec<String>)>,
+    renamed: impl Iterator<Item = (u32, AnnotId)>,
+) {
+    let mut at: HashMap<u32, usize> = pages
+        .iter()
+        .enumerate()
+        .map(|(k, (i, _))| (*i, k))
+        .collect();
+    for (index, id) in renamed {
+        let k = *at.entry(index).or_insert_with(|| {
+            pages.push((index, Vec::new()));
+            pages.len() - 1
+        });
+        pages[k].1.extend(id.sheaf_names());
+    }
+}
+
+/// The notice for marks the open gave new ids, when there are any.
+fn renamed_notice(n: usize) -> Option<String> {
+    match n {
+        0 => None,
+        1 => Some(
+            "1 annotation shared an id with another (copied by another program); it gets a new \
+             one when you save"
+                .into(),
+        ),
+        n => Some(format!(
+            "{n} annotations shared an id with another (copied by another program); they get \
+             new ones when you save"
+        )),
+    }
 }
 
 /// The model a file opens as in the app while its facts are read: its
@@ -3600,32 +3709,6 @@ pub(crate) fn to_render_image(raster: sheaf_image::raster::Raster) -> RenderImag
     let buf = image::RgbaImage::from_raw(raster.width, raster.height, raster.data)
         .expect("raster size matches buffer");
     RenderImage::new(smallvec::smallvec![image::Frame::new(buf)])
-}
-
-/// Map a rect in a page's source orientation (size `src`) to where it lands
-/// after rotating the page clockwise by `rot`.
-pub(crate) fn rotate_rect(r: Rect, src: PageSize, rot: Rotation) -> Rect {
-    match rot {
-        Rotation::R0 => r,
-        Rotation::R90 => Rect {
-            x: src.height - (r.y + r.h),
-            y: r.x,
-            w: r.h,
-            h: r.w,
-        },
-        Rotation::R180 => Rect {
-            x: src.width - (r.x + r.w),
-            y: src.height - (r.y + r.h),
-            w: r.w,
-            h: r.h,
-        },
-        Rotation::R270 => Rect {
-            x: r.y,
-            y: src.width - (r.x + r.w),
-            w: r.h,
-            h: r.w,
-        },
-    }
 }
 
 impl Focusable for DocView {
@@ -3849,13 +3932,13 @@ fn plan_pane(
     let overdraw = view_h * TILE_OVERDRAW;
     let fetch = visible.start.saturating_sub(PREFETCH)..(visible.end + PREFETCH).min(count);
     for i in visible.start.saturating_sub(KEEP)..(visible.end + KEEP).min(count) {
-        frame
-            .keep
-            .push((layout.refs[i].id, layout.refs[i].rotation));
+        let pref = &layout.refs[i];
+        frame.keep.push((pref.id, doc.model.render_delta(pref)));
     }
     for i in fetch {
         let Some(r) = layout.rect(i) else { continue };
         let pref = layout.refs[i];
+        let rotation = doc.model.render_delta(&pref);
         let (left, top, w, h) = (r.left, r.top, r.w, r.h);
         let dev_w = (w * scale).round().max(1.0) as u32;
         let dev_h = (h * scale).round().max(1.0) as u32;
@@ -3869,7 +3952,7 @@ fn plan_pane(
                 page: PageIndex(pref.index),
                 job: Job::Page {
                     width: PREVIEW_W,
-                    rotation: pref.rotation,
+                    rotation,
                 },
                 format: PixelFormat::Bgra,
                 priority: if on_screen_page { 0 } else { 2 },
@@ -3907,7 +3990,7 @@ fn plan_pane(
                             y,
                             w: tw,
                             h: th,
-                            rotation: pref.rotation,
+                            rotation,
                         },
                         if on_screen { 1 } else { 3 },
                     ));
@@ -4033,7 +4116,9 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
         .h(px(pl.h))
         .bg(theme::PAGE)
         .shadow_md();
-    if let Some(prev) = doc.previews.get(&(pl.pref.id, pl.pref.rotation)) {
+    // The turn the page's images were rendered with.
+    let rot = doc.model.render_delta(&pl.pref);
+    if let Some(prev) = doc.previews.get(&(pl.pref.id, rot)) {
         page_div = page_div.child(
             div()
                 .absolute()
@@ -4044,7 +4129,7 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
     let mut page_tiles: Vec<(&TileKey, &Arc<RenderImage>)> = doc
         .tiles
         .iter()
-        .filter(|((p, j), _)| *p == pl.pref.id && j.rotation() == pl.pref.rotation)
+        .filter(|((p, j), _)| *p == pl.pref.id && j.rotation() == rot)
         .collect();
     // Stale zoom levels first so current ones paint over them.
     page_tiles.sort_by_key(|((_, j), _)| match j {
@@ -4077,17 +4162,21 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
                 .child(img(im.clone()).size_full().object_fit(ObjectFit::Fill)),
         );
     }
-    // Hit rects and marks are in the source page's displayed space.
-    let src = doc
-        .model
-        .source(pl.pref.source)
-        .map(|s| s.src.page_size(pl.pref.index))
-        .unwrap_or(PageSize {
-            width: 612.0,
-            height: 792.0,
-        });
-    let rot = pl.pref.rotation;
-    let k = pl.w / src.rotated(rot).width.max(1.0);
+    // Hit rects, text and marks are in PageSpace; the pane frame puts them
+    // on the page as drawn.
+    let pane = doc.model.geom(&pl.pref);
+    let to_pane = pane.to_view();
+    let size = pane.shown();
+    let k = pl.w / size.width.max(1.0);
+    // A box in the pane frame, in page-local logical px.
+    let place = |r: Box2| {
+        div()
+            .absolute()
+            .left(px(r.x * k))
+            .top(px(r.y * k))
+            .w(px(r.w * k))
+            .h(px(r.h * k))
+    };
     let hit_rects = |hits: &[Hit], current: Option<usize>, color, current_color| {
         let mut out = Vec::new();
         for (ix, hit) in hits.iter().enumerate() {
@@ -4095,20 +4184,11 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
                 continue;
             }
             for r in &hit.rects {
-                let r = rotate_rect(*r, src, rot);
-                out.push(
-                    div()
-                        .absolute()
-                        .left(px(r.x * k))
-                        .top(px(r.y * k))
-                        .w(px(r.w * k))
-                        .h(px(r.h * k))
-                        .bg(if current == Some(ix) {
-                            current_color
-                        } else {
-                            color
-                        }),
-                );
+                out.push(place(to_pane.apply_box(*r)).bg(if current == Some(ix) {
+                    current_color
+                } else {
+                    color
+                }));
             }
         }
         out
@@ -4139,35 +4219,22 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
         && let Some((_, chars)) = doc.page_chars.get(&sel.page)
     {
         let (a, b) = sel.range();
-        page_div = page_div.children(chars.rects(a, b).into_iter().map(|r| {
-            let r = rotate_rect(
-                Rect {
-                    x: r.x,
-                    y: r.y,
-                    w: r.w,
-                    h: r.h,
-                },
-                src,
-                rot,
-            );
-            div()
-                .absolute()
-                .left(px(r.x * k))
-                .top(px(r.y * k))
-                .w(px(r.w * k))
-                .h(px(r.h * k))
-                .bg(theme::SELECTION)
-        }));
+        page_div = page_div.children(
+            chars
+                .rects(a, b)
+                .into_iter()
+                .map(|r| place(to_pane.apply_box(r)).bg(theme::SELECTION)),
+        );
     }
     // A header/footer not yet saved into the file, drawn as it will be.
     page_div = page_div.children(header_footer_elements(doc, pl, k));
-    // Our markup, drawn over the page in the displayed orientation, less
-    // what the comment filter or View > Hide Comments hides.
+    // Our markup, drawn over the page as the pane shows it, less what the
+    // comment filter or View > Hide Comments hides.
     if let Some(list) = doc.model.state().annots_on(pl.pref.id)
         && !doc.comments_hidden
     {
         for a in list.iter().filter(|a| !doc.hidden_marks.contains(&a.id)) {
-            page_div = page_div.children(annot_elements(a, src, rot, k));
+            page_div = page_div.children(annot_elements(a, &to_pane, size, k));
         }
     }
     // Selection outlines; handles when one mark is selected and nothing is
@@ -4184,27 +4251,17 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
         .map(|(_, a)| a)
         .collect();
     for a in &selected {
-        let b = a.bounds();
-        let r = rotate_rect(
-            Rect {
-                x: b.x - 2.0,
-                y: b.y - 2.0,
-                w: b.w + 4.0,
-                h: b.h + 4.0,
-            },
-            src,
-            rot,
-        );
+        let r = to_pane.apply_box(a.page_bounds());
         page_div = page_div.child(
-            div()
-                .absolute()
-                .left(px(r.x * k))
-                .top(px(r.y * k))
-                .w(px(r.w * k))
-                .h(px(r.h * k))
-                .border_1()
-                .border_dashed()
-                .border_color(theme::ACCENT),
+            place(Box2 {
+                x: r.x - 2.0,
+                y: r.y - 2.0,
+                w: r.w + 4.0,
+                h: r.h + 4.0,
+            })
+            .border_1()
+            .border_dashed()
+            .border_color(theme::ACCENT),
         );
     }
     if let [a] = selected.as_slice()
@@ -4212,13 +4269,13 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
         && doc.drag.is_none()
     {
         const HANDLE: f32 = 7.0;
-        for (_, q) in crate::markup_tools::handle_spots(a) {
-            let d = rotate_pt(q, src, rot);
+        // Where the edit frame's handles are, as the pane shows them.
+        for (_, q) in crate::markup_tools::handle_spots(&a.mapped(&to_pane)) {
             page_div = page_div.child(
                 div()
                     .absolute()
-                    .left(px(d.x * k - HANDLE / 2.0))
-                    .top(px(d.y * k - HANDLE / 2.0))
+                    .left(px(q.x * k - HANDLE / 2.0))
+                    .top(px(q.y * k - HANDLE / 2.0))
                     .w(px(HANDLE))
                     .h(px(HANDLE))
                     .bg(theme::PAGE)
@@ -4235,26 +4292,17 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
             .annots_on(ed.page)
             .and_then(|l| l.iter().find(|a| a.id == ed.id))
     {
-        // Under the mark (a callout's: under its box).
+        // Under the mark as shown (a callout's: under its box).
         let b = match &a.kind {
             AnnotKind::Callout { rect, .. } => *rect,
-            _ => a.bounds(),
+            _ => a.page_bounds(),
         };
-        let r = rotate_rect(
-            Rect {
-                x: b.x,
-                y: b.y + b.h + 2.0,
-                w: b.w,
-                h: 24.0,
-            },
-            src,
-            rot,
-        );
+        let r = to_pane.apply_box(b);
         page_div = page_div.child(
             div()
                 .absolute()
                 .left(px(r.x * k))
-                .top(px(r.y * k))
+                .top(px((r.bottom() + 2.0) * k))
                 .w(px(300.0))
                 .child(ed.input.clone()),
         );
@@ -4263,18 +4311,21 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
         && pl.pref.source == *source
         && f.page == pl.pref.index
     {
-        page_div = page_div.child(crate::comments_panel::foreign_outline(f, src, rot, k));
+        page_div = page_div.child(crate::comments_panel::foreign_outline(f, &to_pane, k));
     }
-    if let Some(overlay) = crate::region::overlay(ov.region, pl.pref.id, src, rot, k) {
+    if let Some(overlay) = crate::region::overlay(ov.region, pl.pref.id, &to_pane, k) {
         page_div = page_div.child(overlay);
     }
-    if let Some(preview) = DocView::drag_preview(doc, ov.tool, ov.tool_color, pl.index, src, rot, k)
+    // Drags and drafts are in the edit frame.
+    let edit = doc.edit_geom(pl.index).unwrap_or(pane);
+    if let Some(preview) =
+        DocView::drag_preview(doc, ov.tool, ov.tool_color, pl.index, &edit, &pane, k)
     {
         page_div = page_div.child(preview);
     }
     let [r, g, b] = ov.tool_color;
     let tool_rgb = rgb(((r as u32) << 16) | ((g as u32) << 8) | b as u32);
-    if let Some(draft) = crate::shapes::draft_preview(doc, tool_rgb, pl.index, src, rot, k) {
+    if let Some(draft) = crate::shapes::draft_preview(doc, tool_rgb, pl.index, &edit, &pane, k) {
         page_div = page_div.child(draft);
     }
     page_div
@@ -4985,7 +5036,7 @@ impl DocView {
 
         let visible = layout.visible_in(scroll_y, view_h);
         doc.thumb_keep = (visible.start.saturating_sub(2)..(visible.end + 2).min(count))
-            .map(|i| (refs[i].id, refs[i].rotation))
+            .map(|i| (refs[i].id, doc.model.render_delta(&refs[i])))
             .collect();
 
         // Pages that are bookmark targets get a marker (a delete would cascade).
@@ -5004,20 +5055,21 @@ impl DocView {
         let mut items = Vec::new();
         for i in visible {
             let pref = &refs[i];
+            let rotation = doc.model.render_delta(pref);
             wants.push((
                 *pref,
                 RenderRequest {
                     page: PageIndex(pref.index),
                     job: Job::Page {
                         width: PREVIEW_W,
-                        rotation: pref.rotation,
+                        rotation,
                     },
                     format: PixelFormat::Bgra,
                     priority: 2,
                 },
             ));
             let h = thumb_w * sizes[i].height / sizes[i].width.max(1.0);
-            let image = doc.previews.get(&(pref.id, pref.rotation)).cloned();
+            let image = doc.previews.get(&(pref.id, rotation)).cloned();
             let current = i == cur;
             let selected = selection.contains(&pref.id);
             let bookmarked = targets.contains(&pref.id);
@@ -5222,26 +5274,26 @@ fn header_footer_elements(doc: &Doc, pl: &PagePlan, k: f32) -> Vec<AnyElement> {
         .collect()
 }
 
-/// GPUI elements for one annotation, positioned in page-local logical px.
-/// `src` is the source page size, `rot` the page's extra rotation, `k` logical
-/// px per point.
-/// A polygon's or polyline's outline (a cloud's scallops when it's
-/// cloudy), filled when it's closed and has a fill.
+/// A shape's outline (a cloud's scallops when it's cloudy), filled when
+/// it's closed, as all but a polyline are, and has a fill: `shape`, `a`'s
+/// laid out upright, with `m` taking it onto the page as drawn, `shown` in
+/// size, at `k` logical px a point.
 fn outline_elements(
     a: &Annot,
-    closed: bool,
-    src: PageSize,
-    rot: Rotation,
+    shape: &AnnotKind,
+    m: &Affine,
+    shown: PageSize,
     k: f32,
     stroke: gpui::Rgba,
     alpha: u32,
 ) -> Vec<AnyElement> {
     let px_of = |p: Pt| {
-        let q = rotate_pt(p, src, rot);
+        let q = m.apply(p);
         (q.x * k, q.y * k)
     };
+    let closed = !matches!(shape, AnnotKind::Polyline { .. });
     let mut path: Vec<(f32, f32)> = if closed && a.cloudy {
-        let outline = sheaf_doc::annot::outline_of(&a.kind).unwrap_or_default();
+        let outline = sheaf_doc::annot::outline_of(shape).unwrap_or_default();
         let curves =
             sheaf_doc::annot::cloud_curves(&outline, sheaf_doc::annot::cloud_step(a.stroke));
         let mut pts = Vec::new();
@@ -5263,7 +5315,7 @@ fn outline_elements(
         }
         pts
     } else {
-        match &a.kind {
+        match shape {
             AnnotKind::Polygon { points } | AnnotKind::Polyline { points } => {
                 points.iter().map(|p| px_of(*p)).collect()
             }
@@ -5283,7 +5335,7 @@ fn outline_elements(
         out.push(crate::markup_tools::fill_canvas(
             vec![path.clone()],
             rgba((u << 8) | alpha),
-            src.rotated(rot),
+            shown,
             k,
         ));
     }
@@ -5292,40 +5344,43 @@ fn outline_elements(
         stroke,
         a.stroke * k,
         a.dashed.then_some(k),
-        src.rotated(rot),
+        shown,
         k,
     ));
     out
 }
 
-/// A text edit's caret, drawn as the file draws it.
-fn caret_element(at: Box2, color: gpui::Rgba, src: PageSize, rot: Rotation, k: f32) -> AnyElement {
+/// A text edit's caret, drawn as the file draws it: `at` upright, and `m`
+/// taking it onto the page (see [`outline_elements`]).
+fn caret_element(at: Box2, color: gpui::Rgba, m: &Affine, shown: PageSize, k: f32) -> AnyElement {
     let tri = sheaf_doc::annot::caret_points(at)
         .into_iter()
         .map(|p| {
-            let q = rotate_pt(p, src, rot);
+            let q = m.apply(p);
             (q.x * k, q.y * k)
         })
         .collect();
-    crate::markup_tools::fill_canvas(vec![tri], color, src.rotated(rot), k)
+    crate::markup_tools::fill_canvas(vec![tri], color, shown, k)
 }
 
-pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) -> Vec<AnyElement> {
+/// GPUI elements for one mark, positioned in page-local logical px:
+/// `to_pane` takes PageSpace onto the page as drawn, `shown` in size, at
+/// `k` logical px a point. The mark is laid out as it reads (upright),
+/// then turned onto the page, as the file draws it.
+pub(crate) fn annot_elements(
+    a: &Annot,
+    to_pane: &Affine,
+    shown: PageSize,
+    k: f32,
+) -> Vec<AnyElement> {
+    let up = a.upright();
+    let m = Affine::upright(a.turn).inverse().then(*to_pane);
     let rgb_u32 = ((a.color[0] as u32) << 16) | ((a.color[1] as u32) << 8) | a.color[2] as u32;
     let color = rgb(rgb_u32);
     let alpha = (a.opacity.clamp(0.0, 1.0) * 255.0) as u32;
     let fill = rgba((rgb_u32 << 8) | alpha);
     let place = |b: Box2| {
-        let r = rotate_rect(
-            Rect {
-                x: b.x,
-                y: b.y,
-                w: b.w,
-                h: b.h,
-            },
-            src,
-            rot,
-        );
+        let r = m.apply_box(b);
         div()
             .absolute()
             .left(px(r.x * k))
@@ -5334,7 +5389,7 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
             .h(px(r.h * k))
     };
     let mut out = Vec::new();
-    match &a.kind {
+    match &up {
         AnnotKind::Highlight { rects } => {
             for r in rects {
                 out.push(place(*r).bg(fill).into_any_element());
@@ -5377,11 +5432,10 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
         AnnotKind::Square { .. } | AnnotKind::Ellipse { .. } | AnnotKind::Polygon { .. }
             if a.cloudy =>
         {
-            out.extend(outline_elements(a, true, src, rot, k, fill, alpha));
+            out.extend(outline_elements(a, &up, &m, shown, k, fill, alpha));
         }
         AnnotKind::Polygon { .. } | AnnotKind::Polyline { .. } => {
-            let closed = matches!(a.kind, AnnotKind::Polygon { .. });
-            out.extend(outline_elements(a, closed, src, rot, k, fill, alpha));
+            out.extend(outline_elements(a, &up, &m, shown, k, fill, alpha));
         }
         AnnotKind::Measure {
             what,
@@ -5390,7 +5444,7 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
         } => {
             use sheaf_doc::measure::Measured;
             let px_of = |p: Pt| {
-                let q = rotate_pt(p, src, rot);
+                let q = m.apply(p);
                 (q.x * k, q.y * k)
             };
             let mut line: Vec<(f32, f32)> = points.iter().map(|p| px_of(*p)).collect();
@@ -5411,7 +5465,7 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
                 fill,
                 a.stroke * k,
                 a.dashed.then_some(k),
-                src.rotated(rot),
+                shown,
                 k,
             ));
             if let Some(b) = sheaf_doc::annot::measure_label_box(*what, points, scale) {
@@ -5440,13 +5494,13 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
                 .map(|path| {
                     path.into_iter()
                         .map(|p| {
-                            let q = rotate_pt(p, src, rot);
+                            let q = m.apply(p);
                             (q.x * k, q.y * k)
                         })
                         .collect()
                 })
                 .collect();
-            out.push(stroke_canvas(paths, fill, 1.5 * k, src.rotated(rot), k));
+            out.push(stroke_canvas(paths, fill, 1.5 * k, shown, k));
         }
         AnnotKind::Callout {
             rect,
@@ -5455,7 +5509,7 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
             size,
         } => {
             let px_of = |p: Pt| {
-                let q = rotate_pt(p, src, rot);
+                let q = m.apply(p);
                 (q.x * k, q.y * k)
             };
             let end = sheaf_doc::annot::callout_end(*rect, *knee);
@@ -5467,7 +5521,7 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
                 ],
                 fill,
                 a.stroke * k,
-                src.rotated(rot),
+                shown,
                 k,
             ));
             out.push(
@@ -5495,7 +5549,7 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
                     .border_color(fill)
                     .when(a.dashed, |d| d.border_dashed())
                     .when_some(inside, |d, c| d.bg(c))
-                    .when(matches!(a.kind, AnnotKind::Ellipse { .. }), |d| {
+                    .when(matches!(up, AnnotKind::Ellipse { .. }), |d| {
                         d.rounded_full()
                     })
                     .into_any_element(),
@@ -5632,7 +5686,7 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
         | AnnotKind::Squiggly { rects }
         | AnnotKind::Replace { rects, .. } => {
             // A replacement crosses its text out, then shows its caret.
-            let lines = match &a.kind {
+            let lines = match &up {
                 AnnotKind::Replace { .. } => AnnotKind::StrikeOut {
                     rects: rects.clone(),
                 },
@@ -5643,19 +5697,19 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
                 .map(|path| {
                     path.into_iter()
                         .map(|p| {
-                            let q = rotate_pt(p, src, rot);
+                            let q = m.apply(p);
                             (q.x * k, q.y * k)
                         })
                         .collect()
                 })
                 .collect();
             let width = sheaf_doc::annot::text_line_width(rects);
-            out.push(stroke_canvas(paths, fill, width * k, src.rotated(rot), k));
-            if let AnnotKind::Replace { at, .. } = &a.kind {
-                out.push(caret_element(*at, fill, src, rot, k));
+            out.push(stroke_canvas(paths, fill, width * k, shown, k));
+            if let AnnotKind::Replace { at, .. } = &up {
+                out.push(caret_element(*at, fill, &m, shown, k));
             }
         }
-        AnnotKind::Insert { at } => out.push(caret_element(*at, fill, src, rot, k)),
+        AnnotKind::Insert { at } => out.push(caret_element(*at, fill, &m, shown, k)),
         // In their parent's thread, not on the page.
         AnnotKind::Reply { .. } | AnnotKind::Status { .. } => {}
         AnnotKind::PageStamp {
@@ -5738,7 +5792,7 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
             arrow,
             arrow_start,
         } => {
-            let (qa, qb) = (rotate_pt(*pa, src, rot), rotate_pt(*pb, src, rot));
+            let (qa, qb) = (m.apply(*pa), m.apply(*pb));
             let (a2, b2) = ((qa.x * k, qa.y * k), (qb.x * k, qb.y * k));
             let head = (6.0 + a.stroke * 2.0) * k;
             out.push(stroke_canvas_dashed(
@@ -5746,7 +5800,7 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
                 fill,
                 a.stroke * k,
                 a.dashed.then_some(k),
-                src.rotated(rot),
+                shown,
                 k,
             ));
             let mut heads = Vec::new();
@@ -5757,13 +5811,7 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
                 heads.push(arrow_head(b2, a2, head));
             }
             if !heads.is_empty() {
-                out.push(stroke_canvas(
-                    heads,
-                    fill,
-                    a.stroke * k,
-                    src.rotated(rot),
-                    k,
-                ));
+                out.push(stroke_canvas(heads, fill, a.stroke * k, shown, k));
             }
         }
         AnnotKind::Ink { paths } => {
@@ -5772,7 +5820,7 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
                 .map(|p| {
                     p.iter()
                         .map(|q| {
-                            let r = rotate_pt(*q, src, rot);
+                            let r = m.apply(*q);
                             (r.x * k, r.y * k)
                         })
                         .collect()
@@ -5783,7 +5831,7 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
                 fill,
                 a.stroke * k,
                 a.dashed.then_some(k),
-                src.rotated(rot),
+                shown,
                 k,
             ));
         }
@@ -6026,6 +6074,33 @@ mod tests {
             differ.len()
         );
         assert!(differ.is_empty(), "{differ:#?}");
+    }
+
+    /// PDFium hides the marks given new ids at open under the names the
+    /// file still says, on their pages beside the others', and one notice
+    /// counts them.
+    #[test]
+    fn renamed_marks_are_hidden_by_their_old_names() {
+        let note = sheaf_doc::forms::fixture::note();
+        let marks = HashMap::from([(0, vec![note.clone()])]);
+        let renamed = [(0, AnnotId(7)), (2, AnnotId(8))];
+        let mut pages = marks_by_page(&marks, renamed.into_iter());
+        pages.sort_by_key(|(i, _)| *i);
+        let names = |id: u64| [format!("sheaf:{id}"), format!("sheaf:{id}:strike")];
+        let mut first = vec![note.name()];
+        first.extend(names(7));
+        assert_eq!(pages, [(0, first), (2, names(8).to_vec())]);
+        assert_eq!(renamed_notice(0), None);
+        assert!(
+            renamed_notice(1)
+                .unwrap()
+                .starts_with("1 annotation shared an id")
+        );
+        assert!(
+            renamed_notice(3)
+                .unwrap()
+                .starts_with("3 annotations shared an id")
+        );
     }
 
     #[test]

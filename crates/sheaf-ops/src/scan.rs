@@ -8,7 +8,6 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use sheaf_core::PageSize;
 use sheaf_doc::images::placement;
 use sheaf_doc::{Box2, Document, Edit, SourceInfo, Store, TextLayer};
 use sheaf_image::clean::ScanParams;
@@ -246,7 +245,7 @@ pub fn scan(
     tmp.push(".images.part");
     let tmp = PathBuf::from(tmp);
     std::fs::write(&tmp, &bytes).with_context(|| format!("writing {}", tmp.display()))?;
-    let result = add_text(&tmp, &pages, fit, words, &engine_name, out);
+    let result = add_text(&tmp, words, &engine_name, out);
     let _ = std::fs::remove_file(&tmp);
     result?;
     Ok(report)
@@ -287,34 +286,25 @@ fn to_page(
         .collect()
 }
 
-/// Open the image PDF at `src`, give each page its text layer, and write
-/// the result to `out`.
+/// Open the image PDF at `src`, give each page its text layer (`words`,
+/// in points from each page's top-left), and write the result to `out`.
 fn add_text(
     src: &Path,
-    pages: &[PageImage],
-    fit: sheaf_doc::images::PageFit,
     words: Vec<Vec<sheaf_doc::OcrWord>>,
     engine: &str,
     out: &Path,
 ) -> Result<()> {
-    let sizes: Vec<PageSize> = pages
-        .iter()
-        .map(|p| {
-            let (width, height) = placement(p, fit).page;
-            PageSize { width, height }
-        })
-        .collect();
     let store = Store::new();
     let info = SourceInfo::read(&store, src, None)?;
     let mut doc = Document::new(store, info, &[], sheaf_doc::history::default_policy());
-    let ids: Vec<_> = doc.state().pages.iter().map(|p| p.id).collect();
-    let layers = ids
-        .into_iter()
+    let layers = doc
+        .state()
+        .pages
+        .iter()
         .zip(words)
-        .zip(sizes)
-        .map(|((id, w), size)| {
-            let layer = TextLayer::from_engine(w, size, sheaf_core::Rotation::R0, engine);
-            (id, Arc::new(layer))
+        .map(|(p, w)| {
+            let layer = TextLayer::from_engine(w, &doc.geom(p), engine);
+            (p.id, Arc::new(layer))
         })
         .collect();
     doc.apply(Edit::SetTextLayers { layers }, "Recognize Text")?;

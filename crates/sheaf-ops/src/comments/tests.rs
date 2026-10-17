@@ -1,4 +1,5 @@
 use super::*;
+use sheaf_core::Rotation;
 use sheaf_doc::annot::REVIEW;
 use sheaf_doc::{FixedCount, Pt, SourceInfo, Store};
 
@@ -24,6 +25,7 @@ fn mark(kind: AnnotKind, contents: &str) -> Annot {
         fill: None,
         dashed: false,
         cloudy: false,
+        turn: Rotation::R0,
         name: String::new(),
     }
 }

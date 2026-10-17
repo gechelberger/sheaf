@@ -32,6 +32,9 @@ image.workspace = true
 quick-xml = "0.41"
 # A file's password is wiped from memory when its blob goes.
 zeroize = "1.9"
+# Text in a mark's staleness digest is NFC, whatever another tool wrote
+# (M10.5 §3.6).
+unicode-normalization = "0.1"
 
 [dev-dependencies]
 image.workspace = true

@@ -94,12 +94,20 @@ fn mark(kind: AnnotKind, color: [u8; 3], contents: &str) -> Annot {
         fill: None,
         dashed: false,
         cloudy: false,
+        turn: Rotation::R0,
         name: String::new(),
     }
 }
 
+/// `a`, placed where page `i` of `doc` shows it, as the model keeps it:
+/// in PageSpace, reading upright as the page shows.
+fn placed(doc: &sheaf_doc::Document, i: usize, a: Annot) -> Annot {
+    a.to_page(&doc.geom(doc.page(i).unwrap()))
+}
+
 /// The file, with a red note of ours on page 1 at (100, 100) and a green
-/// tickmark on page 3 at (50, 60), and the other tools' comments in it.
+/// tickmark on page 3 at (50, 60), as they show, and the other tools'
+/// comments in it.
 fn opened(
     dir: &Path,
 ) -> (
@@ -118,7 +126,7 @@ fn opened(
     doc.apply(
         Edit::AnnotAdd {
             page: pages[0],
-            annot: note,
+            annot: placed(&doc, 0, note),
         },
         "note",
     )
@@ -139,7 +147,7 @@ fn opened(
     doc.apply(
         Edit::AnnotAdd {
             page: pages[2],
-            annot: tick,
+            annot: placed(&doc, 2, tick),
         },
         "tick",
     )

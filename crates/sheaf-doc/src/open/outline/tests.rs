@@ -1,6 +1,6 @@
 //! The outline read from built files: each way a destination is named,
-//! positions in displayed space, every view kind, styles, the closed
-//! state, and the caps on cycles and depth.
+//! positions in PageSpace, every view kind, styles, the closed state, and
+//! the caps on cycles and depth.
 
 use std::path::Path;
 
@@ -200,7 +200,7 @@ fn an_integer_is_a_page_index() {
     );
     let got = outline(&f.source());
     assert_eq!(pages(&got), [Some(1), None, None, Some(0)]);
-    assert!(near(&got[3].view, &at(Some(72.0), Some(72.0), None)));
+    assert!(near(&got[3].view, &at(Some(72.0), Some(720.0), None)));
 }
 
 /// A page the tree lists twice is where it's first listed.
@@ -228,10 +228,10 @@ fn a_page_listed_twice_is_its_first_index() {
     assert_eq!(pages(&outline(&src)), [Some(0), Some(1)]);
 }
 
-/// An `/XYZ` position is in the page's displayed space, after its
-/// `/Rotate` and within its `/CropBox`, as `write_outline` writes it.
+/// An `/XYZ` position is in PageSpace, as the file has it, whatever the
+/// page's `/Rotate` and `/CropBox`, and `write_outline` writes it back so.
 #[test]
-fn positions_are_in_displayed_space() {
+fn positions_are_in_page_space() {
     let mut f = Form::new(3);
     let p = f.pages.clone();
     f.dict(p[1]).set("Rotate", 90);
@@ -240,7 +240,6 @@ fn positions_are_in_displayed_space() {
     outline_tree(
         &mut f,
         vec![
-            // User (100, 700) on a /Rotate 90 page: 700 across, 100 down.
             (0, to("Turned", xyz(p[1], 100.into(), 700.into(), 0.into()))),
             (
                 0,
@@ -275,9 +274,9 @@ fn positions_are_in_displayed_space() {
     );
     let got = outline(&f.source());
     let want = [
-        at(Some(700.0), Some(100.0), None),
-        at(Some(100.0), Some(100.0), Some(2.0)),
-        at(None, Some(292.0), None),
+        at(Some(100.0), Some(700.0), None),
+        at(Some(150.0), Some(642.0), Some(2.0)),
+        at(None, Some(500.0), None),
         at(None, None, Some(1.5)),
         None,
         at(Some(10.0), None, None),

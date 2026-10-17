@@ -37,9 +37,10 @@
 //! (15), Bates apply and the live-token reorder (17), and the flattened
 //! export's RSS (19). The rows today's code has no counterpart for come
 //! with those slices; idle CPU is the app's (12, 13). So far slice 1's
-//! history bench, slice 3's geometry walk and slice 4's ready assert,
-//! after their tables print. The 200 OCR versions take about 5 GB until
-//! slice 12 bounds history, and skip with less memory available.
+//! history bench, slice 3's geometry walk, slice 4's ready and slice 5's
+//! ready on 20,000 of sheaf's marks assert, after their tables print. The
+//! 200 OCR versions take about 5 GB until slice 12 bounds history, and
+//! skip with less memory available.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -47,7 +48,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use sheaf_core::{PageIndex, PageSize, Rotation};
+use sheaf_core::{PageIndex, Rotation};
 use sheaf_doc::open::Facts;
 use sheaf_doc::save::Strategy;
 use sheaf_doc::stamps::{Bates, HeaderFooter};
@@ -187,6 +188,11 @@ const MARKS_7K: MarksBaseline = MarksBaseline {
     add_ms: 0.686,
     reorder_ms: 0.945,
 };
+
+/// Ready on the history bench's document saved, its 20,000 marks sheaf's
+/// own, on slice 5's code, in milliseconds: the median of three runs of
+/// the harness.
+const MARKS_7K_READY_MS: f64 = 499.0;
 
 /// 200 OCR versions of 1,000 pages on slice 2's code: what history holds,
 /// by its estimate and by RSS, in megabytes.
@@ -579,6 +585,7 @@ fn gates(kind: Kind) {
 
     print_table(
         &format!("{} 7k: {}, {file_mb:.1} MB", kind.name(), path.display()),
+        "slice 2",
         &rows,
     );
     if let Some(gate) = walk_gate {
@@ -617,6 +624,7 @@ fn flatten(kind: Kind) {
     };
     print_table(
         &format!("{} 7k, flatten in a process of its own", kind.name()),
+        "slice 2",
         &[
             Row::time("flatten", flatten, base.flatten_ms, ""),
             Row::peak("flatten", mem, base.flatten_rss_mb, rss_gate),
@@ -708,6 +716,7 @@ fn history_at_7k_pages_and_20k_marks() {
     let (add, reorder) = (median(adds), median(reorders));
     print_table(
         "history: 7,000 pages, 20,000 marks",
+        "slice 2",
         &[
             Row::time("AnnotAdd", add, MARKS_7K.add_ms, "< 1 ms, asserted"),
             Row::time(
@@ -723,6 +732,66 @@ fn history_at_7k_pages_and_20k_marks() {
         reorder < Duration::from_millis(2),
         "a full reorder took {reorder:?}"
     );
+}
+
+/// Ready on the history bench's 7,000 pages and 20,000 marks saved by a
+/// Rewrite, so they're sheaf's own in the file, the last 10,000 copies
+/// that say the first 10,000's ids on other pages: each mark's payload
+/// read and its digest checked, and the copies given new ids (M10.5 slice
+/// 5). The file is written to the gate directory each run, by today's
+/// writer. Under the ready gate, 1 s.
+#[test]
+#[ignore = "gate: cargo test -p sheaf-ops --release --test gate_7k -- --ignored --nocapture --test-threads=1"]
+fn ready_at_7k_pages_and_20k_sheaf_marks() {
+    const MARKS: u32 = 20_000;
+    const COPIES: u32 = 10_000;
+    let mut marks: HashMap<u32, Vec<Annot>> = HashMap::new();
+    for i in 0..MARKS {
+        // The last COPIES say the first ones' ids.
+        let id = i % (MARKS - COPIES);
+        marks
+            .entry(i % PAGES)
+            .or_default()
+            .push(square(u64::from(id) + 1));
+    }
+    let store = Store::new();
+    let primary = SourceInfo::blank(&store, PAGES);
+    let mut d = sheaf_doc::open::start(store, primary, sheaf_doc::history::default_policy());
+    d.ready(Facts {
+        marks,
+        ..Default::default()
+    })
+    .unwrap();
+    let dir = gate_dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("marks-{PAGES}.pdf"));
+    std::fs::write(&path, sheaf_doc::save::rewrite(&d.snapshot()).unwrap()).unwrap();
+    drop(d);
+    let mut opened = None;
+    let (ready, _) = measure(RUNS, || {
+        drop(opened.take());
+        let (t, o) = timed(|| sheaf_doc::open::file(&path, None).unwrap());
+        opened = Some(o);
+        t
+    });
+    let opened = opened.expect("opened above");
+    let read: usize = opened.doc.state().annots.values().map(|l| l.len()).sum();
+    assert_eq!(read, MARKS as usize, "every mark is sheaf's");
+    assert_eq!(opened.view.renamed.len(), COPIES as usize);
+    print_table(
+        &format!(
+            "ready: 7,000 pages, 20,000 sheaf marks, {:.1} MB",
+            mb(std::fs::metadata(&path).unwrap().len())
+        ),
+        "slice 5",
+        &[Row::time(
+            "ready",
+            ready,
+            MARKS_7K_READY_MS,
+            "< 1 s, asserted",
+        )],
+    );
+    assert!(ready < Duration::from_secs(1), "ready took {ready:?}");
 }
 
 /// 200 OCR runs over a 1,000-page scan, each a version: what history
@@ -758,6 +827,7 @@ fn history_of_200_ocr_versions_at_1000_pages() {
     let stats = d.stats();
     print_table(
         "history: 200 OCR versions of 1,000 pages, 300 words a page",
+        "slice 2",
         &[
             Row {
                 what: "versions".into(),
@@ -812,12 +882,8 @@ fn workspace() -> PathBuf {
 /// fixture gen.py makes at another length isn't slice 2's, and fails; a
 /// heavy one is another font's, and only warns.
 fn fixture(kind: Kind) -> PathBuf {
-    let ws = workspace();
-    let dir = std::env::var_os("SHEAF_GATE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| ws.join("target/gate-7k"));
-    let path = dir.join(format!("{}-{PAGES}.pdf", kind.name()));
-    let generator = ws.join("bench/gen.py");
+    let path = gate_dir().join(format!("{}-{PAGES}.pdf", kind.name()));
+    let generator = workspace().join("bench/gen.py");
     let len = |p: &Path| std::fs::metadata(p).map(|m| m.len()).ok();
     let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
     let stale = match (modified(&path), modified(&generator)) {
@@ -857,6 +923,13 @@ fn fixture(kind: Kind) -> PathBuf {
     path
 }
 
+/// Where the fixtures go: `$SHEAF_GATE_DIR`, else `target/gate-7k/`.
+fn gate_dir() -> PathBuf {
+    std::env::var_os("SHEAF_GATE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace().join("target/gate-7k"))
+}
+
 /// A document of `pages` blank Letter pages, in a store of its own.
 fn blank(pages: u32) -> Document {
     let store = Store::new();
@@ -886,11 +959,13 @@ fn square(id: u64) -> Annot {
         fill: None,
         dashed: false,
         cloudy: false,
+        turn: Rotation::R0,
         name: String::new(),
     }
 }
 
-/// A Letter page's OCR text: 30 lines of 10 words, picked by `seed`.
+/// A Letter page's OCR text: 30 lines of 10 words down the page, picked
+/// by `seed`.
 fn ocr_layer(seed: usize) -> TextLayer {
     const WORDS: [&str; 8] = [
         "the", "witness", "said", "exhibit", "of", "page", "2024", "counsel",
@@ -904,7 +979,7 @@ fn ocr_layer(seed: usize) -> TextLayer {
                 text: WORDS[(seed + line * 10 + i) % WORDS.len()].into(),
                 rect: Box2 {
                     x: 72.0 + 46.0 * i as f32,
-                    y: 72.0 + 20.0 * line as f32,
+                    y: 708.0 - 20.0 * line as f32,
                     w: 42.0,
                     h: 12.0,
                 },
@@ -917,10 +992,6 @@ fn ocr_layer(seed: usize) -> TextLayer {
         words,
         lines,
         upright: Rotation::R0,
-        page: PageSize {
-            width: 612.0,
-            height: 792.0,
-        },
         engine: "gate".into(),
     }
 }
@@ -969,11 +1040,12 @@ impl Row {
     }
 }
 
-fn print_table(title: &str, rows: &[Row]) {
+/// `rows` under `title`, beside the baselines `against` names.
+fn print_table(title: &str, against: &str, rows: &[Row]) {
     println!("\n{title}");
     println!(
         "  {:<44} {:>14} {:>14} {:>6}  gate",
-        "", "now", "slice 2", "ratio"
+        "", "now", against, "ratio"
     );
     for r in rows {
         let now = r.now.map_or("n/a".into(), |v| amount(v, r.unit));

@@ -6554,6 +6554,7 @@ dependencies = [
  "sheaf-progress",
  "syn 2.0.119",
  "thiserror 2.0.21",
+ "unicode-normalization",
  "zeroize",
 ]
 
@@ -6641,6 +6642,7 @@ dependencies = [
  "http",
  "http-body-util",
  "log",
+ "lopdf",
  "regex",
  "semver",
  "serde",

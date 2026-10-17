@@ -16,8 +16,9 @@ use std::path::Path;
 
 use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, StringFormat, dictionary};
+use sheaf_core::Rotation;
 
-use crate::annot::{Annot, AnnotId, AnnotKind, PageGeom, Pt};
+use crate::annot::{Annot, AnnotId, AnnotKind, Pt};
 use crate::model::PageId;
 use crate::stamps::HeaderFooter;
 use crate::store::{BlobKind, Src, Store};
@@ -649,11 +650,7 @@ pub fn every_kind() -> Form {
 pub fn every_fact() -> Form {
     let mut f = Form::new(3);
     f.text("name", 0, row(0));
-    let geom = PageGeom {
-        media: [0.0, 0.0, 612.0, 792.0],
-        rotate: 0,
-    };
-    let main = crate::annot::to_pdf(&note(), &geom, &mut f.pdf).main;
+    let main = crate::annot::to_pdf(&note(), &mut f.pdf).main;
     let main = f.pdf.add_object(main);
     f.set_annots(1, &[main]);
     let catalog = f.catalog;
@@ -759,8 +756,204 @@ pub fn note() -> Annot {
         fill: None,
         dashed: false,
         cloudy: false,
+        turn: Rotation::R0,
         name: String::new(),
     }
+}
+
+/// One mark of every kind, not turned, in PageSpace within a visible box
+/// of (−17, 62)–(555, 824), and after them the measurements of a
+/// perimeter and an area, which a file holds as `/Vertices` where a
+/// distance is `/L`: ids from 1, the reply and the status in the note's
+/// thread, and the stamp and the attachment naming no file in the cache,
+/// so writing and reading them never touches it.
+pub fn every_mark_kind() -> Vec<Annot> {
+    use crate::annot::{Box2, REVIEW};
+    use crate::measure::{Measured, Scale};
+    use crate::tape::{Tape, TapeLook};
+    let b = |x: f32, y: f32, w: f32, h: f32| Box2 { x, y, w, h };
+    let p = |x: f32, y: f32| Pt { x, y };
+    let lines = vec![b(60.0, 700.0, 200.0, 14.0), b(60.0, 684.0, 120.0, 14.0)];
+    let scale = || {
+        Box::new(Scale {
+            page: 1.0,
+            page_unit: "in".into(),
+            real: 10.0,
+            unit: "ft".into(),
+            precision: 2,
+        })
+    };
+    let mut kinds = vec![
+        AnnotKind::Highlight { rects: lines },
+        AnnotKind::Note {
+            pos: p(400.0, 700.0),
+        },
+        AnnotKind::FreeText {
+            rect: b(60.0, 600.0, 180.0, 40.0),
+            size: 11.0,
+        },
+        AnnotKind::Square {
+            rect: b(300.0, 600.0, 80.0, 50.0),
+        },
+        AnnotKind::Ellipse {
+            rect: b(400.0, 600.0, 60.0, 40.0),
+        },
+        AnnotKind::Line {
+            a: p(60.0, 560.0),
+            b: p(200.0, 520.0),
+            arrow: true,
+            arrow_start: true,
+        },
+        AnnotKind::Ink {
+            paths: vec![vec![p(250.0, 560.0), p(270.0, 540.0), p(300.0, 555.0)]],
+        },
+        AnnotKind::Stamp {
+            rect: b(320.0, 530.0, 24.0, 24.0),
+            glyph: "✓".into(),
+        },
+        AnnotKind::Connector {
+            rect: b(380.0, 530.0, 22.0, 22.0),
+            label: "1".into(),
+            partner: None,
+        },
+        AnnotKind::Tape {
+            rect: b(450.0, 420.0, 70.0, 100.0),
+            size: 10.0,
+            tape: Tape::from_text("1.00 +\n2.00 +\n3.00 T"),
+            look: TapeLook {
+                rotation: 90,
+                ..TapeLook::default()
+            },
+        },
+        AnnotKind::Underline {
+            rects: vec![b(60.0, 480.0, 150.0, 12.0)],
+        },
+        AnnotKind::StrikeOut {
+            rects: vec![b(60.0, 460.0, 150.0, 12.0)],
+        },
+        AnnotKind::Squiggly {
+            rects: vec![b(60.0, 440.0, 150.0, 12.0)],
+        },
+        AnnotKind::Replace {
+            rects: vec![b(60.0, 420.0, 60.0, 12.0)],
+            struck: "teh".into(),
+            at: b(117.0, 416.0, 7.0, 7.0),
+        },
+        AnnotKind::Insert {
+            at: b(200.0, 416.0, 7.0, 7.0),
+        },
+        AnnotKind::Reply {
+            parent: "sheaf:2".into(),
+        },
+        AnnotKind::Status {
+            parent: "sheaf:2".into(),
+            model: REVIEW.into(),
+            state: "Accepted".into(),
+        },
+        AnnotKind::PageStamp {
+            rect: b(60.0, 300.0, 100.0, 50.0),
+            stamp: "absent".into(),
+            name: "Approved".into(),
+            text: Some("GE".into()),
+        },
+        AnnotKind::TextStamp {
+            rect: b(200.0, 300.0, 120.0, 50.0),
+            text: "APPROVED\nGE 10/16/2026".into(),
+            status: false,
+        },
+        AnnotKind::PageBorder {
+            rect: b(-12.0, 67.0, 562.0, 752.0),
+            status: "Reviewed".into(),
+        },
+        AnnotKind::Polygon {
+            points: vec![p(350.0, 300.0), p(420.0, 310.0), p(380.0, 370.0)],
+        },
+        AnnotKind::Polyline {
+            points: vec![p(430.0, 300.0), p(470.0, 330.0), p(520.0, 300.0)],
+        },
+        AnnotKind::Callout {
+            rect: b(60.0, 200.0, 150.0, 36.0),
+            knee: p(240.0, 210.0),
+            point: p(300.0, 180.0),
+            size: 12.0,
+        },
+        AnnotKind::FileAttachment {
+            pos: p(500.0, 700.0),
+            icon: "Paperclip".into(),
+            file: "absent".into(),
+            name: "notes.txt".into(),
+            size: 12,
+        },
+        AnnotKind::Measure {
+            what: Measured::Distance,
+            points: vec![p(250.0, 200.0), p(400.0, 250.0)],
+            scale: scale(),
+        },
+    ];
+    for (i, kind) in kinds.iter().enumerate() {
+        // Every kind, in this order: a new one doesn't compile until it's
+        // here too.
+        let at = match kind {
+            AnnotKind::Highlight { .. } => 0,
+            AnnotKind::Note { .. } => 1,
+            AnnotKind::FreeText { .. } => 2,
+            AnnotKind::Square { .. } => 3,
+            AnnotKind::Ellipse { .. } => 4,
+            AnnotKind::Line { .. } => 5,
+            AnnotKind::Ink { .. } => 6,
+            AnnotKind::Stamp { .. } => 7,
+            AnnotKind::Connector { .. } => 8,
+            AnnotKind::Tape { .. } => 9,
+            AnnotKind::Underline { .. } => 10,
+            AnnotKind::StrikeOut { .. } => 11,
+            AnnotKind::Squiggly { .. } => 12,
+            AnnotKind::Replace { .. } => 13,
+            AnnotKind::Insert { .. } => 14,
+            AnnotKind::Reply { .. } => 15,
+            AnnotKind::Status { .. } => 16,
+            AnnotKind::PageStamp { .. } => 17,
+            AnnotKind::TextStamp { .. } => 18,
+            AnnotKind::PageBorder { .. } => 19,
+            AnnotKind::Polygon { .. } => 20,
+            AnnotKind::Polyline { .. } => 21,
+            AnnotKind::Callout { .. } => 22,
+            AnnotKind::FileAttachment { .. } => 23,
+            AnnotKind::Measure { .. } => 24,
+        };
+        assert_eq!(at, i, "{kind:?} is out of place");
+    }
+    kinds.extend([
+        AnnotKind::Measure {
+            what: Measured::Perimeter,
+            points: vec![p(250.0, 120.0), p(330.0, 160.0), p(400.0, 110.0)],
+            scale: scale(),
+        },
+        AnnotKind::Measure {
+            what: Measured::Area,
+            points: vec![p(420.0, 120.0), p(520.0, 120.0), p(500.0, 180.0)],
+            scale: scale(),
+        },
+    ]);
+    kinds
+        .into_iter()
+        .enumerate()
+        .map(|(i, kind)| Annot {
+            id: AnnotId(i as u64 + 1),
+            fill: kind.fillable().then_some([255, 255, 0]),
+            dashed: matches!(kind, AnnotKind::Square { .. }),
+            cloudy: matches!(kind, AnnotKind::Ellipse { .. } | AnnotKind::Polygon { .. }),
+            kind,
+            color: [220, 40, 40],
+            opacity: 0.8,
+            stroke: 1.5,
+            author: "Ann".into(),
+            contents: "About this".into(),
+            modified: "D:20261016120000".into(),
+            created: "D:20261015120000".into(),
+            turn: Rotation::R0,
+            name: String::new(),
+        })
+        .collect()
 }
 
 /// `bytes` with an incremental update appended: `change` edits a copy of

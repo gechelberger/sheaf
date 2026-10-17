@@ -17,8 +17,9 @@ use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
 use serde::{Deserialize, Serialize};
 use sheaf_core::PageSize;
 
-use crate::annot::{PageGeom, Pt};
+use crate::annot::Pt;
 use crate::attachments::Objects;
+use crate::geom::Geom;
 use crate::model::PageId;
 
 /// Bates numbering: `<prefix><number, zero-padded to digits><suffix>`,
@@ -306,23 +307,18 @@ pub const FONT_NAME: &str = "SheafHF";
 /// Marks our artifacts so they can be found again.
 const MARKER: &str = "SheafStamp";
 
-/// The artifact stream for `placed` on a page with geometry `geom` whose
-/// shown orientation includes `extra` degrees of rotation beyond the
-/// file's own (sheaf's page rotation).
-pub fn to_content(placed: &[Placed], color: [u8; 3], geom: &PageGeom, extra: i32) -> Vec<u8> {
+/// The artifact stream for `placed`, laid out on the page as it shows
+/// with geometry `geom`, its rotation the page's, absolute.
+pub fn to_content(placed: &[Placed], color: [u8; 3], geom: &Geom) -> Vec<u8> {
     // Draw in the shown frame: map shown points to user space.
-    let rotate = (geom.rotate + extra).rem_euclid(360);
-    let g = PageGeom {
-        media: geom.media,
-        rotate,
-    };
-    let theta = (rotate as f32).to_radians();
+    let to_user = geom.from_view();
+    let theta = (geom.rotate.degrees() as f32).to_radians();
     let (cs, sn) = (theta.cos(), theta.sin());
     let [r, gr, b] = color.map(|v| v as f32 / 255.0);
     let mut s = b"Q\n".to_vec();
     for p in placed {
         let subtype = if p.header { "Header" } else { "Footer" };
-        let o = g.to_user(Pt {
+        let o = to_user.apply(Pt {
             x: p.x,
             y: p.baseline,
         });
@@ -363,21 +359,21 @@ fn objects(pdf: &mut Pdf, cache: &mut Option<StampObjects>) -> StampObjects {
     o
 }
 
-/// Draw `placed` on `page`, after its own content.
+/// Draw `placed` on `page`, after its own content, as [`to_content`]
+/// lays it out.
 pub fn install(
     pdf: &mut Pdf,
     page: &mut Dictionary,
     placed: &[Placed],
     color: [u8; 3],
-    geom: &PageGeom,
-    extra: i32,
+    geom: &Geom,
     cache: &mut Option<StampObjects>,
 ) {
     if placed.is_empty() {
         return;
     }
     let o = objects(pdf, cache);
-    let mut stream = Stream::new(dictionary! {}, to_content(placed, color, geom, extra));
+    let mut stream = Stream::new(dictionary! {}, to_content(placed, color, geom));
     let _ = stream.compress();
     let ours = pdf.add_object(stream);
     let mut entries = vec![Object::Reference(o.q)];
@@ -655,11 +651,7 @@ mod tests {
             size: 9.0,
             width: 20.0,
         }];
-        let geom = PageGeom {
-            media: [0.0, 0.0, 612.0, 792.0],
-            rotate: 0,
-        };
-        let out = to_content(&placed, [0, 0, 0], &geom, 0);
+        let out = to_content(&placed, [0, 0, 0], &Geom::read(None, None, 0));
         assert!(out.windows(6).any(|w| w == b"(Caf\xe9)"), "{out:?}");
     }
 

@@ -919,7 +919,8 @@ impl sheaf_plugin::OcrSource for EngineOcr {
     fn recognize(
         &self,
         page: &sheaf_doc::PageRef,
-        size: sheaf_core::PageSize,
+        geom: &sheaf_doc::geom::Geom,
+        render: sheaf_core::Rotation,
         language: Option<String>,
         dpi: Option<u32>,
     ) -> Result<sheaf_doc::TextLayer> {
@@ -941,8 +942,8 @@ impl sheaf_plugin::OcrSource for EngineOcr {
                 id: page.id,
                 source: page.source,
                 index: page.index,
-                rotation: page.rotation,
-                size,
+                geom: *geom,
+                render,
             }],
             skip_pages_with_text: false,
             engine: config.engine,
@@ -1068,9 +1069,9 @@ fn sign_marks(edits: &mut [sheaf_doc::Edit], me: &Signer) {
 }
 
 /// A plugin rewrites a mark from what its API shows it. Every plugin's
-/// update keeps the mark's creation date, name and a tape's rows and look,
-/// which no API shows; a 0.2 plugin's (`api02`) keeps its fill, dashes,
-/// cloud and start arrowhead too, which 0.2 can't say.
+/// update keeps the mark's creation date, name, turn and a tape's rows and
+/// look, which no API shows; a 0.2 plugin's (`api02`) keeps its fill,
+/// dashes, cloud and start arrowhead too, which 0.2 can't say.
 fn keep_unseen(edits: &mut [sheaf_doc::Edit], st: &sheaf_doc::DocState, api02: bool) {
     for e in edits {
         let sheaf_doc::Edit::AnnotUpdate { page, annot } = e else {
@@ -1084,6 +1085,7 @@ fn keep_unseen(edits: &mut [sheaf_doc::Edit], st: &sheaf_doc::DocState, api02: b
         };
         annot.name = was.name.clone();
         annot.created = was.created.clone();
+        annot.turn = was.turn;
         if api02 {
             annot.fill = was.fill;
             annot.dashed = was.dashed;
@@ -1917,16 +1919,19 @@ mod tests {
             fill: None,
             dashed: true,
             cloudy: false,
+            turn: sheaf_core::Rotation::R90,
             name: String::new(),
         };
         d.apply(Edit::AnnotAdd { page, annot: line }, "Line")
             .unwrap();
         let mut placed = d.state().annots_on(page).unwrap()[0].clone();
-        // What a 0.2 plugin hands back: the styles it can't see are lost.
+        // What a 0.2 plugin hands back: the styles it can't see are lost,
+        // and it reads upright as the file shows the page.
         let mut back = placed.clone();
         back.contents = "checked".into();
         back.dashed = false;
         back.created = "D:2".into();
+        back.turn = sheaf_core::Rotation::R0;
         if let AnnotKind::Line { arrow_start, .. } = &mut back.kind {
             *arrow_start = false;
         }
@@ -1943,6 +1948,7 @@ mod tests {
         let mut back = placed.clone();
         back.dashed = false;
         back.created = "D:2".into();
+        back.turn = sheaf_core::Rotation::R0;
         let mut edits = vec![Edit::AnnotUpdate { page, annot: back }];
         keep_unseen(&mut edits, d.state(), false);
         let Edit::AnnotUpdate { annot, .. } = &edits[0] else {
@@ -1950,6 +1956,7 @@ mod tests {
         };
         assert!(!annot.dashed);
         assert_eq!(annot.created, "D:0");
+        assert_eq!(annot.turn, sheaf_core::Rotation::R90);
     }
 
     #[test]
@@ -1983,6 +1990,7 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            turn: sheaf_core::Rotation::R0,
             name: String::new(),
         };
         let mut edits = vec![Edit::AnnotAdd {

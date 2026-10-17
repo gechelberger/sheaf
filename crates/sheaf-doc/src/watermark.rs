@@ -16,7 +16,8 @@ use lopdf::{Dictionary, Document as Pdf, Object, Stream, dictionary};
 use serde::{Deserialize, Serialize};
 use sheaf_core::PageSize;
 
-use crate::annot::{PageGeom, Pt};
+use crate::annot::Pt;
+use crate::geom::Geom;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -102,32 +103,10 @@ fn extent(wm: &Watermark, size: PageSize, image: Option<(u32, u32)>) -> (f32, f3
     }
 }
 
-/// Draw `wm` on `page` (geometry `geom`, shown with `extra` degrees of
-/// sheaf rotation beyond its own `/Rotate`).
-pub fn install(
-    pdf: &mut Pdf,
-    page: &mut Dictionary,
-    wm: &Watermark,
-    geom: &PageGeom,
-    extra: i32,
-) -> Result<()> {
-    let rotate = (geom.rotate + extra).rem_euclid(360);
-    let g = PageGeom {
-        media: geom.media,
-        rotate,
-    };
-    let [x0, y0, x1, y1] = g.media;
-    let size = if rotate % 180 == 0 {
-        PageSize {
-            width: x1 - x0,
-            height: y1 - y0,
-        }
-    } else {
-        PageSize {
-            width: y1 - y0,
-            height: x1 - x0,
-        }
-    };
+/// Draw `wm` on `page`, laid out on the page as it shows with geometry
+/// `geom`, its rotation the page's, absolute.
+pub fn install(pdf: &mut Pdf, page: &mut Dictionary, wm: &Watermark, geom: &Geom) -> Result<()> {
+    let size = geom.shown();
     let image = match &wm.mark {
         Mark::Image { path, .. } => {
             let img = sheaf_image::io::read(path)?
@@ -159,16 +138,17 @@ pub fn install(
     let ox = cx - ux.0 * w / 2.0 - uy.0 * h / 2.0;
     let oy = cy - ux.1 * w / 2.0 - uy.1 * h / 2.0;
     // Shown space to user space is affine.
-    let o = g.to_user(Pt { x: 0.0, y: 0.0 });
-    let ex = g.to_user(Pt { x: 1.0, y: 0.0 });
-    let ey = g.to_user(Pt { x: 0.0, y: 1.0 });
+    let to_user = geom.from_view();
+    let o = to_user.apply(Pt { x: 0.0, y: 0.0 });
+    let ex = to_user.apply(Pt { x: 1.0, y: 0.0 });
+    let ey = to_user.apply(Pt { x: 0.0, y: 1.0 });
     let map = |(vx, vy): (f32, f32)| {
         (
             (ex.x - o.x) * vx + (ey.x - o.x) * vy,
             (ex.y - o.y) * vx + (ey.y - o.y) * vy,
         )
     };
-    let origin = g.to_user(Pt { x: ox, y: oy });
+    let origin = to_user.apply(Pt { x: ox, y: oy });
     let (xa, xb) = map(ux);
     let (ya, yb) = map(uy);
     let settings = serde_json::to_string(wm).unwrap_or_default();
@@ -375,17 +355,7 @@ mod tests {
         let mut pdf = Pdf::with_version("1.7");
         let mut p = page(&mut pdf);
         let wm = Watermark::default();
-        install(
-            &mut pdf,
-            &mut p,
-            &wm,
-            &PageGeom {
-                media: [0.0, 0.0, 612.0, 792.0],
-                rotate: 0,
-            },
-            0,
-        )
-        .unwrap();
+        install(&mut pdf, &mut p, &wm, &Geom::read(None, None, 0)).unwrap();
         let text = all_content(&pdf, &p);
         // Page content first, the mark after.
         let at_page = text.find("re f").unwrap();
@@ -411,17 +381,7 @@ mod tests {
             behind: true,
             ..Default::default()
         };
-        install(
-            &mut pdf,
-            &mut p,
-            &wm,
-            &PageGeom {
-                media: [0.0, 0.0, 612.0, 792.0],
-                rotate: 0,
-            },
-            0,
-        )
-        .unwrap();
+        install(&mut pdf, &mut p, &wm, &Geom::read(None, None, 0)).unwrap();
         let text = all_content(&pdf, &p);
         assert!(
             text.find("(DRAFT)").unwrap() < text.find("re f").unwrap(),

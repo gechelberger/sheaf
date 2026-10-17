@@ -13,13 +13,14 @@ use anyhow::{Context, Result, bail};
 use im::Vector;
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, StringFormat, dictionary};
 
-use crate::annot::{Annot, AnnotId, AnnotKind, PageGeom};
+use crate::annot::{Annot, AnnotId, AnnotKind};
 use crate::attachments::Objects;
 use crate::forms::merge::{CopyMaps, FormCopy};
+use crate::geom::{Geom, Rect};
 use crate::model::{DocState, OutlineNode, PageId, PageRef, Snapshot, SourceId, SourceInfo};
 use crate::source::Source;
 use crate::text_layer;
-use sheaf_core::{DestView, PageFrame};
+use sheaf_core::{DestView, Rotation};
 
 /// Page-level keys a page may inherit from its ancestors in the page tree.
 /// We flatten the tree, so these must be copied onto each page.
@@ -137,6 +138,7 @@ fn subset(model: &Snapshot, ids: &[PageId], outline: bool) -> Option<Snapshot> {
         removes_content: false,
         // Fields on pages left out go.
         form_changed: model.form_changed || model.state.widgets.keys().any(|p| !keep.contains(p)),
+        renamed: model.renamed.clone(),
     })
 }
 
@@ -412,8 +414,6 @@ fn build_rewrite(model: &Snapshot, clean: bool) -> Result<(Pdf, Vec<String>)> {
     let pages_id = pdf.new_object_id();
     let mut kids: Vec<Object> = Vec::with_capacity(state.pages.len());
     let mut page_obj: HashMap<PageId, ObjectId> = HashMap::new();
-    // Each page's geometry before our rotation, for bookmark positions.
-    let mut frames: HashMap<PageId, PageFrame> = HashMap::new();
     let mut used: HashSet<ObjectId> = HashSet::new();
     let mut copy_maps: CopyMaps = HashMap::new();
     let mut connectors = Vec::new();
@@ -530,12 +530,6 @@ fn build_rewrite(model: &Snapshot, clean: bool) -> Result<(Pdf, Vec<String>)> {
                 dict.set(k.clone(), v.clone());
             }
         }
-        // Rotation: the source's own /Rotate plus our delta.
-        let original = dict
-            .get(b"Rotate")
-            .ok()
-            .and_then(|o| o.as_i64().ok())
-            .unwrap_or(0);
         if clean {
             strip_markup_annots(&pdf, &mut dict);
         } else {
@@ -545,15 +539,16 @@ fn build_rewrite(model: &Snapshot, clean: bool) -> Result<(Pdf, Vec<String>)> {
             ) {
                 (None, None) => strip_sheaf_annots(&pdf, &mut dict),
                 (list, removed) => {
-                    let geom = geom_of(&dict, original as i32);
                     let marks = list.into_iter().flatten();
+                    let index = origin.map_or(pref.index, |(_, i)| i);
+                    let renamed = model.renamed_on(source, index);
                     connectors.extend(
                         write_page_annots(
                             &mut pdf,
                             &mut dict,
                             marks,
                             removed,
-                            &geom,
+                            renamed,
                             &mut stamp_forms,
                         )
                         .connectors,
@@ -562,59 +557,35 @@ fn build_rewrite(model: &Snapshot, clean: bool) -> Result<(Pdf, Vec<String>)> {
             }
         }
         if let Some(layer) = state.text_layers.get(&pref.id) {
-            let geom = geom_of(&dict, original as i32);
-            text_layer::install(&mut pdf, &mut dict, layer, &geom, &mut ocr_objects);
+            text_layer::install(&mut pdf, &mut dict, layer, &mut ocr_objects);
         }
-        // A header/footer the file doesn't have drawn yet.
+        // A header/footer the file doesn't have drawn yet, laid out on the
+        // page as it shows.
         if model.header_footer_dirty
             && let Some(hf) = &state.header_footer
             && hf.covers(pref.id)
         {
-            let geom = geom_of(&dict, original as i32);
-            let extra = pref.rotation.degrees();
-            let [x0, y0, x1, y1] = geom.media;
-            let total = (geom.rotate + extra).rem_euclid(360);
-            let size = if total % 180 == 0 {
-                sheaf_core::PageSize {
-                    width: x1 - x0,
-                    height: y1 - y0,
-                }
-            } else {
-                sheaf_core::PageSize {
-                    width: y1 - y0,
-                    height: x1 - x0,
-                }
-            };
+            let geom = geom_of(&dict, pref.rotation);
             let position = kids.len();
             let facts = crate::stamps::PageFacts {
                 index: position,
                 count: state.pages.len(),
                 bates: bates.get(position).copied().flatten(),
             };
-            let placed = hf.layout(size, &facts);
+            let placed = hf.layout(geom.shown(), &facts);
             crate::stamps::install(
                 &mut pdf,
                 &mut dict,
                 &placed,
                 hf.color,
                 &geom,
-                extra,
                 &mut stamp_objects,
             );
         }
-        let g = geom_of(&dict, original as i32);
-        frames.insert(
-            pref.id,
-            PageFrame {
-                media: g.media,
-                rotate: g.rotate,
-            },
-        );
-        let rotate = (original + pref.rotation.degrees() as i64).rem_euclid(360);
-        if rotate == 0 {
+        if pref.rotation == Rotation::R0 {
             dict.remove(b"Rotate");
         } else {
-            dict.set("Rotate", rotate);
+            dict.set("Rotate", pref.rotation.degrees());
         }
         dict.set("Parent", pages_id);
         dict.remove(b"Type");
@@ -639,7 +610,7 @@ fn build_rewrite(model: &Snapshot, clean: bool) -> Result<(Pdf, Vec<String>)> {
         page_obj.insert(pref.id, id);
     }
 
-    link_connectors(&mut pdf, &connectors, state, &page_obj);
+    link_connectors(&mut pdf, &connectors, model, &page_obj);
 
     pdf.objects.insert(
         pages_id,
@@ -686,9 +657,7 @@ fn build_rewrite(model: &Snapshot, clean: bool) -> Result<(Pdf, Vec<String>)> {
     }
     catalog.remove(b"Outlines");
     if !state.outline.is_empty() {
-        let outlines_id = write_outline(&mut pdf, &state.outline, &page_obj, &|id| {
-            frames.get(&id).copied()
-        });
+        let outlines_id = write_outline(&mut pdf, &state.outline, &page_obj);
         pdf.get_dictionary_mut(catalog_id)?
             .set("Outlines", outlines_id);
     }
@@ -733,16 +702,16 @@ pub fn cropped_copy(src: &SourceInfo, pages: &[(u32, [f32; 4])]) -> Result<Vec<u
 
 /// Pages of `src` as a new PDF, each with a new `/CropBox` when given,
 /// then passed to `fix` (with the new PDF, the page's dictionary, its
-/// geometry, and its position in `pages`) to change its content. sheaf's
-/// own marks are left out, since the model keeps them; other
-/// annotations, links and fields come along, and the form the fields are
-/// in, so the page shows them (see [`copy_form`]). A save writes the page
-/// it was made from instead, with the copy's content
+/// geometry with its own `/Rotate`, and its position in `pages`) to change
+/// its content. sheaf's own marks are left out, since the model keeps
+/// them; other annotations, links and fields come along, and the form the
+/// fields are in, so the page shows them (see [`copy_form`]). A save
+/// writes the page it was made from instead, with the copy's content
 /// (`SourceInfo::derived`).
 pub fn derived_copy(
     src: &SourceInfo,
     pages: &[(u32, Option<[f32; 4]>)],
-    fix: &mut dyn FnMut(&mut Pdf, &mut Dictionary, &PageGeom, usize) -> Result<()>,
+    fix: &mut dyn FnMut(&mut Pdf, &mut Dictionary, &Geom, usize) -> Result<()>,
 ) -> Result<Vec<u8>> {
     let from = crate::file::load_source(src)?;
     let loaded = LoadedSource::from_pdf(&from)?;
@@ -786,8 +755,8 @@ pub fn derived_copy(
             .get(b"Rotate")
             .ok()
             .and_then(|o| o.as_i64().ok())
-            .unwrap_or(0) as i32;
-        let geom = geom_of(&dict, rotate);
+            .unwrap_or(0);
+        let geom = geom_of(&dict, crate::geom::quarter_turns(rotate));
         fix(&mut pdf, &mut dict, &geom, position)?;
         dict.set("Parent", pages_id);
         dict.set("Type", Object::Name(b"Page".to_vec()));
@@ -1291,9 +1260,10 @@ pub(crate) fn remap<P: Objects + ?Sized>(
     })
 }
 
-/// PDF text string: PDFDocEncoding when ASCII, otherwise UTF-16BE with BOM.
+/// PDF text string: as is when PDFDocEncoding reads it back so
+/// (`file::is_pdf_doc_ascii`), otherwise UTF-16BE with BOM.
 pub fn text_string(s: &str) -> Object {
-    if s.is_ascii() {
+    if crate::file::is_pdf_doc_ascii(s) {
         Object::String(s.as_bytes().to_vec(), StringFormat::Literal)
     } else {
         let mut bytes = vec![0xFE, 0xFF];
@@ -1305,17 +1275,14 @@ pub fn text_string(s: &str) -> Object {
 }
 
 /// A bookmark's `/Dest`: its page and, when it has one, its position (see
-/// [`DestView`]); otherwise the top of the page.
-fn outline_dest(page: ObjectId, view: Option<&DestView>, frame: Option<PageFrame>) -> Vec<Object> {
+/// [`DestView`], in PageSpace as the file has it); otherwise the top of
+/// the page.
+fn outline_dest(page: ObjectId, view: Option<&DestView>) -> Vec<Object> {
     let num = |v: Option<f32>| v.map(Object::from).unwrap_or(Object::Null);
     let mut dest = vec![Object::Reference(page)];
     match view {
         Some(DestView::Xyz { left, top, zoom }) => {
-            let (ux, uy) = match frame {
-                Some(f) => f.to_user(*left, *top),
-                None => (None, None),
-            };
-            dest.extend(["XYZ".into(), num(ux), num(uy), num(*zoom)]);
+            dest.extend(["XYZ".into(), num(*left), num(*top), num(*zoom)]);
         }
         Some(DestView::Other { kind, params }) => {
             dest.push(Object::Name(kind.as_bytes().to_vec()));
@@ -1326,22 +1293,19 @@ fn outline_dest(page: ObjectId, view: Option<&DestView>, frame: Option<PageFrame
     dest
 }
 
-/// Write the outline tree. `frame` gives a page's geometry (before any
-/// rotation added in sheaf) for converting bookmark positions to user space.
-/// A `/Count` is how many items show below an open item, and that many
-/// negated for a closed one: how many would show were it opened.
+/// Write the outline tree. A `/Count` is how many items show below an
+/// open item, and that many negated for a closed one: how many would show
+/// were it opened.
 pub(crate) fn write_outline(
     pdf: &mut Pdf,
     nodes: &Vector<OutlineNode>,
     page_obj: &HashMap<PageId, ObjectId>,
-    frame: &dyn Fn(PageId) -> Option<PageFrame>,
 ) -> ObjectId {
     fn level(
         pdf: &mut Pdf,
         parent: ObjectId,
         nodes: &Vector<OutlineNode>,
         page_obj: &HashMap<PageId, ObjectId>,
-        frame: &dyn Fn(PageId) -> Option<PageFrame>,
     ) -> (Option<ObjectId>, Option<ObjectId>, i64) {
         let ids: Vec<ObjectId> = nodes.iter().map(|_| pdf.new_object_id()).collect();
         // How many items show below `parent` while it's open.
@@ -1357,7 +1321,7 @@ pub(crate) fn write_outline(
             if let Some(t) = node.target
                 && let Some(obj) = page_obj.get(&t)
             {
-                dict.set("Dest", outline_dest(*obj, node.view.as_ref(), frame(t)));
+                dict.set("Dest", outline_dest(*obj, node.view.as_ref()));
             }
             if let Some([r, g, b]) = node.color {
                 dict.set(
@@ -1373,7 +1337,7 @@ pub(crate) fn write_outline(
             if flags != 0 {
                 dict.set("F", flags);
             }
-            let (first, last, below) = level(pdf, ids[i], &node.children, page_obj, frame);
+            let (first, last, below) = level(pdf, ids[i], &node.children, page_obj);
             if let (Some(f), Some(l)) = (first, last) {
                 dict.set("First", f);
                 dict.set("Last", l);
@@ -1385,7 +1349,7 @@ pub(crate) fn write_outline(
         (ids.first().copied(), ids.last().copied(), shown)
     }
     let outlines_id = pdf.new_object_id();
-    let (first, last, count) = level(pdf, outlines_id, nodes, page_obj, frame);
+    let (first, last, count) = level(pdf, outlines_id, nodes, page_obj);
     let mut dict = dictionary! { "Type" => "Outlines" };
     if let (Some(f), Some(l)) = (first, last) {
         dict.set("First", f);
@@ -1408,18 +1372,19 @@ pub fn validate(model: &Snapshot) -> Result<()> {
     Ok(())
 }
 
-/// Page geometry from a (flattened) page dictionary and its original rotation.
-pub(crate) fn geom_of(dict: &Dictionary, rotate: i32) -> PageGeom {
+/// A (flattened) page dictionary's boxes, as [`Geom::read`] reads them,
+/// turned `rotate`: for the old writers, until slice 9.
+pub(crate) fn geom_of(dict: &Dictionary, rotate: Rotation) -> Geom {
     let boxed = |key: &[u8]| {
         dict.get(key)
             .ok()
             .and_then(|o| o.as_array().ok())
             .and_then(|a| crate::annot::box_of(a))
+            .map(|[a, b, c, d]| Rect::new(a, b, c, d))
     };
-    let media = boxed(b"MediaBox").unwrap_or([0.0, 0.0, 612.0, 792.0]);
-    PageGeom {
-        media: crate::annot::visible_box(media, boxed(b"CropBox")),
-        rotate: rotate.rem_euclid(360),
+    Geom {
+        rotate,
+        ..Geom::read(boxed(b"MediaBox"), boxed(b"CropBox"), 0)
     }
 }
 
@@ -1466,9 +1431,11 @@ pub(crate) fn strip_sheaf_annots(pdf: &Pdf, page: &mut Dictionary) {
     else {
         return;
     };
+    let annots = crate::file::PageAnnots::new(&existing);
     let kept: Vec<Object> = existing
-        .into_iter()
-        .filter(|e| !crate::file::is_ours(pdf, e))
+        .iter()
+        .filter(|e| !crate::file::is_ours(pdf, e, &annots))
+        .cloned()
         .collect();
     if kept.is_empty() {
         page.remove(b"Annots");
@@ -1506,29 +1473,48 @@ pub(crate) struct PageAnnotsWritten {
 /// appearance streams. `/P` is left unset; PDFium and Acrobat don't need it.
 ///
 /// Replies and statuses (`Annot::thread_parent`) are written after what
-/// they're in the thread of, with `/IRT` to it and its `/Rect`.
+/// they're in the thread of, with `/IRT` to it and its `/Rect`. `renamed`
+/// are the page's marks the open gave new ids (`Snapshot::renamed_on`):
+/// the file names each by the id it had, and other tools' replies to it
+/// follow it to the name it has.
 pub(crate) fn write_page_annots<'a>(
     pdf: &mut Pdf,
     page: &mut Dictionary,
     annots: impl Iterator<Item = &'a Annot>,
     removed: Option<&im::OrdSet<String>>,
-    geom: &PageGeom,
+    renamed: &[(AnnotId, AnnotId)],
     forms: &mut StampForms,
 ) -> PageAnnotsWritten {
+    let annots: Vec<&Annot> = annots.collect();
+    let writing: std::collections::HashSet<String> = annots.iter().map(|a| a.name()).collect();
+    // A renamed mark's old name, where no mark written keeps it.
+    let renamed: HashMap<String, String> = renamed
+        .iter()
+        .map(|(was, id)| (was.sheaf_names(), id.sheaf_names()))
+        .map(|([was, _], [now, _])| (was, now))
+        .filter(|(was, _)| !writing.contains(was))
+        .collect();
     // Our marks as the file has them now, by object, so other tools'
-    // replies to them can follow them to the objects this writes.
-    let mut before: HashMap<ObjectId, String> = page
+    // replies to them can follow them to the objects this writes: the
+    // name the file gives each, and the one it has now.
+    let existing = page
         .get(b"Annots")
         .ok()
         .and_then(|a| pdf.dereference(a).ok())
         .and_then(|(_, o)| o.as_array().ok().cloned())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    let page_annots = crate::file::PageAnnots::new(&existing);
+    let mut before: HashMap<ObjectId, (String, String)> = existing
         .iter()
         .filter_map(|e| {
             let id = e.as_reference().ok()?;
             let d = pdf.get_dictionary(id).ok()?;
-            (d.has(b"SheafAnnot") && crate::file::is_ours(pdf, e))
-                .then(|| (id, crate::file::thread_name(d)))
+            if !(d.has(b"SheafAnnot") && crate::file::is_ours(pdf, e, &page_annots)) {
+                return None;
+            }
+            let name = crate::file::thread_name(d);
+            let now = renamed.get(&name).cloned().unwrap_or_else(|| name.clone());
+            Some((id, (name, now)))
         })
         .collect();
     strip_sheaf_annots(pdf, page);
@@ -1538,10 +1524,6 @@ pub(crate) fn write_page_annots<'a>(
         .and_then(|a| pdf.dereference(a).ok())
         .and_then(|(_, o)| o.as_array().ok().cloned())
         .unwrap_or_default();
-    // Other tools' comments deleted in sheaf go, with their threads, and
-    // so do their replies to our marks that are gone.
-    let annots: Vec<&Annot> = annots.collect();
-    let writing: std::collections::HashSet<String> = annots.iter().map(|a| a.name()).collect();
     // Another tool's comment that one of our marks now is (made editable
     // in sheaf, or imported over it) gives way to it, with the parts
     // grouped under it (`/RT /Group`, which the mark draws itself); its
@@ -1553,7 +1535,7 @@ pub(crate) fn write_page_annots<'a>(
             && let name = crate::file::thread_name(d)
             && writing.contains(&name)
         {
-            before.insert(id, name);
+            before.insert(id, (name.clone(), name));
             replaced.insert(id);
         }
     }
@@ -1575,8 +1557,16 @@ pub(crate) fn write_page_annots<'a>(
                 .is_some_and(|irt| replaced.contains(&irt));
         !(writing.contains(&crate::file::thread_name(d)) || grouped_under_replaced)
     });
+    // Other tools' comments deleted in sheaf go, with their threads, and
+    // so do their replies to our marks that are gone, by the names the
+    // file gives those.
     let mut removed = removed.cloned().unwrap_or_default();
-    removed.extend(before.values().filter(|n| !writing.contains(*n)).cloned());
+    removed.extend(
+        before
+            .values()
+            .filter(|(_, now)| !writing.contains(now))
+            .map(|(name, _)| name.clone()),
+    );
     if !removed.is_empty() {
         let comments: Vec<(String, Option<String>)> = list
             .iter()
@@ -1621,7 +1611,7 @@ pub(crate) fn write_page_annots<'a>(
         .partition(|a| a.thread_parent().is_some());
     let mut connectors = Vec::new();
     for a in marks {
-        let written = crate::annot::to_pdf_in(a, geom, pdf, forms);
+        let written = crate::annot::to_pdf_in(a, pdf, forms);
         let rect = rect_of(pdf, &written.main);
         let id = pdf.add_object(Object::Dictionary(written.main));
         list.push(Object::Reference(id));
@@ -1633,12 +1623,11 @@ pub(crate) fn write_page_annots<'a>(
             list.push(Object::Reference(pdf.add_object(Object::Dictionary(part))));
         }
         if let AnnotKind::Connector { rect, label, .. } = &a.kind {
-            let [llx, _, _, ury] = geom.box_to_user(*rect);
             connectors.push(ConnectorRef {
                 obj: id,
                 id: a.id,
                 label: label.clone(),
-                top_left: (llx, ury),
+                top_left: (rect.x, rect.bottom()),
             });
         }
     }
@@ -1655,7 +1644,7 @@ pub(crate) fn write_page_annots<'a>(
             .partition(|a| named.contains_key(a.thread_parent().unwrap_or_default()));
         let stuck = ready.is_empty();
         for a in if stuck { &waiting } else { &ready } {
-            let mut main = crate::annot::to_pdf_in(a, geom, pdf, forms).main;
+            let mut main = crate::annot::to_pdf_in(a, pdf, forms).main;
             if let Some((parent, rect)) = a.thread_parent().and_then(|p| named.get(p)).cloned() {
                 main.set("IRT", parent);
                 main.set("Rect", rect);
@@ -1679,7 +1668,7 @@ pub(crate) fn write_page_annots<'a>(
             .ok()
             .and_then(|o| o.as_reference().ok())
             .and_then(|irt| before.get(&irt))
-            .and_then(|name| named.get(name))
+            .and_then(|(_, now)| named.get(now))
             .map(|(obj, _)| *obj);
         let name = (!d.has(b"NM"))
             .then(|| crate::file::anon_name(d))
@@ -1715,13 +1704,13 @@ pub(crate) fn write_page_annots<'a>(
 pub(crate) fn link_connectors(
     pdf: &mut Pdf,
     connectors: &[ConnectorRef],
-    state: &DocState,
+    model: &Snapshot,
     page_obj: &HashMap<PageId, ObjectId>,
 ) {
     let mut groups: HashMap<&str, Vec<(usize, PageId, Annot)>> = HashMap::new();
     for c in connectors {
         let members = groups.entry(c.label.as_str()).or_insert_with(|| {
-            state.group_members(&crate::annot::Group::Connector(c.label.clone()))
+            model.group_members(&crate::annot::Group::Connector(c.label.clone()))
         });
         if members.len() < 2 {
             continue;
@@ -1756,7 +1745,7 @@ mod tests {
     use crate::model::{Document, Edit, FlatOutlineItem};
     use crate::store::Store;
     use lopdf::content::{Content, Operation};
-    use sheaf_core::{PageSize, Rotation};
+    use sheaf_core::Rotation;
 
     /// A PDF whose page i has content "MARK <tag> <i>" and /Rotate from `rot`.
     fn make_pdf(
@@ -2012,7 +2001,7 @@ mod tests {
                     0,
                     Some(DestView::Xyz {
                         left: Some(36.0),
-                        top: Some(100.0),
+                        top: Some(692.0),
                         zoom: None,
                     }),
                 ),
@@ -2029,7 +2018,7 @@ mod tests {
             Box::new(FixedCount(10)),
         );
         // Turning the page in sheaf mustn't move the stored position: it's
-        // relative to the page as the file draws it.
+        // in PageSpace, which a turn leaves alone.
         let p0 = model.page(0).unwrap().id;
         model
             .apply(
@@ -2053,7 +2042,7 @@ mod tests {
                     target: Some(p1),
                     view: Some(DestView::Xyz {
                         left: None,
-                        top: Some(0.0),
+                        top: Some(792.0),
                         zoom: Some(1.5),
                     }),
                 },
@@ -2484,6 +2473,7 @@ mod tests {
                 fill: None,
                 dashed: false,
                 cloudy: false,
+                turn: Rotation::R0,
                 name: String::new(),
             };
             model
@@ -2744,6 +2734,7 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            turn: Rotation::R0,
             name: String::new(),
         }
     }
@@ -3476,6 +3467,7 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            turn: Rotation::R0,
             name: String::new(),
         };
         let replace = mk(
@@ -3617,6 +3609,7 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            turn: Rotation::R0,
             name: String::new(),
         };
         model
@@ -3754,6 +3747,7 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            turn: Rotation::R0,
             name: String::new(),
         };
         for pg in [p0, p1, p2] {
@@ -3851,6 +3845,7 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            turn: Rotation::R0,
             name: String::new(),
         };
         model
@@ -3991,6 +3986,7 @@ mod tests {
                         fill: None,
                         dashed: false,
                         cloudy: false,
+                        turn: Rotation::R0,
                         name: String::new(),
                     },
                 },
@@ -4021,6 +4017,7 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            turn: Rotation::R0,
             name: String::new(),
         };
         model
@@ -4289,6 +4286,7 @@ mod tests {
                             fill: None,
                             dashed: false,
                             cloudy: false,
+                            turn: Rotation::R0,
                             name: String::new(),
                         },
                     },
@@ -4470,23 +4468,24 @@ mod tests {
         assert_eq!(read(&out), None);
     }
 
-    /// Displayed positions start at the CropBox's corner, as viewers draw.
+    /// The view starts at the CropBox's corner, as viewers draw.
     #[test]
     fn geometry_follows_the_crop_box() {
         let d = dictionary! {
             "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
             "CropBox" => vec![100.into(), 100.into(), 400.into(), 500.into()],
         };
-        let g = geom_of(&d, 0);
-        assert_eq!(g.media, [100.0, 100.0, 400.0, 500.0]);
-        let u = g.to_user(crate::annot::Pt { x: 10.0, y: 10.0 });
+        let g = geom_of(&d, Rotation::R0);
+        assert_eq!(g.visible(), Rect::new(100.0, 100.0, 400.0, 500.0));
+        let u = g.from_view().apply(crate::annot::Pt { x: 10.0, y: 10.0 });
         assert_eq!((u.x, u.y), (110.0, 490.0));
-        // A crop outside the media box is ignored.
+        // A crop outside the media box leaves nothing shown, as PDFium
+        // reads it.
         let d = dictionary! {
             "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
             "CropBox" => vec![700.into(), 700.into(), 800.into(), 900.into()],
         };
-        assert_eq!(geom_of(&d, 0).media, [0.0, 0.0, 612.0, 792.0]);
+        assert!(geom_of(&d, Rotation::R0).visible().is_empty());
     }
 
     #[test]
@@ -4532,6 +4531,7 @@ mod tests {
                         fill: None,
                         dashed: false,
                         cloudy: false,
+                        turn: Rotation::R0,
                         name: String::new(),
                     },
                 },
@@ -4607,6 +4607,7 @@ mod tests {
                         fill: None,
                         dashed: false,
                         cloudy: false,
+                        turn: Rotation::R0,
                         name: String::new(),
                     },
                 },
@@ -4664,11 +4665,7 @@ mod tests {
                 },
                 confidence: 0.95,
             }],
-            PageSize {
-                width: 612.0,
-                height: 792.0,
-            },
-            Rotation::R0,
+            &crate::geom::Geom::read(None, None, 0),
             "test",
         ))
     }
@@ -4969,6 +4966,7 @@ mod tests {
                         fill: None,
                         dashed: false,
                         cloudy: false,
+                        turn: Rotation::R0,
                         name: String::new(),
                     },
                 },
@@ -5008,11 +5006,7 @@ mod tests {
         let p0 = model.page(0).unwrap().id;
         let empty = std::sync::Arc::new(crate::text_layer::TextLayer::from_engine(
             vec![],
-            PageSize {
-                width: 612.0,
-                height: 792.0,
-            },
-            Rotation::R0,
+            &crate::geom::Geom::read(None, None, 0),
             "test",
         ));
         model

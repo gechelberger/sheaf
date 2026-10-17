@@ -4,11 +4,10 @@
 //! sheaf-doc writes come back where they were put through both, and over
 //! Greg's corpus the two read the same outline.
 
-use std::collections::HashMap;
 use std::path::Path;
 
 use lopdf::{Document as Pdf, Object, Stream, dictionary};
-use sheaf_core::{DestView, PageFrame};
+use sheaf_core::DestView;
 use sheaf_doc::forms::corpus::{Corpus, Entry, each_entry};
 use sheaf_doc::store::BlobKind;
 use sheaf_doc::{Document, FixedCount, FlatOutlineItem, SourceInfo, Store};
@@ -24,8 +23,8 @@ struct Bookmark {
     title: String,
     page: Option<u32>,
     depth: u16,
-    /// Where on `page` it lands: an `/XYZ` position in the page's
-    /// displayed space, or another destination kind as is.
+    /// Where on `page` it lands: an `/XYZ` position in PageSpace, or
+    /// another destination kind, as the file has them.
     view: Option<DestView>,
 }
 
@@ -44,23 +43,17 @@ fn bookmarks(engine: &PdfiumEngine) -> Vec<Bookmark> {
         }
     }
     let mut out = Vec::new();
-    walk(root, 0, &engine.doc, &mut HashMap::new(), &mut out);
+    walk(root, 0, &mut out);
     out
 }
 
-fn walk(
-    first: Option<PdfBookmark<'_>>,
-    depth: u16,
-    doc: &PdfDocument<'_>,
-    frames: &mut HashMap<u32, Option<PageFrame>>,
-    out: &mut Vec<Bookmark>,
-) {
+fn walk(first: Option<PdfBookmark<'_>>, depth: u16, out: &mut Vec<Bookmark>) {
     let mut node = first;
     while let Some(b) = node {
         if out.len() >= MAX_ITEMS {
             return;
         }
-        let (page, view) = locate(&b, doc, frames);
+        let (page, view) = locate(&b);
         out.push(Bookmark {
             title: b.title().unwrap_or_default(),
             page,
@@ -68,7 +61,7 @@ fn walk(
             view,
         });
         if depth < MAX_DEPTH {
-            walk(b.first_child(), depth + 1, doc, frames, out);
+            walk(b.first_child(), depth + 1, out);
         }
         node = b.next_sibling();
     }
@@ -76,14 +69,10 @@ fn walk(
 
 /// The bookmark's page and position, from its `/Dest` or its GoTo
 /// action.
-fn locate(
-    b: &PdfBookmark<'_>,
-    doc: &PdfDocument<'_>,
-    frames: &mut HashMap<u32, Option<PageFrame>>,
-) -> (Option<u32>, Option<DestView>) {
-    let mut from = |d: &PdfDestination<'_>| {
+fn locate(b: &PdfBookmark<'_>) -> (Option<u32>, Option<DestView>) {
+    let from = |d: &PdfDestination<'_>| {
         let page = d.page_index().ok().map(|i| i as u32);
-        let view = page.and_then(|p| view_of(d, p, doc, frames));
+        let view = page.and_then(|_| view_of(d));
         (page, view)
     };
     if let Some(d) = b.destination() {
@@ -101,32 +90,8 @@ fn locate(
     }
 }
 
-/// The page's visible box (CropBox, else MediaBox) and `/Rotate`, for
-/// converting positions.
-fn frame_of(doc: &PdfDocument<'_>, index: u32) -> Option<PageFrame> {
-    let page = doc.pages().get(index as i32).ok()?;
-    let bounds = page.boundaries();
-    let b = bounds.crop().or_else(|_| bounds.media()).ok()?.bounds;
-    let rotate = match page.rotation().ok()? {
-        PdfPageRenderRotation::None => 0,
-        PdfPageRenderRotation::Degrees90 => 90,
-        PdfPageRenderRotation::Degrees180 => 180,
-        PdfPageRenderRotation::Degrees270 => 270,
-    };
-    let (l, r) = (b.left().value, b.right().value);
-    let (bt, t) = (b.bottom().value, b.top().value);
-    Some(PageFrame {
-        media: [l.min(r), bt.min(t), l.max(r), bt.max(t)],
-        rotate,
-    })
-}
-
-fn view_of(
-    d: &PdfDestination<'_>,
-    page: u32,
-    doc: &PdfDocument<'_>,
-    frames: &mut HashMap<u32, Option<PageFrame>>,
-) -> Option<DestView> {
+/// Where a destination lands, in PDFium's user-space coordinates.
+fn view_of(d: &PdfDestination<'_>) -> Option<DestView> {
     use PdfDestinationViewSettings as V;
     let pt = |p: Option<PdfPoints>| p.map(|p| p.value);
     let other = |kind: &str, params: Vec<Option<f32>>| {
@@ -137,13 +102,7 @@ fn view_of(
     };
     match d.view_settings().ok()? {
         V::SpecificCoordinatesAndZoom(x, y, zoom) => {
-            let (left, top) = match (x, y) {
-                (None, None) => (None, None),
-                (x, y) => {
-                    let frame = *frames.entry(page).or_insert_with(|| frame_of(doc, page));
-                    frame?.to_display(pt(x), pt(y))
-                }
-            };
+            let (left, top) = (pt(x), pt(y));
             if left.is_none() && top.is_none() && zoom.is_none() {
                 return None;
             }
@@ -204,9 +163,8 @@ fn xyz(left: f32, top: f32) -> Option<DestView> {
 }
 
 /// Bookmark positions written by sheaf-doc come back where they were put,
-/// in the page's displayed space whatever the file's own `/Rotate`, both
-/// through PDFium and from the source; other destination kinds come back
-/// as they were.
+/// in PageSpace whatever the file's own `/Rotate`, both through PDFium and
+/// from the source; other destination kinds come back as they were.
 #[test]
 fn positions_round_trip_through_pdfium_and_the_source() {
     let item = |title: &str, page, view| FlatOutlineItem {
@@ -239,7 +197,7 @@ fn positions_round_trip_through_pdfium_and_the_source() {
         primary,
         &[
             item("Upright", 0, xyz(36.0, 100.0)),
-            // Displayed space on a /Rotate 90 page is 792 wide, 612 tall.
+            // PageSpace on a /Rotate 90 page is still 612 wide, 792 tall.
             item("Turned", 1, xyz(400.0, 50.0)),
             item("Fit width", 1, fit_h.clone()),
             item("Top", 0, None),

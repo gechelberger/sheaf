@@ -5,15 +5,13 @@
 //! and table extraction start from it too.
 
 use gpui::{AnyElement, Context, div, prelude::*, px};
-use sheaf_core::{PageSize, Rotation};
+use sheaf_doc::geom::Affine;
 use sheaf_doc::{Box2, PageId, Pt};
 use sheaf_ui::theme;
 
 use crate::docview::{DocEvent, DocView, State};
-use crate::markup_tools::rotate_pt;
 
-/// The selected region, in the page's source-displayed space (like
-/// annotations).
+/// The selected region, in PageSpace.
 #[derive(Debug, Clone)]
 pub(crate) struct Region {
     pub page: PageId,
@@ -38,14 +36,17 @@ impl DocView {
     }
 
     fn emit_region(&self, cx: &mut Context<Self>) {
-        if let Some(r) = &self.region {
-            cx.emit(DocEvent::Region {
-                page: r.page,
-                rect: r.rect(),
-            });
-        }
+        let Some(r) = &self.region else {
+            return;
+        };
+        cx.emit(DocEvent::Region {
+            page: r.page,
+            rect: r.rect(),
+        });
     }
 
+    /// Shift+press on display page `page` at `p` (in PageSpace): a region
+    /// starts there.
     pub(crate) fn start_region(&mut self, page: usize, p: Pt, cx: &mut Context<Self>) {
         let Some(id) = self.page_id_at(page) else {
             return;
@@ -120,27 +121,17 @@ impl DocView {
     }
 }
 
-/// The region's outline on `page`, in page-local logical px.
+/// The region's outline on `page`, in page-local logical px: `to_pane`
+/// takes PageSpace onto the page as drawn, at `k` px a point.
 pub(crate) fn overlay(
     region: Option<&Region>,
     page: PageId,
-    src: PageSize,
-    rot: Rotation,
+    to_pane: &Affine,
     k: f32,
 ) -> Option<AnyElement> {
     {
         let r = region.filter(|r| r.page == page)?;
-        let b = r.rect();
-        let a = rotate_pt(Pt { x: b.x, y: b.y }, src, rot);
-        let c = rotate_pt(
-            Pt {
-                x: b.x + b.w,
-                y: b.y + b.h,
-            },
-            src,
-            rot,
-        );
-        let shown = Box2::from_corners(a, c);
+        let shown = to_pane.apply_box(r.rect());
         Some(
             div()
                 .absolute()

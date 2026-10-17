@@ -48,7 +48,8 @@ pub fn picture(stem: &str) -> Option<PathBuf> {
     None
 }
 
-/// Tapes' pictures, by what the tape is: the cache name of its PDF.
+/// Tapes' pictures, by what the tape is and the turn it reads upright in:
+/// the cache name of its PDF.
 static TAPES: LazyLock<Mutex<std::collections::HashMap<u128, String>>> =
     LazyLock::new(Default::default);
 
@@ -56,7 +57,7 @@ static TAPES: LazyLock<Mutex<std::collections::HashMap<u128, String>>> =
 /// one-page PDF in the cache, rendered like a stamp's.
 pub fn tape_picture(a: &sheaf_doc::Annot) -> Option<PathBuf> {
     let key = sheaf_core::checksum(
-        serde_json::to_string(&(&a.kind, a.color, &a.contents))
+        serde_json::to_string(&(&a.kind, a.color, &a.contents, a.turn))
             .ok()?
             .as_bytes(),
     );

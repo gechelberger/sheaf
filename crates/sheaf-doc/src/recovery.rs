@@ -104,7 +104,7 @@ mod tests {
     use crate::model::{Document, Edit, SourceInfo};
     use crate::store::Store;
     use lopdf::{Document as Pdf, Object, Stream, dictionary};
-    use sheaf_core::{PageSize, Rotation};
+    use sheaf_core::Rotation;
 
     fn two_page_pdf(path: &Path) {
         let mut pdf = Pdf::with_version("1.7");
@@ -206,11 +206,7 @@ mod tests {
                 },
                 confidence: 1.0,
             }],
-            PageSize {
-                width: 612.0,
-                height: 792.0,
-            },
-            Rotation::R0,
+            &crate::geom::Geom::read(None, None, 0),
             "test",
         );
         model

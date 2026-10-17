@@ -109,8 +109,8 @@ impl DocView {
                 id: p.id,
                 source: p.source,
                 index: p.index,
-                rotation: p.rotation,
-                size: doc.model.page_size(p),
+                geom: doc.model.geom(p),
+                render: doc.model.render_delta(p),
             })
             .collect();
         let sources: HashMap<_, Arc<dyn PageSource>> = doc

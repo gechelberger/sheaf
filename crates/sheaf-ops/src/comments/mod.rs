@@ -179,8 +179,7 @@ pub struct Comment {
     /// tickmark is a "Tickmark").
     pub kind: String,
     pub color: Option<[u8; 3]>,
-    /// Where it is on its page, in the page's displayed space before
-    /// sheaf's rotation.
+    /// Where it is on its page, in PageSpace.
     pub rect: Box2,
     /// What a measurement comes to ("12.50 ft"), and its scale ("1 in =
     /// 10 ft").
@@ -248,7 +247,7 @@ pub fn comments_on(
             label: kind_label(&a.kind),
             kind: ours_type(&a.kind).to_string(),
             color: Some(a.color),
-            rect: a.bounds(),
+            rect: a.page_bounds(),
             measurement: measurement_of(&a.kind),
         });
     }
@@ -870,12 +869,7 @@ pub fn import_data(
     password: Option<&str>,
 ) -> Result<sheaf_doc::exchange::Imported> {
     let comments = sheaf_doc::exchange::read(bytes, password)?;
-    Ok(sheaf_doc::exchange::import(
-        &snap.state,
-        &snap.sources,
-        foreign,
-        &comments,
-    ))
+    Ok(sheaf_doc::exchange::import(&snap.state, foreign, &comments))
 }
 
 /// A column of the CSV export.

@@ -178,6 +178,8 @@ pub mod pdfium {
 
     #[cfg(test)]
     mod bookmarks;
+    #[cfg(test)]
+    mod frames;
 
     /// Held across every use of PDFium, from a load to the document's
     /// drop: a call into an engine, such as one page of a walk over the
@@ -849,10 +851,6 @@ enum Msg {
         re: std::sync::Arc<regex::Regex>,
         reply: oneshot::Sender<Result<Vec<SearchHit>>>,
     },
-    PageSize {
-        page: u32,
-        reply: oneshot::Sender<Result<PageSize>>,
-    },
     HideAnnots {
         pages: Vec<(u32, Vec<String>)>,
         reply: oneshot::Sender<Result<usize>>,
@@ -956,14 +954,6 @@ impl RenderHandle {
             rect,
             reply: tx,
         });
-        rx
-    }
-
-    /// The size of one page as the engine renders it (after its own
-    /// `/Rotate`).
-    pub fn page_size(&self, page: u32) -> oneshot::Receiver<Result<PageSize>> {
-        let (tx, rx) = oneshot::channel();
-        self.send(Msg::PageSize { page, reply: tx });
         rx
     }
 
@@ -1130,9 +1120,6 @@ fn worker_loop(engine: impl Renderer, rx: mpsc::Receiver<Msg>) {
                 }
                 Msg::PatternPage { page, re, reply } => {
                     let _ = reply.send(engine.pattern_search_page(PageIndex(page), &re));
-                }
-                Msg::PageSize { page, reply } => {
-                    let _ = reply.send(engine.page_size(PageIndex(page)));
                 }
                 Msg::SetHidden { pages, reply } => {
                     let mut n = 0;

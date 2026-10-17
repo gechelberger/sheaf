@@ -168,12 +168,16 @@ impl Source {
         self.pages.iter().map(|page| page.id)
     }
 
-    /// Page `index`'s size as shown; past the last page, a page's with no
-    /// boxes, Letter.
-    pub fn page_size(&self, index: u32) -> PageSize {
+    /// Page `index`'s boxes and its own `/Rotate`; past the last page, a
+    /// page's with no boxes, Letter.
+    pub fn geom(&self, index: u32) -> Geom {
         self.page(index)
             .map_or_else(|| Geom::read(None, None, 0), |page| page.geom)
-            .shown()
+    }
+
+    /// Page `index`'s size as shown.
+    pub fn page_size(&self, index: u32) -> PageSize {
+        self.geom(index).shown()
     }
 
     /// What its XMP metadata claims it conforms to: PDF/A and PDF/UA.

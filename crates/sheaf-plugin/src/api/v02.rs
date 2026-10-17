@@ -135,6 +135,7 @@ pub(crate) fn annot_from_wit(a: w::Annot) -> Annot {
         fill: None,
         dashed: false,
         cloudy: false,
+        turn: Rotation::R0,
         name: String::new(),
     }
 }

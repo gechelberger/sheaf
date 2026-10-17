@@ -10,10 +10,11 @@ use std::io::Write;
 
 use anyhow::{Context, Result, bail};
 use lopdf::{Document as Pdf, Object, ObjectId, Stream, dictionary};
-use sheaf_core::{PageSize, Rotation};
+use sheaf_core::PageSize;
 use sheaf_doc::file::ForeignAnnot;
+use sheaf_doc::geom::Geom;
 use sheaf_doc::stamps::{helvetica_advance, pdf_literal};
-use sheaf_doc::{Box2, PageGeom, Pt, Snapshot, SourceId};
+use sheaf_doc::{Box2, Pt, Snapshot, SourceId};
 
 use super::{CommentFilter, Listing, Sort, Thread, list, meta, numbers};
 
@@ -196,19 +197,9 @@ fn pages(
     let (width, height, margin) = (w.size.width, w.size.height, w.margin);
     let mid = width / 2.0;
     for ((&page, threads), (form, geom)) in by_page.iter().zip(forms) {
-        let pref = st.pages[page];
-        let source = snap
-            .source(pref.source)
-            .map(|s| s.src.page_size(pref.index))
-            .unwrap_or(PageSize {
-                width: 612.0,
-                height: 792.0,
-            });
         let picture = Picture {
             form,
             geom,
-            source,
-            rotation: pref.rotation,
             area: [
                 margin,
                 margin + FOOTER,
@@ -254,12 +245,9 @@ fn pages(
 /// A page drawn on a sheet, with its comments' numbers.
 struct Picture {
     form: ObjectId,
-    /// The printed page's box and rotation.
-    geom: PageGeom,
-    /// Its source page's size, and sheaf's rotation of it: what the
-    /// comments' positions are in.
-    source: PageSize,
-    rotation: Rotation,
+    /// The printed page's boxes and rotation. It's the page's user space,
+    /// so the comments' places, in PageSpace, are on it.
+    geom: Geom,
     /// Where it goes: x, y, width, height.
     area: [f32; 4],
     /// Each comment's place, color and number.
@@ -269,11 +257,10 @@ struct Picture {
 impl Picture {
     fn draw(&self, w: &mut Writer) {
         let [bx, by, bw, bh] = self.area;
-        let [x0, y0, x1, y1] = self.geom.media;
-        let (dw, dh) = match self.geom.rotate.rem_euclid(360) {
-            90 | 270 => (y1 - y0, x1 - x0),
-            _ => (x1 - x0, y1 - y0),
-        };
+        let PageSize {
+            width: dw,
+            height: dh,
+        } = self.geom.shown();
         if dw <= 0.0 || dh <= 0.0 {
             return;
         }
@@ -282,8 +269,9 @@ impl Picture {
         let left = bx + (bw - pw) / 2.0;
         let top = by + bh;
         // User space → the sheet: shown on the page, then scaled into place.
+        let to_view = self.geom.to_view();
         let at = |u: Pt| {
-            let d = self.geom.to_display(u);
+            let d = to_view.apply(u);
             (left + d.x * s, top - d.y * s)
         };
         let o = at(Pt { x: 0.0, y: 0.0 });
@@ -294,14 +282,12 @@ impl Picture {
         let sheet = w.sheet();
         sheet.place(&name, m, [left, top - ph, pw, ph]);
         sheet.stroke_rect(left, top - ph, pw, ph, RULE, 0.75);
-        // The comments' places are on the source page; sheaf's rotation
-        // turns them as it turned the page.
-        let shown = self.source.rotated(self.rotation);
+        // Each number at its comment's top-left as the page shows.
         const R: f32 = 7.0;
         for &(rect, color, n) in &self.markers {
-            let r = rotate_box(rect, self.source, self.rotation);
-            let cx = (left + r.x / shown.width * pw).clamp(left + R, left + pw - R);
-            let cy = (top - r.y / shown.height * ph).clamp(top - ph + R, top - R);
+            let r = to_view.apply_box(rect);
+            let cx = (left + r.x * s).clamp(left + R, left + pw - R);
+            let cy = (top - r.y * s).clamp(top - ph + R, top - R);
             let fill = color.map_or(MARKER, rgb);
             sheet.disc(cx, cy, R, fill);
             let label = n.to_string();
@@ -717,31 +703,6 @@ fn rgb(c: [u8; 3]) -> [f32; 3] {
 
 fn luminance(c: [f32; 3]) -> f32 {
     0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]
-}
-
-/// `r` on a page of `src` size, as it shows turned by `rot`.
-fn rotate_box(r: Box2, src: PageSize, rot: Rotation) -> Box2 {
-    match rot {
-        Rotation::R0 => r,
-        Rotation::R90 => Box2 {
-            x: src.height - (r.y + r.h),
-            y: r.x,
-            w: r.h,
-            h: r.w,
-        },
-        Rotation::R180 => Box2 {
-            x: src.width - (r.x + r.w),
-            y: src.height - (r.y + r.h),
-            w: r.w,
-            h: r.h,
-        },
-        Rotation::R270 => Box2 {
-            x: r.y,
-            y: src.width - (r.x + r.w),
-            w: r.h,
-            h: r.w,
-        },
-    }
 }
 
 #[cfg(test)]

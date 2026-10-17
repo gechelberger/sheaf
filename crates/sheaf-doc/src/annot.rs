@@ -1,28 +1,52 @@
-//! Markup annotations: the model, their PDF serialization (dictionary +
-//! appearance stream), and the coordinate mapping between the page's
-//! displayed space and PDF user space.
+//! Markup annotations: the model and their PDF serialization (dictionary +
+//! appearance stream).
 //!
-//! Coordinates in the model are in the source page's *displayed* space:
-//! points, top-left origin, after the page's own `/Rotate` — the same space
-//! search hits use. They're converted to user space (bottom-left origin,
-//! before `/Rotate`) only when written to a file.
+//! A mark's geometry is in PageSpace (M10.5 §5): its page's default user
+//! space, points, y up, before `/Rotate`, the space `/Rect` and
+//! `/QuadPoints` are in, so nothing moves it but an edit of it. Its
+//! [`turn`](Annot::turn) is the rotation it reads upright in. Its layout
+//! (bounds, hit tests, where its text and lines go) is written y down, for
+//! the mark in a frame that reads upright: [`Annot::upright`], or a view's.
+//! The writer lays a mark out upright and maps that into PageSpace.
 //!
 //! Every annotation we write carries `/NM sheaf:<id>` and a `/SheafAnnot`
-//! JSON copy of the model, so a file we saved can be reopened with the marks
-//! editable and PDFium told to hide its rendering of them.
+//! JSON copy of the model ([`Payload`]), so a file we saved can be reopened
+//! with the marks editable and PDFium told to hide its rendering of them.
+//! Beside the mark, the copy holds a digest of the dictionary's standard
+//! keys ([`staleness`]): a mark another tool has edited since no longer
+//! matches it, and opens as that tool's comment (M10.5 §3.6).
 //!
 //! The JSON is a file format. Changes to it are additive: a new kind is a
 //! new variant and a new field has `#[serde(default)]`, so older files keep
-//! reading. A mark this build can't read (a kind from a newer sheaf) isn't
-//! ours to rewrite: it's kept and shown like another tool's (see
-//! `file::is_ours`). Every mark also writes a full appearance, so other
-//! viewers, and older sheaf builds, draw it.
+//! reading. Version 1, from before M10.5, held the mark in its page's
+//! displayed space; it's read from the standard keys (`file::sheaf_mark`).
+//! A mark this build can't read (a kind from a newer sheaf) isn't ours to
+//! rewrite: it's kept and shown like another tool's (see `file::is_ours`).
+//! Every mark also writes a full appearance, so other viewers, and older
+//! sheaf builds, draw it.
 
 use lopdf::{Dictionary, Object, Stream, StringFormat, dictionary};
 use serde::{Deserialize, Serialize};
+use sheaf_core::Rotation;
+use unicode_normalization::UnicodeNormalization;
+
+use crate::attachments::{Objects, resolve};
+use crate::geom::{Affine, Geom, Rect};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct AnnotId(pub u64);
+
+impl AnnotId {
+    /// What a mark with this id and no name of its own is called in the
+    /// file (`/NM`), and the StrikeOut of a replacement: the names PDFium
+    /// is told to hide.
+    pub fn sheaf_names(self) -> [String; 2] {
+        [
+            format!("sheaf:{}", self.0),
+            format!("sheaf:{}:strike", self.0),
+        ]
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Pt {
@@ -30,6 +54,9 @@ pub struct Pt {
     pub y: f32,
 }
 
+/// A box, `w` and `h` not negative, with `(x, y)` its low corner: its
+/// bottom-left in PageSpace, its top-left in a frame that's y down. So
+/// [`bottom`](Self::bottom) is its top in PageSpace.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Box2 {
     pub x: f32,
@@ -74,7 +101,8 @@ pub enum AnnotKind {
     Highlight {
         rects: Vec<Box2>,
     },
-    /// Sticky note: an icon at `pos` (top-left), text in `contents`.
+    /// Sticky note: an icon at `pos` (its box's low corner), text in
+    /// `contents`.
     Note {
         pos: Pt,
     },
@@ -214,10 +242,10 @@ pub enum AnnotKind {
         point: Pt,
         size: f32,
     },
-    /// A file attached at `pos` (Acrobat's Attach File). Its bytes are
-    /// `file` in the cache (`generated::store_blob`) until a save embeds
-    /// them; `name` and `size` are the file's. `icon` is one of
-    /// [`ATTACHMENT_ICONS`].
+    /// A file attached at `pos` (Acrobat's Attach File), its icon's box's
+    /// low corner as a note's is. Its bytes are `file` in the cache
+    /// (`generated::store_blob`) until a save embeds them; `name` and
+    /// `size` are the file's. `icon` is one of [`ATTACHMENT_ICONS`].
     FileAttachment {
         pos: Pt,
         icon: String,
@@ -316,34 +344,25 @@ pub fn box_of(arr: &[lopdf::Object]) -> Option<[f32; 4]> {
     ])
 }
 
-/// What a viewer shows: `crop` clipped to `media` (PDF 32000 §14.11.2),
-/// or `media` when there's no crop or it doesn't overlap.
-pub fn visible_box(media: [f32; 4], crop: Option<[f32; 4]>) -> [f32; 4] {
-    match crop {
-        Some(c) => {
-            let b = [
-                c[0].max(media[0]),
-                c[1].max(media[1]),
-                c[2].min(media[2]),
-                c[3].min(media[3]),
-            ];
-            if b[2] - b[0] > 0.5 && b[3] - b[1] > 0.5 {
-                b
-            } else {
-                media
-            }
-        }
-        None => media,
+/// A note's or an attachment's icon box, its low corner at `pos`.
+pub fn icon_box(pos: Pt) -> Box2 {
+    Box2 {
+        x: pos.x,
+        y: pos.y,
+        w: NOTE_SIZE,
+        h: NOTE_SIZE,
     }
 }
 
 impl AnnotKind {
-    /// The same shape with every point mapped by `mp` and every box by
-    /// `mb`; `size` maps the text size of tapes.
-    fn mapped(
+    /// The same shape with every point mapped by `mp`, every box by `mb`
+    /// and an icon's corner by `icon_at`; `size` maps the text size of
+    /// tapes.
+    fn map_with(
         &self,
         mp: &dyn Fn(&Pt) -> Pt,
         mb: &dyn Fn(&Box2) -> Box2,
+        icon_at: &dyn Fn(&Pt) -> Pt,
         size: &dyn Fn(f32) -> f32,
     ) -> AnnotKind {
         let rs = |rects: &Vec<Box2>| rects.iter().map(mb).collect();
@@ -412,13 +431,13 @@ impl AnnotKind {
                 name,
                 size,
             } => AnnotKind::FileAttachment {
-                pos: mp(pos),
+                pos: icon_at(pos),
                 icon: icon.clone(),
                 file: file.clone(),
                 name: name.clone(),
                 size: *size,
             },
-            AnnotKind::Note { pos } => AnnotKind::Note { pos: mp(pos) },
+            AnnotKind::Note { pos } => AnnotKind::Note { pos: icon_at(pos) },
             AnnotKind::FreeText { rect, size } => AnnotKind::FreeText {
                 rect: mb(rect),
                 size: *size,
@@ -466,19 +485,116 @@ impl AnnotKind {
         }
     }
 
+    /// Its bounding box, in a frame that's y down (see
+    /// [`Annot::upright`]).
+    pub fn bounds(&self) -> Box2 {
+        let union = |rects: &[Box2]| {
+            rects.iter().copied().reduce(Box2::union).unwrap_or(Box2 {
+                x: 0.0,
+                y: 0.0,
+                w: 0.0,
+                h: 0.0,
+            })
+        };
+        match self {
+            AnnotKind::Highlight { rects }
+            | AnnotKind::Underline { rects }
+            | AnnotKind::StrikeOut { rects }
+            | AnnotKind::Squiggly { rects } => union(rects),
+            AnnotKind::Replace { rects, at, .. } => union(rects).union(*at),
+            AnnotKind::Insert { at } => *at,
+            // Not on the page: they're in their parent's thread.
+            AnnotKind::Reply { .. } | AnnotKind::Status { .. } => union(&[]),
+            AnnotKind::Polygon { points } | AnnotKind::Polyline { points } => union(
+                &points
+                    .iter()
+                    .map(|p| Box2 {
+                        x: p.x,
+                        y: p.y,
+                        w: 0.0,
+                        h: 0.0,
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            AnnotKind::Callout {
+                rect, knee, point, ..
+            } => union(&[*rect, Box2::from_corners(*knee, *point)]),
+            AnnotKind::Measure {
+                what,
+                points,
+                scale,
+            } => union(
+                &points
+                    .iter()
+                    .map(|p| Box2 {
+                        x: p.x,
+                        y: p.y,
+                        w: 0.0,
+                        h: 0.0,
+                    })
+                    .chain(measure_label_box(*what, points, scale))
+                    .collect::<Vec<_>>(),
+            ),
+            AnnotKind::Note { pos } | AnnotKind::FileAttachment { pos, .. } => icon_box(*pos),
+            AnnotKind::FreeText { rect, .. }
+            | AnnotKind::Tape { rect, .. }
+            | AnnotKind::Square { rect }
+            | AnnotKind::Ellipse { rect } => *rect,
+            AnnotKind::Stamp { rect, .. }
+            | AnnotKind::Connector { rect, .. }
+            | AnnotKind::PageStamp { rect, .. }
+            | AnnotKind::TextStamp { rect, .. }
+            | AnnotKind::PageBorder { rect, .. } => *rect,
+            AnnotKind::Line { a, b, .. } => Box2::from_corners(*a, *b),
+            AnnotKind::Ink { paths } => paths
+                .iter()
+                .flatten()
+                .map(|p| Box2 {
+                    x: p.x,
+                    y: p.y,
+                    w: 0.0,
+                    h: 0.0,
+                })
+                .reduce(Box2::union)
+                .unwrap_or(Box2 {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 0.0,
+                    h: 0.0,
+                }),
+        }
+    }
+
+    /// The same shape mapped by `m`, a quarter-turn map as a page's
+    /// frames are: points pointwise, boxes through [`Affine::apply_box`],
+    /// and a note's or an attachment's corner through its icon's box.
+    pub fn mapped(&self, m: &Affine) -> AnnotKind {
+        self.map_with(
+            &|p| m.apply(*p),
+            &|b| m.apply_box(*b),
+            &|p| {
+                let b = m.apply_box(icon_box(*p));
+                Pt { x: b.x, y: b.y }
+            },
+            &|s| s,
+        )
+    }
+
     /// The same shape moved by (`dx`, `dy`) points.
     pub fn translated(&self, dx: f32, dy: f32) -> AnnotKind {
-        self.mapped(
-            &|p| Pt {
-                x: p.x + dx,
-                y: p.y + dy,
-            },
+        let mp = |p: &Pt| Pt {
+            x: p.x + dx,
+            y: p.y + dy,
+        };
+        self.map_with(
+            &mp,
             &|b| Box2 {
                 x: b.x + dx,
                 y: b.y + dy,
                 w: b.w,
                 h: b.h,
             },
+            &mp,
             &|s| s,
         )
     }
@@ -499,7 +615,7 @@ impl AnnotKind {
             AnnotKind::Tape { look, .. } if look.rotation % 180 == 90 => sx,
             _ => sy,
         };
-        self.mapped(
+        self.map_with(
             &mp,
             &|b| {
                 let p = mp(&Pt { x: b.x, y: b.y });
@@ -510,6 +626,7 @@ impl AnnotKind {
                     h: b.h * sy,
                 }
             },
+            &mp,
             &|s| (s * along).max(4.0),
         )
     }
@@ -751,7 +868,8 @@ pub fn cloud_curves(pts: &[Pt], step: f32) -> Vec<[Pt; 4]> {
     curves
 }
 
-/// An attachment icon's strokes in the box `at` (displayed space).
+/// An attachment icon's strokes in the box `at`, in a frame that's y
+/// down.
 pub fn attachment_icon(icon: &str, at: Box2) -> Vec<Vec<Pt>> {
     let shape: Vec<Vec<(f32, f32)>> = match icon {
         "Paperclip" => vec![vec![
@@ -819,8 +937,9 @@ fn cloudy_style() -> Dictionary {
     dictionary! { "S" => Object::Name(b"C".to_vec()), "I" => 1 }
 }
 
-/// The path of a mark's cloudy border, in user space through `up`.
-fn cloud_ops(kind: &AnnotKind, width: f32, up: &dyn Fn(Pt) -> Pt) -> String {
+/// The path of a mark's cloudy border, laid out upright, in user space
+/// through `up`.
+fn cloud_ops(kind: &AnnotKind, width: f32, up: &Affine) -> String {
     let Some(outline) = outline_of(kind) else {
         return String::new();
     };
@@ -829,7 +948,7 @@ fn cloud_ops(kind: &AnnotKind, width: f32, up: &dyn Fn(Pt) -> Pt) -> String {
         .into_iter()
         .enumerate()
     {
-        let [a, c1, c2, b] = [a, c1, c2, b].map(up);
+        let [a, c1, c2, b] = [a, c1, c2, b].map(|p| up.apply(p));
         if i == 0 {
             out.push_str(&format!(" {:.2} {:.2} m", a.x, a.y));
         }
@@ -890,6 +1009,11 @@ pub struct Annot {
     /// rectangle, ellipse or polygon.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cloudy: bool,
+    /// The rotation it reads upright in, absolute: its page's when it was
+    /// made. Turning the page later turns the mark with what's printed
+    /// there.
+    #[serde(default, skip_serializing_if = "is_upright")]
+    pub turn: Rotation,
     /// The `/NM` it came with when it was another tool's comment (made
     /// editable, or imported), kept so the replies to it still find it.
     /// Empty for one made in sheaf: see [`Annot::name`].
@@ -897,107 +1021,75 @@ pub struct Annot {
     pub name: String,
 }
 
+fn is_upright(turn: &Rotation) -> bool {
+    *turn == Rotation::R0
+}
+
 impl Annot {
-    /// Bounding box in displayed page space.
-    pub fn bounds(&self) -> Box2 {
-        let union = |rects: &[Box2]| {
-            rects.iter().copied().reduce(Box2::union).unwrap_or(Box2 {
-                x: 0.0,
-                y: 0.0,
-                w: 0.0,
-                h: 0.0,
-            })
-        };
-        match &self.kind {
-            AnnotKind::Highlight { rects }
-            | AnnotKind::Underline { rects }
-            | AnnotKind::StrikeOut { rects }
-            | AnnotKind::Squiggly { rects } => union(rects),
-            AnnotKind::Replace { rects, at, .. } => union(rects).union(*at),
-            AnnotKind::Insert { at } => *at,
-            // Not on the page: they're in their parent's thread.
-            AnnotKind::Reply { .. } | AnnotKind::Status { .. } => union(&[]),
-            AnnotKind::Polygon { points } | AnnotKind::Polyline { points } => union(
-                &points
-                    .iter()
-                    .map(|p| Box2 {
-                        x: p.x,
-                        y: p.y,
-                        w: 0.0,
-                        h: 0.0,
-                    })
-                    .collect::<Vec<_>>(),
-            ),
-            AnnotKind::Callout {
-                rect, knee, point, ..
-            } => union(&[*rect, Box2::from_corners(*knee, *point)]),
-            AnnotKind::Measure {
-                what,
-                points,
-                scale,
-            } => union(
-                &points
-                    .iter()
-                    .map(|p| Box2 {
-                        x: p.x,
-                        y: p.y,
-                        w: 0.0,
-                        h: 0.0,
-                    })
-                    .chain(measure_label_box(*what, points, scale))
-                    .collect::<Vec<_>>(),
-            ),
-            AnnotKind::Note { pos } | AnnotKind::FileAttachment { pos, .. } => Box2 {
-                x: pos.x,
-                y: pos.y,
-                w: NOTE_SIZE,
-                h: NOTE_SIZE,
-            },
-            AnnotKind::FreeText { rect, .. }
-            | AnnotKind::Tape { rect, .. }
-            | AnnotKind::Square { rect }
-            | AnnotKind::Ellipse { rect } => *rect,
-            AnnotKind::Stamp { rect, .. }
-            | AnnotKind::Connector { rect, .. }
-            | AnnotKind::PageStamp { rect, .. }
-            | AnnotKind::TextStamp { rect, .. }
-            | AnnotKind::PageBorder { rect, .. } => *rect,
-            AnnotKind::Line { a, b, .. } => Box2::from_corners(*a, *b),
-            AnnotKind::Ink { paths } => paths
-                .iter()
-                .flatten()
-                .map(|p| Box2 {
-                    x: p.x,
-                    y: p.y,
-                    w: 0.0,
-                    h: 0.0,
-                })
-                .reduce(Box2::union)
-                .unwrap_or(Box2 {
-                    x: 0.0,
-                    y: 0.0,
-                    w: 0.0,
-                    h: 0.0,
-                }),
+    /// The mark with its geometry mapped by `m` (see
+    /// [`AnnotKind::mapped`]), its turn kept.
+    pub fn mapped(&self, m: &Affine) -> Annot {
+        let mut a = self.clone();
+        a.kind = self.kind.mapped(m);
+        a
+    }
+
+    /// The mark made in `frame`, a view of its page, with its turn relative
+    /// to the frame (R0 reads as drawn), placed on the page: in PageSpace,
+    /// with its turn on the page. The one way a mark made on a page as it
+    /// shows reaches the model (M10.5 §5).
+    pub fn to_page(&self, frame: &Geom) -> Annot {
+        Annot {
+            turn: self.turn.plus(frame.rotate),
+            ..self.mapped(&frame.from_view())
         }
     }
 
+    /// The mark as `frame`, a view of its page, shows it, its turn made
+    /// relative to the frame: what a drag moves, a handle reshapes and the
+    /// clipboard holds. [`to_page`](Self::to_page) takes it back.
+    pub fn to_frame(&self, frame: &Geom) -> Annot {
+        Annot {
+            turn: self.turn.minus(frame.rotate),
+            ..self.mapped(&frame.to_view())
+        }
+    }
+
+    /// Its shape in the frame it reads upright in: PageSpace turned by its
+    /// [`turn`](Self::turn), y down, not moved.
+    /// [`AnnotKind::bounds`], [`hit`](Self::hit), [`outline_of`],
+    /// [`text_line_paths`], [`caret_points`], [`measure_label_box`] and the
+    /// tape and stamp layouts are written y down, for a shape in this frame
+    /// or in a view's.
+    pub fn upright(&self) -> AnnotKind {
+        self.kind.mapped(&Affine::upright(self.turn))
+    }
+
+    /// Its bounds in PageSpace: laid out upright, then mapped back.
+    pub fn page_bounds(&self) -> Box2 {
+        Affine::upright(self.turn)
+            .inverse()
+            .apply_box(self.upright().bounds())
+    }
     /// What it's called in threads and in the file (`/NM`): the name it
     /// came with, else `sheaf:<id>`.
     pub fn name(&self) -> String {
         if self.name.is_empty() {
-            format!("sheaf:{}", self.id.0)
+            let [own, _] = self.id.sheaf_names();
+            own
         } else {
             self.name.clone()
         }
     }
 
-    /// Whether a click at `p` lands on the mark: on the stroke for lines
-    /// and drawings (within `tolerance` points of it), anywhere in the box
-    /// for everything else.
+    /// Whether a click at `p`, in the frame the mark reads upright in
+    /// ([`upright`](Self::upright)), lands on the mark: on the stroke for
+    /// lines and drawings (within `tolerance` points of it), anywhere in
+    /// the box for everything else.
     pub fn hit(&self, p: Pt, tolerance: f32) -> bool {
         let near = |a: Pt, b: Pt| segment_distance(p, a, b) <= tolerance + self.stroke / 2.0;
-        match &self.kind {
+        let shape = self.upright();
+        match &shape {
             AnnotKind::Reply { .. } | AnnotKind::Status { .. } => false,
             // On its edge, not anywhere on the page it goes round.
             AnnotKind::PageBorder { rect, .. } => {
@@ -1049,7 +1141,7 @@ impl Annot {
                 pts => pts.windows(2).any(|w| near(w[0], w[1])),
             }),
             _ => {
-                let b = self.bounds();
+                let b = shape.bounds();
                 Box2 {
                     x: b.x - tolerance,
                     y: b.y - tolerance,
@@ -1093,7 +1185,8 @@ impl Annot {
 
     /// The `/NM` of a replacement's StrikeOut.
     fn strike_name(&self) -> String {
-        format!("sheaf:{}:strike", self.id.0)
+        let [_, strike] = self.id.sheaf_names();
+        strike
     }
 }
 
@@ -1111,24 +1204,26 @@ pub struct Written {
     pub companions: Vec<Dictionary>,
 }
 
-/// Write `a` into `pdf` as it appears on a page with geometry `geom`. The
-/// caller adds [`Written::main`] (and the companions) to the page's
-/// `/Annots`.
-pub fn to_pdf(a: &Annot, geom: &PageGeom, pdf: &mut lopdf::Document) -> Written {
-    to_pdf_in(a, geom, pdf, &mut std::collections::HashMap::new())
+/// Write `a` into `pdf`. Its geometry is PageSpace, which is the page's
+/// user space, so it needs nothing of the page. The caller adds
+/// [`Written::main`] (and the companions) to the page's `/Annots`.
+pub fn to_pdf(a: &Annot, pdf: &mut lopdf::Document) -> Written {
+    to_pdf_in(a, pdf, &mut std::collections::HashMap::new())
 }
 
 /// [`to_pdf`], with the stamp pages already imported into `pdf` in this
 /// save (by `stamp`), so a stamp used on every page is in the file once.
 pub fn to_pdf_in(
     a: &Annot,
-    geom: &PageGeom,
     pdf: &mut lopdf::Document,
     forms: &mut std::collections::HashMap<String, Option<(lopdf::ObjectId, sheaf_core::PageSize)>>,
 ) -> Written {
-    let (mut main, mut appearance) = annotation(a, geom);
+    let (mut main, mut appearance) = annotation(a);
     if let AnnotKind::PageStamp {
-        rect, stamp, name, ..
+        rect: at,
+        stamp,
+        name,
+        ..
     } = &a.kind
     {
         let form = *forms.entry(stamp.clone()).or_insert_with(|| {
@@ -1145,8 +1240,10 @@ pub fn to_pdf_in(
         });
         match form {
             Some((id, size)) => {
-                // The page fitted into the mark, upright as shown.
-                let up = |p: Pt| geom.to_user(p);
+                // The page fitted into the mark, upright as it reads.
+                let rect = Affine::upright(a.turn).apply_box(*at);
+                let user = to_user(a.turn);
+                let up = |p: Pt| user.apply(p);
                 let o = up(Pt {
                     x: rect.x,
                     y: rect.bottom(),
@@ -1174,12 +1271,10 @@ pub fn to_pdf_in(
             None => {
                 // Without its page, a box with its name, so it's not lost.
                 let mut content = appearance.content.clone();
-                let [x0, y0, x1, y1] = geom.box_to_user(*rect);
                 content.extend_from_slice(
                     format!(
-                        " 0.5 g 1 w {x0:.2} {y0:.2} {:.2} {:.2} re S",
-                        x1 - x0,
-                        y1 - y0
+                        " 0.5 g 1 w {:.2} {:.2} {:.2} {:.2} re S",
+                        at.x, at.y, at.w, at.h
                     )
                     .as_bytes(),
                 );
@@ -1221,6 +1316,17 @@ pub fn to_pdf_in(
             Err(e) => log::warn!("attachment {name} ({file}) isn't on this machine: {e}"),
         }
     }
+    // The mark, and the digest of what its dictionary now says.
+    on_grid(&mut main);
+    let payload = Payload {
+        v: Some(VERSION),
+        std: staleness(&*pdf, &main, a.thread_parent().is_some()),
+        mark: a,
+    };
+    main.set(
+        "SheafAnnot",
+        pdf_text_string(&serde_json::to_string(&payload).unwrap_or_default()),
+    );
     let mut companions = Vec::new();
     // A replacement's crossed-out text: a StrikeOut of its own, grouped
     // under the Caret, which carries the mark.
@@ -1232,8 +1338,7 @@ pub fn to_pdf_in(
             contents: String::new(),
             ..a.clone()
         };
-        let (mut dict, appearance) = annotation(&strike, geom);
-        dict.remove(b"SheafAnnot");
+        let (mut dict, appearance) = annotation(&strike);
         dict.set("NM", pdf_text_string(&a.strike_name()));
         let ap = pdf.add_object(Object::Stream(appearance));
         dict.set("AP", dictionary! { "N" => ap });
@@ -1369,73 +1474,16 @@ pub fn default_author() -> String {
         .unwrap_or_else(|_| "sheaf".into())
 }
 
-/// Geometry of a page needed to map between displayed and user space.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct PageGeom {
-    /// The visible box, x0, y0, x1, y1 in user space: the CropBox clipped
-    /// to the MediaBox, or the MediaBox when there's no CropBox. It's what
-    /// viewers show, so "displayed" positions start at its corner.
-    pub media: [f32; 4],
-    /// `/Rotate`, normalized to 0/90/180/270.
-    pub rotate: i32,
+/// A mark's upright frame (see [`Annot::upright`]) to PageSpace, which
+/// is the page's user space: where the writer draws what it lays out.
+fn to_user(turn: Rotation) -> Affine {
+    Affine::upright(turn).inverse()
 }
 
-impl PageGeom {
-    /// Displayed point → user space.
-    pub fn to_user(&self, p: Pt) -> Pt {
-        let [x0, y0, x1, y1] = self.media;
-        match self.rotate.rem_euclid(360) {
-            90 => Pt {
-                x: x0 + p.y,
-                y: y0 + p.x,
-            },
-            180 => Pt {
-                x: x1 - p.x,
-                y: y0 + p.y,
-            },
-            270 => Pt {
-                x: x1 - p.y,
-                y: y1 - p.x,
-            },
-            _ => Pt {
-                x: x0 + p.x,
-                y: y1 - p.y,
-            },
-        }
-    }
-
-    /// User space → displayed point.
-    pub fn to_display(&self, u: Pt) -> Pt {
-        let [x0, y0, x1, y1] = self.media;
-        match self.rotate.rem_euclid(360) {
-            90 => Pt {
-                x: u.y - y0,
-                y: u.x - x0,
-            },
-            180 => Pt {
-                x: x1 - u.x,
-                y: u.y - y0,
-            },
-            270 => Pt {
-                x: y1 - u.y,
-                y: x1 - u.x,
-            },
-            _ => Pt {
-                x: u.x - x0,
-                y: y1 - u.y,
-            },
-        }
-    }
-
-    /// Displayed box → user-space [llx lly urx ury].
-    pub fn box_to_user(&self, b: Box2) -> [f32; 4] {
-        let p = self.to_user(Pt { x: b.x, y: b.y });
-        let q = self.to_user(Pt {
-            x: b.right(),
-            y: b.bottom(),
-        });
-        [p.x.min(q.x), p.y.min(q.y), p.x.max(q.x), p.y.max(q.y)]
-    }
+/// The box `b` of the upright frame in user space, `[llx lly urx ury]`.
+fn user_box(up: &Affine, b: Box2) -> [f32; 4] {
+    let u = up.apply_box(b);
+    [u.x, u.y, u.right(), u.bottom()]
 }
 
 fn pdf_rect(r: [f32; 4]) -> Object {
@@ -1501,8 +1549,12 @@ fn color_ops(c: [u8; 3], fill: bool) -> String {
     format!("{r:.3} {g:.3} {b:.3} {}", if fill { "rg" } else { "RG" })
 }
 
+/// A text string: as is when PDFDocEncoding reads it back so
+/// ([`crate::file::is_pdf_doc_ascii`]), else UTF-16BE with its BOM. The
+/// `/SheafAnnot` JSON is one too: a DEL in a mark's text, written as is,
+/// would read back as a NUL, which no JSON string holds.
 fn pdf_text_string(s: &str) -> Object {
-    if s.is_ascii() {
+    if crate::file::is_pdf_doc_ascii(s) {
         Object::String(s.as_bytes().to_vec(), StringFormat::Literal)
     } else {
         let mut bytes = vec![0xFE, 0xFF];
@@ -1631,13 +1683,18 @@ fn arrowhead(from: Pt, tip: Pt, stroke: f32) -> String {
     )
 }
 
-/// The main annotation dictionary (without `/AP` or `/P`) and its
-/// appearance stream.
-fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
+/// The main annotation dictionary (without `/AP`, `/P` or `/SheafAnnot`)
+/// and its appearance stream.
+fn annotation(a: &Annot) -> (Dictionary, Stream) {
+    // Laid out as it reads, then drawn in user space through `user`, so
+    // it's upright whatever the page's /Rotate.
+    let shown = a.upright();
+    let user = to_user(a.turn);
+    let up = |p: Pt| user.apply(p);
     // A replacement's Caret covers the caret; its StrikeOut is separate.
-    let bounds = match &a.kind {
+    let bounds = match &shown {
         AnnotKind::Replace { at, .. } => *at,
-        _ => a.bounds(),
+        _ => shown.bounds(),
     };
     // Pad so strokes aren't clipped by the BBox.
     let pad = a.stroke.max(1.0) + 1.0;
@@ -1647,14 +1704,10 @@ fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
         w: bounds.w + 2.0 * pad,
         h: bounds.h + 2.0 * pad,
     };
-    let rect = geom.box_to_user(padded);
+    let rect = user_box(&user, padded);
     let rect_user = rect;
     let [llx, lly, urx, ury] = rect;
 
-    // Appearance content is drawn in user space, so it works for any /Rotate;
-    // text is placed upright relative to the displayed page by rotating with
-    // the page.
-    let up = |p: Pt| geom.to_user(p);
     let mut content = String::new();
     let alpha = a.opacity.clamp(0.0, 1.0);
     let ext = dictionary! { "GS" => dictionary! { "Type" => "ExtGState", "CA" => alpha, "ca" => alpha,
@@ -1668,7 +1721,6 @@ fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
         "M" => pdf_text_string(&a.modified),
         "F" => 4i64, // Print
         "CA" => alpha,
-        "SheafAnnot" => pdf_text_string(&serde_json::to_string(a).unwrap_or_default()),
     };
     if !a.contents.is_empty() {
         dict.set("Contents", pdf_text_string(&a.contents));
@@ -1679,8 +1731,8 @@ fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
     let c = a.color;
     let color_arr = Object::Array(c.iter().map(|v| Object::from(*v as f32 / 255.0)).collect());
 
-    // Rotation of upright text, in degrees, to counter the page rotation.
-    let text_rot = geom.rotate.rem_euclid(360) as f32;
+    // Text turns with the frame it reads upright in.
+    let text_rot = a.turn.degrees() as f32;
     let (cs, sn) = (text_rot.to_radians().cos(), text_rot.to_radians().sin());
     let text_matrix = |origin: Pt| {
         let o = up(origin);
@@ -1690,14 +1742,14 @@ fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
         )
     };
 
-    match &a.kind {
+    match &shown {
         AnnotKind::Highlight { rects } => {
             dict.set("Subtype", Object::Name(b"Highlight".to_vec()));
             dict.set("C", color_arr);
             let mut quads = Vec::new();
             content.push_str(&color_ops(c, true));
             for r in rects {
-                let [x0, y0, x1, y1] = geom.box_to_user(*r);
+                let [x0, y0, x1, y1] = user_box(&user, *r);
                 // QuadPoints order: x1 y1 x2 y2 (upper), x3 y3 x4 y4 (lower).
                 quads.extend([x0, y1, x1, y1, x0, y0, x1, y0].map(Object::from));
                 content.push_str(&format!(
@@ -1720,15 +1772,15 @@ fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
             dict.set("C", color_arr);
             let mut quads = Vec::new();
             for r in rects {
-                let [x0, y0, x1, y1] = geom.box_to_user(*r);
+                let [x0, y0, x1, y1] = user_box(&user, *r);
                 quads.extend([x0, y1, x1, y1, x0, y0, x1, y0].map(Object::from));
             }
             dict.set("QuadPoints", Object::Array(quads));
-            // Drawn in displayed space, then taken to user space, so the
+            // Drawn as the text reads, then taken to user space, so the
             // line follows the text whatever the page's /Rotate.
             let width = text_line_width(rects);
             content.push_str(&format!(" {} {width:.2} w", color_ops(c, false)));
-            for path in text_line_paths(&a.kind) {
+            for path in text_line_paths(&shown) {
                 let mut first = true;
                 for p in path {
                     let u = up(p);
@@ -1745,7 +1797,7 @@ fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
         }
         AnnotKind::Replace { at, .. } | AnnotKind::Insert { at } => {
             dict.set("Subtype", Object::Name(b"Caret".to_vec()));
-            dict.set("RD", inner_box(rect_user, geom.box_to_user(*at)));
+            dict.set("RD", inner_box(rect_user, user_box(&user, *at)));
             dict.set("C", color_arr);
             dict.set("Sy", Object::Name(b"None".to_vec()));
             let [p0, p1, p2] = caret_points(*at).map(up);
@@ -1786,13 +1838,7 @@ fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
                 dict.set("Contents", pdf_text_string(name));
             }
             content.push_str(&format!(" {} 1.5 w 1 J 1 j", color_ops(c, false)));
-            let at = Box2 {
-                x: pos.x,
-                y: pos.y,
-                w: NOTE_SIZE,
-                h: NOTE_SIZE,
-            };
-            for path in attachment_icon(icon, at) {
+            for path in attachment_icon(icon, icon_box(*pos)) {
                 for (i, p) in path.iter().enumerate() {
                     let u = up(*p);
                     let op = if i == 0 { "m" } else { "l" };
@@ -1806,12 +1852,7 @@ fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
             dict.set("Name", Object::Name(b"Comment".to_vec()));
             dict.set("C", color_arr);
             dict.set("Open", false);
-            let [x0, y0, x1, y1] = geom.box_to_user(Box2 {
-                x: pos.x,
-                y: pos.y,
-                w: NOTE_SIZE,
-                h: NOTE_SIZE,
-            });
+            let [x0, y0, x1, y1] = user_box(&user, icon_box(*pos));
             content.push_str(&format!(
                 " {} {} {x0:.2} {y0:.2} {:.2} {:.2} re B 0.5 w 1 1 1 RG",
                 color_ops(c, true),
@@ -1831,7 +1872,7 @@ fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
         }
         AnnotKind::FreeText { rect, size } => {
             dict.set("Subtype", Object::Name(b"FreeText".to_vec()));
-            dict.set("RD", inner_box(rect_user, geom.box_to_user(*rect)));
+            dict.set("RD", inner_box(rect_user, user_box(&user, *rect)));
             dict.set(
                 "DA",
                 pdf_text_string(&format!("{HELV} {size} Tf {}", color_ops(c, true))),
@@ -1866,7 +1907,7 @@ fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
             );
             dict.set("C", Object::Array(vec![Object::Real(1.0); 3]));
             let tape = a.tape().unwrap_or_default();
-            content.push_str(&tape_content(*rect, *size, look, &tape, c, geom));
+            content.push_str(&tape_content(*rect, *size, look, &tape, c, &user));
         }
         AnnotKind::Square { rect } | AnnotKind::Ellipse { rect } => {
             let square = matches!(a.kind, AnnotKind::Square { .. });
@@ -1882,11 +1923,11 @@ fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
                 );
                 content.push_str(&format!(" {}", color_ops(f, true)));
             }
-            let b = geom.box_to_user(*rect);
+            let b = user_box(&user, *rect);
             dict.set("RD", inner_box(rect_user, b));
             if a.cloudy {
                 dict.set("BE", cloudy_style());
-                content.push_str(&cloud_ops(&a.kind, a.stroke, &up));
+                content.push_str(&cloud_ops(&shown, a.stroke, &user));
             } else if square {
                 let [x0, y0, x1, y1] = b;
                 content.push_str(&format!(
@@ -1928,7 +1969,7 @@ fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
             }
             if closed && a.cloudy {
                 dict.set("BE", cloudy_style());
-                content.push_str(&cloud_ops(&a.kind, a.stroke, &up));
+                content.push_str(&cloud_ops(&shown, a.stroke, &user));
             } else {
                 for (i, p) in points.iter().enumerate() {
                     let u = up(*p);
@@ -2041,7 +2082,7 @@ fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
             );
             dict.set("LE", Object::Name(b"OpenArrow".to_vec()));
             // The box inside /Rect, for viewers that lay the text out.
-            let [bx0, by0, bx1, by1] = geom.box_to_user(*rect);
+            let [bx0, by0, bx1, by1] = user_box(&user, *rect);
             dict.set(
                 "RD",
                 Object::Array(
@@ -2092,7 +2133,7 @@ fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
             dict.set("H", Object::Name(b"I".to_vec()));
             // Filled disc in the mark's color, label in white.
             content.push_str(&format!(" {}", color_ops(c, true)));
-            content.push_str(&ellipse_path(geom.box_to_user(*rect)));
+            content.push_str(&ellipse_path(user_box(&user, *rect)));
             content.push_str(" f");
             let size = rect.h * 0.55;
             let chars = label.chars().count().max(1) as f32;
@@ -2199,7 +2240,7 @@ fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
                 dict.set("Contents", pdf_text_string(&format!("Status: {status}")));
             }
             content.push_str(&stroke_ops(a));
-            let [x0, y0, x1, y1] = geom.box_to_user(*rect);
+            let [x0, y0, x1, y1] = user_box(&user, *rect);
             content.push_str(&format!(
                 " {x0:.2} {y0:.2} {:.2} {:.2} re S",
                 x1 - x0,
@@ -2274,10 +2315,8 @@ fn annotation(a: &Annot, geom: &PageGeom) -> (Dictionary, Stream) {
         }
         AnnotKind::Stamp { rect, glyph } => {
             dict.set("Subtype", Object::Name(b"Stamp".to_vec()));
-            dict.set(
-                "Name",
-                Object::Name(format!("SheafTick{}", a.id.0).into_bytes()),
-            );
+            // Which tick it is is the mark's id, in /SheafAnnot.
+            dict.set("Name", Object::Name(b"Tick".to_vec()));
             // ZapfDingbats has the check and cross; everything else is bold text.
             let (font, text): (&str, String) = match glyph.as_str() {
                 "✓" => (ZADB, "4".into()),
@@ -2321,9 +2360,9 @@ pub fn text_line_width(rects: &[Box2]) -> f32 {
     (h * 0.07).clamp(0.75, 3.0)
 }
 
-/// The lines an underline, strikeout or squiggly draws, in displayed
-/// space: one path per rect, under it, through its middle, or a wave
-/// under it.
+/// The lines an underline, strikeout or squiggly draws, for the mark in
+/// a frame that's y down: one path per rect, under it, through its
+/// middle, or a wave under it.
 pub fn text_line_paths(kind: &AnnotKind) -> Vec<Vec<Pt>> {
     let (rects, at): (&[Box2], f32) = match kind {
         AnnotKind::Underline { rects } => (rects, 0.92),
@@ -2354,7 +2393,8 @@ pub fn text_line_paths(kind: &AnnotKind) -> Vec<Vec<Pt>> {
         .collect()
 }
 
-/// A caret's triangle in displayed space: its tip at the top centre.
+/// A caret's triangle in a frame that's y down: its tip at the top
+/// centre.
 pub fn caret_points(at: Box2) -> [Pt; 3] {
     [
         Pt {
@@ -2377,8 +2417,8 @@ pub fn text_stamp_line(rect: Box2) -> f32 {
     (rect.h * 0.05).clamp(1.0, 4.0)
 }
 
-/// A text stamp's lines as drawn: (text, size, baseline in displayed
-/// space). The first is large, the rest small, centred as a block.
+/// A text stamp's lines as drawn: (text, size, baseline, y down). The
+/// first is large, the rest small, centred as a block.
 pub fn text_stamp_lines(rect: Box2, text: &str) -> Vec<(String, f32, f32)> {
     let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
     let (big, small) = match lines.len() {
@@ -2456,7 +2496,7 @@ fn tape_frame(rect: Box2, look: &crate::tape::TapeLook) -> (f32, f32) {
 }
 
 /// Where a point of the tape's frame (x right, y down, as it reads) is
-/// in the page's displayed space, the tape turned as `look` says.
+/// in the mark's upright frame, the tape turned as `look` says.
 fn tape_to_shown(rect: Box2, look: &crate::tape::TapeLook, u: f32, v: f32) -> Pt {
     match look.rotation % 360 {
         90 => Pt {
@@ -2531,20 +2571,21 @@ pub fn tape_size(tape: &crate::tape::Tape, size: f32, look: &crate::tape::TapeLo
 }
 
 /// A tape's appearance: paper, then its rows (number, amount or title,
-/// symbol, note), drawn in the tape's own frame and mapped onto the page,
-/// so it reads the right way whichever way it's turned.
+/// symbol, note), drawn in the tape's own frame and mapped onto the page
+/// through `up`, from `rect`'s frame, so it reads the right way whichever
+/// way it's turned.
 fn tape_content(
     rect: Box2,
     size: f32,
     look: &crate::tape::TapeLook,
     tape: &crate::tape::Tape,
     c: [u8; 3],
-    geom: &PageGeom,
+    up: &Affine,
 ) -> String {
     use crate::tape::{Row, fmt_amount};
     let (w, h) = tape_frame(rect, look);
     // The frame, PDF-style (y up from its bottom left), to user space.
-    let user = |x: f32, y: f32| geom.to_user(tape_to_shown(rect, look, x, h - y));
+    let user = |x: f32, y: f32| up.apply(tape_to_shown(rect, look, x, h - y));
     let o = user(0.0, 0.0);
     let ex = user(1.0, 0.0);
     let ey = user(0.0, 1.0);
@@ -2609,12 +2650,12 @@ fn tape_content(
     out
 }
 
-/// A tape alone as a one-page PDF its size: how sheaf shows a turned tape
-/// on screen, from a picture of it.
+/// A tape alone, as it reads, as a one-page PDF its size: how sheaf shows
+/// a turned tape on screen, from a picture of it.
 pub fn tape_pdf(a: &Annot) -> Option<Vec<u8>> {
     let AnnotKind::Tape {
         rect, size, look, ..
-    } = &a.kind
+    } = &a.upright()
     else {
         return None;
     };
@@ -2625,11 +2666,8 @@ pub fn tape_pdf(a: &Annot) -> Option<Vec<u8>> {
         w: rect.w,
         h: rect.h,
     };
-    let geom = PageGeom {
-        media: [0.0, 0.0, rect.w, rect.h],
-        rotate: 0,
-    };
-    let content = tape_content(at, *size, look, &tape, a.color, &geom);
+    let page = Geom::read(Some(Rect::new(0.0, 0.0, rect.w, rect.h)), None, 0);
+    let content = tape_content(at, *size, look, &tape, a.color, &page.from_view());
     let mut pdf = lopdf::Document::with_version("1.5");
     let pages_id = pdf.new_object_id();
     let content = pdf.add_object(Stream::new(dictionary! {}, content.into_bytes()));
@@ -2651,58 +2689,201 @@ pub fn tape_pdf(a: &Annot) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+/// The `/SheafAnnot` version this build writes.
+pub const VERSION: u32 = 2;
+
+/// A `/SheafAnnot` payload: the mark's JSON, and beside its fields the
+/// version and the [`staleness`] digest of the dictionary it was written
+/// into. Version 1 had neither, and its geometry was in the page's
+/// displayed space. A field of [`Annot`] is never called `v` or `std`.
+#[derive(Serialize, Deserialize)]
+pub struct Payload<M> {
+    /// [`VERSION`]; none in version 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub v: Option<u32>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub std: String,
+    #[serde(flatten)]
+    pub mark: M,
+}
+
 /// Parse a `/SheafAnnot` payload.
-pub fn from_json(s: &[u8]) -> Option<Annot> {
+pub fn from_json(s: &[u8]) -> Option<Payload<Annot>> {
     serde_json::from_slice(s).ok()
+}
+
+/// How many of the steps [`staleness`] counts a key's numbers in make
+/// one: 64 a point for geometry, 1000 for colors and `/CA`.
+fn steps_per_unit(key: &[u8]) -> f64 {
+    match key {
+        b"C" | b"IC" | b"CA" => 1000.0,
+        _ => 64.0,
+    }
+}
+
+/// The step `v` is on, counted as the digest counts it: as an f32, which
+/// is what the writer computes.
+fn steps(v: f64, scale: f64) -> f64 {
+    (f64::from(v as f32) * scale).round()
+}
+
+/// `v` on its step.
+fn snapped(v: f64, scale: f64) -> f64 {
+    steps(v, scale) / scale
+}
+
+/// Put the numbers [`staleness`] counts on its steps, before it counts
+/// them. A value off them can sit by the middle of two, where another
+/// tool writing it again with fewer digits moves it into the next and
+/// stales the mark; one on them needs at most six decimals, and comes
+/// back to its step from any rewrite to two or more (three for colors).
+/// `/RD` is the inset to an inner box that's put on the steps itself, so
+/// a box read as `/Rect` less `/RD` is off by half a step at most.
+fn on_grid(dict: &mut Dictionary) {
+    let numbers = |o: &Object| -> Option<Vec<f64>> {
+        o.as_array()
+            .ok()?
+            .iter()
+            .map(|v| v.as_float().ok())
+            .collect()
+    };
+    let rect = dict.get(b"Rect").ok().and_then(numbers);
+    let rd = dict.get(b"RD").ok().and_then(numbers);
+    if let (Some([x0, y0, x1, y1]), Some([l, b, r, t])) = (
+        rect.as_deref().and_then(|v| <[f64; 4]>::try_from(v).ok()),
+        rd.as_deref().and_then(|v| <[f64; 4]>::try_from(v).ok()),
+    ) {
+        let s = |v| snapped(v, steps_per_unit(b"RD"));
+        let (outer, inner) = (
+            [s(x0), s(y0), s(x1), s(y1)],
+            [s(x0 + l), s(y0 + b), s(x1 - r), s(y1 - t)],
+        );
+        let inset = [
+            inner[0] - outer[0],
+            inner[1] - outer[1],
+            outer[2] - inner[2],
+            outer[3] - inner[3],
+        ];
+        dict.set("RD", inset.map(Object::Real).to_vec());
+    }
+    fn walk(o: &mut Object, scale: f64) {
+        match o {
+            Object::Real(v) => *v = snapped(*v, scale),
+            Object::Array(items) => items.iter_mut().for_each(|v| walk(v, scale)),
+            _ => {}
+        }
+    }
+    for key in [
+        &b"Rect"[..],
+        b"QuadPoints",
+        b"InkList",
+        b"L",
+        b"Vertices",
+        b"CL",
+        b"C",
+        b"IC",
+        b"CA",
+    ] {
+        if let Ok(o) = dict.get_mut(key) {
+            walk(o, steps_per_unit(key));
+        }
+    }
+}
+
+/// The staleness digest of a mark's dictionary (M10.5 §3.6): the keys the
+/// writer sets from the mark, made canonical, so that a re-serialization
+/// (`100` written `100.0`, reals written to three decimals or more, a
+/// text string in another encoding, `/Rect`'s corners swapped) keeps it
+/// and another tool's edit changes it. Geometry counts in steps of 1/64
+/// pt, colors and `/CA` (1 when absent) in steps of 1/1000, as f32s, which
+/// is what the writer computes, and the writer puts them on those steps
+/// ([`on_grid`]); text strings decode as PDFium decodes them, then NFC. A
+/// reply's or a status's `/Rect` (`threaded`) is its parent's, which the
+/// writer sets later, and `/IRT`, `/RT` and `/AP` aren't the mark's: none
+/// of them counts.
+pub fn staleness<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary, threaded: bool) -> String {
+    use std::io::Write as _;
+    const KEYS: [&[u8]; 15] = [
+        b"Subtype",
+        b"Rect",
+        b"Contents",
+        b"T",
+        b"M",
+        b"NM",
+        b"C",
+        b"IC",
+        b"CA",
+        b"QuadPoints",
+        b"InkList",
+        b"L",
+        b"Vertices",
+        b"CL",
+        b"RD",
+    ];
+    let number = |o| resolve(pdf, o).and_then(|o| o.as_float().ok());
+    // In steps of 1/`scale`.
+    let numbers = |out: &mut Vec<u8>, items: &mut dyn Iterator<Item = Option<f64>>, scale: f64| {
+        for v in items {
+            match v {
+                Some(v) => {
+                    let _ = write!(out, "{} ", steps(v, scale) as i64);
+                }
+                None => out.extend_from_slice(b"? "),
+            }
+        }
+    };
+    let mut out = Vec::new();
+    for key in KEYS {
+        let scale = steps_per_unit(key);
+        match (key, dict.get(key).ok().and_then(|o| resolve(pdf, o))) {
+            (b"Rect", _) if threaded => {}
+            (b"Subtype", Some(Object::Name(n))) => out.extend_from_slice(n),
+            (b"Rect", Some(Object::Array(r))) => {
+                let c: Vec<Option<f64>> = r.iter().map(number).collect();
+                match c.as_slice() {
+                    [Some(x0), Some(y0), Some(x1), Some(y1)] => {
+                        let corners = [x0.min(*x1), y0.min(*y1), x0.max(*x1), y0.max(*y1)];
+                        numbers(&mut out, &mut corners.into_iter().map(Some), scale);
+                    }
+                    _ => numbers(&mut out, &mut c.into_iter(), scale),
+                }
+            }
+            (b"Contents" | b"T" | b"M" | b"NM", Some(Object::String(text, _))) => {
+                let text: String = crate::file::text_string(text).nfc().collect();
+                out.extend_from_slice(text.as_bytes());
+            }
+            (b"C" | b"IC", Some(Object::Array(c))) => {
+                numbers(&mut out, &mut c.iter().map(number), scale);
+            }
+            (b"CA", ca) => {
+                let ca = ca.map_or(Some(1.0), |o| o.as_float().ok());
+                numbers(&mut out, &mut std::iter::once(ca), scale);
+            }
+            (b"InkList", Some(Object::Array(paths))) => {
+                for path in paths {
+                    if let Some(Object::Array(p)) = resolve(pdf, path) {
+                        numbers(&mut out, &mut p.iter().map(number), scale);
+                    }
+                    out.push(b';');
+                }
+            }
+            (_, Some(Object::Array(v))) => numbers(&mut out, &mut v.iter().map(number), scale),
+            _ => {}
+        }
+        // Each key's value ends with a byte no text or number has.
+        out.push(0xFF);
+    }
+    sheaf_core::checksum_hex(&out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn geom(rot: i32) -> PageGeom {
-        PageGeom {
-            media: [0.0, 0.0, 612.0, 792.0],
-            rotate: rot,
-        }
-    }
-
-    #[test]
-    fn display_user_round_trip_all_rotations() {
-        for rot in [0, 90, 180, 270] {
-            let g = geom(rot);
-            for p in [
-                Pt { x: 0.0, y: 0.0 },
-                Pt { x: 100.0, y: 50.0 },
-                Pt { x: 300.0, y: 700.0 },
-            ] {
-                let back = g.to_display(g.to_user(p));
-                assert!(
-                    (back.x - p.x).abs() < 1e-3 && (back.y - p.y).abs() < 1e-3,
-                    "rot {rot} {p:?} -> {back:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn display_corners_map_sensibly() {
-        // Unrotated: displayed top-left is user (x0, y1).
-        let g = geom(0);
-        let u = g.to_user(Pt { x: 0.0, y: 0.0 });
-        assert_eq!((u.x, u.y), (0.0, 792.0));
-        // 90° CW: displayed page is 792 wide; displayed top-left is user bottom-left.
-        let g = geom(90);
-        let u = g.to_user(Pt { x: 0.0, y: 0.0 });
-        assert_eq!((u.x, u.y), (0.0, 0.0));
-        let u = g.to_user(Pt { x: 792.0, y: 0.0 });
-        assert_eq!((u.x, u.y), (0.0, 792.0));
-    }
-
     #[test]
     fn marks_saved_before_creation_dates_still_read() {
         let old = br#"{"id":3,"kind":{"Note":{"pos":{"x":1.0,"y":2.0}}},"color":[1,2,3],"opacity":1.0,"stroke":1.0,"author":"me","contents":"hi","modified":"D:20261011000000"}"#;
-        let a = from_json(old).unwrap();
+        let a = from_json(old).unwrap().mark;
         assert_eq!(a.created, "");
         // And an empty one isn't written.
         assert!(!serde_json::to_string(&a).unwrap().contains("created"));
@@ -2731,10 +2912,11 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            turn: Rotation::R90,
             name: String::new(),
         };
         let mut pdf = lopdf::Document::with_version("1.7");
-        let Written { main: dict, .. } = to_pdf(&a, &geom(0), &mut pdf);
+        let Written { main: dict, .. } = to_pdf(&a, &mut pdf);
         let ap = dict.get(b"AP").unwrap().as_dict().unwrap();
         let stream = pdf
             .get_object(ap.get(b"N").unwrap().as_reference().unwrap())
@@ -2761,7 +2943,10 @@ mod tests {
         } else {
             json.to_vec()
         };
-        assert_eq!(from_json(&json).unwrap(), a);
+        let payload = from_json(&json).unwrap();
+        assert_eq!(payload.mark, a);
+        assert_eq!(payload.v, Some(VERSION));
+        assert_eq!(payload.std, staleness(&pdf, &dict, false));
         let content = String::from_utf8_lossy(&stream.content);
         assert!(content.contains("Tj"), "{content}");
         assert!(content.contains("\\(world\\)"), "{content}");
@@ -2781,12 +2966,50 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            turn: Rotation::R0,
             name: String::new(),
         }
     }
 
     fn bx(x: f32, y: f32, w: f32, h: f32) -> Box2 {
         Box2 { x, y, w, h }
+    }
+
+    /// A mark turned with its page is laid out as it reads there: a
+    /// note's icon box maps whole, and a text box's lines run up the
+    /// page's user space.
+    #[test]
+    fn a_turned_mark_lays_out_as_it_reads() {
+        let mut note = mark(AnnotKind::Note {
+            pos: Pt { x: 10.0, y: 20.0 },
+        });
+        note.turn = Rotation::R90;
+        let upright = note.upright();
+        assert_eq!(
+            upright,
+            AnnotKind::Note {
+                pos: Pt { x: 20.0, y: 10.0 }
+            }
+        );
+        let back = upright.mapped(&Affine::upright(Rotation::R90).inverse());
+        assert_eq!(back, note.kind);
+        assert_eq!(note.page_bounds(), bx(10.0, 20.0, NOTE_SIZE, NOTE_SIZE));
+        let mut text = mark(AnnotKind::FreeText {
+            rect: bx(100.0, 100.0, 40.0, 200.0),
+            size: 12.0,
+        });
+        text.contents = "Up".into();
+        text.turn = Rotation::R90;
+        assert_eq!(text.upright().bounds().w, 200.0, "it reads wide");
+        let mut pdf = lopdf::Document::with_version("1.7");
+        let main = to_pdf(&text, &mut pdf).main;
+        let ap = main.get(b"AP").unwrap().as_dict().unwrap();
+        let id = ap.get(b"N").unwrap().as_reference().unwrap();
+        let content = &pdf.get_object(id).unwrap().as_stream().unwrap().content;
+        let content = String::from_utf8_lossy(content);
+        // Along user y, from its first line's start: (102, 114) upright.
+        let tm = "1.0000 -1.0000 -0.0000 114.000 102.000 Tm";
+        assert!(content.contains(tm), "{content}");
     }
 
     #[test]
@@ -2828,6 +3051,8 @@ mod tests {
         assert_eq!(text.with_text_size(1000.0).text_size(), Some(144.0));
     }
 
+    /// A click is in the frame the mark reads upright in, y down: an
+    /// upright mark's PageSpace with y negated, a turned one's turned too.
     #[test]
     fn clicks_hit_strokes_and_boxes() {
         let line = mark(AnnotKind::Line {
@@ -2839,12 +3064,15 @@ mod tests {
         assert!(line.hit(Pt { x: 50.0, y: 3.0 }, 3.0));
         assert!(!line.hit(Pt { x: 50.0, y: 10.0 }, 3.0));
         assert!(!line.hit(Pt { x: 110.0, y: 0.0 }, 3.0));
-        let square = mark(AnnotKind::Square {
-            rect: bx(0.0, 0.0, 100.0, 100.0),
+        let mut square = mark(AnnotKind::Square {
+            rect: bx(0.0, -100.0, 100.0, 100.0),
         });
         assert!(square.hit(Pt { x: 50.0, y: 50.0 }, 3.0));
         assert!(square.hit(Pt { x: -2.0, y: 50.0 }, 3.0));
         assert!(!square.hit(Pt { x: -5.0, y: 50.0 }, 3.0));
+        square.turn = Rotation::R90;
+        assert!(square.hit(Pt { x: -50.0, y: 50.0 }, 3.0));
+        assert!(!square.hit(Pt { x: 50.0, y: 50.0 }, 3.0));
     }
 
     #[test]
@@ -2855,7 +3083,7 @@ mod tests {
         });
         square.fill = Some([255, 0, 0]);
         square.dashed = true;
-        let main = to_pdf(&square, &geom(0), &mut pdf).main;
+        let main = to_pdf(&square, &mut pdf).main;
         let ic = main.get(b"IC").unwrap().as_array().unwrap();
         assert_eq!(ic.len(), 3);
         assert_eq!(ic[0].as_float().unwrap(), 1.0);
@@ -2866,7 +3094,7 @@ mod tests {
         // Unfilled and solid: neither key.
         square.fill = None;
         square.dashed = false;
-        let main = to_pdf(&square, &geom(0), &mut pdf).main;
+        let main = to_pdf(&square, &mut pdf).main;
         assert!(main.get(b"IC").is_err());
         let bs = main.get(b"BS").unwrap().as_dict().unwrap();
         assert!(bs.get(b"S").is_err());
@@ -2877,7 +3105,7 @@ mod tests {
             arrow: false,
             arrow_start: true,
         });
-        let main = to_pdf(&line, &geom(0), &mut pdf).main;
+        let main = to_pdf(&line, &mut pdf).main;
         let le: Vec<&[u8]> = main
             .get(b"LE")
             .unwrap()
@@ -2912,7 +3140,7 @@ mod tests {
         });
         a.contents = "the".into();
         let json = serde_json::to_vec(&a).unwrap();
-        assert_eq!(from_json(&json).unwrap(), a);
+        assert_eq!(from_json(&json).unwrap().mark, a);
         assert_eq!(
             a.pdf_names(),
             vec!["sheaf:1".to_string(), "sheaf:1:strike".to_string()]
@@ -2920,8 +3148,28 @@ mod tests {
         let ins = mark(AnnotKind::Insert {
             at: caret_box(50.0, 22.0, 12.0),
         });
-        assert_eq!(from_json(&serde_json::to_vec(&ins).unwrap()).unwrap(), ins);
-        assert_eq!(ins.bounds().w, ins.bounds().h);
+        assert_eq!(
+            from_json(&serde_json::to_vec(&ins).unwrap()).unwrap().mark,
+            ins
+        );
+        assert_eq!(ins.kind.bounds().w, ins.kind.bounds().h);
+    }
+
+    /// A tick is a Stamp named `/Tick`: which one it is is its mark's id,
+    /// which its `/SheafAnnot` holds.
+    #[test]
+    fn a_tick_is_named_tick() {
+        let tick = mark(AnnotKind::Stamp {
+            rect: bx(10.0, 10.0, 24.0, 24.0),
+            glyph: "✓".into(),
+        });
+        let mut pdf = lopdf::Document::with_version("1.7");
+        let main = to_pdf(&tick, &mut pdf).main;
+        assert_eq!(main.get(b"Subtype").unwrap().as_name().unwrap(), b"Stamp");
+        assert_eq!(main.get(b"Name").unwrap().as_name().unwrap(), b"Tick");
+        let json = main.get(b"SheafAnnot").unwrap().as_str().unwrap();
+        let json = crate::file::text_string(json);
+        assert_eq!(from_json(json.as_bytes()).unwrap().mark.id, tick.id);
     }
 
     #[test]
@@ -2967,14 +3215,14 @@ mod tests {
         let mut pdf = lopdf::Document::with_version("1.7");
         let mut poly = mark(AnnotKind::Polygon {
             points: vec![
-                Pt { x: 10.0, y: 10.0 },
-                Pt { x: 110.0, y: 10.0 },
-                Pt { x: 60.0, y: 90.0 },
+                Pt { x: 10.0, y: -10.0 },
+                Pt { x: 110.0, y: -10.0 },
+                Pt { x: 60.0, y: -90.0 },
             ],
         });
         poly.cloudy = true;
         poly.fill = Some([255, 255, 0]);
-        let main = to_pdf(&poly, &geom(0), &mut pdf).main;
+        let main = to_pdf(&poly, &mut pdf).main;
         assert_eq!(main.get(b"Subtype").unwrap().as_name().unwrap(), b"Polygon");
         assert_eq!(main.get(b"Vertices").unwrap().as_array().unwrap().len(), 6);
         let be = main.get(b"BE").unwrap().as_dict().unwrap();
@@ -2990,20 +3238,29 @@ mod tests {
             point: Pt { x: 150.0, y: 200.0 },
             size: 12.0,
         });
-        let main = to_pdf(&callout, &geom(0), &mut pdf).main;
+        let main = to_pdf(&callout, &mut pdf).main;
         assert_eq!(
             main.get(b"IT").unwrap().as_name().unwrap(),
             b"FreeTextCallout"
         );
         let cl = main.get(b"CL").unwrap().as_array().unwrap();
         assert_eq!(cl.len(), 6);
-        // The leader starts at the point (user space: 792 - 200).
-        assert_eq!(cl[1].as_float().unwrap(), 592.0);
+        // The leader starts at the point.
+        assert_eq!(cl[1].as_float().unwrap(), 200.0);
         // It meets the box at its left side, level with the knee.
         assert_eq!(
             callout_end(bx(200.0, 100.0, 120.0, 40.0), Pt { x: 180.0, y: 120.0 }),
             Pt { x: 200.0, y: 120.0 }
         );
-        assert!(callout.hit(Pt { x: 165.0, y: 180.0 }, 3.0), "on the leader");
+        assert!(
+            callout.hit(
+                Pt {
+                    x: 165.0,
+                    y: -180.0
+                },
+                3.0
+            ),
+            "on the leader"
+        );
     }
 }

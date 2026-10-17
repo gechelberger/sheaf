@@ -13,8 +13,9 @@ use sheaf_core::{DestView, PageSize, Rotation};
 
 use crate::annot::{Annot, AnnotId, AnnotKind};
 use crate::forms::{Field, FieldId, FileForm, Widget};
+use crate::geom::Geom;
 use crate::history::{HistoryPolicy, HistoryStats};
-use crate::open::{Facts, ViewFacts};
+use crate::open::{Facts, Renamed, ViewFacts};
 use crate::prim::{HeapSize, Key, Prim, Rec, Val, same};
 use crate::store::{BlobKind, Src, Store};
 use crate::text_layer::TextLayer;
@@ -97,7 +98,8 @@ pub struct PageRef {
     pub id: PageId,
     pub source: SourceId,
     pub index: u32,
-    /// Extra rotation on top of the source page as rendered.
+    /// The page's `/Rotate`, absolute, as a save writes it: its source
+    /// page's own until it's rotated.
     pub rotation: Rotation,
 }
 
@@ -267,28 +269,6 @@ impl DocState {
             .max()
             .unwrap_or(0);
         (max + 1).to_string()
-    }
-
-    /// Every mark in `group` (see `annot::group_of`), in document order:
-    /// by page, then down the page, then across. With each, its page's
-    /// position.
-    pub fn group_members(&self, group: &crate::annot::Group) -> Vec<(usize, PageId, Annot)> {
-        let mut out = Vec::new();
-        for (i, p) in self.pages.iter().enumerate() {
-            let mut on_page: Vec<&Annot> = self
-                .annots
-                .get(&p.id)
-                .into_iter()
-                .flatten()
-                .filter(|a| crate::annot::group_of(&a.kind).as_ref() == Some(group))
-                .collect();
-            on_page.sort_by(|a, b| {
-                let (ba, bb) = (a.bounds(), b.bounds());
-                ba.y.total_cmp(&bb.y).then(ba.x.total_cmp(&bb.x))
-            });
-            out.extend(on_page.into_iter().map(|a| (i, p.id, a.clone())));
-        }
-        out
     }
 
     pub fn index_of(&self, id: PageId) -> Option<usize> {
@@ -477,9 +457,8 @@ pub enum Edit {
         ids: Vec<PageId>,
     },
     /// Show pages from other source pages (a cropped copy, say) while
-    /// keeping their ids, rotation and bookmarks. Their marks and OCR text
-    /// move by each `shift` (source-displayed points) to stay on the same
-    /// content.
+    /// keeping their ids, rotation, bookmarks, marks and OCR text, which
+    /// are in PageSpace, which a copy keeps: nothing moves.
     RebasePages {
         pages: Vec<Rebase>,
     },
@@ -499,7 +478,6 @@ pub struct Rebase {
     pub id: PageId,
     pub source: SourceId,
     pub index: u32,
-    pub shift: (f32, f32),
 }
 
 /// Serde for `Option<Option<T>>` fields that distinguishes "absent"
@@ -679,12 +657,92 @@ pub struct Snapshot {
     /// `Document::form_changed`): a save takes out what described it as
     /// it was, its XFA copy and usage rights (M10 proposals 6 and 7).
     pub form_changed: bool,
+    /// Each source's marks the open gave new ids (see
+    /// `Document::set_source_renamed`).
+    pub(crate) renamed: HashMap<SourceId, Arc<Renames>>,
 }
+
+/// A source's marks the open gave new ids ([`Renamed`]): by page index,
+/// the id each had, which the page's `/NM` says, and the one it has.
+pub(crate) type Renames = HashMap<u32, Vec<(AnnotId, AnnotId)>>;
 
 impl Snapshot {
     pub fn source(&self, id: SourceId) -> Option<&Arc<SourceInfo>> {
         self.sources.get(&id)
     }
+
+    /// [`Document::geom`].
+    pub fn geom(&self, page: &PageRef) -> Geom {
+        geom_in(&self.sources, page)
+    }
+
+    /// [`Document::render_delta`].
+    pub fn render_delta(&self, page: &PageRef) -> Rotation {
+        render_delta_in(&self.sources, page)
+    }
+
+    /// [`Document::group_members`].
+    pub fn group_members(&self, group: &crate::annot::Group) -> Vec<(usize, PageId, Annot)> {
+        group_members_in(&self.state, &self.sources, group)
+    }
+
+    /// The marks on page `index` of `source` the open gave new ids: the id
+    /// each had, which the page's `/NM` says, and the one it has.
+    pub(crate) fn renamed_on(&self, source: SourceId, index: u32) -> &[(AnnotId, AnnotId)] {
+        self.renamed
+            .get(&source)
+            .and_then(|r| r.get(&index))
+            .map_or(&[], Vec::as_slice)
+    }
+}
+
+/// Every mark of `state` in `group`, in document order: by page, then
+/// down the page as it shows, then across.
+fn group_members_in(
+    state: &DocState,
+    sources: &HashMap<SourceId, Arc<SourceInfo>>,
+    group: &crate::annot::Group,
+) -> Vec<(usize, PageId, Annot)> {
+    let in_group = |a: &&Annot| crate::annot::group_of(&a.kind).as_ref() == Some(group);
+    let mut out = Vec::new();
+    for (i, p) in state.pages.iter().enumerate() {
+        let on_page: Vec<&Annot> = state
+            .annots_on(p.id)
+            .into_iter()
+            .flatten()
+            .filter(in_group)
+            .collect();
+        if on_page.is_empty() {
+            continue;
+        }
+        let to_view = geom_in(sources, p).to_view();
+        let mut shown: Vec<(crate::annot::Box2, &Annot)> = on_page
+            .into_iter()
+            .map(|a| (to_view.apply_box(a.page_bounds()), a))
+            .collect();
+        shown.sort_by(|(a, _), (b, _)| a.y.total_cmp(&b.y).then(a.x.total_cmp(&b.x)));
+        out.extend(shown.into_iter().map(|(_, a)| (i, p.id, a.clone())));
+    }
+    out
+}
+
+/// Page `page`'s source page's boxes and `/Rotate`: a Letter page's when
+/// its source isn't in `sources`.
+fn source_geom(sources: &HashMap<SourceId, Arc<SourceInfo>>, page: &PageRef) -> Geom {
+    sources
+        .get(&page.source)
+        .map_or_else(|| Geom::read(None, None, 0), |s| s.src.geom(page.index))
+}
+
+fn geom_in(sources: &HashMap<SourceId, Arc<SourceInfo>>, page: &PageRef) -> Geom {
+    Geom {
+        rotate: page.rotation,
+        ..source_geom(sources, page)
+    }
+}
+
+fn render_delta_in(sources: &HashMap<SourceId, Arc<SourceInfo>>, page: &PageRef) -> Rotation {
+    page.rotation.minus(source_geom(sources, page).rotate)
 }
 
 /// Where page, bookmark and field ids come from. The counters only go up,
@@ -750,6 +808,9 @@ pub struct Document {
     /// Each source's form as read (`set_source_form`), for the fields that
     /// come in with its pages.
     forms: HashMap<SourceId, Arc<FileForm>>,
+    /// Each source's marks the open gave new ids (`set_source_renamed`),
+    /// which its pages name by the old ones until a save writes them.
+    renamed: HashMap<SourceId, Arc<Renames>>,
     /// A save made one form of forms whose scripts came from more than one
     /// file (see [`Document::scripts_mixed`]).
     scripts_mixed: bool,
@@ -815,6 +876,7 @@ impl Document {
             saved_annots: im::HashMap::new(),
             saved_fields: im::OrdMap::new(),
             forms: HashMap::new(),
+            renamed: HashMap::new(),
             scripts_mixed: false,
             ready: false,
         };
@@ -824,7 +886,7 @@ impl Document {
                 id: doc.ids.page(),
                 source,
                 index,
-                rotation: Rotation::R0,
+                rotation: primary.src.geom(index).rotate,
             })
             .collect();
         doc.sources.insert(source, Arc::new(primary));
@@ -931,12 +993,24 @@ impl Document {
             .collect();
         self.ids
             .fields_from(fields.keys().next_back().map_or(0, |id| id.0 + 1));
+        let renamed: Vec<(PageId, AnnotId)> = facts
+            .renamed
+            .iter()
+            .filter_map(|r| Some((at(r.page as usize)?, r.was)))
+            .collect();
+        self.set_source_renamed(self.primary, &facts.renamed);
         self.saved_outline = outline.clone();
         self.saved_labels = labels.clone();
         self.baked_header_footer = header_footer.clone();
         self.saved_annots = annots.clone();
+        // The file says other ids for the marks the open gave new ones:
+        // their pages are written at the next save, of either kind.
+        for (page, _) in &renamed {
+            self.saved_annots.remove(page);
+        }
         self.saved_fields = fields.clone();
         let view = ViewFacts {
+            renamed,
             foreign: facts.foreign,
             attachments: facts.attachments,
             collection: facts.collection,
@@ -1001,7 +1075,8 @@ impl Document {
         id
     }
 
-    /// Forget registrations whose version is gone, and their forms: a
+    /// Forget registrations whose version is gone, and their forms and
+    /// renamed marks: a
     /// source goes with the last registration holding it, and an engine
     /// opened on it keeps only its bytes, until slice 13's engine pool. The
     /// primary stays while it is the primary.
@@ -1009,6 +1084,7 @@ impl Document {
         for id in ids.iter().filter(|&&id| id != self.primary) {
             self.sources.remove(id);
             self.forms.remove(id);
+            self.renamed.remove(id);
         }
     }
 
@@ -1028,6 +1104,21 @@ impl Document {
     pub fn set_source_form(&mut self, id: SourceId, form: FileForm) {
         if !form.fields.is_empty() {
             self.forms.insert(id, Arc::new(form));
+        }
+    }
+
+    /// Source `id`'s marks the open gave new ids, as `open::finish` read
+    /// them: its pages name them by their old ids until a save writes
+    /// them, and a save follows other tools' replies to them through these
+    /// (see `save::write_page_annots`). Call it before the edit that brings
+    /// its pages.
+    pub fn set_source_renamed(&mut self, id: SourceId, renamed: &[Renamed]) {
+        let mut by_page = Renames::new();
+        for r in renamed {
+            by_page.entry(r.page).or_default().push((r.was, r.id));
+        }
+        if !by_page.is_empty() {
+            self.renamed.insert(id, Arc::new(by_page));
         }
     }
 
@@ -1213,6 +1304,7 @@ impl Document {
             fields_dirty: self.fields_dirty(),
             removes_content: self.removes_content(),
             form_changed: self.form_changed(),
+            renamed: self.renamed.clone(),
         }
     }
 
@@ -1290,8 +1382,9 @@ impl Document {
     /// `saved`: register it as a new source and make the current version an
     /// identity mapping over it, keeping `PageId`s (and bookmarks) intact so
     /// the view doesn't flicker. Older versions still reference the old
-    /// sources, so undo across a save keeps working. Rotation deltas and OCR
-    /// layers are now baked into the file, so they reset to nothing.
+    /// sources, so undo across a save keeps working. OCR layers are now
+    /// baked into the file, so they reset to nothing; a page's rotation is
+    /// the saved file's `/Rotate`, so it stays.
     ///
     /// The content is the same, so this isn't an edit and makes no step,
     /// but the state is expressed anew, so the version gets a new id under
@@ -1334,7 +1427,7 @@ impl Document {
                 id: p.id,
                 source: id,
                 index: i as u32,
-                rotation: Rotation::R0,
+                rotation: p.rotation,
             })
             .collect();
         // Every field is the saved file's own now, under the name it was
@@ -1392,17 +1485,27 @@ impl Document {
         self.state().index_of(id)
     }
 
-    /// Displayed size of a page: its source size rotated by its delta.
+    /// A page's boxes, its source page's, with its rotation.
+    pub fn geom(&self, page: &PageRef) -> Geom {
+        geom_in(&self.sources, page)
+    }
+
+    /// The turn PDFium adds to the source page's own `/Rotate`: what a
+    /// render `Job` takes.
+    pub fn render_delta(&self, page: &PageRef) -> Rotation {
+        render_delta_in(&self.sources, page)
+    }
+
+    /// A page's size as shown.
     pub fn page_size(&self, page: &PageRef) -> PageSize {
-        let src = self
-            .sources
-            .get(&page.source)
-            .map(|s| s.src.page_size(page.index))
-            .unwrap_or(PageSize {
-                width: 612.0,
-                height: 792.0,
-            });
-        src.rotated(page.rotation)
+        self.geom(page).shown()
+    }
+
+    /// Every mark in `group` (see `annot::group_of`), in document order:
+    /// by page, then down the page as it shows, then across. With each,
+    /// its page's position.
+    pub fn group_members(&self, group: &crate::annot::Group) -> Vec<(usize, PageId, Annot)> {
+        group_members_in(self.state(), &self.sources, group)
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -2396,7 +2499,7 @@ impl Document {
                         id: self.ids.page(),
                         source,
                         index,
-                        rotation: Rotation::R0,
+                        rotation: info.src.geom(index).rotate,
                     })
                     .collect();
                 out.pages_added = new.len();
@@ -2497,7 +2600,7 @@ impl Document {
                                     id: *id,
                                     source,
                                     index,
-                                    rotation: Rotation::R0,
+                                    rotation: info.src.geom(index).rotate,
                                 },
                             );
                             shown_by.insert(index, *id);
@@ -2518,7 +2621,7 @@ impl Document {
                             id,
                             source,
                             index,
-                            rotation: Rotation::R0,
+                            rotation: info.src.geom(index).rotate,
                         }
                     })
                     .collect();
@@ -2832,7 +2935,6 @@ impl Document {
                     if r.index >= info.src.page_count() {
                         bail!("page {} isn't in the source", r.index);
                     }
-                    let size = info.src.page_size(r.index);
                     let old = pages[i];
                     pages.set(
                         i,
@@ -2843,21 +2945,6 @@ impl Document {
                             rotation: old.rotation,
                         },
                     );
-                    let (dx, dy) = r.shift;
-                    if let Some(list) = rec.annots.get(&r.id).cloned() {
-                        let moved = list
-                            .into_iter()
-                            .map(|mut a| {
-                                a.kind = a.kind.translated(dx, dy);
-                                a
-                            })
-                            .collect();
-                        rec.put(Key::AnnotsOf(r.id), Some(Val::Annots(moved)));
-                    }
-                    if let Some(layer) = rec.text_layers.get(&r.id).cloned() {
-                        let shifted = Arc::new(layer.shifted(dx, dy, size));
-                        rec.put(Key::TextLayer(r.id), Some(Val::TextLayer(shifted)));
-                    }
                 }
                 rec.put(Key::Pages, Some(Val::Pages(pages)));
             }
@@ -4118,12 +4205,217 @@ mod tests {
         assert_eq!(d.page(0).unwrap().id, p5);
         assert_eq!(d.page(0).unwrap().source, new);
         assert_eq!(order(&d), vec![0, 1, 2, 3, 4, 5]);
-        assert_eq!(d.page(0).unwrap().rotation, Rotation::R0);
+        // The rotation is the page's /Rotate, which a save writes as is.
+        assert_eq!(d.page(0).unwrap().rotation, Rotation::R90);
         // Undo still reaches the pre-save version over the old source.
         d.undo().unwrap();
         assert_eq!(d.page(0).unwrap().source, old_primary);
         assert_eq!(d.page(0).unwrap().index, 5);
         assert!(d.is_dirty());
+    }
+
+    /// One Letter page turned `degrees` by its `/Rotate`, or by its
+    /// parent's when `inherited`, as a source in `store`.
+    fn turned(store: &Store, own: Option<i64>, parent: Option<i64>) -> SourceInfo {
+        let mut f = crate::forms::fixture::Form::new(1);
+        let page = f.pages[0];
+        let up = f.dict(page).get(b"Parent").unwrap().as_reference().unwrap();
+        for (at, degrees) in [(page, own), (up, parent)] {
+            if let Some(degrees) = degrees {
+                f.dict(at).set("Rotate", degrees);
+            }
+        }
+        let kind = BlobKind::file(Path::new("turned.pdf"), None);
+        SourceInfo {
+            src: store.open(f.bytes().into(), kind).unwrap(),
+            name: "turned.pdf".into(),
+            derived: None,
+        }
+    }
+
+    /// `d` saved, incrementally or by a rewrite, and rebased onto the
+    /// saved file, which it returns.
+    fn save_and_rebase(d: &mut Document, incremental: bool) -> Src {
+        let snap = d.snapshot();
+        let bytes = if incremental {
+            crate::incremental::incremental(&snap)
+        } else {
+            crate::save::rewrite(&snap)
+        }
+        .unwrap();
+        let kind = BlobKind::file(Path::new("saved.pdf"), None);
+        let src = d.store().open(bytes.into(), kind).unwrap();
+        d.rebase_to_saved(SourceInfo {
+            src: src.clone(),
+            name: "saved.pdf".into(),
+            derived: None,
+        });
+        src
+    }
+
+    const LANDSCAPE: PageSize = PageSize {
+        width: 792.0,
+        height: 612.0,
+    };
+
+    /// A page from a file that turns it has that turn as its rotation,
+    /// with nothing for PDFium to add, and shows turned.
+    #[test]
+    fn an_inserted_page_keeps_its_own_rotate() {
+        let mut d = new_doc(1, &[], Box::new(FixedCount(10)));
+        let s = d.add_source(turned(d.store(), Some(90), None));
+        d.apply(
+            Edit::InsertPages {
+                source: s,
+                range: 0..1,
+                before: None,
+                outline: None,
+                annots: Vec::new(),
+            },
+            "insert",
+        )
+        .unwrap();
+        let p = *d.page(1).unwrap();
+        assert_eq!(p.rotation, Rotation::R90);
+        assert_eq!(d.render_delta(&p), Rotation::R0);
+        assert_eq!(d.page_size(&p), LANDSCAPE);
+        assert_eq!(d.geom(&p).rotate, Rotation::R90);
+        // Turned again, it's turned from there, and PDFium adds the turn.
+        d.apply(
+            Edit::RotatePages {
+                ids: vec![p.id],
+                by: Rotation::R90,
+            },
+            "rotate",
+        )
+        .unwrap();
+        let p = *d.page(1).unwrap();
+        assert_eq!(p.rotation, Rotation::R180);
+        assert_eq!(d.render_delta(&p), Rotation::R90);
+        assert_eq!(d.snapshot().render_delta(&p), Rotation::R90);
+        assert_eq!(d.page_size(&p).width, 612.0);
+    }
+
+    /// A page's rotation is its `/Rotate`: a save writes it as it is, and
+    /// the document rebased onto the saved file keeps it, with no turn
+    /// left for PDFium to add.
+    #[test]
+    fn a_rotation_survives_a_save() {
+        for incremental in [false, true] {
+            let mut d = new_doc(2, &[], Box::new(FixedCount(10)));
+            rotate(&mut d, 0, "rotate");
+            let saved = save_and_rebase(&mut d, incremental);
+            assert_eq!(saved.geom(0).rotate, Rotation::R90, "{incremental}");
+            assert_eq!(saved.geom(1).rotate, Rotation::R0, "{incremental}");
+            let p = *d.page(0).unwrap();
+            assert_eq!(p.rotation, Rotation::R90, "{incremental}");
+            assert_eq!(d.render_delta(&p), Rotation::R0, "{incremental}");
+            assert_eq!(d.page_size(&p), LANDSCAPE, "{incremental}");
+        }
+    }
+
+    /// A page turned upright is upright in the saved file whatever its
+    /// parent's `/Rotate`: an incremental save leaves it under its parent,
+    /// so it says 0. A page that's only marked keeps the `/Rotate` it has,
+    /// its own or its parent's, a 135 too, which reads as 90.
+    #[test]
+    fn a_page_turned_upright_stays_upright_through_a_save() {
+        let square = crate::annot::AnnotKind::Square {
+            rect: crate::annot::Box2 {
+                x: 100.0,
+                y: 100.0,
+                w: 50.0,
+                h: 40.0,
+            },
+        };
+        // The page's own /Rotate, its parent's, and the turn sheaf adds.
+        let cases = [
+            (None, Some(90), Some(Rotation::R270)),
+            (Some(90), Some(180), Some(Rotation::R270)),
+            (Some(0), Some(90), None),
+            (Some(135), Some(180), None),
+        ];
+        for (own, parent, by) in cases {
+            for incremental in [false, true] {
+                let case = format!("{own:?} under {parent:?}, turned {by:?}, {incremental}");
+                let store = Store::new();
+                let primary = turned(&store, own, parent);
+                let mut d = Document::new(store, primary, &[], Box::new(FixedCount(10)));
+                let page = id_at(&d, 0);
+                let was = d.page(0).unwrap().rotation;
+                let edit = match by {
+                    Some(by) => Edit::RotatePages {
+                        ids: vec![page],
+                        by,
+                    },
+                    None => Edit::AnnotAdd {
+                        page,
+                        annot: mark(0, square.clone()),
+                    },
+                };
+                d.apply(edit, "edit").unwrap();
+                let want = d.page(0).unwrap().rotation;
+                assert_eq!(want, was.plus(by.unwrap_or(Rotation::R0)), "{case}");
+                let saved = save_and_rebase(&mut d, incremental);
+                assert_eq!(saved.geom(0).rotate, want, "{case}");
+                assert_eq!(d.page(0).unwrap().rotation, want, "{case}");
+                if incremental && by.is_none() {
+                    let pdf = lopdf::Document::load_mem(saved.bytes()).unwrap();
+                    let dict = pdf.get_dictionary(pdf.get_pages()[&1]).unwrap();
+                    let rotate = dict.get(b"Rotate").and_then(lopdf::Object::as_i64).ok();
+                    assert_eq!(rotate, own, "{case}: the page's own /Rotate");
+                }
+            }
+        }
+    }
+
+    /// A mark on a page sheaf turned shows where it did after a save, and
+    /// the saved file has it where the model does: marks are in PageSpace,
+    /// which neither the save nor the rebase moves.
+    #[test]
+    fn a_mark_on_a_rotated_page_stays_put_through_a_save() {
+        let rect = crate::annot::Box2 {
+            x: 100.0,
+            y: 650.0,
+            w: 50.0,
+            h: 40.0,
+        };
+        for incremental in [false, true] {
+            let mut d = new_doc(1, &[], Box::new(FixedCount(10)));
+            rotate(&mut d, 0, "rotate");
+            let page = id_at(&d, 0);
+            let annot = mark(0, AnnotKind::Square { rect });
+            d.apply(Edit::AnnotAdd { page, annot }, "add").unwrap();
+            let shown = |d: &Document| {
+                let AnnotKind::Square { rect } = d.state().annots[&page][0].kind else {
+                    unreachable!("the square");
+                };
+                d.geom(d.page(0).unwrap()).to_view().apply_box(rect)
+            };
+            let before = shown(&d);
+            let saved = save_and_rebase(&mut d, incremental);
+            assert_eq!(shown(&d), before, "{incremental}");
+            let pdf = lopdf::Document::load_mem(saved.bytes()).unwrap();
+            let dict = pdf.get_dictionary(pdf.get_pages()[&1]).unwrap();
+            let annots = dict.get(b"Annots").unwrap().as_array().unwrap();
+            let (_, annot) = pdf.dereference(&annots[0]).unwrap();
+            let r: Vec<f32> = annot
+                .as_dict()
+                .unwrap()
+                .get(b"Rect")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_float().unwrap() as f32)
+                .collect();
+            let centre = ((r[0] + r[2]) / 2.0, (r[1] + r[3]) / 2.0);
+            let want = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+            assert!(
+                (centre.0 - want.0).abs() < 1.0 / 64.0 && (centre.1 - want.1).abs() < 1.0 / 64.0,
+                "{incremental}: /Rect {r:?}"
+            );
+        }
     }
 
     /// A save re-expresses the version it wrote, so the versions made from
@@ -4175,6 +4467,7 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            turn: Rotation::R0,
             name: String::new(),
         };
         assert_eq!(d.state().next_connector_label(), "1");
@@ -4203,7 +4496,7 @@ mod tests {
     }
 
     #[test]
-    fn a_group_runs_by_page_then_down_the_page() {
+    fn a_group_runs_by_page_then_down_the_page_as_it_shows() {
         use crate::annot::{AnnotKind, Box2, Group};
         let mut d = doc();
         let (p0, p1) = (d.page(0).unwrap().id, d.page(1).unwrap().id);
@@ -4236,13 +4529,30 @@ mod tests {
             )
             .unwrap();
         }
-        let order: Vec<(usize, f32)> = d
-            .state()
-            .group_members(&Group::Tickmark("✓".into()))
-            .iter()
-            .map(|(i, _, a)| (*i, a.bounds().y))
-            .collect();
-        assert_eq!(order, [(0, 500.0), (1, 100.0), (1, 300.0)]);
+        let order = |d: &Document| -> Vec<(usize, f32)> {
+            d.group_members(&Group::Tickmark("✓".into()))
+                .iter()
+                .map(|(i, _, a)| (*i, a.page_bounds().y))
+                .collect()
+        };
+        // PageSpace is y up: the higher one is first.
+        assert_eq!(order(&d), [(0, 500.0), (1, 300.0), (1, 100.0)]);
+        assert_eq!(
+            d.snapshot()
+                .group_members(&Group::Tickmark("✓".into()))
+                .len(),
+            3
+        );
+        // Turned, the page shows them side by side, the lower one left.
+        d.apply(
+            Edit::RotatePages {
+                ids: vec![p1],
+                by: Rotation::R90,
+            },
+            "rotate",
+        )
+        .unwrap();
+        assert_eq!(order(&d), [(0, 500.0), (1, 100.0), (1, 300.0)]);
     }
 
     fn mark(id: u64, kind: crate::annot::AnnotKind) -> Annot {
@@ -4259,6 +4569,7 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            turn: Rotation::R0,
             name: String::new(),
         }
     }
@@ -4469,6 +4780,7 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            turn: Rotation::R0,
             name: String::new(),
         };
         d.apply(
@@ -4614,11 +4926,7 @@ mod tests {
                 },
                 confidence: 1.0,
             }],
-            PageSize {
-                width: 612.0,
-                height: 792.0,
-            },
-            Rotation::R0,
+            &crate::geom::Geom::read(None, None, 0),
             "test",
         ))
     }
@@ -5386,6 +5694,7 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            turn: Rotation::R0,
             name: String::new(),
         };
         let edits = vec![

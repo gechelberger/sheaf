@@ -42,7 +42,8 @@ SourceInfo           { src: Src, name: PathBuf, derived: Option<Derived> }
 
 PageRef              { id: PageId, source: SourceId, index: u32, rotation: Rotation }
                      one page of the virtual document, pointing at a page of a source.
-                     PageId is a fresh, stable identity (never reused).
+                     PageId is a fresh, stable identity (never reused). rotation
+                     is the page's /Rotate, absolute, as a save writes it.
 
 DocState             { pages: im::Vector<PageRef>,
                        outline: im::Vector<OutlineNode>,   // tree; targets are PageIds
@@ -68,9 +69,10 @@ everything it didn't change. Reordering 7,000 pages clones one `Vec<PageRef>`
 
 **Rendering never waits on an edit.** The viewer displays `state.pages` in
 order; a render request for display index *i* becomes
-`(sources[pages[i].source], pages[i].index, rotation)`. PDFium is never told
-about reorders, deletions, or insertions. Inserting a 400-page PDF means
-opening it as a second source and splicing 400 `PageRef`s — milliseconds.
+`(sources[pages[i].source], pages[i].index, render_delta)`, the turn PDFium
+adds to the source page's own `/Rotate`. PDFium is never told about
+reorders, deletions, or insertions. Inserting a 400-page PDF means opening
+it as a second source and splicing 400 `PageRef`s — milliseconds.
 
 **Saving is a materialization.** Given a `DocState` and its sources, produce
 bytes. Two strategies, chosen per save (see below). The snapshot is
@@ -145,7 +147,10 @@ three steps in a row):
 - **`finish` reads the rest, on any thread, from the source alone:**
   sheaf's marks and other tools' comments in one pass over the page
   table's annotations (what a mark keeps in this machine's cache is made
-  again from the file where it's missing), the form, the page labels,
+  again from the file where it's missing; a mark another tool has edited
+  since sheaf wrote it, whose `/SheafAnnot` digest no longer matches, is
+  that tool's comment; copies of marks another program made, which say
+  ids earlier marks have, get new ones), the form, the page labels,
   the header and footer sheaf drew, attachments, the portfolio schema,
   layers, and the outline with its colors, styles and closed state
   (`/C`, `/F`, a negative `/Count`). Of a page it reads the dictionary
@@ -156,15 +161,17 @@ three steps in a row):
   outline), so it ends. It counts the pages of its first pass to the
   progress it's given. The outline's destinations (`/Dest`, named
   destinations, a GoTo action's `/D`) are found through the page table,
-  and their views are read as PDFium reads them; the renderer is never
-  asked for the outline.
+  and their views are read as PDFium reads them, their positions kept in
+  PageSpace as the file has them; the renderer is never asked for the
+  outline.
 - **`Document::ready(facts)` builds the complete opened version once**
   and puts it in the loading version's place under a new `VersionId`,
   the way a save or a job's amend does. The pages keep their ids, and the
   current and saved versions follow it, so the document isn't dirty and
   there's nothing to undo. It gives back what the view shows beside the
-  model: other tools' comments, attachments, the portfolio, layers and
-  what sheaf says about the form. A second call is refused.
+  model: other tools' comments, attachments, the portfolio, layers, what
+  sheaf says about the form, and the marks given new ids, whose pages the
+  next save writes. A second call is refused.
 - **Until then the document is loading.** `apply`, `apply_batch` and
   `apply_in_job` return `NotReady`, making no version and drawing no ids.
   The app greys out what edits the document or writes it out (saves,
@@ -187,6 +194,158 @@ On the heavy 7k fixture, ready (the source's open, `finish` and `ready`,
 `open::file` in the 7k gate harness) takes 391–406 ms against a gate of
 1 s, asserted; the scanned one's 539–545 ms and 514 MB at its peak, the
 474 MB file's bytes and little more.
+
+## Coordinates: PageSpace (M10.5 slice 5)
+
+Everything sheaf keeps about a place on a page is in **PageSpace**: the
+page's default user space, points, y up, before `/Rotate`, whatever its
+boxes; the space `/MediaBox`, `/CropBox`, `/Rect`, `/QuadPoints` and
+`/XYZ` are written in. Marks, other tools' comments, OCR words, bookmark
+positions, connectors and regions are stored in it, so nothing moves them
+but an edit of them: turning or cropping a page changes how they show,
+not what's stored.
+
+- **One conversion.** `Geom::to_view()` (`geom.rs`) takes PageSpace to
+  the page as shown: points, y down, from the top-left corner of the
+  visible box (the crop box within the media box) after `/Rotate`, so the
+  visible box covers `(0, 0)` to `shown()`. It is PDFium's page-to-device
+  mapping at one pixel a point, and `from_view()` undoes it. Both are
+  `Affine`s, 2×3 maps in PDF's order: `Affine::upright(r)` is the linear
+  part for a page turned `r`, `then` composes, `apply_box` maps a box,
+  and `apply_axes` maps an `/XYZ` point whose missing coordinate stays
+  missing. `save::geom_of` and `file::page_geom` read a dictionary's
+  `Geom` for the old writers until slice 9; no other conversion is left.
+- **Rotation is absolute.** `PageRef.rotation` is the `/Rotate` a save
+  writes: a page starts with its source page's, and a save keeps it.
+  `Document::geom(page)` is the source page's boxes with that rotation.
+  PDFium applies a source page's own `/Rotate` when it renders, so a
+  render job takes `render_delta(page)`, the turn from the source page's
+  rotation to the page's. A full rewrite writes the rotation in quarter
+  turns (a `/Rotate 135` comes out as 90, which PDFium shows the same).
+  An incremental save that keeps the page tree writes it only where it
+  isn't the source page's, and then always, `/Rotate 0` too, since the
+  page stays under parents that may have one; any other page keeps the
+  `/Rotate` it has, its own or its parent's, a 135 included.
+- **The app's frames.** A pane draws page *i* through
+  `Doc::pane_geom(i)`, the page's `Geom` turned further by the pane's
+  rotate view: its `to_view`, times the zoom, puts PageSpace on the
+  screen. Gestures work in the **edit frame**, `Doc::edit_geom(i)`, the
+  page as it shows without rotate view: the pointer goes through the
+  pane's `from_view` and the edit frame's `to_view`, a tool builds its
+  mark there, and `Annot::to_page` maps it into PageSpace, the one way a
+  mark made on a page as it shows reaches the model (the plugin adapter's
+  too); `Annot::to_frame` is its inverse, what a drag moves, a handle
+  reshapes and the clipboard holds. Find and pattern hits, the
+  text selection, handles, other tools' comment outlines, regions and the
+  print preview draw through the pane frame, and `Doc::reveal` scrolls a
+  PageSpace box into view.
+- **A mark's `turn`** is the rotation it reads upright in, absolute: its
+  page's when it was made (`to_page` adds the frame's rotation; a text
+  markup takes its text's). Its layout (bounds, hit tests, where its
+  text, carets, labels and tape lines go) is written y down, for its shape
+  in its **upright frame**, `Annot::upright()`: PageSpace turned by
+  `turn`. `page_bounds()` maps those bounds back. A tape's own
+  `look.rotation`, the turn PDFlyer's options give its text within its
+  box, is a style laid out within that frame, not a frame of its own.
+  The writer lays a mark out upright and maps that into user space, so it
+  needs no page geometry, and a page turned later turns its marks with
+  what's printed there. GPUI can't turn text, so a free text or stamp
+  whose turn isn't the pane's draws its text unturned in its turned box.
+- **A crop moves nothing.** A crop still shows the page from a derived
+  copy, until slice 15 makes it a box edit, and the copy only sets
+  `/CropBox`, the kept area as shown mapped through `from_view`; it keeps
+  the page's user space. So `RebasePages` only re-points pages: no mark,
+  OCR word or bookmark moves.
+- **`/SheafAnnot` version 2** (`annot::Payload`) is the mark's JSON in
+  PageSpace with its `turn` (none when upright), `"v":2` and `"std"`, a
+  staleness digest of the dictionary it was written into
+  (`annot::staleness`). The digest covers what the writer sets from the
+  mark: `/Subtype`, `/Rect` with its corners normalized, `/Contents`,
+  `/T`, `/M`, `/NM`, `/C`, `/IC`, `/CA` (1 when absent), `/QuadPoints`,
+  `/InkList`, `/L`, `/Vertices`, `/CL` and `/RD`. Numbers count as the
+  writer computes them, as f32s, in steps of 1/64 pt for geometry and
+  1/1000 for colors and `/CA`, and the writer puts them on those steps
+  (`annot::on_grid`; `/RD` as the inset to an inner box on them), so a
+  value is never near the middle of two; text strings decode as PDFium
+  decodes them (a BOM, else PDFDocEncoding), then to NFC. So another
+  program's re-serialization (`100` as `100.0`, reals written to three
+  decimals or more, two for geometry alone, `/Contents` in UTF-16BE,
+  `/Rect`'s corners swapped) keeps a mark sheaf's, and its edit doesn't.
+  A text string is written as is only where PDFDocEncoding reads it back
+  so: one with a DEL or a byte from 0x18 to 0x1F is UTF-16BE. Left out:
+  `/IRT` and `/RT`, which the save sets after the mark is written, `/IRT`
+  an object reference a rewrite renumbers; a reply's or a status's
+  `/Rect`, its parent's, set later too; and `/AP`, which other tools
+  regenerate. A tick is a stamp named `/Tick`; it is known by the mark's
+  `id`, as every mark is.
+- **Reading a mark** (`file::sheaf_mark`): version 2 is a mark while its
+  digest matches. Version 1, from before slice 5, held its geometry in
+  the page's displayed space, which on a page sheaf had turned wasn't the
+  `/Rotate` the save wrote, so its geometry comes from the standard keys,
+  already PageSpace (a box is `/Rect` less `/RD` or the old writer's pad;
+  text markup is `/QuadPoints`; lines and paths are `/L`, `/Vertices`,
+  `/InkList` and `/CL`; a replacement's struck text is its grouped
+  StrikeOut's, found through an index of the page's StrikeOuts made
+  once), its `turn` is the page's `/Rotate`, and it's a mark while
+  the JSON's `modified` is `/M`. A mark that fails either check was
+  edited by another tool, and opens as that tool's comment, in the list
+  other tools' comments are in: shown, deletable and adoptable, never
+  reverted. `file::is_ours` asks the same reader, so the old writers keep
+  its dictionary as the other tool wrote it.
+- **Copied marks get new ids.** `/NM` need only be unique on its page,
+  and Acrobat's Insert Pages copies `sheaf:<id>` with the page. At the
+  open the first mark, in page and then `/Annots` order, keeps an id, and
+  each later one with it gets a new one from an rng seeded by the file's
+  hash, so the same bytes open with the same ids; a reply copied with its
+  parent follows it, and so does another tool's reply to the copy, which
+  the open lists under the new name. `ready` says which have a new `/NM`
+  coming (`ViewFacts.renamed`; one that kept another tool's `/NM` only
+  changes id), the app shows one notice, and the next save writes their
+  pages with the new `/NM`. Until then the file names them by the old
+  ids: the document keeps each source's renames
+  (`Document::set_source_renamed`, which `ready` calls for the file and
+  the app for a file whose pages it inserts), and the old writers follow
+  other tools' replies to a copy through them to its new object
+  (`save::write_page_annots`). A page the tree lists twice shares its
+  `/Annots`, so its second listing's marks are renamed too.
+- **OCR words** are PageSpace, and `upright` is the page's absolute
+  rotation when it was recognized: the frame its words group into lines
+  in and its invisible text runs in. The engine's pixels go through the
+  `Geom` the page was rendered with, captured with the job.
+- **Bookmark positions** (`DestView::Xyz`) are PageSpace, as the file has
+  them, read and written unchanged. The outline panel records the
+  window's top and the page's left edge as shown, through the pane frame,
+  and a jump goes back the same way, a missing coordinate staying
+  missing.
+- **Regions** (Shift+drag) are held in PageSpace, and the plugin host
+  gets them so.
+- **Plugins under API 0.3 keep their frame:** a page's coordinates are
+  its source page as the file displays it, after the file's own
+  `/Rotate` and before any turn sheaf adds. The adapter (`sheaf-plugin`'s
+  `api/shared.rs`) maps marks, OCR text, bookmark positions and region
+  events into that frame on the way out, and back into PageSpace on the
+  way in, a mark's `turn` the frame's rotation. `page-info`'s size is the
+  page as shown, sheaf's turn included, while its coordinates aren't;
+  API 0.4's to-view and from-view matrices end that (slice 20).
+- **PDFium's text is still in the source page's displayed space**
+  (`page_chars`, `search_page`, `pattern_search_page` and
+  `text_boxes_in_rect`, through a device 16 times the page's size) until
+  slice 14's text service. The app maps it into PageSpace where it
+  arrives, through the source page's `from_view` (`PageChars::from_engine`,
+  `merge_source_hits`); the plugins' text source passes it on as it is,
+  since that is 0.3's frame.
+- **The clipboard** (version 2) holds marks in the edit frame of the page
+  they were copied from, each turned relative to it. A paste maps them
+  through the target page's frame, so they land where they were seen and
+  read the same way on a page with another `/Rotate`, crop box or media
+  box origin. A version 1 clipboard, in the old displayed space, isn't
+  pasted.
+
+`to_view ∘ from_view` is the identity within 1/16 pt over `/Rotate`, the
+pane's rotation, crop boxes and media boxes off the origin (a property
+test, `geom.rs`), and `to_view` is PDFium's page-to-device mapping on
+every corpus page and widget checked (`sheaf-render`'s
+`pdfium::frames`).
 
 ## Undo/redo: snapshots, not inverse commands
 
@@ -333,7 +492,9 @@ bookmarks that targeted it.
 
 - Caches (previews, tiles, sizes) key by `PageId`, not display index, so a
   reorder costs nothing visually.
-- `Job` gains `rotation`; PDFium renders rotated bitmaps, so tiles at a
+- `Job` gains `rotation`: the page's `render_delta`, the turn on top of
+  the source page's own `/Rotate` (which PDFium applies itself), plus the
+  pane's rotate view. PDFium renders rotated bitmaps, so tiles at a
   different rotation are just a cache miss.
 - `DocView` holds a `Document` instead of a bare `RenderHandle`; sidebar
   thumbnails become the primary editing surface (drag to reorder,
@@ -349,11 +510,12 @@ for object serialization.
 
 **Rewrite** (M2 slice 3, first): load `sources[0]` in lopdf, rebuild the page
 tree from `state.pages` (copying page object subgraphs from other sources
-with renumbering), set `/Rotate` per page, rebuild `/Outlines`, write
-sheaf's marks (`annot::to_pdf_in`, each with its appearance and its JSON in
-`/SheafAnnot`), then cut whatever still points at a page that isn't kept
-(`kept::keep_only`: links, named destinations, the open action, form
-widgets, the structure tree) so pruning takes it out, and save. A copy
+with renumbering), write each page's rotation as its `/Rotate`, rebuild
+`/Outlines`, write sheaf's marks (`annot::to_pdf_in`, each with its
+appearance and, in `/SheafAnnot`, its PageSpace JSON and staleness digest:
+version 2, see Coordinates), then cut whatever still points at a page that
+isn't kept (`kept::keep_only`: links, named destinations, the open action,
+form widgets, the structure tree) so pruning takes it out, and save. A copy
 never follows a reference to a page it isn't copying (`save::remap`).
 Simple, always correct, O(file). Used for "Save As" and as the fallback.
 
@@ -367,13 +529,16 @@ writer of our own on top of lopdf's object serializer. Only possible when
 `sources[0]` is the file being saved to; otherwise fall back to rewrite.
 Also a rewrite when anything in the file was removed since it was saved (a
 page, a mark, a bookmark, OCR text replaced: `Snapshot::removes_content`),
-since an incremental save would leave it in the earlier revision.
+since an incremental save would leave it in the earlier revision. It writes
+a page's `/Rotate` only where the page's rotation isn't its source page's
+(then explicitly, 0 too), and marks as a rewrite writes them.
 
 Either way the save runs on a background thread from a cloned snapshot. On
 completion the saved file is read back into the store as a fresh single
-source replacing all the others, and `saved = cursor`. History is kept (undo
-across a save works; the snapshots still reference the old sources, which
-stay registered until the versions holding them are pruned).
+source replacing all the others, and `saved = cursor`; each page keeps its
+rotation, now its saved page's own. History is kept (undo across a save
+works; the snapshots still reference the old sources, which stay registered
+until the versions holding them are pruned).
 
 ## Rendering edited pages: the spikes (M10.5 slice 2)
 
@@ -768,30 +933,33 @@ prints today's numbers on the three fixtures beside slice 2's baselines.
   bookmarks (the outline panel already greys them), so they need a fix path.
 - Thumbnails show a bookmark glyph on pages that are bookmark targets, so a
   cascade is visible before the delete.
-- `PageRef.rotation` is a **delta** over the source page as PDFium renders
-  it (i.e. on top of its own `/Rotate`). Reading originals up front would
-  cost a page load per page; the absolute value is only needed at save time,
-  where lopdf has the original anyway.
+- `PageRef.rotation` is the page's `/Rotate`, **absolute**, as a save
+  writes it (M10.5 slice 5): a page starts with its source page's own, and
+  a save keeps it. A render takes `Document::render_delta`, the turn PDFium
+  adds to the source page's own `/Rotate`. It was a delta over the source
+  page until then, since reading the originals up front cost a page load
+  per page; the page table (M10.5 slice 3) has every page's `Geom`, its
+  `/Rotate` among them, from the open, so the original is free.
 - `im` is MPL-2.0 (file-scoped copyleft); fine as an unmodified dependency
   of an MIT/Apache project.
 
 ## Text layers (OCR)
 
 Added in M5. An OCR run produces, per page, a `TextLayer`: words with boxes
-in the source page's displayed space (the same space annotations use), the
-frame the text reads upright in (`upright`, the page's extra rotation at
-recognition time) and the engine's name. It lives in
+in PageSpace (M10.5 slice 5; see Coordinates), like marks, the frame the
+text reads upright in (`upright`, the page's absolute rotation when it was
+recognized) and the engine's name. It lives in
 `DocState.text_layers: im::HashMap<PageId, Arc<TextLayer>>`.
 
 - **Presence means unsaved.** A save writes every layer into its page as an
   invisible text layer (text render mode 3 with Tesseract's glyphless
   embedded font, `/Contents` turned into `[q, original…, layer]`), and
-  `rebase_to_saved` drops them, exactly as it resets rotation deltas. The
-  model never reads layers back: once in the file, PDFium owns the text.
+  `rebase_to_saved` drops them. The model never reads layers back: once
+  in the file, PDFium owns the text.
   Older versions keep their layers, so undo across a save still works.
 - **Edits**: `SetTextLayers` and `ClearTextLayers`. Delete removes a page's
   layer, Duplicate shares it (same `Arc`), Replace drops it (the page shows
-  other content), Move and Rotate leave it alone.
+  other content), Move, Rotate and Crop leave it alone.
 - **Coalesced undo.** Results arrive in batches over minutes, but a run is
   one undo step: `Document::begin_job` returns a `JobId`, and
   `apply_in_job` amends the newest version when that version belongs to

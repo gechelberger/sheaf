@@ -2,19 +2,20 @@
 //! the page it goes to and where on it, its color and style, and whether
 //! the file shows it closed, flattened in pre-order with its depth.
 //!
-//! Positions come back in the page's displayed space through the frame
-//! `save::write_outline` writes them with, so a bookmark sheaf saved is
-//! read back where it was put. PDFium's bookmark walk, which sheaf-render's
-//! tests keep, is the reference: the same caps, items and destinations.
+//! Positions are PageSpace (M10.5 §5), as the file has them, so a
+//! bookmark sheaf saved is read back where it was put, and a crop or a
+//! turn of its page leaves it on the same content. PDFium's bookmark walk,
+//! which sheaf-render's tests keep, is the reference: the same caps, items
+//! and destinations.
 
 use std::collections::{HashMap, HashSet};
 
 use lopdf::{Dictionary, LazyPdf, Object, ObjectId};
-use sheaf_core::{DestView, PageFrame};
+use sheaf_core::DestView;
 
 use crate::Source;
 use crate::attachments::{name_tree, resolve};
-use crate::file::pdf_text_bytes;
+use crate::file::{pdf_text_bytes, text_string};
 use crate::model::{FlatOutlineItem, TextStyle};
 
 #[cfg(test)]
@@ -52,7 +53,6 @@ pub fn outline(src: &Source) -> Vec<FlatOutlineItem> {
         pdf,
         pages,
         names: None,
-        frames: HashMap::new(),
         seen: HashSet::new(),
         out: Vec::new(),
     };
@@ -60,42 +60,13 @@ pub fn outline(src: &Source) -> Vec<FlatOutlineItem> {
     walk.out
 }
 
-/// A title's text, as PDFium shows it: UTF-16 (a last odd byte left out)
-/// or UTF-8 after their byte order marks, PDFDocEncoding without one, and
-/// control characters as spaces. (`file::pdf_text` reads PDFDocEncoding
-/// as Latin-1, which most of it is, but not its quotes and dashes.)
+/// A title's text, as PDFium shows it: the text string's
+/// ([`text_string`]), control characters as spaces.
 fn title(bytes: &[u8]) -> String {
-    let utf16 = |rest: &[u8], unit: fn([u8; 2]) -> u16| {
-        let units: Vec<u16> = rest.as_chunks::<2>().0.iter().map(|&c| unit(c)).collect();
-        String::from_utf16_lossy(&units)
-    };
-    let text = match bytes {
-        [0xFE, 0xFF, rest @ ..] => utf16(rest, u16::from_be_bytes),
-        [0xFF, 0xFE, rest @ ..] => utf16(rest, u16::from_le_bytes),
-        [0xEF, 0xBB, 0xBF, rest @ ..] => String::from_utf8_lossy(rest).into_owned(),
-        _ => bytes.iter().map(|&b| pdf_doc_char(b)).collect(),
-    };
-    text.chars()
+    text_string(bytes)
+        .chars()
         .map(|c| if c < ' ' { ' ' } else { c })
         .collect()
-}
-
-/// A PDFDocEncoding byte's character: Latin-1's, but for the accents at
-/// 0x18–0x1F and the punctuation and letters at 0x80–0xA0, and NUL for
-/// the three bytes it leaves undefined (0x7F, 0x9F and 0xAD), as PDFium's
-/// table has them.
-fn pdf_doc_char(b: u8) -> char {
-    const ACCENTS: [char; 8] = ['˘', 'ˇ', 'ˆ', '˙', '˝', '˛', '˚', '˜'];
-    const HIGH: [char; 33] = [
-        '•', '†', '‡', '…', '—', '–', 'ƒ', '⁄', '‹', '›', '−', '‰', '„', '“', '”', '‘', '’', '‚',
-        '™', 'ﬁ', 'ﬂ', 'Ł', 'Œ', 'Š', 'Ÿ', 'Ž', 'ı', 'ł', 'œ', 'š', 'ž', '\0', '€',
-    ];
-    match b {
-        0x18..=0x1F => ACCENTS[usize::from(b - 0x18)],
-        0x80..=0xA0 => HIGH[usize::from(b - 0x80)],
-        0x7F | 0xAD => '\0',
-        b => char::from(b),
-    }
 }
 
 /// An item's `/First` or `/Next`.
@@ -110,9 +81,6 @@ struct Walk<'a> {
     pages: HashMap<ObjectId, u32>,
     /// `/Names /Dests` by key, read when a destination first names one.
     names: Option<HashMap<String, &'a Object>>,
-    /// The pages positions are on, by index: their visible box and
-    /// `/Rotate`.
-    frames: HashMap<u32, Option<PageFrame>>,
     seen: HashSet<ObjectId>,
     out: Vec<FlatOutlineItem>,
 }
@@ -171,7 +139,7 @@ impl<'a> Walk<'a> {
         let Some(page) = self.page(dest) else {
             return (None, None);
         };
-        (Some(page), self.view(dest, page))
+        (Some(page), self.view(dest))
     }
 
     /// The destination of `item`'s `/A`, when it's a GoTo.
@@ -236,11 +204,11 @@ impl<'a> Walk<'a> {
         }
     }
 
-    /// Where on `page` a destination lands. An `/XYZ` position is turned
-    /// into the page's displayed space; null stays None, a zoom of 0 is
-    /// none, and with nothing set it's just the page. Other kinds keep
-    /// their numbers as written, as many as the kind takes.
-    fn view(&mut self, dest: &[Object], page: u32) -> Option<DestView> {
+    /// Where on its page a destination lands. An `/XYZ` position is read
+    /// as is: null stays None, a zoom of 0 is none, and with nothing set
+    /// it's just the page. Other kinds keep their numbers as written, as
+    /// many as the kind takes.
+    fn view(&self, dest: &[Object]) -> Option<DestView> {
         let kind = resolve(self.pdf, dest.get(1)?)?.as_name().ok()?;
         let takes = match kind {
             b"XYZ" => 3,
@@ -261,28 +229,12 @@ impl<'a> Walk<'a> {
                 params,
             });
         }
-        let (left, top) = match (params[0], params[1]) {
-            (None, None) => (None, None),
-            (x, y) => self.frame(page)?.to_display(x, y),
-        };
+        let (left, top) = (params[0], params[1]);
         let zoom = params[2].filter(|&z| z != 0.0);
         if left.is_none() && top.is_none() && zoom.is_none() {
             return None;
         }
         Some(DestView::Xyz { left, top, zoom })
-    }
-
-    /// Page `page`'s visible box and `/Rotate`, as `write_outline` takes
-    /// them.
-    fn frame(&mut self, page: u32) -> Option<PageFrame> {
-        let (src, pdf) = (self.src, self.pdf);
-        *self.frames.entry(page).or_insert_with(|| {
-            let geom = crate::file::page_geom(pdf, src.page(page)?.id);
-            Some(PageFrame {
-                media: geom.media,
-                rotate: geom.rotate,
-            })
-        })
     }
 
     /// `/C` (black is no color) and `/F` (italic 1, bold 2).

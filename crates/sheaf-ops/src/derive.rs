@@ -2,11 +2,13 @@
 //! with the header/footer the file had drawn stripped out. The copies are
 //! made in memory and interned into the document's store, named after
 //! their originals; `Edit::RebasePages` then moves the document's pages
-//! onto them, keeping ids, rotation, bookmarks and marks.
+//! onto them, keeping ids, rotation, bookmarks, marks and OCR text.
 
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
+use sheaf_core::Rotation;
+use sheaf_doc::geom::Geom;
 use sheaf_doc::store::{BlobKind, MemoryKind, Origin};
 use sheaf_doc::{Derived, PageId, Rebase, Snapshot, SourceId, SourceInfo, Store};
 use sheaf_progress::{Progress, Unit};
@@ -15,8 +17,8 @@ use sheaf_progress::{Progress, Unit};
 /// move the document's pages onto it once it's a source.
 pub struct DerivedSource {
     pub info: SourceInfo,
-    /// (page, its index in `info`'s file, shift).
-    pub pages: Vec<(PageId, u32, (f32, f32))>,
+    /// (page, its index in `info`'s file).
+    pub pages: Vec<(PageId, u32)>,
 }
 
 impl DerivedSource {
@@ -24,12 +26,7 @@ impl DerivedSource {
     pub fn rebases(&self, source: SourceId) -> Vec<Rebase> {
         self.pages
             .iter()
-            .map(|&(id, index, shift)| Rebase {
-                id,
-                source,
-                index,
-                shift,
-            })
+            .map(|&(id, index)| Rebase { id, source, index })
             .collect()
     }
 }
@@ -98,7 +95,7 @@ pub fn strip_stamps(
             pages: keep
                 .iter()
                 .enumerate()
-                .map(|(k, &(id, _))| (id, k as u32, (0.0, 0.0)))
+                .map(|(k, &(id, _))| (id, k as u32))
                 .collect(),
         });
     }
@@ -107,8 +104,8 @@ pub fn strip_stamps(
 
 /// Pages with `wm` drawn on (its kind stripped first), and pages outside
 /// `scope` that have one of its kind stripped; `None` strips only. Each
-/// page's sheaf rotation is passed on, so the mark sits upright as the
-/// page is shown. The copies are sources in `store`.
+/// page's rotation is passed on, so the mark sits upright as the page is
+/// shown. The copies are sources in `store`.
 pub fn watermark(
     store: &Store,
     snap: &Snapshot,
@@ -123,14 +120,14 @@ pub fn watermark(
         sheaf_doc::stamps::WATERMARK
     };
     progress.set_total(Some(snap.state.pages.len() as u64), Unit::Pages);
-    // (page, index in source, draw?, its sheaf rotation)
-    let mut by_source: BTreeMap<SourceId, Vec<(PageId, u32, bool, i32)>> = BTreeMap::new();
+    // (page, index in source, draw?, its rotation)
+    let mut by_source: BTreeMap<SourceId, Vec<(PageId, u32, bool, Rotation)>> = BTreeMap::new();
     for p in snap.state.pages.iter() {
         let draw = wm.is_some() && scope.contains(&p.id);
         by_source
             .entry(p.source)
             .or_default()
-            .push((p.id, p.index, draw, p.rotation.degrees()));
+            .push((p.id, p.index, draw, p.rotation));
     }
     let mut out = Vec::new();
     let mut done = 0;
@@ -157,9 +154,9 @@ pub fn watermark(
         let list: Vec<(u32, Option<[f32; 4]>)> = keep.iter().map(|k| (k.1, None)).collect();
         let bytes = sheaf_doc::save::derived_copy(info, &list, &mut |pdf, d, geom, at| {
             sheaf_doc::stamps::strip(pdf, d, kinds);
-            let (_, _, draw, rot) = keep[at];
+            let (_, _, draw, rotate) = keep[at];
             if draw && let Some(wm) = wm {
-                sheaf_doc::watermark::install(pdf, d, wm, geom, rot)?;
+                sheaf_doc::watermark::install(pdf, d, wm, &Geom { rotate, ..*geom })?;
             }
             Ok(())
         })?;
@@ -169,7 +166,7 @@ pub fn watermark(
             pages: keep
                 .iter()
                 .enumerate()
-                .map(|(k, &(id, ..))| (id, k as u32, (0.0, 0.0)))
+                .map(|(k, &(id, ..))| (id, k as u32))
                 .collect(),
         });
     }

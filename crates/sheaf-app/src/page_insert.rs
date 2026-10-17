@@ -195,6 +195,7 @@ impl DocView {
                 let label = format!("Replace {n} page{}", if n == 1 { "" } else { "s" });
                 let mixed = doc.model.scripts_mixed();
                 doc.model.set_source_form(sid, incoming.form.clone());
+                doc.model.set_source_renamed(sid, &incoming.renamed);
                 match doc.model.apply(
                     Edit::ReplacePages {
                         ids,

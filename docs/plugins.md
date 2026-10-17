@@ -199,6 +199,8 @@ stamp's) are filled in as dynamic stamps fill them: write
 with their boxes in page coordinates: points, top-left origin, the page as
 the file displays it (the same space annotations use). Pattern matches also
 carry their capture groups. OCR text the user hasn't saved yet counts.
+This frame is 0.3's and stays so: sheaf keeps pages' geometry in their
+unrotated user space now, and converts at the API's edge.
 
 **`edits`**: `submit(label, edits)` queues a batch that becomes one undo step
 labelled `label`. Batches are applied in order **after your call returns**,

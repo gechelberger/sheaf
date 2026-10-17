@@ -418,7 +418,6 @@ impl Run {
                             id,
                             source,
                             index: rng.u32(..count),
-                            shift: (rng.f32() * 10.0, rng.f32() * 10.0),
                         }
                     })
                     .collect(),

@@ -1,8 +1,8 @@
 //! The appearances sheaf writes for text markup and text edits are what
 //! other viewers draw: this saves an underline, a strikethrough, a
 //! replacement and an insertion, renders the file with PDFium, and looks
-//! for their colors where they should be, on a plain page and on one with
-//! `/Rotate 90`.
+//! for their colors where they should be, on a plain page and on ones
+//! with `/Rotate`.
 //!
 //! Needs libpdfium (`scripts/fetch-pdfium.sh`), like the app itself.
 
@@ -69,8 +69,15 @@ fn mark(kind: AnnotKind, color: [u8; 3]) -> Annot {
         fill: None,
         dashed: false,
         cloudy: false,
+        turn: Rotation::R0,
         name: String::new(),
     }
+}
+
+/// `a`, placed where the first page shows it, as the model keeps it: in
+/// PageSpace, reading upright as the page shows.
+fn placed(model: &Document, a: Annot) -> Annot {
+    a.to_page(&model.geom(model.page(0).unwrap()))
 }
 
 /// A one-page red stamp, 100 × 50, in the generated-file cache; its name.
@@ -182,9 +189,8 @@ fn check(rotate: i64) {
             BLUE,
         ),
     ] {
-        model
-            .apply(Edit::AnnotAdd { page, annot: a }, "mark")
-            .unwrap();
+        let annot = placed(&model, a);
+        model.apply(Edit::AnnotAdd { page, annot }, "mark").unwrap();
     }
     let out = dir.join("marked.pdf");
     sheaf_doc::save::rewrite_to_path(&model.snapshot(), &out).unwrap();
@@ -281,6 +287,12 @@ fn text_markup_draws_where_it_should() {
 #[test]
 fn text_markup_draws_where_it_should_on_a_turned_page() {
     check(90);
+}
+
+#[test]
+fn text_markup_draws_where_it_should_turned_further() {
+    check(180);
+    check(270);
 }
 
 #[test]
@@ -402,9 +414,8 @@ fn tapes_draw_turned_and_from_old_text() {
         [20, 20, 20],
     );
     a.contents = tape.text(2);
-    model
-        .apply(Edit::AnnotAdd { page, annot: a }, "tape")
-        .unwrap();
+    let annot = placed(&model, a);
+    model.apply(Edit::AnnotAdd { page, annot }, "tape").unwrap();
     // From before rows were kept: text only, read back from it.
     let mut old = mark(
         AnnotKind::Tape {
@@ -421,9 +432,8 @@ fn tapes_draw_turned_and_from_old_text() {
         [20, 20, 20],
     );
     old.contents = "1,234.50 +\n250.00 +\n1,484.50 T".into();
-    model
-        .apply(Edit::AnnotAdd { page, annot: old }, "tape")
-        .unwrap();
+    let annot = placed(&model, old);
+    model.apply(Edit::AnnotAdd { page, annot }, "tape").unwrap();
     let out = dir.join("tapes.pdf");
     sheaf_doc::save::rewrite_to_path(&model.snapshot(), &out).unwrap();
 
@@ -502,9 +512,8 @@ fn clouds_and_callouts_draw() {
         BLUE,
     );
     for a in [cloud, callout] {
-        model
-            .apply(Edit::AnnotAdd { page, annot: a }, "mark")
-            .unwrap();
+        let annot = placed(&model, a);
+        model.apply(Edit::AnnotAdd { page, annot }, "mark").unwrap();
     }
     let out = dir.join("shapes.pdf");
     sheaf_doc::save::rewrite_to_path(&model.snapshot(), &out).unwrap();

@@ -39,9 +39,9 @@ pub mod tape;
 pub mod text_layer;
 pub mod watermark;
 
-pub use sheaf_core::{DestView, PageFrame};
+pub use sheaf_core::DestView;
 
-pub use annot::{Annot, AnnotId, AnnotKind, Box2, PageGeom, Pt, default_author, pdf_date_now};
+pub use annot::{Annot, AnnotId, AnnotKind, Box2, Pt, default_author, pdf_date_now};
 pub use history::{AllOf, FixedCount, HistoryPolicy, HistoryStats, MemoryBudget};
 pub use model::{
     Damaged, Derived, DocState, Document, Edit, EditOutcome, FlatOutlineItem, JobId,

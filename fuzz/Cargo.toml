@@ -38,3 +38,10 @@ path = "fuzz_targets/page_tree.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "sheaf_annot"
+path = "fuzz_targets/sheaf_annot.rs"
+test = false
+doc = false
+bench = false

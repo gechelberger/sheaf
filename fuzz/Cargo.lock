@@ -1503,7 +1503,9 @@ dependencies = [
  "serde_json",
  "sheaf-core",
  "sheaf-image",
+ "sheaf-progress",
  "thiserror",
+ "unicode-normalization",
  "zeroize",
 ]
 

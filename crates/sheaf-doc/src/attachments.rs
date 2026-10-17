@@ -73,7 +73,12 @@ pub fn attachments_in<P: Objects + ?Sized>(
     }
     for (page_no, page_id) in pages.into_iter().enumerate() {
         let mut n = 0;
-        for annot in page_annots(pdf, page_id) {
+        let entries = page_entries(pdf, page_id);
+        let page_annots = crate::file::PageAnnots::new(entries);
+        for entry in entries {
+            let Some(annot) = resolve(pdf, entry).and_then(|o| o.as_dict().ok()) else {
+                continue;
+            };
             if annot.get(b"Subtype").and_then(Object::as_name).ok() != Some(b"FileAttachment") {
                 continue;
             }
@@ -82,8 +87,9 @@ pub fn attachments_in<P: Objects + ?Sized>(
                 n,
             };
             n += 1;
-            // sheaf's own are listed from the document (`Cached`).
-            if annot.has(b"SheafAnnot") {
+            // sheaf's own are listed from the document (`Cached`); one
+            // another tool has edited since is that tool's.
+            if crate::file::is_ours(pdf, entry, &page_annots) {
                 continue;
             }
             let Some(fs) = annot
@@ -284,17 +290,20 @@ fn walk_names<'a, P: Objects + ?Sized>(
 }
 
 fn page_annots<P: Objects + ?Sized>(pdf: &P, page: ObjectId) -> Vec<&Dictionary> {
+    page_entries(pdf, page)
+        .iter()
+        .filter_map(|o| resolve(pdf, o).and_then(|o| o.as_dict().ok()))
+        .collect()
+}
+
+/// A page's `/Annots`, as written.
+fn page_entries<P: Objects + ?Sized>(pdf: &P, page: ObjectId) -> &[Object] {
     pdf.get_dictionary(page)
         .ok()
         .and_then(|p| p.get(b"Annots").ok())
         .and_then(|o| resolve(pdf, o))
         .and_then(|o| o.as_array().ok())
-        .map(|a| {
-            a.iter()
-                .filter_map(|o| resolve(pdf, o).and_then(|o| o.as_dict().ok()))
-                .collect()
-        })
-        .unwrap_or_default()
+        .map_or(&[], Vec::as_slice)
 }
 
 /// A portfolio key "<12>Report.pdf" as (12, "Report.pdf").

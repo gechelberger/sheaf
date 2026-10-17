@@ -4,13 +4,7 @@ use crate::history::FixedCount;
 use crate::model::Document;
 use crate::store::Store;
 use lopdf::{Stream, dictionary};
-
-fn geom() -> PageGeom {
-    PageGeom {
-        media: [0.0, 0.0, 612.0, 792.0],
-        rotate: 0,
-    }
-}
+use sheaf_core::Rotation;
 
 /// Comments of most kinds, as another tool writes them.
 fn sample() -> Comments {
@@ -105,7 +99,7 @@ fn marks(c: &Comments) -> Vec<(u32, String)> {
     let mut out = Vec::new();
     for i in 0..c.len() {
         let d = c.dict(i).unwrap();
-        let a = crate::import::convert(&c.pdf, d, &geom(), Default::default()).unwrap();
+        let a = crate::import::convert(&c.pdf, d, Rotation::R0, Default::default()).unwrap();
         out.push((c.annots[i].0, serde_json::to_string(&a).unwrap()));
     }
     out
@@ -145,17 +139,18 @@ fn acrobat_xfdf_reads() {
     let c = read(xml.as_bytes(), None).unwrap();
     assert_eq!(c.len(), 3);
     assert_eq!(c.file.as_deref(), Some("workpapers.pdf"));
-    let note =
-        crate::import::convert(&c.pdf, c.dict(0).unwrap(), &geom(), Default::default()).unwrap();
+    let note = crate::import::convert(&c.pdf, c.dict(0).unwrap(), Rotation::R0, Default::default())
+        .unwrap();
     assert_eq!(note.contents, "Tie & foot—now");
     assert_eq!((note.name.as_str(), note.author.as_str()), ("a1b2", "Ann"));
     assert_eq!(note.color, [255, 255, 0]);
     assert_eq!(note.created, "D:20261001120000-07'00'");
     let reply =
-        crate::import::convert(&c.pdf, c.dict(1).unwrap(), &geom(), Default::default()).unwrap();
+        crate::import::convert(&c.pdf, c.dict(1).unwrap(), Rotation::R0, Default::default())
+            .unwrap();
     assert!(matches!(reply.kind, AnnotKind::Reply { ref parent } if parent == "a1b2"));
-    let ink =
-        crate::import::convert(&c.pdf, c.dict(2).unwrap(), &geom(), Default::default()).unwrap();
+    let ink = crate::import::convert(&c.pdf, c.dict(2).unwrap(), Rotation::R0, Default::default())
+        .unwrap();
     assert_eq!(c.annots[2].0, 1);
     assert!(matches!(&ink.kind, AnnotKind::Ink { paths } if paths[0].len() == 3));
     assert_eq!(ink.stroke, 2.0);
@@ -219,6 +214,7 @@ fn opened(path: &std::path::Path) -> (Document, Vec<(SourceId, ForeignAnnot)>) {
         fill: None,
         dashed: false,
         cloudy: false,
+        turn: Rotation::R0,
         name: String::new(),
     };
     let p0 = doc.page(0).unwrap().id;
@@ -270,7 +266,7 @@ fn imports_match_by_name_and_report_the_rest() {
     add(1, dictionary! { "Subtype" => "Sound", "Rect" => r() });
     add(1, dictionary! { "Subtype" => "Popup", "Rect" => r() });
     add(5, dictionary! { "Subtype" => "Text", "Rect" => r() });
-    let got = import(&snap.state, &snap.sources, &foreign, &c);
+    let got = import(&snap.state, &foreign, &c);
     assert_eq!((got.added, got.updated, got.off_the_end), (1, 2, 1));
     assert_eq!(got.skipped, BTreeMap::from([("Sound".to_string(), 1)]));
     assert_eq!(
@@ -296,7 +292,7 @@ fn imports_match_by_name_and_report_the_rest() {
         .collect();
     assert_eq!(names, [(0, ours.name()), (0, "sq".to_string())]);
     // Ours come back exactly, from /SheafAnnot.
-    let again = import(&snap.state, &snap.sources, &foreign, &back);
+    let again = import(&snap.state, &foreign, &back);
     assert_eq!((again.added, again.updated), (0, 2));
     let _ = std::fs::remove_dir_all(&dir);
 }
