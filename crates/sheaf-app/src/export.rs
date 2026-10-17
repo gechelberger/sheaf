@@ -136,6 +136,9 @@ impl crate::docview::DocView {
     }
 
     fn run_export(&mut self, job: ExportJob, cx: &mut gpui::Context<Self>) {
+        if self.still_opening(cx) {
+            return;
+        }
         let crate::docview::State::Ready(doc) = &self.state else {
             return;
         };

@@ -121,8 +121,8 @@ Tier 1 platforms gate every release and run the perf budgets in CI.
 ├────────────────────────────┬────────────────────────────┤
 │  sheaf-cli (no GUI)        │  sheaf-ops: operations     │
 │  clap subcommands          │  shared by app and CLI;    │
-│                            │  sheaf-progress: progress  │
-│                            │  + cancel trait            │
+│                            │  progress + cancel: the    │
+│                            │  in-progress crate         │
 ├────────────────────────────┴────────────────────────────┤
 │  sheaf-ui           Reusable widgets: page canvas, tile  │
 │                     viewport, sidebars, command palette  │
@@ -587,4 +587,6 @@ Dual-licensed under MIT or Apache-2.0, at your option. Third-party engines:
 PDFium (BSD-3), hayro (Apache-2.0/MIT), Tesseract and its glyphless `pdf.ttf`
 (Apache-2.0), Leptonica (BSD-2), ONNX Runtime (MIT), PaddleOCR models and
 `oar-ocr` (Apache-2.0); see `packaging/licenses/`. MuPDF is deliberately not
-used (AGPL). lopdf (MIT) is vendored with a patch in `vendor/lopdf`.
+used (AGPL). lopdf (MIT) is vendored with a patch in `vendor/lopdf`. Text in
+the standard 14 fonts is laid out with Adobe's Core 14 AFM metrics (Adobe's
+notice) and the Adobe Glyph List (BSD-3), in `crates/sheaf-doc/assets`.

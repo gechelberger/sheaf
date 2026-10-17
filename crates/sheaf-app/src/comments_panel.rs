@@ -15,21 +15,20 @@ use gpui::{
     AnchoredPositionMode, AnyElement, App, Context, Entity, FocusHandle, Focusable, Pixels, Point,
     Subscription, Window, anchored, deferred, div, prelude::*, px,
 };
-use sheaf_core::PageSize;
 use sheaf_doc::annot::{MARKED, REVIEW, REVIEW_STATES};
+use sheaf_doc::geom::Affine;
 use sheaf_doc::{Annot, AnnotId, AnnotKind, PageId, file::ForeignAnnot};
 use sheaf_ops::comments::{
     self, Column, Comment, DataFormat, Layout, Sort, Summary, foreign_text, ours_text, parse_pages,
     status_words, subtype_label, thread_status, threads,
 };
 pub use sheaf_ops::comments::{CommentFilter, Item, fmt_pdf_date, kind_label};
-use sheaf_render::Rect;
 use sheaf_ui::list::ListLayout;
 use sheaf_ui::text_area::{TextArea, TextAreaEvent};
 use sheaf_ui::text_input::{TextInput, TextInputEvent};
 use sheaf_ui::theme;
 
-use crate::docview::{DocView, ScrollTo, State, rotate_rect};
+use crate::docview::{DocView, State};
 use crate::{DeleteComment, EditComment, Redo, ReplyToComment, Save, ToggleCheckmark, Undo};
 
 pub const KEY_CONTEXT: &str = "Comments";
@@ -204,29 +203,8 @@ impl DocView {
         let Some((source, f)) = doc.foreign_annots.get(ix).cloned() else {
             return;
         };
-        if let Some(index) = doc.index_of_page_in(source, f.page)
-            && let Some(pref) = doc.shown_ref(index)
-            && let Some(src) = doc
-                .model
-                .source(pref.source)
-                .map(|s| s.page_size(pref.index))
-        {
-            let r = rotate_rect(
-                Rect {
-                    x: f.rect.x,
-                    y: f.rect.y,
-                    w: f.rect.w,
-                    h: f.rect.h,
-                },
-                src,
-                pref.rotation,
-            );
-            let ps = src.rotated(pref.rotation);
-            doc.scroll_to(ScrollTo::Reveal {
-                page: index,
-                fx: (r.x + r.w / 2.0) / ps.width.max(1.0),
-                fy: (r.y + r.h / 2.0) / ps.height.max(1.0),
-            });
+        if let Some(index) = doc.index_of_page_in(source, f.page) {
+            doc.reveal(index, f.rect);
         }
         cx.notify();
     }
@@ -376,7 +354,7 @@ impl DocView {
                 let color = crate::markup_tools::color_of(crate::markup_tools::Tool::Note, cx);
                 let mut a = self.new_annot(AnnotKind::Reply { parent: rb.parent }, color, cx);
                 a.contents = text;
-                self.add_annot(rb.page, a, "Reply", cx);
+                self.add_page_annot(rb.page, a, "Reply", cx);
             }
         }
     }
@@ -403,7 +381,7 @@ impl DocView {
         );
         // What Acrobat writes, for viewers that list statuses as text.
         a.contents = format!("{state} set by {}", a.author);
-        self.add_annot(page, a, "Status", cx);
+        self.add_page_annot(page, a, "Status", cx);
         if let Some(cm) = &mut self.comments {
             cm.menu = None;
         }
@@ -1479,6 +1457,9 @@ impl DocView {
         path: std::path::PathBuf,
         cx: &mut Context<Self>,
     ) {
+        if self.still_opening(cx) {
+            return;
+        }
         let needle = self.comment_needle(cx);
         let columns = csv_columns(cx);
         let title = self
@@ -1582,6 +1563,10 @@ impl DocView {
     /// Bring in the comments in the FDF, XFDF or PDF file at `path`, as
     /// one undo step: one here already by name is updated, the rest added.
     pub fn import_comments_from(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
+        // What's brought in is matched against the comments already here.
+        if self.still_opening(cx) {
+            return;
+        }
         let State::Ready(doc) = &mut self.state else {
             return;
         };
@@ -1904,29 +1889,16 @@ fn comment_row(
         )
 }
 
-/// Dashed outline for the selected third-party comment on `page`.
-pub(crate) fn foreign_outline(
-    f: &ForeignAnnot,
-    src: PageSize,
-    rot: sheaf_core::Rotation,
-    k: f32,
-) -> AnyElement {
-    let r = rotate_rect(
-        Rect {
-            x: f.rect.x - 2.0,
-            y: f.rect.y - 2.0,
-            w: f.rect.w + 4.0,
-            h: f.rect.h + 4.0,
-        },
-        src,
-        rot,
-    );
+/// Dashed outline for the selected third-party comment on a page:
+/// `to_pane` takes PageSpace onto the page as drawn, at `k` px a point.
+pub(crate) fn foreign_outline(f: &ForeignAnnot, to_pane: &Affine, k: f32) -> AnyElement {
+    let r = to_pane.apply_box(f.rect);
     div()
         .absolute()
-        .left(px(r.x * k))
-        .top(px(r.y * k))
-        .w(px(r.w * k))
-        .h(px(r.h * k))
+        .left(px((r.x - 2.0) * k))
+        .top(px((r.y - 2.0) * k))
+        .w(px((r.w + 4.0) * k))
+        .h(px((r.h + 4.0) * k))
         .border_1()
         .border_dashed()
         .border_color(theme::ACCENT)
@@ -1936,28 +1908,17 @@ pub(crate) fn foreign_outline(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sheaf_doc::{Box2, Document, FixedCount, SourceInfo};
+    use sheaf_doc::{Box2, Document, FixedCount, SourceInfo, Store};
 
     /// The rows for a page with a thread (a; r in reply to it; rr in reply
     /// to r) and a comment b, as short strings.
     fn rows(reply: Option<(Item, Option<AnnotId>)>) -> Vec<String> {
-        let d = Document::new(
-            SourceInfo {
-                path: "x.pdf".into(),
-                page_count: 1,
-                first_page: PageSize {
-                    width: 612.0,
-                    height: 792.0,
-                },
-                page_sizes: None,
-                bytes: 0,
-                password: None,
-                data: None,
-                derived: None,
-            },
-            &[],
-            Box::new(FixedCount(10)),
-        );
+        let store = Store::new();
+        let primary = SourceInfo {
+            name: "x.pdf".into(),
+            ..SourceInfo::blank(&store, 1)
+        };
+        let d = Document::new(store, primary, &[], Box::new(FixedCount(10)));
         let source = d.state().pages[0].source;
         let theirs = |name: &str, parent: Option<&str>, date: &str| {
             (

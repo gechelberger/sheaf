@@ -7,14 +7,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use in_progress::{Level, Progress};
 use serde::{Deserialize, Serialize};
-use sheaf_core::PageSize;
 use sheaf_doc::images::placement;
-use sheaf_doc::{Box2, Document, Edit, SourceInfo, TextLayer};
+use sheaf_doc::{Box2, Document, Edit, PAGES, SourceInfo, Store, TextLayer};
 use sheaf_image::clean::ScanParams;
 use sheaf_image::io::PageImage;
 use sheaf_ocr::{OcrConfig, OcrImage, OcrWord};
-use sheaf_progress::{Progress, Unit};
 
 use crate::images::Paper;
 
@@ -185,10 +184,10 @@ pub fn scan(
     let mut report = ScanReport::default();
     let mut pages = Vec::with_capacity(inputs.len());
     let mut words: Vec<Vec<sheaf_doc::OcrWord>> = Vec::new();
-    progress.set_total(Some(inputs.len() as u64), Unit::Pages);
+    progress.set_total(Some(inputs.len() as u64), PAGES);
     for (i, path) in inputs.iter().enumerate() {
         progress.check()?;
-        let share = 1.0 / inputs.len() as f32;
+        let share = 1.0 / inputs.len() as f64;
         let step = progress.child(&format!("page {}", i + 1), share);
         let cleaned = clean_one(path, &params, &*step.child("cleaning", 0.6))?;
         if cleaned.quad.is_some() {
@@ -196,15 +195,12 @@ pub fn scan(
         }
         if cleaned.turns != 0 {
             step.message(
-                sheaf_progress::Level::Info,
+                Level::Info,
                 &format!("{}: turned {}°", path.display(), cleaned.turns * 90),
             );
         }
         if opts.drop_blanks && is_blank_page(&cleaned.image) {
-            step.message(
-                sheaf_progress::Level::Info,
-                &format!("{}: blank, left out", path.display()),
-            );
+            step.message(Level::Info, &format!("{}: blank, left out", path.display()));
             report.dropped += 1;
             progress.set(i as u64 + 1);
             continue;
@@ -246,7 +242,7 @@ pub fn scan(
     tmp.push(".images.part");
     let tmp = PathBuf::from(tmp);
     std::fs::write(&tmp, &bytes).with_context(|| format!("writing {}", tmp.display()))?;
-    let result = add_text(&tmp, &pages, fit, words, &engine_name, out);
+    let result = add_text(&tmp, words, &engine_name, out);
     let _ = std::fs::remove_file(&tmp);
     result?;
     Ok(report)
@@ -287,44 +283,25 @@ fn to_page(
         .collect()
 }
 
-/// Open the image PDF at `src`, give each page its text layer, and write
-/// the result to `out`.
+/// Open the image PDF at `src`, give each page its text layer (`words`,
+/// in points from each page's top-left), and write the result to `out`.
 fn add_text(
     src: &Path,
-    pages: &[PageImage],
-    fit: sheaf_doc::images::PageFit,
     words: Vec<Vec<sheaf_doc::OcrWord>>,
     engine: &str,
     out: &Path,
 ) -> Result<()> {
-    let sizes: Vec<PageSize> = pages
+    let store = Store::new();
+    let info = SourceInfo::read(&store, src, None)?;
+    let mut doc = Document::new(store, info, &[], sheaf_doc::history::default_policy());
+    let layers = doc
+        .state()
+        .pages
         .iter()
-        .map(|p| {
-            let (width, height) = placement(p, fit).page;
-            PageSize { width, height }
-        })
-        .collect();
-    let info = SourceInfo {
-        path: src.to_path_buf(),
-        page_count: pages.len() as u32,
-        first_page: sizes[0],
-        page_sizes: Some(sizes.clone()),
-        bytes: std::fs::metadata(src)
-            .map(|m| m.len() as usize)
-            .unwrap_or(0),
-        password: None,
-        data: None,
-        derived: None,
-    };
-    let mut doc = Document::new(info, &[], sheaf_doc::history::default_policy());
-    let ids: Vec<_> = doc.state().pages.iter().map(|p| p.id).collect();
-    let layers = ids
-        .into_iter()
         .zip(words)
-        .zip(sizes)
-        .map(|((id, w), size)| {
-            let layer = TextLayer::from_engine(w, size, sheaf_core::Rotation::R0, engine);
-            (id, Arc::new(layer))
+        .map(|(p, w)| {
+            let layer = TextLayer::from_engine(w, &doc.geom(p), engine);
+            (p.id, Arc::new(layer))
         })
         .collect();
     doc.apply(Edit::SetTextLayers { layers }, "Recognize Text")?;

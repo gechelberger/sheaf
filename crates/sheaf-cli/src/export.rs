@@ -97,7 +97,7 @@ pub fn run(args: ExportArgs, quiet: bool) -> anyhow::Result<()> {
             args.name.clone().unwrap_or_else(|| stem_of(&args.input)),
         ),
     };
-    let doc = sheaf_ops::open(&args.input, args.password.as_deref())?;
+    let doc = sheaf_doc::open::file(&args.input, args.password.as_deref())?.doc;
     let snapshot = doc.snapshot();
     let pages = sheaf_ops::pages::ids(&snapshot, args.pages.as_deref())
         .map_err(anyhow::Error::msg)

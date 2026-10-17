@@ -30,6 +30,7 @@ New proposals not yet placed in a milestone go under [Pending](#pending).
 | M8 | **Page tools**: split, insert/replace, crop, labels, headers/footers, Bates, watermarks | Binder assembly is complete | v0.4 |
 | M9 | **Markup completion**: mark editing, remaining annotation types, custom stamps, replies and status, PDFlyer stamps/connectors/tape, FDF/XFDF, measurement | Review workflow parity | v0.5 |
 | M10 | **Forms**: fill, calculate, create, import/export, flatten | Tax forms are filled and calculated in sheaf | v0.6 |
+| M10.5 | **The edit API**: page content in the model, one op vocabulary over one primitive, saves as outputs, one emitter for screen and file | M11–M15 edit content without reworking the core | — |
 | M11 | **Security & redaction**: true redaction, sanitize, passwords and permissions | Client data can be sent out safely | v0.7 |
 | M12 | **Signatures**: Fill & Sign, digital signatures, verification, timestamps | Engagement letters and 8879s are signed in-app | v0.8 |
 | M13 | **Content editing**: text, images, links, objects | The hardest Acrobat feature | v0.9 |
@@ -37,6 +38,8 @@ New proposals not yet placed in a milestone go under [Pending](#pending).
 | M15 | **Automation → v1.0**: batch actions, CLI, parity audit | Acrobat Pro + PDFlyer parity | v1.0 |
 
 M6 has no release of its own; it ships in v0.2 together with Scan & OCR.
+M10.5 has none either; it sits between M10 slices 5 and 6, and ships in
+v0.6 with the rest of M10.
 
 Each milestone is broken into slices when it starts, as M1–M4 were. Slices
 below are a first cut.
@@ -252,6 +255,44 @@ Slices: corpus and form check → field model → page tools → appearances →
 saving → filling → flatten → data import/export → AF functions → script
 host → scripts → field authoring → auto-detect (the cut line) → plugin API.
 
+### M10.5: The edit API
+
+Planned 2026-10-15, between M10 slices 5 and 6: M10 paused so that its
+remaining slices are built on this API rather than revisited after it.
+The plan, with the decisions made while planning, the proposals for
+kickoff and the bugs found, is in
+[`todos/m10.5-edit-api.md`](todos/m10.5-edit-api.md).
+
+M11–M15 change PDF content far more surgically than anything so far, and
+today three separate mechanisms change what a page shows (overlays drawn
+at save, derived source files, export-only transforms), none of which
+the model sees as content. M10.5 replaces them with one design:
+
+- `DocState` is the document's definition, page content included, and
+  one emitter derives every PDF object from it, on screen and on disk.
+  The derived-source file cache goes.
+- About 25 public semantic ops (a new `sheaf-edit` crate, serde and
+  schemars) lower to one primitive, `Put { key, before, after }`.
+  History stores those with their before-values, so replay is exact and
+  checked.
+- Effects are a pure function of each change, and drive dirty state,
+  removal detection, signature impact and the save plan.
+- Saves are outputs, never rebases: a planner picks Append or Rewrite
+  before a byte is written, deleting or replacing really removes, and
+  encryption is kept on every save.
+- One frame below the page (unrotated user space), lazily read
+  content-addressed sources, and an in-memory realizer for edited pages.
+- Every existing feature moves onto it (crop, watermark, header/footer
+  and Bates, OCR, flatten, the exports, Combine), plus `sheaf edit` JSON
+  and plugin API 0.4 as the only world.
+
+Slices: history stores what changed → spikes and gates → lazy sources and
+the Store → one open → PageSpace → content toolkit and fonts → the
+serializer → records → Rewrite from records → Append and the planner →
+ops and Tx → one funnel → realizer → text service → crop → watermark →
+header/footer and Bates → OCR → exports and `sheaf edit` → plugin API
+0.4. M10 resumes after slice 20.
+
 ### M11: Security & redaction
 
 Planned 2026-10-14; follows M10 (M10 was first skipped, then started
@@ -348,8 +389,8 @@ archival requirements but not for daily binder work.
   question: plugins first, with an optional Rhai front end for quick macros
   if users want one.
 - Headless CLI batch mode (`sheaf batch …`). The split is in place: GUI-free
-  operations live in `sheaf-ops` (with `sheaf-progress` for progress and
-  cancellation), and `sheaf-cli` holds the subcommands. They're reachable
+  operations live in `sheaf-ops` (with the `in-progress` crate for progress
+  and cancellation), and `sheaf-cli` holds the subcommands. They're reachable
   as `sheaf <subcommand>` or through the GPUI-free `sheaf-cli` binary;
   `export`, `images-to-pdf` and `scan` ship today. Ops move into
   `sheaf-ops` as subcommands need them, and `batch` chains them.

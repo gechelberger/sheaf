@@ -5,10 +5,12 @@
 //!
 //! A drag that starts on text selects from there to the pointer, in
 //! reading order; a double-click takes a word. A selection is on one page.
+//! Points here are in PageSpace, as the characters are.
 
 use std::sync::Arc;
 
 use gpui::{ClipboardItem, Context};
+use sheaf_core::Rotation;
 use sheaf_doc::{AnnotKind, Box2, PageChars, PageId, Pt, SourceId, TextLayer};
 
 use crate::docview::{DocView, State};
@@ -39,6 +41,7 @@ pub struct TextDrag {
     pub page: PageId,
     /// The page's index, which pointer positions come with.
     pub index: usize,
+    /// In PageSpace.
     pub start: Pt,
     pub current: Pt,
     /// Points from a character that still count as on it.
@@ -126,8 +129,8 @@ impl DocView {
                 f(self, Some(chars), cx)
             }
             CharsKey::Engine(source, index) => {
-                let size = doc.model.source(source).map(|s| s.page_size(index));
-                let (Some(handle), Some(size)) = (doc.handles.get(&source).cloned(), size) else {
+                let base = doc.model.source(source).map(|s| s.src.geom(index));
+                let (Some(handle), Some(base)) = (doc.handles.get(&source).cloned(), base) else {
                     return f(self, None, cx);
                 };
                 doc.chars_loading.insert(page);
@@ -153,7 +156,7 @@ impl DocView {
                                     )
                                 })
                                 .collect();
-                            Arc::new(PageChars::from_engine(list, size))
+                            Arc::new(PageChars::from_engine(list, &base))
                         });
                         // The page may have changed while the engine read it.
                         if let Some(c) = &chars
@@ -443,19 +446,24 @@ impl DocView {
         let Some((page, _, rects)) = self.selected_text() else {
             return;
         };
+        let Some(chars) = self.cached_chars(page) else {
+            return;
+        };
         if rects.is_empty() {
             return;
         }
-        self.add_text_markup(tool, page, rects, cx);
+        self.add_text_markup(tool, page, rects, chars.upright, cx);
         self.clear_text_sel(cx);
     }
 
-    /// Add `tool`'s markup over `rects` on `page`.
+    /// Add `tool`'s markup over `rects` (in PageSpace) on `page`, turned
+    /// `turn`, as the text under it reads.
     pub(crate) fn add_text_markup(
         &mut self,
         tool: Tool,
         page: PageId,
         rects: Vec<Box2>,
+        turn: Rotation,
         cx: &mut Context<Self>,
     ) {
         let kind = match tool {
@@ -466,10 +474,11 @@ impl DocView {
             _ => return,
         };
         let mut a = self.new_annot(kind, crate::markup_tools::color_of(tool, cx), cx);
+        a.turn = turn;
         if tool == Tool::Highlight {
             a.opacity = 0.6;
         }
-        self.add_annot(page, a, tool.label(), cx);
+        self.add_page_annot(page, a, tool.label(), cx);
     }
 
     /// Text Edits on the selection: cross it out, with a caret after it,
@@ -482,17 +491,19 @@ impl DocView {
             State::Ready(doc) => doc.text_sel.and_then(|sel| {
                 let c = self.cached_chars(sel.page)?;
                 // After the last character crossed out.
-                c.caret_at(sel.range().1)
+                Some((c.caret_at(sel.range().1)?, c.upright))
             }),
             _ => None,
         };
-        let Some(at) = at else {
+        let Some((at, turn)) = at else {
             return;
         };
         let kind = AnnotKind::Replace { rects, struck, at };
         let color = crate::markup_tools::color_of(Tool::TextEdit, cx);
-        let a = self.new_annot(kind, color, cx);
-        self.add_annot(page, a, "Replace text", cx);
+        let mut a = self.new_annot(kind, color, cx);
+        // The caret stands as the text reads.
+        a.turn = turn;
+        self.add_page_annot(page, a, "Replace text", cx);
         self.clear_text_sel(cx);
         self.pending_edit_last = Some(page);
         cx.notify();
@@ -501,12 +512,16 @@ impl DocView {
     /// Text Edits at a click in the text: a caret at boundary `at`, and the
     /// editor for what to insert.
     fn start_insert(&mut self, page: PageId, at: usize, cx: &mut Context<Self>) {
-        let Some(at) = self.cached_chars(page).and_then(|c| c.caret_at(at)) else {
+        let Some((at, turn)) = self
+            .cached_chars(page)
+            .and_then(|c| Some((c.caret_at(at)?, c.upright)))
+        else {
             return;
         };
         let color = crate::markup_tools::color_of(Tool::TextEdit, cx);
-        let a = self.new_annot(AnnotKind::Insert { at }, color, cx);
-        self.add_annot(page, a, "Insert text", cx);
+        let mut a = self.new_annot(AnnotKind::Insert { at }, color, cx);
+        a.turn = turn;
+        self.add_page_annot(page, a, "Insert text", cx);
         self.pending_edit_last = Some(page);
         cx.notify();
     }

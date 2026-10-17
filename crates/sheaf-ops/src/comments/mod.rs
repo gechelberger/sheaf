@@ -179,8 +179,7 @@ pub struct Comment {
     /// tickmark is a "Tickmark").
     pub kind: String,
     pub color: Option<[u8; 3]>,
-    /// Where it is on its page, in the page's displayed space before
-    /// sheaf's rotation.
+    /// Where it is on its page, in PageSpace.
     pub rect: Box2,
     /// What a measurement comes to ("12.50 ft"), and its scale ("1 in =
     /// 10 ft").
@@ -248,7 +247,7 @@ pub fn comments_on(
             label: kind_label(&a.kind),
             kind: ours_type(&a.kind).to_string(),
             color: Some(a.color),
-            rect: a.bounds(),
+            rect: a.page_bounds(),
             measurement: measurement_of(&a.kind),
         });
     }
@@ -791,9 +790,10 @@ pub fn open(
     path: &Path,
     password: Option<&str>,
 ) -> Result<(Document, Vec<(SourceId, ForeignAnnot)>)> {
-    let (doc, foreign) = crate::open::open_with_foreign(path, password)?;
-    let primary = doc.primary();
-    Ok((doc, foreign.into_iter().map(|f| (primary, f)).collect()))
+    let opened = sheaf_doc::open::file(path, password)?;
+    let primary = opened.doc.primary();
+    let foreign = opened.view.foreign.into_iter();
+    Ok((opened.doc, foreign.map(|f| (primary, f)).collect()))
 }
 
 /// A comments data file's format.
@@ -843,8 +843,7 @@ pub fn export_data(
             Item::Ours(..) => None,
         })
         .collect();
-    let comments =
-        sheaf_doc::exchange::gather(&snap.state, &snap.sources, foreign, &ours, &theirs)?;
+    let comments = sheaf_doc::exchange::gather(snap, foreign, &ours, &theirs)?;
     match format {
         DataFormat::Xfdf => sheaf_doc::exchange::xfdf::write(&comments),
         DataFormat::Fdf => sheaf_doc::exchange::fdf::write(&comments),
@@ -869,12 +868,7 @@ pub fn import_data(
     password: Option<&str>,
 ) -> Result<sheaf_doc::exchange::Imported> {
     let comments = sheaf_doc::exchange::read(bytes, password)?;
-    Ok(sheaf_doc::exchange::import(
-        &snap.state,
-        &snap.sources,
-        foreign,
-        &comments,
-    ))
+    Ok(sheaf_doc::exchange::import(snap, foreign, &comments))
 }
 
 /// A column of the CSV export.

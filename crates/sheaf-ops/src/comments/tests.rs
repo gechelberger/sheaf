@@ -1,7 +1,7 @@
 use super::*;
-use sheaf_core::PageSize;
+use sheaf_core::Rotation;
 use sheaf_doc::annot::REVIEW;
-use sheaf_doc::{FixedCount, Pt, SourceInfo};
+use sheaf_doc::{FixedCount, Pt, SourceInfo, Store};
 
 #[test]
 fn dates_format() {
@@ -25,6 +25,7 @@ fn mark(kind: AnnotKind, contents: &str) -> Annot {
         fill: None,
         dashed: false,
         cloudy: false,
+        turn: Rotation::R0,
         name: String::new(),
     }
 }
@@ -177,24 +178,20 @@ fn the_filter_hides_by_each_facet() {
     assert_eq!(cf.describe(), "pages 4–6; Stamp Summary");
 }
 
-fn doc(pages: u32) -> Document {
-    Document::new(
-        SourceInfo {
-            path: "big.pdf".into(),
-            page_count: pages,
-            first_page: PageSize {
-                width: 612.0,
-                height: 792.0,
-            },
-            page_sizes: None,
-            bytes: 0,
-            password: None,
-            data: None,
-            derived: None,
-        },
-        &[],
-        Box::new(FixedCount(10)),
-    )
+/// A file of `pages` blank pages opened, holding `marks`, sheaf's own.
+fn doc(pages: u32, marks: HashMap<u32, Vec<Annot>>) -> Document {
+    let store = Store::new();
+    let primary = SourceInfo {
+        name: "big.pdf".into(),
+        ..SourceInfo::blank(&store, pages)
+    };
+    let mut d = sheaf_doc::open::start(store, primary, Box::new(FixedCount(10)));
+    let facts = sheaf_doc::open::Facts {
+        marks,
+        ..Default::default()
+    };
+    d.ready(facts).unwrap();
+    d
 }
 
 fn theirs(
@@ -234,7 +231,6 @@ fn theirs(
 /// 900 pages, filtered and sorted.
 #[test]
 fn a_thousand_comments_list_quickly() {
-    let mut d = doc(900);
     let authors = ["Pat", "Greg", "Lee"];
     let mut ours: HashMap<u32, Vec<Annot>> = HashMap::new();
     for i in 0..600u32 {
@@ -262,7 +258,7 @@ fn a_thousand_comments_list_quickly() {
         a.modified = format!("D:2026101{}000000", i % 10);
         ours.entry(i * 3 % 900).or_default().push(a);
     }
-    d.set_initial_annots(ours).unwrap();
+    let d = doc(900, ours);
     let source = d.state().pages[0].source;
     let foreign: Vec<(SourceId, ForeignAnnot)> = (0..400u32)
         .map(|i| {
@@ -306,7 +302,7 @@ fn a_thousand_comments_list_quickly() {
 /// Two threads on page 2: one with a reply that has its own reply and a
 /// status, and one alone.
 fn two_threads() -> Listing {
-    let d = doc(3);
+    let d = doc(3, HashMap::new());
     let source = d.state().pages[0].source;
     let mut status = theirs(source, 1, "st", Some("a"));
     status.1.state = Some((REVIEW.into(), "Accepted".into()));

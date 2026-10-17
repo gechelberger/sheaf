@@ -17,7 +17,7 @@ use sheaf_ui::list::ListLayout;
 use sheaf_ui::text_input::{TextInput, TextInputEvent};
 use sheaf_ui::theme;
 
-use crate::docview::{DocView, Hit, ScrollTo, State};
+use crate::docview::{DocView, Hit, State};
 use crate::patterns::{self, Preset};
 
 const ROW_H: f32 = 22.0;
@@ -314,25 +314,8 @@ impl DocView {
         let Some(index) = doc.model.index_of(hit.page) else {
             return;
         };
-        let Some(pref) = doc.shown_ref(index) else {
-            return;
-        };
-        let src = doc
-            .model
-            .source(pref.source)
-            .map(|s| s.page_size(pref.index))
-            .unwrap_or(sheaf_core::PageSize {
-                width: 612.0,
-                height: 792.0,
-            });
         if let Some(r) = hit.rects.first() {
-            let r = crate::docview::rotate_rect(*r, src, pref.rotation);
-            let ps2 = src.rotated(pref.rotation);
-            doc.scroll_to(ScrollTo::Reveal {
-                page: index,
-                fx: (r.x + r.w / 2.0) / ps2.width.max(1.0),
-                fy: (r.y + r.h / 2.0) / ps2.height.max(1.0),
-            });
+            doc.reveal(index, *r);
         }
         cx.notify();
     }
@@ -686,9 +669,10 @@ fn preset_menu(index: usize, pos: Point<Pixels>, cx: &mut Context<DocView>) -> A
 impl DocView {
     /// Patterns panel > Bookmark matches: a bookmark per match, titled with
     /// its text and pointing at it, under one titled with the pattern; one
-    /// undo step.
+    /// undo step. Each points a little above its match's top as the page
+    /// shows.
     pub(crate) fn bookmark_pattern_hits(&mut self, cx: &mut Context<Self>) {
-        let Some(ps) = &self.pattern else {
+        let (Some(ps), State::Ready(doc)) = (&self.pattern, &self.state) else {
             return;
         };
         let mut items = vec![sheaf_doc::NewOutlineItem {
@@ -697,23 +681,38 @@ impl DocView {
             view: None,
             depth: 0,
         }];
+        let index: std::collections::HashMap<sheaf_doc::PageId, usize> = doc
+            .model
+            .state()
+            .pages
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.id, i))
+            .collect();
         items.extend(ps.hits.iter().map(|h| {
-            let top = h.rects.iter().map(|r| r.y).fold(f32::MAX, f32::min);
+            let geom = index.get(&h.page).and_then(|i| doc.edit_geom(*i));
+            let at = geom.and_then(|g| {
+                let to_view = g.to_view();
+                let top = h
+                    .rects
+                    .iter()
+                    .map(|r| to_view.apply_box(*r).y)
+                    .fold(f32::MAX, f32::min);
+                (top < f32::MAX)
+                    .then(|| g.from_view().apply_axes(None, Some((top - 12.0).max(0.0))))
+            });
             sheaf_doc::NewOutlineItem {
                 title: h.text.trim().to_string(),
                 target: Some(h.page),
-                view: (top < f32::MAX).then(|| sheaf_core::DestView::Xyz {
-                    left: None,
-                    top: Some((top - 12.0).max(0.0)),
+                view: at.map(|(left, top)| sheaf_core::DestView::Xyz {
+                    left,
+                    top,
                     zoom: None,
                 }),
                 depth: 1,
             }
         }));
         let n = items.len() - 1;
-        let State::Ready(doc) = &self.state else {
-            return;
-        };
         let after = doc.model.state().outline.last().map(|o| o.id);
         self.apply_batch(
             vec![sheaf_doc::Edit::OutlineInsertTree {

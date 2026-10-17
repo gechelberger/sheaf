@@ -89,7 +89,7 @@ where
     };
     match result {
         Ok(()) => 0,
-        Err(e) if e.is::<sheaf_progress::Cancelled>() => {
+        Err(e) if sheaf_ops::was_cancelled(&e) => {
             eprintln!("cancelled");
             CANCELLED
         }

@@ -1,5 +1,6 @@
 use super::*;
-use lopdf::{Stream, dictionary};
+use lopdf::{Document as Pdf, Stream, dictionary};
+use sheaf_core::Rotation;
 
 fn mark(kind: AnnotKind) -> Annot {
     Annot {
@@ -15,6 +16,7 @@ fn mark(kind: AnnotKind) -> Annot {
         fill: None,
         dashed: false,
         cloudy: false,
+        turn: Rotation::R0,
         name: String::new(),
     }
 }
@@ -51,18 +53,16 @@ fn close(a: &serde_json::Value, b: &serde_json::Value) -> bool {
     }
 }
 
-/// `a` as sheaf writes it, read back as another tool's: the same mark.
-fn round_trip(a: &Annot, rotate: i32) {
-    let geom = PageGeom {
-        media: [0.0, 0.0, 612.0, 792.0],
-        rotate,
-    };
+/// `a`, turned `turn`, as sheaf writes it, read back as another tool's on
+/// a page that shows it so: the same mark.
+fn round_trip(a: &Annot, turn: Rotation) {
+    let a = &Annot { turn, ..a.clone() };
     let mut pdf = Pdf::with_version("1.7");
-    let mut forms = Default::default();
-    let mut main = crate::annot::to_pdf_in(a, &geom, &mut pdf, &mut forms).main;
+    let mut main = crate::annot::to_pdf(a, &mut pdf).main;
     main.remove(b"SheafAnnot");
-    let back = convert(&pdf, &main, &geom, Options::default())
+    let back = convert(&pdf, &main, turn, Options::default())
         .unwrap_or_else(|e| panic!("{:?}: {e:?}", a.kind));
+    let rotate = turn.degrees();
     let (want, got) = (
         serde_json::to_value(&a.kind).unwrap(),
         serde_json::to_value(&back.kind).unwrap(),
@@ -73,6 +73,7 @@ fn round_trip(a: &Annot, rotate: i32) {
         (&back.author[..], &back.modified[..], &back.created[..]),
         (&a.author[..], &a.modified[..], &a.created[..])
     );
+    assert_eq!(back.turn, turn);
     assert!((back.opacity - a.opacity).abs() < 0.01);
     assert_eq!(
         (back.fill, back.dashed, back.cloudy),
@@ -170,19 +171,15 @@ fn our_own_marks_read_back_as_themselves() {
             scale: Box::new(feet()),
         }),
     ];
-    for rotate in [0, 90] {
+    for turn in [Rotation::R0, Rotation::R90] {
         for a in &marks {
-            round_trip(a, rotate);
+            round_trip(a, turn);
         }
     }
 }
 
 #[test]
 fn free_text_takes_its_color_from_its_appearance_string() {
-    let geom = PageGeom {
-        media: [0.0, 0.0, 612.0, 792.0],
-        rotate: 0,
-    };
     let pdf = Pdf::with_version("1.7");
     let dict = dictionary! {
         "Subtype" => "FreeText",
@@ -191,7 +188,7 @@ fn free_text_takes_its_color_from_its_appearance_string() {
         "C" => vec![1.into(), 1.into(), 0.into()],
         "Contents" => Object::string_literal("Tick and tie"),
     };
-    let a = convert(&pdf, &dict, &geom, Options::default()).unwrap();
+    let a = convert(&pdf, &dict, Rotation::R0, Options::default()).unwrap();
     assert_eq!(a.color, [0, 0, 255]);
     let AnnotKind::FreeText { rect, size } = a.kind else {
         panic!("{:?}", a.kind)
@@ -200,7 +197,7 @@ fn free_text_takes_its_color_from_its_appearance_string() {
     // No /RD: in by half the border, which defaults to 1.
     assert!(close(
         &serde_json::to_value(rect).unwrap(),
-        &serde_json::to_value(b(100.5, 152.5, 199.0, 39.0)).unwrap()
+        &serde_json::to_value(b(100.5, 600.5, 199.0, 39.0)).unwrap()
     ));
     // Without /NM, it's named as the panel names it.
     assert_eq!(a.name, thread_name(&dict));
@@ -209,10 +206,6 @@ fn free_text_takes_its_color_from_its_appearance_string() {
 
 #[test]
 fn replies_statuses_and_replacements_keep_their_threads() {
-    let geom = PageGeom {
-        media: [0.0, 0.0, 612.0, 792.0],
-        rotate: 0,
-    };
     let mut pdf = Pdf::with_version("1.7");
     let r = || vec![100.into(), 100.into(), 110.into(), 112.into()];
     let caret = pdf.add_object(dictionary! {
@@ -248,7 +241,7 @@ fn replies_statuses_and_replacements_keep_their_threads() {
         &popup,
         &sound,
     ];
-    let out = convert_page(&pdf, &all, &geom, Options::default());
+    let out = convert_page(&pdf, &all, Rotation::R0, Options::default());
     match &out[0] {
         Ok(Annot {
             kind: AnnotKind::Replace { rects, at, .. },
@@ -260,11 +253,11 @@ fn replies_statuses_and_replacements_keep_their_threads() {
             assert_eq!(contents, "the");
             assert!(close(
                 &serde_json::to_value(rects).unwrap(),
-                &serde_json::to_value([b(110.0, 680.0, 30.0, 12.0)]).unwrap()
+                &serde_json::to_value([b(110.0, 100.0, 30.0, 12.0)]).unwrap()
             ));
             assert!(close(
                 &serde_json::to_value(at).unwrap(),
-                &serde_json::to_value(b(100.0, 680.0, 10.0, 12.0)).unwrap()
+                &serde_json::to_value(b(100.0, 100.0, 10.0, 12.0)).unwrap()
             ));
         }
         other => panic!("{other:?}"),
@@ -286,10 +279,6 @@ fn replies_statuses_and_replacements_keep_their_threads() {
 
 #[test]
 fn a_stamp_keeps_its_appearance() {
-    let geom = PageGeom {
-        media: [0.0, 0.0, 612.0, 792.0],
-        rotate: 0,
-    };
     let mut pdf = Pdf::with_version("1.7");
     let form = pdf.add_object(Stream::new(
         dictionary! {
@@ -303,7 +292,7 @@ fn a_stamp_keeps_its_appearance() {
         "Rect" => vec![100.into(), 600.into(), 200.into(), 640.into()],
         "AP" => dictionary! { "N" => form },
     };
-    let a = convert(&pdf, &dict, &geom, Options::default()).unwrap();
+    let a = convert(&pdf, &dict, Rotation::R0, Options::default()).unwrap();
     let AnnotKind::PageStamp {
         stamp, name, rect, ..
     } = &a.kind
@@ -311,12 +300,12 @@ fn a_stamp_keeps_its_appearance() {
         panic!("{:?}", a.kind)
     };
     assert_eq!(name, "Approved");
-    assert_eq!(*rect, b(100.0, 152.0, 100.0, 40.0));
+    assert_eq!(*rect, b(100.0, 600.0, 100.0, 40.0));
     let page = Pdf::load(crate::generated::path_of(stamp).unwrap()).unwrap();
     assert_eq!(page.get_pages().len(), 1);
     // With no appearance, its name in a frame.
     let mut bare = dict.clone();
     bare.remove(b"AP");
-    let a = convert(&pdf, &bare, &geom, Options::default()).unwrap();
+    let a = convert(&pdf, &bare, Rotation::R0, Options::default()).unwrap();
     assert!(matches!(&a.kind, AnnotKind::TextStamp { text, .. } if text == "APPROVED"));
 }

@@ -30,7 +30,7 @@ pub fn write(snap: &Snapshot) -> Result<Option<usize>> {
         .source(snap.primary)
         .context("primary source missing")?;
     let (original_len, section) = crate::incremental::incremental_section(snap)?;
-    let sidecar = sidecar_path(&info.path);
+    let sidecar = sidecar_path(&info.name);
     if section.is_empty() {
         let _ = std::fs::remove_file(&sidecar);
         return Ok(None);
@@ -102,8 +102,9 @@ mod tests {
     use super::*;
     use crate::history::FixedCount;
     use crate::model::{Document, Edit, SourceInfo};
+    use crate::store::Store;
     use lopdf::{Document as Pdf, Object, Stream, dictionary};
-    use sheaf_core::{PageSize, Rotation};
+    use sheaf_core::Rotation;
 
     fn two_page_pdf(path: &Path) {
         let mut pdf = Pdf::with_version("1.7");
@@ -135,23 +136,9 @@ mod tests {
         let pdf = dir.join("doc.pdf");
         two_page_pdf(&pdf);
         let bytes = std::fs::metadata(&pdf).unwrap().len() as usize;
-        let mut model = Document::new(
-            SourceInfo {
-                path: pdf.clone(),
-                page_count: 2,
-                first_page: PageSize {
-                    width: 612.0,
-                    height: 792.0,
-                },
-                page_sizes: None,
-                bytes,
-                password: None,
-                data: None,
-                derived: None,
-            },
-            &[],
-            Box::new(FixedCount(10)),
-        );
+        let store = Store::new();
+        let primary = SourceInfo::read(&store, &pdf, None).unwrap();
+        let mut model = Document::new(store, primary, &[], Box::new(FixedCount(10)));
         // Nothing unsaved: no sidecar.
         assert_eq!(write(&model.snapshot()).unwrap(), None);
         assert!(find(&pdf).is_none());
@@ -204,24 +191,9 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let pdf = dir.join("doc.pdf");
         two_page_pdf(&pdf);
-        let bytes = std::fs::metadata(&pdf).unwrap().len() as usize;
-        let mut model = Document::new(
-            SourceInfo {
-                path: pdf.clone(),
-                page_count: 2,
-                first_page: PageSize {
-                    width: 612.0,
-                    height: 792.0,
-                },
-                page_sizes: None,
-                bytes,
-                password: None,
-                data: None,
-                derived: None,
-            },
-            &[],
-            Box::new(FixedCount(10)),
-        );
+        let store = Store::new();
+        let primary = SourceInfo::read(&store, &pdf, None).unwrap();
+        let mut model = Document::new(store, primary, &[], Box::new(FixedCount(10)));
         let p1 = model.page(1).unwrap().id;
         let layer = TextLayer::from_engine(
             vec![OcrWord {
@@ -234,11 +206,7 @@ mod tests {
                 },
                 confidence: 1.0,
             }],
-            PageSize {
-                width: 612.0,
-                height: 792.0,
-            },
-            Rotation::R0,
+            &crate::geom::Geom::read(None, None, 0),
             "test",
         );
         model

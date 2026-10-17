@@ -41,22 +41,29 @@ pub struct StampsPanel {
     pub scroll: ScrollHandle,
 }
 
-/// The library, and each stamp's page in the generated-file cache.
+/// The library, and each stamp's page.
 pub struct Library {
     pub collections: Vec<Collection>,
-    /// By collection, then stamp: its cache name, when it could be made.
-    pub stems: Vec<Vec<Option<String>>>,
+    /// By collection, then stamp: its page, when it could be made.
+    pub pages: Vec<Vec<Option<StampPage>>>,
     pub favorites: Vec<StampRef>,
 }
 
+/// A library stamp's page: a one-page PDF, and its stem, the name the
+/// generated-file cache gives it, which marks name it by.
+pub struct StampPage {
+    pub stem: String,
+    pub pdf: Arc<[u8]>,
+}
+
 impl Library {
-    /// A library stamp's collection, index, and cache name.
-    fn stamp(&self, r: &StampRef) -> Option<(&Collection, usize, Option<&String>)> {
+    /// A library stamp's collection, index, and page.
+    fn stamp(&self, r: &StampRef) -> Option<(&Collection, usize, Option<&StampPage>)> {
         let (c, s) = lib::find(&self.collections, r)?;
         Some((
             &self.collections[c],
             s,
-            self.stems
+            self.pages
                 .get(c)
                 .and_then(|v| v.get(s))
                 .and_then(Option::as_ref),
@@ -109,33 +116,37 @@ impl DocView {
     }
 
     /// Read the library again (off the main thread), with each stamp's
-    /// page put in the cache for its picture and for placing.
+    /// page, for its picture and for placing. Each is put in the
+    /// generated-file cache too, where a mark naming it by its stem
+    /// without the page finds it (until M10.5 slice 19).
     pub(crate) fn load_stamps(&mut self, cx: &mut Context<Self>) {
         if let Some(p) = &mut self.stamps {
             p.loading = true;
         }
         let task = cx.background_executor().spawn(async move {
             let collections = lib::list();
-            let stems = collections
+            let pages = collections
                 .iter()
                 .map(|c| match lib::each_stamp(c) {
                     Ok(pdfs) => pdfs
-                        .iter()
-                        .map(|b| {
-                            sheaf_doc::generated::store(b)
-                                .ok()
-                                .map(|p| sheaf_doc::generated::stem_of(&p))
+                        .into_iter()
+                        .map(|pdf| {
+                            let path = sheaf_doc::generated::store(&pdf).ok()?;
+                            Some(StampPage {
+                                stem: sheaf_doc::generated::stem_of(&path),
+                                pdf: pdf.into(),
+                            })
                         })
                         .collect(),
                     Err(e) => {
                         log::warn!("stamps in {}: {e:#}", c.path.display());
-                        vec![None; c.stamps.len()]
+                        c.stamps.iter().map(|_| None).collect()
                     }
                 })
                 .collect();
             Library {
                 collections,
-                stems,
+                pages,
                 favorites: lib::favorites_in(&lib::dir()),
             }
         });
@@ -198,19 +209,25 @@ impl DocView {
             }
             None => {
                 let library = self.stamps.as_ref().and_then(|s| s.library.clone());
-                let Some((c, i, Some(stem))) = library.as_deref().and_then(|l| l.stamp(&choice))
-                else {
+                let (State::Ready(doc), Some((c, i, Some(page)))) = (
+                    &mut self.state,
+                    library.as_deref().and_then(|l| l.stamp(&choice)),
+                ) else {
                     if let State::Ready(doc) = &mut self.state {
                         doc.notice = Some(format!("Stamp {} isn't ready", choice.name));
                     }
                     cx.notify();
                     return;
                 };
+                // The document keeps its page from now on.
+                doc.model
+                    .assets()
+                    .intern_stamp(&page.stem, page.pdf.clone());
                 let page_size = c.stamps[i].size;
                 let w = height * page_size.width / page_size.height.max(1.0);
                 AnnotKind::PageStamp {
                     rect: centred(w, height),
-                    stamp: stem.clone(),
+                    stamp: page.stem.clone(),
                     name: choice.name.clone(),
                     text: c.stamps[i].text.as_deref().map(fill),
                 }
@@ -500,10 +517,10 @@ impl DocView {
                 None => match library
                     .as_deref()
                     .and_then(|l| l.stamp(&r))
-                    .and_then(|(_, _, stem)| stem)
-                    .and_then(|stem| crate::stamp_preview::picture(stem))
+                    .and_then(|(_, _, page)| page)
+                    .and_then(|page| crate::stamp_preview::library_picture(&page.stem, &page.pdf))
                 {
-                    Some(path) => img(path)
+                    Some(image) => img(image)
                         .w(px(TILE_W - 8.0))
                         .h(px(TILE_H - 8.0))
                         .object_fit(ObjectFit::Contain)

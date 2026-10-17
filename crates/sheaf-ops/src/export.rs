@@ -6,11 +6,11 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use in_progress::Progress;
 use sheaf_core::{PageIndex, Rotation};
-use sheaf_doc::{PageId, Snapshot};
+use sheaf_doc::{PAGES, PageId, Snapshot};
 use sheaf_image::encode::{TiffPage, TiffWriter};
 use sheaf_image::raster::{PixelFormat, Raster};
-use sheaf_progress::{Progress, Unit};
 use sheaf_render::pdfium::PdfiumEngine;
 use sheaf_render::{Job, Renderer};
 
@@ -80,7 +80,7 @@ pub fn run(snapshot: &Snapshot, job: &ExportJob, progress: &dyn Progress) -> Res
     progress.check()?;
     let engine = flattened(snapshot, &job.pages, job.markup)?;
     let n = engine.page_count() as usize;
-    progress.set_total(Some(n as u64), Unit::Pages);
+    progress.set_total(Some(n as u64), PAGES);
     std::fs::create_dir_all(&job.dir).with_context(|| format!("creating {}", job.dir.display()))?;
     if job.format == Format::Text {
         let path = job.dir.join(format!("{}.txt", job.stem));
@@ -297,28 +297,18 @@ mod tests {
             dir: dir.clone(),
             stem: "x".into(),
         };
-        let snapshot = sheaf_doc::Document::new(
-            sheaf_doc::SourceInfo {
-                path: "none.pdf".into(),
-                page_count: 1,
-                first_page: sheaf_core::PageSize {
-                    width: 612.0,
-                    height: 792.0,
-                },
-                page_sizes: None,
-                bytes: 0,
-                password: None,
-                data: None,
-                derived: None,
-            },
-            &[],
-            sheaf_doc::history::default_policy(),
-        )
-        .snapshot();
-        let tracker = sheaf_progress::Tracker::new();
+        let store = sheaf_doc::Store::new();
+        let primary = sheaf_doc::SourceInfo {
+            name: "none.pdf".into(),
+            ..sheaf_doc::SourceInfo::blank(&store, 1)
+        };
+        let snapshot =
+            sheaf_doc::Document::new(store, primary, &[], sheaf_doc::history::default_policy())
+                .snapshot();
+        let tracker = crate::Tracker::new();
         tracker.cancel();
         let err = run(&snapshot, &job, &tracker).unwrap_err();
-        assert!(err.is::<sheaf_progress::Cancelled>());
+        assert!(err.is::<crate::Cancelled>() && crate::was_cancelled(&err));
         assert!(!dir.exists());
     }
 

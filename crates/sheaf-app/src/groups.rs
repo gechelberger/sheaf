@@ -125,7 +125,7 @@ impl DocView {
         cx: &mut Context<Self>,
     ) {
         let members = match &self.state {
-            State::Ready(doc) => doc.model.state().group_members(&group),
+            State::Ready(doc) => doc.model.group_members(&group),
             _ => return,
         };
         let n = members.len();
@@ -149,8 +149,8 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        let st = doc.model.state();
-        let mut on: Vec<usize> = st
+        let mut on: Vec<usize> = doc
+            .model
             .group_members(&group)
             .into_iter()
             .map(|(i, _, _)| i)
@@ -159,7 +159,9 @@ impl DocView {
         let pages: Vec<usize> = if with {
             on
         } else {
-            (0..st.pages.len()).filter(|i| !on.contains(i)).collect()
+            (0..doc.model.state().pages.len())
+                .filter(|i| !on.contains(i))
+                .collect()
         };
         doc.group_list = Some(GroupList {
             title: format!(
@@ -195,7 +197,6 @@ impl DocView {
         let placed = match &self.state {
             State::Ready(doc) => doc
                 .model
-                .state()
                 .group_members(&Group::Connector(label.clone()))
                 .len(),
             _ => 0,

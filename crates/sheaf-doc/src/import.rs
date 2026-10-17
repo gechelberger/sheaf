@@ -6,9 +6,11 @@
 //! The mark keeps the annotation's `/NM` ([`Annot::name`]), so replies to
 //! it still find it, and a save puts the mark where the annotation was.
 
-use lopdf::{Dictionary, Document as Pdf, Object};
+use lopdf::{Dictionary, Object};
+use sheaf_core::Rotation;
 
-use crate::annot::{Annot, AnnotId, AnnotKind, Box2, PageGeom, Pt, REVIEW};
+use crate::annot::{Annot, AnnotId, AnnotKind, Box2, Pt, REVIEW};
+use crate::attachments::Objects;
 use crate::file::{pdf_text, thread_name};
 
 /// What a conversion may do beyond reading the dictionary.
@@ -32,14 +34,14 @@ pub enum NotAMark {
     Part,
 }
 
-/// Each of a page's annotations (`dicts`, in order) as a mark, on a page
-/// with `geom`. A replacement's StrikeOut, grouped under its Caret, is
-/// folded into the Caret's mark. `pdf` resolves references (`/IRT`, `/AP`,
-/// `/FS`).
-pub fn convert_page(
-    pdf: &Pdf,
+/// Each of a page's annotations (`dicts`, in order) as a mark that reads
+/// upright turned `turn`, as the page shows. A replacement's StrikeOut,
+/// grouped under its Caret, is folded into the Caret's mark. `pdf`
+/// resolves references (`/IRT`, `/AP`, `/FS`).
+pub fn convert_page<P: Objects + ?Sized>(
+    pdf: &P,
     dicts: &[&Dictionary],
-    geom: &PageGeom,
+    turn: Rotation,
     opts: Options,
 ) -> Vec<Result<Annot, NotAMark>> {
     let names: Vec<String> = dicts.iter().map(|d| thread_name(d)).collect();
@@ -53,7 +55,7 @@ pub fn convert_page(
         }
     }
     let mut out: Vec<Result<Annot, NotAMark>> =
-        dicts.iter().map(|d| convert(pdf, d, geom, opts)).collect();
+        dicts.iter().map(|d| convert(pdf, d, turn, opts)).collect();
     for (i, d) in dicts.iter().enumerate() {
         let Some(kids) = parts.get(&names[i]) else {
             continue;
@@ -87,11 +89,12 @@ pub fn convert_page(
     out
 }
 
-/// `dict` as a mark on a page with `geom`.
-pub fn convert(
-    pdf: &Pdf,
+/// `dict` as a mark that reads upright turned `turn`. Its geometry is the
+/// standard keys', which are PageSpace.
+pub fn convert<P: Objects + ?Sized>(
+    pdf: &P,
     dict: &Dictionary,
-    geom: &PageGeom,
+    turn: Rotation,
     opts: Options,
 ) -> Result<Annot, NotAMark> {
     let sub = subtype(dict);
@@ -104,7 +107,7 @@ pub fn convert(
     let unsupported = || NotAMark::Unsupported(sub.clone());
     let rect = numbers(pdf, dict, b"Rect")
         .filter(|r| r.len() == 4)
-        .map(|r| user_box(geom, [r[0], r[1], r[2], r[3]]))
+        .map(|r| user_box([r[0], r[1], r[2], r[3]]))
         .ok_or_else(unsupported)?;
     let text = |key: &[u8]| dict.get(key).map(pdf_text).unwrap_or_default();
     let stroke = border_width(pdf, dict);
@@ -113,18 +116,12 @@ pub fn convert(
     let within = |border: f32| match numbers(pdf, dict, b"RD").filter(|d| d.len() == 4) {
         Some(d) => {
             let r = numbers(pdf, dict, b"Rect").unwrap_or_default();
-            user_box(geom, [r[0] + d[0], r[1] + d[1], r[2] - d[2], r[3] - d[3]])
+            user_box([r[0] + d[0], r[1] + d[1], r[2] - d[2], r[3] - d[3]])
         }
         None => inset(rect, border),
     };
     let inner = || within(stroke / 2.0);
-    let point = |x: f32, y: f32| geom.to_display(Pt { x, y });
-    let points = |v: &[f32]| -> Vec<Pt> {
-        v.chunks(2)
-            .filter(|c| c.len() == 2)
-            .map(|c| point(c[0], c[1]))
-            .collect()
-    };
+    let point = |x: f32, y: f32| Pt { x, y };
     let mut color = color_of(pdf, dict, b"C");
     let kind = match sub.as_str() {
         "Text" => {
@@ -142,14 +139,9 @@ pub fn convert(
             }
         }
         "Highlight" | "Underline" | "StrikeOut" | "Squiggly" => {
-            let rects = match numbers(pdf, dict, b"QuadPoints") {
-                Some(q) if q.len() >= 8 => q
-                    .chunks(8)
-                    .filter(|c| c.len() == 8)
-                    .map(|c| bounds(&points(c)))
-                    .collect(),
-                _ => vec![rect],
-            };
+            let rects = quads(pdf, dict)
+                .filter(|q| !q.is_empty())
+                .unwrap_or_else(|| vec![rect]);
             match sub.as_str() {
                 "Highlight" => {
                     color = color.or(Some([255, 230, 0]));
@@ -208,23 +200,9 @@ pub fn convert(
             }
         }
         "Ink" => {
-            let paths: Vec<Vec<Pt>> = match dict
-                .get(b"InkList")
-                .ok()
-                .and_then(|o| pdf.dereference(o).ok())
-            {
-                Some((_, Object::Array(strokes))) => strokes
-                    .iter()
-                    .filter_map(|s| pdf.dereference(s).ok())
-                    .filter_map(|(_, s)| s.as_array().ok())
-                    .map(|s| points(&floats(pdf, s)))
-                    .filter(|p| !p.is_empty())
-                    .collect(),
-                _ => Vec::new(),
-            };
-            if paths.is_empty() {
-                return Err(unsupported());
-            }
+            let paths = ink(pdf, dict)
+                .filter(|p| !p.is_empty())
+                .ok_or_else(unsupported)?;
             AnnotKind::Ink { paths }
         }
         "Polygon" | "PolyLine" => {
@@ -267,7 +245,7 @@ pub fn convert(
             .ok()
             .and_then(|o| o.as_float().ok())
             .unwrap_or(1.0)
-            .clamp(0.0, 1.0),
+            .clamp(0.0, 1.0) as f32,
         stroke,
         author: text(b"T"),
         contents,
@@ -283,6 +261,7 @@ pub fn convert(
             .and_then(|be| be.get(b"S").ok())
             .and_then(|s| s.as_name().ok())
             .is_some_and(|s| s == b"C"),
+        turn,
         name: thread_name(dict),
     })
 }
@@ -299,7 +278,7 @@ fn measured(dict: &Dictionary) -> Option<crate::measure::Measured> {
 }
 
 /// Its `/Measure` as a scale.
-fn scale(pdf: &Pdf, dict: &Dictionary) -> Option<crate::measure::Scale> {
+fn scale<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary) -> Option<crate::measure::Scale> {
     let (_, m) = pdf.dereference(dict.get(b"Measure").ok()?).ok()?;
     crate::measure::scale_of(pdf, m.as_dict().ok()?)
 }
@@ -328,7 +307,7 @@ fn measure(
 
 /// A stamp: its appearance as one of ours, in the cache, when it has one
 /// sheaf can read; else a text stamp saying its name.
-fn stamp(pdf: &Pdf, dict: &Dictionary, rect: Box2) -> AnnotKind {
+fn stamp<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary, rect: Box2) -> AnnotKind {
     let name = dict
         .get(b"Name")
         .ok()
@@ -372,7 +351,7 @@ fn stamp(pdf: &Pdf, dict: &Dictionary, rect: Box2) -> AnnotKind {
 }
 
 /// An attachment, its embedded file copied into the cache.
-fn attachment(pdf: &Pdf, dict: &Dictionary, rect: Box2) -> Option<AnnotKind> {
+fn attachment<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary, rect: Box2) -> Option<AnnotKind> {
     let deref_dict = |o: &Object| pdf.dereference(o).ok()?.1.as_dict().ok().cloned();
     let fs = deref_dict(dict.get(b"FS").ok()?)?;
     let ef = deref_dict(fs.get(b"EF").ok()?)?;
@@ -427,7 +406,7 @@ fn is_grouped(dict: &Dictionary) -> bool {
 
 /// What `/IRT` names: the annotation it refers to, by its name, or (as
 /// XFDF gives it) the name itself.
-pub fn irt_name(pdf: &Pdf, dict: &Dictionary) -> Option<String> {
+pub fn irt_name<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary) -> Option<String> {
     match dict.get(b"IRT").ok()? {
         Object::Reference(id) => pdf.get_dictionary(*id).ok().map(thread_name),
         o @ Object::String(..) => Some(pdf_text(o)).filter(|n| !n.is_empty()),
@@ -435,28 +414,57 @@ pub fn irt_name(pdf: &Pdf, dict: &Dictionary) -> Option<String> {
     }
 }
 
-fn floats(pdf: &Pdf, a: &[Object]) -> Vec<f32> {
+/// `/InkList`'s strokes, those with points.
+pub(crate) fn ink<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary) -> Option<Vec<Vec<Pt>>> {
+    let (_, list) = pdf.dereference(dict.get(b"InkList").ok()?).ok()?;
+    Some(
+        list.as_array()
+            .ok()?
+            .iter()
+            .filter_map(|s| pdf.dereference(s).ok())
+            .filter_map(|(_, s)| s.as_array().ok())
+            .map(|s| points(&floats(pdf, s)))
+            .filter(|p| !p.is_empty())
+            .collect(),
+    )
+}
+
+/// `/QuadPoints` as the box each quad bounds.
+pub(crate) fn quads<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary) -> Option<Vec<Box2>> {
+    let q = numbers(pdf, dict, b"QuadPoints")?;
+    let quads = q.as_chunks::<8>().0;
+    Some(quads.iter().map(|c| bounds(&points(c))).collect())
+}
+
+/// Coordinates `[x0 y0 x1 y1 …]` as points.
+pub(crate) fn points(v: &[f32]) -> Vec<Pt> {
+    let pairs = v.as_chunks::<2>().0;
+    pairs.iter().map(|&[x, y]| Pt { x, y }).collect()
+}
+
+fn floats<P: Objects + ?Sized>(pdf: &P, a: &[Object]) -> Vec<f32> {
     a.iter()
         .map(|o| {
             pdf.dereference(o)
                 .ok()
                 .and_then(|(_, o)| o.as_float().ok())
-                .unwrap_or(0.0)
+                .unwrap_or(0.0) as f32
         })
         .collect()
 }
 
-fn numbers(pdf: &Pdf, dict: &Dictionary, key: &[u8]) -> Option<Vec<f32>> {
+pub(crate) fn numbers<P: Objects + ?Sized>(
+    pdf: &P,
+    dict: &Dictionary,
+    key: &[u8],
+) -> Option<Vec<f32>> {
     let (_, o) = pdf.dereference(dict.get(key).ok()?).ok()?;
     Some(floats(pdf, o.as_array().ok()?))
 }
 
-/// A user-space box `[x0 y0 x1 y1]` as shown.
-fn user_box(geom: &PageGeom, r: [f32; 4]) -> Box2 {
-    Box2::from_corners(
-        geom.to_display(Pt { x: r[0], y: r[1] }),
-        geom.to_display(Pt { x: r[2], y: r[3] }),
-    )
+/// A user-space box `[x0 y0 x1 y1]`, in either order, as a mark's.
+pub(crate) fn user_box(r: [f32; 4]) -> Box2 {
+    Box2::from_corners(Pt { x: r[0], y: r[1] }, Pt { x: r[2], y: r[3] })
 }
 
 fn bounds(points: &[Pt]) -> Box2 {
@@ -480,7 +488,8 @@ fn icon_at(rect: Box2) -> Pt {
     }
 }
 
-fn inset(r: Box2, d: f32) -> Box2 {
+/// `r` with `d` off each side, but never past its middle.
+pub(crate) fn inset(r: Box2, d: f32) -> Box2 {
     let d = d.min(r.w / 2.0).min(r.h / 2.0).max(0.0);
     Box2 {
         x: r.x + d,
@@ -491,7 +500,7 @@ fn inset(r: Box2, d: f32) -> Box2 {
 }
 
 /// `/BS /W`, else `/Border`'s width, else 1.
-fn border_width(pdf: &Pdf, dict: &Dictionary) -> f32 {
+fn border_width<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary) -> f32 {
     let bs = dict
         .get(b"BS")
         .ok()
@@ -501,20 +510,20 @@ fn border_width(pdf: &Pdf, dict: &Dictionary) -> f32 {
         .and_then(|bs| bs.get(b"W").ok())
         .and_then(|w| w.as_float().ok())
     {
-        return w;
+        return w as f32;
     }
     numbers(pdf, dict, b"Border")
         .and_then(|b| b.get(2).copied())
         .unwrap_or(1.0)
 }
 
-fn border_style(pdf: &Pdf, dict: &Dictionary) -> Option<Vec<u8>> {
+fn border_style<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary) -> Option<Vec<u8>> {
     let (_, bs) = pdf.dereference(dict.get(b"BS").ok()?).ok()?;
     Some(bs.as_dict().ok()?.get(b"S").ok()?.as_name().ok()?.to_vec())
 }
 
 /// `/C` or `/IC` as RGB: gray, RGB or CMYK; none when empty.
-fn color_of(pdf: &Pdf, dict: &Dictionary, key: &[u8]) -> Option<[u8; 3]> {
+fn color_of<P: Objects + ?Sized>(pdf: &P, dict: &Dictionary, key: &[u8]) -> Option<[u8; 3]> {
     let c = numbers(pdf, dict, key)?;
     let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
     match c.as_slice() {

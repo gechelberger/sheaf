@@ -2,7 +2,7 @@
 //! the call's own (`CallContext::progress`), which the app shows and can
 //! cancel. Handles are freed when the call that made them returns.
 
-use sheaf_progress::Tracker;
+use in_progress::Tracker;
 use wasmtime::component::Resource;
 
 use crate::runtime::HostState;
@@ -14,13 +14,15 @@ pub struct Task(pub(crate) Tracker);
 pub const MAX_TASKS: usize = 256;
 
 impl HostState {
+    /// Whether a new task can go under the call's tracker. Past the cap a
+    /// task gets a detached tracker instead: nobody sees it, and
+    /// `is-cancelled` asks the call. Ask before placing one, since dropping
+    /// a placed task fills its share.
+    pub(crate) fn has_task_room(&self) -> bool {
+        self.task_handles.len() < MAX_TASKS
+    }
+
     pub(crate) fn push_task(&mut self, t: Tracker) -> Resource<Task> {
-        // Past the cap, a detached tracker: it works, nobody sees it.
-        let t = if self.task_handles.len() >= MAX_TASKS {
-            Tracker::new()
-        } else {
-            t
-        };
         let r = self.table.push(Task(t)).expect("resource table full");
         self.task_handles.push(r.rep());
         r

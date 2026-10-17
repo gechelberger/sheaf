@@ -1,6 +1,7 @@
 //! Pixel-to-point mapping and word grouping shared by the engines.
 
-use sheaf_core::{PageSize, Rotation};
+use sheaf_core::PageSize;
+use sheaf_doc::geom::Geom;
 use sheaf_doc::{Box2, TextLayer};
 
 use crate::engine::OcrWord;
@@ -115,17 +116,16 @@ fn union(boxes: &[[f32; 4]]) -> [f32; 4] {
     })
 }
 
-/// Turn an engine's words for a page rendered at `rendered` points (as
-/// shown, i.e. after `upright`) into the model's layer.
+/// Turn an engine's words for the page `geom` rendered into a raster
+/// `raster_w` by `raster_h` pixels into the model's layer.
 pub fn layer_from_words(
     words: Vec<OcrWord>,
-    rendered: PageSize,
+    geom: &Geom,
     raster_w: u32,
     raster_h: u32,
-    upright: Rotation,
     engine: &str,
 ) -> TextLayer {
-    let m = PxToPt::new(rendered, raster_w, raster_h);
+    let m = PxToPt::new(geom.shown(), raster_w, raster_h);
     let words = words
         .into_iter()
         .map(|w| sheaf_doc::OcrWord {
@@ -134,7 +134,7 @@ pub fn layer_from_words(
             confidence: w.confidence,
         })
         .collect();
-    TextLayer::from_engine(words, rendered, upright, engine)
+    TextLayer::from_engine(words, geom, engine)
 }
 
 #[cfg(test)]
@@ -196,26 +196,34 @@ mod tests {
         assert!(words_from_line("   ", line, None, 0.9).is_empty());
     }
 
+    /// A word on a Letter page rendered turned 90°, 792 by 612 pixels:
+    /// its box in points as shown, then in PageSpace, where the top-left
+    /// as shown is the bottom-left.
     #[test]
-    fn layer_lands_in_points() {
-        let rendered = PageSize {
-            width: 792.0,
-            height: 612.0,
-        };
+    fn layer_lands_in_page_space() {
+        let geom = Geom::read(None, None, 90);
         let layer = layer_from_words(
             vec![OcrWord {
                 text: "x".into(),
                 bbox_px: [79.2, 61.2, 158.4, 122.4],
                 confidence: 1.0,
             }],
-            rendered,
+            &geom,
             792,
             612,
-            Rotation::R90,
             "test",
         );
-        assert_eq!(layer.upright, Rotation::R90);
-        assert_eq!(layer.page.width, 612.0);
+        assert_eq!(layer.upright, sheaf_core::Rotation::R90);
         assert_eq!(layer.words.len(), 1);
+        let r = layer.words[0].rect;
+        let want = Box2 {
+            x: 61.2,
+            y: 79.2,
+            w: 61.2,
+            h: 79.2,
+        };
+        for (got, want) in [(r.x, want.x), (r.y, want.y), (r.w, want.w), (r.h, want.h)] {
+            assert!((got - want).abs() < 1e-3, "{r:?}");
+        }
     }
 }

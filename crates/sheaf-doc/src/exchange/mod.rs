@@ -11,15 +11,15 @@ pub mod fdf;
 pub mod xfdf;
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId};
 
-use crate::annot::{AnnotId, PageGeom};
+use crate::annot::AnnotId;
+use crate::assets::MarkAssets;
 use crate::file::{ForeignAnnot, thread_name};
 use crate::import::{NotAMark, Options};
-use crate::model::{DocState, Edit, PageId, PageRef, SourceId, SourceInfo};
+use crate::model::{Edit, PageId, Snapshot, SourceId};
 
 /// Comments as dictionaries, each with its page (from 0). `pdf` holds
 /// what they refer to: appearances, files, the comments their `/IRT`
@@ -165,18 +165,20 @@ impl Imported {
     }
 }
 
-/// The edits that bring `comments` into the document `st` (with its
-/// `sources`, and the other tools' comments read from them, `foreign`):
-/// one comment whose `/NM` is one of our marks' updates it; one whose
-/// `/NM` is another tool's comment here takes its place, as making it
-/// editable does; the rest are added. Pages are counted in the document's
-/// order.
+/// The edits that bring `comments` into the document `snap` (with the
+/// other tools' comments read from its sources, `foreign`): one comment
+/// whose `/NM` is one of our marks' updates it; one whose `/NM` is another
+/// tool's comment here takes its place, as making it editable does; the
+/// rest are added. Pages are counted in the document's order, and a
+/// comment reads upright as its page shows. What our marks hold, a page
+/// stamp's page and an attachment's file, goes into the document's
+/// stamps and files where it has none of its own.
 pub fn import(
-    st: &DocState,
-    sources: &HashMap<SourceId, Arc<SourceInfo>>,
+    snap: &Snapshot,
     foreign: &[(SourceId, ForeignAnnot)],
     comments: &Comments,
 ) -> Imported {
+    let st = &snap.state;
     let mut out = Imported::default();
     let ours: HashMap<String, (PageId, AnnotId)> = st
         .annots
@@ -185,16 +187,20 @@ pub fn import(
         .collect();
     let theirs: std::collections::HashSet<&str> =
         foreign.iter().map(|(_, f)| f.name.as_str()).collect();
-    let mut geoms = Geoms::new(sources);
     let mut seen = std::collections::HashSet::new();
     // By page, so a replacement's parts meet.
-    let mut by_page: BTreeMap<u32, Vec<&Dictionary>> = BTreeMap::new();
-    for i in 0..comments.len() {
-        if let Some(d) = comments.dict(i) {
-            by_page.entry(comments.annots[i].0).or_default().push(d);
+    let mut by_page: BTreeMap<u32, Vec<ObjectId>> = BTreeMap::new();
+    for &(page, id) in &comments.annots {
+        if comments.pdf.get_dictionary(id).is_ok() {
+            by_page.entry(page).or_default().push(id);
         }
     }
-    for (page, dicts) in by_page {
+    for (page, ids) in by_page {
+        let entries: Vec<Object> = ids.iter().map(|&id| Object::Reference(id)).collect();
+        let dicts: Vec<&Dictionary> = ids
+            .iter()
+            .filter_map(|&id| comments.pdf.get_dictionary(id).ok())
+            .collect();
         let Some(pref) = st.pages.get(page as usize).copied() else {
             out.off_the_end += dicts
                 .iter()
@@ -202,14 +208,21 @@ pub fn import(
                 .count();
             continue;
         };
-        let geom = geoms.of(&pref);
-        let converted =
-            crate::import::convert_page(&comments.pdf, &dicts, &geom, Options { files: true });
-        for (dict, mark) in dicts.iter().zip(converted) {
+        let converted = crate::import::convert_page(
+            &comments.pdf,
+            &dicts,
+            pref.rotation,
+            Options { files: true },
+        );
+        let page_annots = crate::file::PageAnnots::new(&entries);
+        for ((dict, entry), mark) in dicts.iter().zip(&entries).zip(converted) {
             // One of sheaf's comes back exactly as it was, under the name
-            // it had there, so what replies to it there does here.
-            let mark = match crate::file::sheaf_mark(dict) {
+            // it had there, so what replies to it there does here; one
+            // another tool has edited since is that tool's.
+            let own = crate::file::sheaf_mark(&comments.pdf, entry, pref.rotation, &page_annots);
+            let mark = match own {
                 Some(mut a) => {
+                    bring_held(&comments.pdf, dict, &a, &snap.assets);
                     if a.name.is_empty() {
                         a.name = a.name();
                     }
@@ -257,20 +270,48 @@ pub fn import(
     out
 }
 
-/// Comments to write out: our marks and other tools' comments, as
-/// dictionaries in a [`Comments`], replies pointing at what they reply to
-/// when it's written too. `ours` and `foreign` (indexes into
+/// What `a`, one of our marks, holds in `pdf`, its dictionary `dict`, put
+/// in `assets` where they have no copy: its stamp's page, as a one-page
+/// PDF, or its file's bytes.
+fn bring_held(pdf: &Pdf, dict: &Dictionary, a: &crate::Annot, assets: &MarkAssets) {
+    use crate::annot::AnnotKind;
+    match &a.kind {
+        AnnotKind::PageStamp { stamp, .. } if assets.stamp(stamp).is_none() => {
+            let page = crate::file::stamp_page(pdf, dict)
+                .map(|form| crate::stamp_lib::form_to_pdf(pdf, form));
+            match page {
+                Some(Ok(page)) => assets.intern_stamp(stamp, page.into()),
+                Some(Err(e)) => log::warn!("stamp {stamp}: {e:#}"),
+                None => {}
+            }
+        }
+        AnnotKind::FileAttachment { file, .. } if assets.file(file).is_none() => {
+            let bytes = crate::file::attached_file(pdf, dict)
+                .and_then(|id| pdf.get_object(id).ok()?.as_stream().ok())
+                .map(crate::attachments::file_bytes);
+            match bytes {
+                Some(Ok(bytes)) => assets.intern_file(file, bytes.into()),
+                Some(Err(e)) => log::warn!("attachment {file}: {e:#}"),
+                None => {}
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Comments to write out of `snap`: our marks and other tools' comments,
+/// as dictionaries in a [`Comments`], replies pointing at what they reply
+/// to when it's written too. `ours` and `foreign` (indexes into
 /// `foreign_all`) say which; pages are counted in the document's order.
 pub fn gather(
-    st: &DocState,
-    sources: &HashMap<SourceId, Arc<SourceInfo>>,
+    snap: &Snapshot,
     foreign_all: &[(SourceId, ForeignAnnot)],
     ours: &[(PageId, AnnotId)],
     foreign: &[usize],
 ) -> Result<Comments> {
+    let (st, sources) = (&snap.state, &snap.sources);
     let mut out = Comments::new();
-    let mut geoms = Geoms::new(sources);
-    let mut forms = HashMap::new();
+    let mut cx = crate::annot::WriteCx::new(snap.assets.clone());
     // Each written comment's name and parent's name, to link them after.
     let mut names: HashMap<String, ObjectId> = HashMap::new();
     let mut parents: Vec<(ObjectId, String)> = Vec::new();
@@ -284,8 +325,7 @@ pub fn gather(
         else {
             continue;
         };
-        let geom = geoms.of(&st.pages[index]);
-        let written = crate::annot::to_pdf_in(a, &geom, &mut out.pdf, &mut forms);
+        let written = crate::annot::to_pdf_in(a, &mut out.pdf, &mut cx);
         let mut main = written.main;
         main.set("Page", index as i64);
         let main_id = out.pdf.add_object(Object::Dictionary(main));
@@ -314,7 +354,7 @@ pub fn gather(
         else {
             continue;
         };
-        let Some(src) = geoms.pdf(*source) else {
+        let Some(src) = sources.get(source).map(|s| &s.src) else {
             continue;
         };
         let Some(dict) = annot_in(src, f.page, f.slot) else {
@@ -333,7 +373,7 @@ pub fn gather(
         }
         let map = maps.entry(*source).or_default();
         let Ok(Object::Dictionary(mut copied)) =
-            crate::save::remap(src, &Object::Dictionary(dict), &mut out.pdf, map)
+            crate::save::remap(src.pdf(), &Object::Dictionary(dict), &mut out.pdf, map)
         else {
             continue;
         };
@@ -362,70 +402,15 @@ pub fn gather(
         .pages
         .front()
         .and_then(|p| sources.get(&p.source))
-        .and_then(|s| s.path.file_name())
+        .and_then(|s| s.name.file_name())
         .map(|n| n.to_string_lossy().into_owned());
     Ok(out)
 }
 
 /// Page `page`'s annotation in `/Annots` slot `slot`.
-fn annot_in(pdf: &Pdf, page: u32, slot: usize) -> Option<&Dictionary> {
-    let id = *pdf.get_pages().get(&(page + 1))?;
-    let list = pdf
-        .dereference(pdf.get_dictionary(id).ok()?.get(b"Annots").ok()?)
-        .ok()?
-        .1
-        .as_array()
-        .ok()?;
-    pdf.dereference(list.get(slot)?).ok()?.1.as_dict().ok()
-}
-
-/// The sources' files, loaded when first needed, and their pages' boxes.
-struct Geoms<'a> {
-    sources: &'a HashMap<SourceId, Arc<SourceInfo>>,
-    loaded: HashMap<SourceId, Option<Pdf>>,
-}
-
-impl<'a> Geoms<'a> {
-    fn new(sources: &'a HashMap<SourceId, Arc<SourceInfo>>) -> Self {
-        Geoms {
-            sources,
-            loaded: HashMap::new(),
-        }
-    }
-
-    fn pdf(&mut self, source: SourceId) -> Option<&Pdf> {
-        let sources = self.sources;
-        self.loaded
-            .entry(source)
-            .or_insert_with(|| {
-                let info = sources.get(&source)?;
-                crate::file::load_source(info)
-                    .map_err(|e| log::warn!("{}: {e:#}", info.path.display()))
-                    .ok()
-            })
-            .as_ref()
-    }
-
-    /// A page's box and rotation in its file, else its size, upright.
-    fn of(&mut self, pref: &PageRef) -> PageGeom {
-        if let Some(pdf) = self.pdf(pref.source)
-            && let Some(&id) = pdf.get_pages().get(&(pref.index + 1))
-        {
-            return crate::file::page_geom(pdf, id);
-        }
-        let size = self
-            .sources
-            .get(&pref.source)
-            .map(|s| s.page_size(pref.index))
-            .unwrap_or(sheaf_core::PageSize {
-                width: 612.0,
-                height: 792.0,
-            });
-        PageGeom {
-            media: [0.0, 0.0, size.width, size.height],
-            rotate: 0,
-        }
-    }
+fn annot_in(src: &crate::Source, page: u32, slot: usize) -> Option<&Dictionary> {
+    let entry = src.page(page)?.annots.get(slot)?;
+    src.pdf().dereference(entry).ok()?.1.as_dict().ok()
 }
 
 #[cfg(test)]

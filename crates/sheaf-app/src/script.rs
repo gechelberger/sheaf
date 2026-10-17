@@ -355,18 +355,22 @@ async fn mouse(
 }
 
 impl crate::docview::DocView {
-    /// Window position (logical px) of point (`x`, `y`) on page `page`, in
-    /// the page's own (file) orientation.
+    /// Window position (logical px) of point (`x`, `y`) on page `page`, on
+    /// the page as its file shows it (points from its top-left, y down).
     pub(crate) fn window_point(&self, page: usize, x: f32, y: f32) -> Option<(f32, f32)> {
         let crate::docview::State::Ready(doc) = &self.state else {
             return None;
         };
         let pane = doc.pane();
         let r = pane.layout.as_ref()?.rect(page)?;
-        let pref = doc.shown_ref(page)?;
-        let src = doc.model.source(pref.source)?.page_size(pref.index);
-        let shown = crate::markup_tools::rotate_pt(sheaf_doc::Pt { x, y }, src, pref.rotation);
-        let k = r.w / src.rotated(pref.rotation).width.max(1.0);
+        let pref = doc.page_ref(page)?;
+        let file = doc.model.source(pref.source)?.src.geom(pref.index);
+        let geom = doc.pane_geom(page)?;
+        let shown = file
+            .from_view()
+            .then(geom.to_view())
+            .apply(sheaf_doc::Pt { x, y });
+        let k = r.w / geom.shown().width.max(1.0);
         let b = pane.scroll.bounds();
         let off = pane.scroll.offset();
         Some((
@@ -499,7 +503,7 @@ impl Workspace {
                             a.fill,
                             a.stroke,
                             a.dashed,
-                            a.bounds()
+                            a.page_bounds()
                         );
                     }
                 }

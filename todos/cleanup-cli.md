@@ -39,6 +39,9 @@ and the CLI.
   We borrow ideas, not code: nesting, max/unit and levelled messages from
   prodash; weighted children and a `check()?` cancel from progress-token. No
   attribution is needed.
+
+  (2026-10-17: the crate was later published as `in-progress`, which sheaf
+  now takes from crates.io; see m10.5-edit-api.md, between slices 6 and 7.)
 - **Plugins get progress too**, through a WIT resource that mirrors the trait.
 - **Scan cleanup starts with the classic, pure-Rust path.** ML unwarping
   (UVDoc) comes in the slice after, opt-in only. See "UVDoc" below.

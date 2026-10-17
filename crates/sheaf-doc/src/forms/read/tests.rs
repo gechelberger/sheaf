@@ -1,22 +1,59 @@
-//! The form reader on forms built in code: every kind of field and what it
-//! inherits, its widgets on pages, the facts, and damaged trees, which
-//! read as not fillable; and hybrid-reference files, built and from the
-//! corpus. Then any tree at all, as a proptest.
+//! The form reader on forms built in code, written and read back from
+//! their sources: every kind of field and what it inherits, its widgets on
+//! pages, the facts, and damaged trees, which read as not fillable; and
+//! hybrid-reference files, built and from the corpus. Then any tree at
+//! all, as a proptest.
 
 use std::io::Write;
+use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 
-use lopdf::{Document as Pdf, Object, ObjectId, Stream, StringFormat, dictionary};
+use lopdf::{Object, ObjectId, Stream, StringFormat, dictionary};
 use proptest::prelude::*;
 
 use super::*;
+use crate::SourceInfo;
 use crate::forms::corpus::Corpus;
 use crate::forms::field::{annot_flags, flags};
-use crate::forms::fixture::{Form, every_kind, hybrid_reference, hybrid_update, row};
+use crate::forms::fixture::{Form, every_kind, hybrid_reference, hybrid_update, row, source};
+use crate::store::{BlobKind, Store};
 
 /// The form as a file holds it, written and read back.
 fn read_back(f: &mut Form) -> FileForm {
-    read(&Pdf::load_mem(&f.bytes()).unwrap())
+    read(&f.source())
+}
+
+/// [`read_back`] within `limits`.
+fn read_within(f: &mut Form, limits: FormLimits) -> FileForm {
+    let store = Store::with_limits(Limits {
+        forms: limits,
+        ..Limits::DEFAULT
+    });
+    let kind = BlobKind::file(Path::new("form.pdf"), None);
+    read(&store.open(f.bytes().into(), kind).unwrap())
+}
+
+/// A placeholder for a real past f64's range, which lopdf can't write:
+/// [`with_huge`] puts a 9, 318 zeros and a point in its place, which reads
+/// as infinity.
+fn huge() -> Object {
+    Object::string_literal("~".repeat(320))
+}
+
+/// `bytes` with each [`huge`] placeholder swapped for its real, byte for
+/// byte, so no offset moves. A string needs no space around it, so the
+/// real brings its own.
+fn with_huge(mut bytes: Vec<u8>) -> Vec<u8> {
+    let placeholder = format!("({})", "~".repeat(320));
+    let real = format!(" 9{}. ", "0".repeat(placeholder.len() - 4));
+    while let Some(at) = bytes
+        .windows(placeholder.len())
+        .position(|w| w == placeholder.as_bytes())
+    {
+        bytes[at..at + real.len()].copy_from_slice(real.as_bytes());
+    }
+    bytes
 }
 
 fn field<'a>(form: &'a FileForm, name: &str) -> &'a Field {
@@ -234,7 +271,7 @@ fn the_class_of_a_form() {
     let mut fields = damaged.fields();
     fields.rotate_right(1);
     damaged.set_fields(&fields);
-    let facts = read(&damaged.pdf).facts;
+    let facts = read_back(&mut damaged).facts;
     assert!(facts.damaged.is_some() && facts.xfa);
     assert_eq!((facts.class, facts.fields), (FormClass::Hybrid, 0));
 
@@ -361,7 +398,7 @@ fn shared_document_scripts_count_once() {
         "Names",
         dictionary! { "JavaScript" => dictionary! { "Kids" => kids } },
     );
-    let facts = read(&f.pdf).facts;
+    let facts = read_back(&mut f).facts;
     assert_eq!((facts.document_scripts, facts.version_checks), (2, 0));
 }
 
@@ -457,14 +494,14 @@ fn widgets_are_finite_and_clamped() {
         .add_object(dictionary! { "Type" => "Annot", "Subtype" => "Link" });
     f.set_annots(0, &[link]);
     let a = f.text("a", 0, row(0));
-    let rect = [300.0, f32::INFINITY, -2e9, 10.0].map(Object::Real);
+    let rect = [300.into(), huge(), (-2e9).into(), 10.into()];
     let d = f.dict(a);
     d.set("Rect", rect.to_vec());
     d.set(
         "MK",
         dictionary! {
             "BG" => vec![Object::Real(2.0)],
-            "BC" => vec![Object::Real(0.5), Object::Real(f32::NAN), Object::Integer(-1)],
+            "BC" => vec![Object::Real(0.5), huge(), Object::Integer(-1)],
             "R" => -90,
             "CA" => Object::string_literal("4"),
         },
@@ -488,7 +525,7 @@ fn widgets_are_finite_and_clamped() {
     let kid = f.widgets_of(pick)[0];
     f.dict(kid)
         .set("DA", Object::string_literal("/ZaDb 12 Tf 1 0 0 rg"));
-    let form = read(&f.pdf);
+    let form = read(&source(with_huge(f.bytes())));
     let [wa, wb, wk] = &form.widgets[&0][..] else {
         panic!("{:?}", form.widgets)
     };
@@ -524,8 +561,13 @@ fn widgets_are_finite_and_clamped() {
 }
 
 /// What damage reads as: no fields, and a reason.
-fn assert_damaged(f: &Form, why: &str) {
-    let form = read(&f.pdf);
+fn assert_damaged(f: &mut Form, why: &str) {
+    assert_damaged_within(f, Limits::DEFAULT.forms, why);
+}
+
+/// [`assert_damaged`] within `limits`.
+fn assert_damaged_within(f: &mut Form, limits: FormLimits, why: &str) {
+    let form = read_within(f, limits);
     let facts = &form.facts;
     let reason = facts
         .damaged
@@ -551,7 +593,7 @@ fn damaged_trees_are_not_fillable() {
     f.dict(a).set("Parent", b);
     f.dict(b).set("Parent", a);
     f.set_fields(&[a]);
-    assert_damaged(&f, "its own ancestor");
+    assert_damaged(&mut f, "its own ancestor");
 
     // A field that's its own kid and parent; and a widget that's its own
     // kid.
@@ -563,30 +605,39 @@ fn damaged_trees_are_not_fillable() {
     f.dict(a).set("Kids", vec![Object::Reference(a)]);
     f.dict(a).set("Parent", a);
     f.set_fields(&[ok, a]);
-    assert_damaged(&f, "its own ancestor");
+    assert_damaged(&mut f, "its own ancestor");
     let mut f = Form::new(1);
     let w = f.text("w", 0, row(0));
     f.dict(w).set("Kids", vec![Object::Reference(w)]);
-    assert_damaged(&f, "its own ancestor");
+    assert_damaged(&mut f, "its own ancestor");
 
-    // A thousand fields that share one /Kids array of a thousand: each kid
-    // is read once, but the lists come to a million entries.
+    // Smaller caps, for trees past them that would take long to build.
+    let small = FormLimits {
+        nodes: 1000,
+        entries: 2000,
+        widgets: 1000,
+        texts: 4 << 20,
+        ..Limits::DEFAULT.forms
+    };
+
+    // A hundred fields that share one /Kids array of a hundred: each kid
+    // is read once, but the lists come to ten thousand entries.
     let mut f = Form::new(1);
-    let kids: Vec<Object> = (0..1000)
+    let kids: Vec<Object> = (0..100)
         .map(|i| {
             let t = Object::string_literal(format!("k{i}"));
             Object::Reference(f.pdf.add_object(dictionary! { "FT" => "Tx", "T" => t }))
         })
         .collect();
     let kids = f.pdf.add_object(kids);
-    let parents: Vec<ObjectId> = (0..1000)
+    let parents: Vec<ObjectId> = (0..100)
         .map(|i| {
             let t = Object::string_literal(format!("p{i}"));
             f.pdf.add_object(dictionary! { "T" => t, "Kids" => kids })
         })
         .collect();
     f.set_fields(&parents);
-    assert_damaged(&f, "more than 200000 entries");
+    assert_damaged_within(&mut f, small, "more than 2000 entries");
 
     // A chain 10,000 deep.
     let mut f = Form::new(1);
@@ -600,22 +651,22 @@ fn damaged_trees_are_not_fillable() {
         below = up;
     }
     f.set_fields(&[below]);
-    assert_damaged(&f, "more than 32 deep");
+    assert_damaged(&mut f, "more than 32 deep");
 
-    // More than 100,000 fields.
+    // More fields than the cap.
     let mut f = Form::new(1);
-    let fields: Vec<ObjectId> = (0..=MAX_NODES)
+    let fields: Vec<ObjectId> = (0..=small.nodes)
         .map(|i| {
             let t = Object::string_literal(format!("f{i}"));
             f.pdf.add_object(dictionary! { "T" => t })
         })
         .collect();
     f.set_fields(&fields);
-    assert_damaged(&f, "more than 100000 nodes");
+    assert_damaged_within(&mut f, small, "more than 1000 nodes");
 
-    // More than 100,000 widgets on pages, under one field.
+    // More widgets on pages than the cap, under one field.
     let mut f = Form::new(1);
-    let widgets: Vec<ObjectId> = (0..=MAX_WIDGETS)
+    let widgets: Vec<ObjectId> = (0..=small.widgets)
         .map(|_| f.pdf.add_object(dictionary! { "Subtype" => "Widget" }))
         .collect();
     let kids: Vec<Object> = widgets.iter().map(|&w| Object::Reference(w)).collect();
@@ -624,13 +675,13 @@ fn damaged_trees_are_not_fillable() {
     });
     f.set_fields(&[many]);
     f.set_annots(0, &widgets);
-    assert_damaged(&f, "more than 100000 widgets");
+    assert_damaged_within(&mut f, small, "more than 1000 widgets");
 
     // A full name over 64 KiB.
     let mut f = Form::new(1);
     let kid = f.text("k", 0, row(0));
     f.group(&"n".repeat(70_000), &[kid]);
-    assert_damaged(&f, "longer than 64 KiB");
+    assert_damaged(&mut f, "longer than 64 KiB");
 
     // Full names over 64 MiB in all: a 65,000-byte name in each of 1,100
     // kids' names.
@@ -639,48 +690,49 @@ fn damaged_trees_are_not_fillable() {
         .map(|i| f.text(&format!("k{i}"), 0, row(0)))
         .collect();
     f.group(&"n".repeat(65_000), &kids);
-    assert_damaged(&f, "full names come to more than 64 MiB");
+    assert_damaged(&mut f, "full names come to more than 64 MiB");
 
+    let caps = Limits::DEFAULT.forms;
     // An /Opt with more than 10,000 items.
     let mut f = Form::new(1);
-    let items: Vec<String> = (0..=MAX_ITEMS).map(|i| i.to_string()).collect();
+    let items: Vec<String> = (0..=caps.items).map(|i| i.to_string()).collect();
     let items: Vec<&str> = items.iter().map(String::as_str).collect();
     f.choice("big", 0, row(0), &items, true);
-    assert_damaged(&f, "an /Opt has more than 10000 items");
+    assert_damaged(&mut f, "an /Opt has more than 10000 items");
     // And a list box's value.
     let mut f = Form::new(1);
     let list = f.choice("list", 0, row(0), &["a"], false);
-    let items = vec![Object::string_literal("a"); MAX_ITEMS + 1];
+    let items = vec![Object::string_literal("a"); caps.items + 1];
     f.dict(list).set("V", items);
-    assert_damaged(&f, "a value has more than 10000 items");
+    assert_damaged(&mut f, "a value has more than 10000 items");
 
     // A value over 1 MiB, as a string.
     let mut f = Form::new(1);
     let t = f.text("t", 0, row(0));
     f.dict(t)
-        .set("V", Object::string_literal(vec![b'x'; MAX_TEXT + 1]));
-    assert_damaged(&f, "longer than 1 MiB");
+        .set("V", Object::string_literal(vec![b'x'; caps.text + 1]));
+    assert_damaged(&mut f, "longer than 1 MiB");
 
-    // Text over 64 MiB in all: 65 values of 1 MiB.
+    // More text in all than the cap: 5 values of 1 MiB.
     let mut f = Form::new(1);
-    for i in 0..65 {
+    for i in 0..5 {
         let t = f.text(&format!("t{i}"), 0, row(0));
         f.dict(t)
-            .set("V", Object::string_literal(vec![b'x'; MAX_TEXT]));
+            .set("V", Object::string_literal(vec![b'x'; caps.text]));
     }
-    assert_damaged(&f, "its text comes to more than 64 MiB");
+    assert_damaged_within(&mut f, small, "its text comes to more than 4 MiB");
 
     // A value that inflates past 1 MiB.
     let mut f = Form::new(1);
     let mut zeros = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
-    zeros.write_all(&vec![b'0'; MAX_TEXT + 1]).unwrap();
+    zeros.write_all(&vec![b'0'; caps.text + 1]).unwrap();
     let bomb = f.pdf.add_object(Stream::new(
         dictionary! { "Filter" => "FlateDecode" },
         zeros.finish().unwrap(),
     ));
     let t = f.text("t", 0, row(0));
     f.dict(t).set("V", bomb);
-    assert_damaged(&f, "longer than 1 MiB");
+    assert_damaged(&mut f, "longer than 1 MiB");
 }
 
 #[test]
@@ -699,7 +751,7 @@ fn fields_listed_twice_are_read_once() {
         vec![Object::Reference(shared), Object::Reference(shared)],
     );
     f.set_fields(&[twice, kid, parent, x, y, twice]);
-    let form = read(&f.pdf);
+    let form = read_back(&mut f);
     assert_eq!(form.facts.damaged, None);
     let names: Vec<&str> = form.fields.iter().map(|f| f.name.as_str()).collect();
     assert_eq!(names, ["twice", "parent.kid", "x", "y"]);
@@ -712,13 +764,38 @@ fn fields_listed_twice_are_read_once() {
 }
 
 #[test]
+fn a_page_listed_twice_has_its_widgets_at_both_indexes() {
+    // Widgets are found through the page table, which numbers pages as
+    // PDFium does: the page object twice is two pages.
+    let mut f = Form::new(1);
+    let a = f.text("a", 0, row(0));
+    let page = Object::Reference(f.pages[0]);
+    let root = f
+        .dict(f.catalog)
+        .get(b"Pages")
+        .unwrap()
+        .as_reference()
+        .unwrap();
+    f.dict(root).set("Kids", vec![page.clone(), page]);
+    f.dict(root).set("Count", 2);
+    let form = read_back(&mut f);
+    let on: Vec<(u32, ObjectId)> = form
+        .widgets
+        .iter()
+        .flat_map(|(&i, ws)| ws.iter().map(move |w| (i, w.object)))
+        .collect();
+    assert_eq!(on, [(0, a), (1, a)]);
+    assert_eq!(form.facts.widgets, 2);
+}
+
+#[test]
 fn a_parent_loop_alone_isnt_damage() {
     // /Parent isn't followed, so a field that's its own parent, but not its
     // own kid, reads like any other.
     let mut f = Form::new(1);
     let a = f.text("a", 0, row(0));
     f.dict(a).set("Parent", a);
-    let form = read(&f.pdf);
+    let form = read_back(&mut f);
     assert_eq!(form.facts.damaged, None);
     let names: Vec<&str> = form.fields.iter().map(|f| f.name.as_str()).collect();
     assert_eq!(names, ["a"]);
@@ -733,7 +810,7 @@ fn layout_uses_at_most_a_thousand_of_max_len() {
     f.dict(t).set("MaxLen", 1_000_000);
     let u = f.text("u", 0, row(1));
     f.dict(u).set("MaxLen", -3);
-    let form = read(&f.pdf);
+    let form = read_back(&mut f);
     assert_eq!(form.fields[0].max_len, Some(1_000_000));
     assert_eq!(form.fields[0].layout_len(), Some(MAX_LAYOUT_LEN));
     assert_eq!(form.fields[1].max_len, Some(0));
@@ -750,8 +827,8 @@ fn hybrid_reference_files_read_their_newest_revision() {
     // The form is in an object stream only /XRefStm lists, and the
     // trailer has no /Prev.
     let first = hybrid_reference();
-    let pdf = crate::file::load_pdf_mem(&first, None).unwrap();
-    let form = read(&pdf);
+    let src = source(first.clone());
+    let form = read(&src);
     assert_eq!(
         fields(&form),
         [
@@ -759,16 +836,15 @@ fn hybrid_reference_files_read_their_newest_revision() {
             ("city".into(), FieldKind::Text, text("Hull")),
         ]
     );
-    assert!(!pdf.trailer.has(b"XRefStm"));
+    assert!(src.xref().hybrid && src.xref().sections == 1);
 
     // The update's catalog is only in its /XRefStm, and the first table
     // lists the old one. The field it changes is in both sections' object
     // streams, and `city` only in the first section's.
-    let updated = hybrid_update(&first);
-    let pdf = crate::file::load_pdf_mem(&updated, None).unwrap();
-    let acroform = pdf.catalog().unwrap().get(b"AcroForm").unwrap();
+    let src = source(hybrid_update(&first));
+    let acroform = src.pdf().catalog().unwrap().get(b"AcroForm").unwrap();
     assert_eq!(acroform.as_reference().unwrap(), (11, 0));
-    let form = read(&pdf);
+    let form = read(&src);
     assert_eq!(
         fields(&form),
         [
@@ -785,11 +861,12 @@ fn hybrid_reference_files_read_their_newest_revision() {
 /// cross-reference stream, by offsets that differ only in the white-space,
 /// comments and zeros before its header. lopdf reads it once
 /// (vendor/lopdf/SHEAF.md): read for each section, this file takes
-/// seconds to load, not milliseconds.
+/// seconds to load, not milliseconds. Its 1,003 sections are within the
+/// lazy reader's cap, and its source opens and its form reads as quickly.
 #[test]
 fn a_cross_reference_stream_many_sections_share_is_read_once() {
     let mut bytes = hybrid_reference();
-    let mut prev = crate::file::load_pdf_mem(&bytes, None).unwrap().xref_start;
+    let mut prev = source(bytes.clone()).xref().start;
     // A million free entries, 7 MB unpacked.
     let mut entries = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
     entries.write_all(&vec![0; 7_000_000]).unwrap();
@@ -813,10 +890,22 @@ fn a_cross_reference_stream_many_sections_share_is_read_once() {
     }
     bytes.extend_from_slice(format!("startxref\n{prev}\n%%EOF\n").as_bytes());
 
-    let start = std::time::Instant::now();
+    // Eagerly, as the old writers load it.
+    let start = Instant::now();
     let pdf = crate::file::load_pdf_mem(&bytes, None).unwrap();
     let took = start.elapsed();
-    assert_eq!(read(&pdf).fields.len(), 2);
+    let acroform = pdf.catalog().unwrap().get(b"AcroForm").unwrap();
+    let acroform = resolve(&pdf, acroform).unwrap().as_dict().unwrap();
+    assert_eq!(fields_of(&pdf, acroform).unwrap().len(), 2);
+    assert!(took.as_secs_f32() < 1.0, "{took:?}");
+
+    let start = Instant::now();
+    let src = source(bytes);
+    let form = read(&src);
+    let took = start.elapsed();
+    assert_eq!(form.fields.len(), 2);
+    assert_eq!(src.xref().sections, 1003);
+    assert!(src.xref().sections <= src.limits().reader.max_sections);
     assert!(took.as_secs_f32() < 1.0, "{took:?}");
 }
 
@@ -844,11 +933,11 @@ fn corpus_hybrid_reference_files_read_their_newest_revision() {
         if !bytes.windows(8).any(|w| w == b"/XRefStm") {
             continue;
         }
-        // lopdf can't read some damaged files at all (slice 1's note).
-        let Ok(pdf) = crate::file::load_pdf_mem(&bytes, None) else {
+        // Some damaged files don't open at all (slice 1's note).
+        let Ok(info) = SourceInfo::read(&Store::new(), &corpus.path(&entry), None) else {
             continue;
         };
-        let facts = read(&pdf).facts;
+        let facts = read(&info.src).facts;
         if facts.damaged.is_some() {
             continue;
         }
@@ -886,10 +975,27 @@ struct Node {
     kids: Option<Vec<usize>>,
     parent: Option<usize>,
     widget: bool,
-    rect: Option<Vec<f32>>,
-    mk: Option<Vec<f32>>,
+    rect: Option<Vec<Num>>,
+    mk: Option<Vec<Num>>,
     opt: Option<usize>,
     on_page: bool,
+}
+
+/// A number in a rect or a color: one lopdf writes as it is, or one past
+/// f64's range, which reads as infinity (see [`huge`]).
+#[derive(Debug, Clone, Copy)]
+enum Num {
+    Real(f32),
+    Huge,
+}
+
+impl From<Num> for Object {
+    fn from(n: Num) -> Object {
+        match n {
+            Num::Real(v) => v.into(),
+            Num::Huge => huge(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -909,11 +1015,11 @@ fn node() -> impl Strategy<Value = Node> {
         any::<i64>().prop_map(Val::Number),
         (0usize..24).prop_map(Val::Ref),
     ];
+    // lopdf writes a real past i64's range as digits it can't read back.
     let float = prop_oneof![
-        any::<f32>(),
-        Just(f32::NAN),
-        Just(f32::INFINITY),
-        -1e7f32..1e7
+        (-1e18f32..1e18).prop_map(Num::Real),
+        Just(Num::Huge),
+        (-1e7f32..1e7).prop_map(Num::Real),
     ];
     (
         (
@@ -951,7 +1057,7 @@ fn node() -> impl Strategy<Value = Node> {
 
 /// The tree as a file: node `i` is object `i + 1`; index 20 and up point
 /// at objects that aren't there.
-fn tree_pdf(nodes: &[Node], roots: &[usize]) -> Pdf {
+fn tree_file(nodes: &[Node], roots: &[usize]) -> Vec<u8> {
     let mut f = Form::new(1);
     let base = f.pdf.max_id + 1;
     let id = |i: usize| -> ObjectId { (base + i as u32, 0) };
@@ -997,11 +1103,11 @@ fn tree_pdf(nodes: &[Node], roots: &[usize]) -> Pdf {
         if let Some(rect) = &n.rect {
             d.set(
                 "Rect",
-                rect.iter().map(|&v| Object::Real(v)).collect::<Vec<_>>(),
+                rect.iter().map(|&v| Object::from(v)).collect::<Vec<_>>(),
             );
         }
         if let Some(mk) = &n.mk {
-            let c: Vec<Object> = mk.iter().map(|&v| Object::Real(v)).collect();
+            let c: Vec<Object> = mk.iter().map(|&v| Object::from(v)).collect();
             d.set("MK", dictionary! { "BG" => c.clone(), "BC" => c });
         }
         if let Some(n) = n.opt {
@@ -1016,7 +1122,7 @@ fn tree_pdf(nodes: &[Node], roots: &[usize]) -> Pdf {
     f.pdf.max_id = base + 24;
     f.set_annots(0, &on_page);
     f.set_fields(&roots.iter().map(|&r| id(r)).collect::<Vec<_>>());
-    f.pdf
+    with_huge(f.bytes())
 }
 
 proptest! {
@@ -1028,8 +1134,7 @@ proptest! {
         nodes in prop::collection::vec(node(), 1..20),
         roots in prop::collection::vec(0usize..24, 0..6),
     ) {
-        let pdf = tree_pdf(&nodes, &roots);
-        let form = read(&pdf);
+        let form = read(&source(tree_file(&nodes, &roots)));
         let facts = &form.facts;
         if facts.damaged.is_some() {
             prop_assert!(form.fields.is_empty() && form.widgets.is_empty());
@@ -1070,17 +1175,20 @@ fn corpus_hybrid_forms_bind_their_xfa() {
         if entry.kind != "hybrid" || entry.path.starts_with("forms/safedocs/") {
             continue;
         }
-        let pdf = crate::file::load_pdf(&corpus.path(&entry), None).unwrap();
-        let form = read(&pdf);
+        let src = SourceInfo::read(&Store::new(), &corpus.path(&entry), None)
+            .unwrap()
+            .src;
+        let form = read(&src);
+        let pdf = src.pdf();
         let acroform = pdf
             .catalog()
             .unwrap()
             .get(b"AcroForm")
             .ok()
-            .and_then(|f| resolve(&pdf, f))
+            .and_then(|f| resolve(pdf, f))
             .and_then(|f| f.as_dict().ok())
             .unwrap();
-        let xfa: HashSet<String> = crate::forms::xfa::read(&pdf, acroform)
+        let xfa: HashSet<String> = crate::forms::xfa::read(pdf, acroform, &src.limits().forms)
             .into_iter()
             .map(|f| f.name)
             .collect();

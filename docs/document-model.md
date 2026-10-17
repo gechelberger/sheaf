@@ -22,25 +22,44 @@ and *outputs* (serialization) of it.
 ## Core idea: a virtual document over immutable sources
 
 ```
-Source               an opened PDF file: bytes, a RenderHandle (PDFium worker),
-                     page count/sizes. Immutable once opened. Refcounted.
+Store                the document's bytes, named by their content: one Blob for
+                     the same bytes however often they're interned, and one Src
+                     for a Blob while anything holds it. Weak references only.
+
+Blob                 { id: BlobId { hash, len },   // compared byte for byte too
+                       bytes: Arc<[u8]>,           // shared with PDFium
+                       kind: Pdf { password, origin: File(path) | Memory(Derived) } }
+
+Src = Arc<Source>    a Blob parsed lazily (lopdf's LazyPdf), under one Limits,
+                     with the facts read from it once: the page table (each
+                     page's Geom, inherited /Resources, /Contents, /Annots),
+                     XrefFacts, conformance. Immutable.
+
+SourceInfo           { src: Src, name: PathBuf, derived: Option<Derived> }
+                     a registration, which a SourceId names (until M10.5 slice
+                     11 makes the BlobId the identity): the same file inserted
+                     twice is two registrations of one Src.
 
 PageRef              { id: PageId, source: SourceId, index: u32, rotation: Rotation }
                      one page of the virtual document, pointing at a page of a source.
-                     PageId is a fresh, stable identity (never reused).
+                     PageId is a fresh, stable identity (never reused). rotation
+                     is the page's /Rotate, absolute, as a save writes it.
 
 DocState             { pages: im::Vector<PageRef>,
                        outline: im::Vector<OutlineNode>,   // tree; targets are PageIds
                        annots: im::HashMap<PageId, im::Vector<Annot>>,  // sheaf's marks
                        removed_comments: ...,   // other tools' comments deleted, by /NM
                        text_layers: ...,        // unsaved OCR text, by page
-                       labels, header_footer }
+                       labels, header_footer,
+                       fields: im::OrdMap<FieldId, Field>,   // the form
+                       widgets: ... }           // the fields' widgets, by page
                      a complete, immutable snapshot of what the user sees.
 
-Document             { sources: HashMap<SourceId, Arc<Source>>,
-                       history: Vec<Version { label, state: DocState }>,
-                       cursor: usize,            // which version is current
-                       saved: Option<usize> }    // which version is on disk
+Document             { store: Arc<Store>,
+                       sources: HashMap<SourceId, Arc<SourceInfo>>,
+                       versions: HashMap<VersionId, Version>,  // a tree (see Undo/redo)
+                       cursor: VersionId,            // which version is current
+                       saved: Option<VersionId> }    // which version is on disk
 ```
 
 **Editing never touches a source or a lopdf object.** An edit is a pure
@@ -50,14 +69,508 @@ everything it didn't change. Reordering 7,000 pages clones one `Vec<PageRef>`
 
 **Rendering never waits on an edit.** The viewer displays `state.pages` in
 order; a render request for display index *i* becomes
-`(sources[pages[i].source], pages[i].index, rotation)`. PDFium is never told
-about reorders, deletions, or insertions. Inserting a 400-page PDF means
-opening it as a second source and splicing 400 `PageRef`s — milliseconds.
+`(sources[pages[i].source], pages[i].index, render_delta)`, the turn PDFium
+adds to the source page's own `/Rotate`. PDFium is never told about
+reorders, deletions, or insertions. Inserting a 400-page PDF means opening
+it as a second source and splicing 400 `PageRef`s — milliseconds.
 
 **Saving is a materialization.** Given a `DocState` and its sources, produce
 bytes. Two strategies, chosen per save (see below). The snapshot is
 immutable and `Send`, so saving runs on a background thread while the user
 keeps editing.
+
+**Sources are read lazily** (M10.5 slice 3). A file is read once, into a
+blob, and a source parses the blob in place:
+
+- **The open (`Store::source`) reads the cross-reference sections, the
+  trailer and the page tree.** Every other object is read when it's first
+  asked for, decrypted on its own (a source keeps `/Encrypt`), and kept,
+  as is a failure to read it that the bytes alone decide; an object
+  stream is decoded once. `XrefFacts` records what a later
+  append needs: the newest section's kind and start, `/Size`, the largest
+  cross-reference stream number, `/ID` and where the header starts.
+- **The page table** numbers pages as PDFium does (a kid with `/Kids` is
+  a node, any other a page) and reads the inheritable keys up `/Parent`
+  as it does. Each page's `Geom` is its boxes and rotation as PDFium
+  sizes them: an empty media box is Letter, the crop box is clipped to the
+  media box (one outside it shows nothing), `/Rotate` is whole quarter
+  turns, `(degrees / 90) mod 4`, and `/UserUnit` doesn't scale the size.
+  The layout's page sizes are `Geom::shown()` from the first paint, and
+  equal PDFium's on every corpus page; PDFium isn't asked for sizes. A
+  page the tree lists twice is two entries, which share what the page
+  holds, as pages naming one `/Annots` array share it. The table ends at
+  the root's `/Count` when PDFium counts by it, since PDFium loads no
+  page past it.
+- **One `Limits`** caps every reader of a source: lopdf's (256 MiB a
+  stream decompressed, 1,024 sections, 8,388,607 objects and twice as
+  many cross-reference stream entries, references 64 deep), the page
+  tree's (1,024 levels, fewer than 0xFFFFF pages), the form reader's and,
+  from slice 6, the content lexer's (`Limits.content`: 256 MiB of a
+  page's streams decompressed together, 65,536 operands before an
+  operator, arrays, dictionaries and marked content 512 deep, and 64 MiB
+  of an inline image's data).
+  Breaking one, a `/Kids` cycle, a `/Parent` loop or an object that
+  doesn't decrypt is a typed error, never a panic, a hang or memory
+  without bound; nothing is repaired. So the app doesn't open such a
+  file, though PDFium shows some of them (none in the corpus: every
+  corpus file PDFium opens opens as a source).
+- **A table that can't be read** is rebuilt by scanning, as lopdf's eager
+  reader rebuilds it, and every object is read then: `base_sound()` is
+  false, and such a file is never appended to. With no `trailer` keyword,
+  the newest cross-reference stream that decodes is the trailer, as
+  PDFium takes it.
+- **Bytes stay in memory.** PDFium opens the blob's own `Arc<[u8]>`
+  (`RenderHandle::open_bytes`). A derived copy (cropped, watermarked, a
+  header and footer stripped) is a memory blob, written nowhere; blank and
+  image pages, and a stamp or attachment nothing else holds (see Page
+  content), are read back from the generated cache once, into blobs.
+  `LazyPdf` can also read a file by position (`FileBytes`).
+- **The open reads every fact from the source** (M10.5 slice 4; see
+  Opening a file): its marks, other tools' comments, labels, header and
+  footer, form, attachments, layers and outline, as File > Properties
+  and the signature check read theirs. Nothing it reads loads the file
+  eagerly. The old writers still load their sources eagerly until
+  slice 9.
+
+At 7,000 pages the open (the geometry walk, asserted by the 7k gate
+harness, `crates/sheaf-ops/tests/gate_7k.rs`) takes 48 ms on the
+synthetic fixture and 72–80 ms on the heavy one, against gates of 100 and
+250 ms.
+
+## Opening a file (M10.5 slice 4)
+
+A file opens once, the same way in the app, on the command line and in
+every other headless caller (`sheaf_doc::open`; `open::file` takes the
+three steps in a row):
+
+- **`start` makes the document from its pages.** Its one version holds
+  the pages from the page table the source built as it opened, and
+  nothing else, so the first page paints at once. It reads nothing of
+  its own. (`Document::new` is for a file sheaf has just made, which says
+  nothing more about itself: it's complete at once, with only an
+  outline.)
+- **`finish` reads the rest, on any thread, from the source alone:**
+  sheaf's marks and other tools' comments in one pass over the page
+  table's annotations (a page stamp's page and an attachment's file are
+  found in the file, not in this machine's cache, and a mark whose file
+  doesn't hold them is another tool's comment; a mark another tool has
+  edited since sheaf wrote it, whose `/SheafAnnot` digest no longer
+  matches, is that tool's comment; copies of marks another program made,
+  which say ids earlier marks have, get new ones), the form, the page
+  labels, the header and footer sheaf drew, attachments, the portfolio
+  schema, layers, and the outline with its colors, styles and closed
+  state (`/C`, `/F`, a negative `/Count`). Of a page it reads the
+  dictionary and the annotations, never its content (`Source::blocks`
+  reads that when an op first asks; see Page content). Each reader
+  passes over what it can't read, so `finish` doesn't fail once the
+  source has opened, and reads a tree a node at a time however often the
+  file lists a node (a name or number tree, the layers' order, a
+  portfolio's folders, the outline), so it ends. It counts the pages of
+  its first pass to the progress it's given. The outline's destinations
+  (`/Dest`, named destinations, a GoTo action's `/D`) are found through
+  the page table, and their views are read as PDFium reads them, their
+  positions kept in PageSpace as the file has them; the renderer is
+  never asked for the outline.
+- **`Document::ready(facts)` builds the complete opened version once**
+  and puts it in the loading version's place under a new `VersionId`,
+  the way a save or a job's amend does. The pages keep their ids, and the
+  current and saved versions follow it, so the document isn't dirty and
+  there's nothing to undo. It gives back what the view shows beside the
+  model: other tools' comments, attachments, the portfolio, layers, what
+  sheaf says about the form, and the marks given new ids, whose pages the
+  next save writes. A second call is refused.
+- **Until then the document is loading.** `apply`, `apply_batch` and
+  `apply_in_job` return `NotReady`, making no version and drawing no ids.
+  The app greys out what edits the document or writes it out (saves,
+  exports, print, split, extract, comment import, page and bookmark
+  edits, the markup tools, undo and redo) and every plugin command, says
+  "Opening…" in the status bar, with the page the first pass is on, and
+  refuses any of them run by its keys with a notice (an insert or a
+  replace before it reads the file it was given). A plugin call given
+  meanwhile (a command, a panel action, an event) waits: once the file is
+  ready, plugins get `opened`, then the calls that waited run, in order,
+  each seeing the document as it is then. Only a plugin's newest region
+  event waits, and a file closed before it's ready drops what waited,
+  saying `closed` only after an `opened` (a recovery opens a file again).
+- **There are no late facts.** Everything the file says arrives in the
+  one `ready`, so nothing is read after an edit and dropped; a file
+  that's slow to read keeps edits waiting longer, with its progress
+  shown.
+
+On the heavy 7k fixture, ready (the source's open, `finish` and `ready`,
+`open::file` in the 7k gate harness) takes 391–406 ms against a gate of
+1 s, asserted; the scanned one's 539–545 ms and 514 MB at its peak, the
+474 MB file's bytes and little more.
+
+## Coordinates: PageSpace (M10.5 slice 5)
+
+Everything sheaf keeps about a place on a page is in **PageSpace**: the
+page's default user space, points, y up, before `/Rotate`, whatever its
+boxes; the space `/MediaBox`, `/CropBox`, `/Rect`, `/QuadPoints` and
+`/XYZ` are written in. Marks, other tools' comments, OCR words, bookmark
+positions, connectors and regions are stored in it, so nothing moves them
+but an edit of them: turning or cropping a page changes how they show,
+not what's stored.
+
+- **One conversion.** `Geom::to_view()` (`geom.rs`) takes PageSpace to
+  the page as shown: points, y down, from the top-left corner of the
+  visible box (the crop box within the media box) after `/Rotate`, so the
+  visible box covers `(0, 0)` to `shown()`. It is PDFium's page-to-device
+  mapping at one pixel a point, and `from_view()` undoes it. Both are
+  `Affine`s, 2×3 maps in PDF's order: `Affine::upright(r)` is the linear
+  part for a page turned `r`, `then` composes, `apply_box` maps a box,
+  and `apply_axes` maps an `/XYZ` point whose missing coordinate stays
+  missing. `save::geom_of` and `file::page_geom` read a dictionary's
+  `Geom` for the old writers until slice 9; no other conversion is left.
+- **Rotation is absolute.** `PageRef.rotation` is the `/Rotate` a save
+  writes: a page starts with its source page's, and a save keeps it.
+  `Document::geom(page)` is the source page's boxes with that rotation.
+  PDFium applies a source page's own `/Rotate` when it renders, so a
+  render job takes `render_delta(page)`, the turn from the source page's
+  rotation to the page's. A full rewrite writes the rotation in quarter
+  turns (a `/Rotate 135` comes out as 90, which PDFium shows the same).
+  An incremental save that keeps the page tree writes it only where it
+  isn't the source page's, and then always, `/Rotate 0` too, since the
+  page stays under parents that may have one; any other page keeps the
+  `/Rotate` it has, its own or its parent's, a 135 included.
+- **The app's frames.** A pane draws page *i* through
+  `Doc::pane_geom(i)`, the page's `Geom` turned further by the pane's
+  rotate view: its `to_view`, times the zoom, puts PageSpace on the
+  screen. Gestures work in the **edit frame**, `Doc::edit_geom(i)`, the
+  page as it shows without rotate view: the pointer goes through the
+  pane's `from_view` and the edit frame's `to_view`, a tool builds its
+  mark there, and `Annot::to_page` maps it into PageSpace, the one way a
+  mark made on a page as it shows reaches the model (the plugin adapter's
+  too); `Annot::to_frame` is its inverse, what a drag moves, a handle
+  reshapes and the clipboard holds. Find and pattern hits, the
+  text selection, handles, other tools' comment outlines, regions and the
+  print preview draw through the pane frame, and `Doc::reveal` scrolls a
+  PageSpace box into view.
+- **A mark's `turn`** is the rotation it reads upright in, absolute: its
+  page's when it was made (`to_page` adds the frame's rotation; a text
+  markup takes its text's). Its layout (bounds, hit tests, where its
+  text, carets, labels and tape lines go) is written y down, for its shape
+  in its **upright frame**, `Annot::upright()`: PageSpace turned by
+  `turn`. `page_bounds()` maps those bounds back. A tape's own
+  `look.rotation`, the turn PDFlyer's options give its text within its
+  box, is a style laid out within that frame, not a frame of its own.
+  The writer lays a mark out upright and maps that into user space, so it
+  needs no page geometry, and a page turned later turns its marks with
+  what's printed there. GPUI can't turn text, so a free text or stamp
+  whose turn isn't the pane's draws its text unturned in its turned box.
+- **A crop moves nothing.** A crop still shows the page from a derived
+  copy, until slice 15 makes it a box edit, and the copy only sets
+  `/CropBox`, the kept area as shown mapped through `from_view`; it keeps
+  the page's user space. So `RebasePages` only re-points pages: no mark,
+  OCR word or bookmark moves.
+- **`/SheafAnnot` version 2** (`annot::Payload`) is the mark's JSON in
+  PageSpace with its `turn` (none when upright), `"v":2` and `"std"`, a
+  staleness digest of the dictionary it was written into
+  (`annot::staleness`). The digest covers what the writer sets from the
+  mark: `/Subtype`, `/Rect` with its corners normalized, `/Contents`,
+  `/T`, `/M`, `/NM`, `/C`, `/IC`, `/CA` (1 when absent), `/QuadPoints`,
+  `/InkList`, `/L`, `/Vertices`, `/CL` and `/RD`. Numbers count as the
+  writer computes them, as f32s, in steps of 1/64 pt for geometry and
+  1/1000 for colors and `/CA`, and the writer puts them on those steps
+  (`annot::on_grid`; `/RD` as the inset to an inner box on them), so a
+  value is never near the middle of two; text strings decode as PDFium
+  decodes them (a BOM, else PDFDocEncoding), then to NFC. So another
+  program's re-serialization (`100` as `100.0`, reals written to three
+  decimals or more, two for geometry alone, `/Contents` in UTF-16BE,
+  `/Rect`'s corners swapped) keeps a mark sheaf's, and its edit doesn't.
+  A text string is written as is only where PDFDocEncoding reads it back
+  so: one with a DEL or a byte from 0x18 to 0x1F is UTF-16BE. Left out:
+  `/IRT` and `/RT`, which the save sets after the mark is written, `/IRT`
+  an object reference a rewrite renumbers; a reply's or a status's
+  `/Rect`, its parent's, set later too; and `/AP`, which other tools
+  regenerate. A tick is a stamp named `/Tick`; it is known by the mark's
+  `id`, as every mark is.
+- **Reading a mark** (`file::sheaf_mark`): version 2 is a mark while its
+  digest matches. Version 1, from before slice 5, held its geometry in
+  the page's displayed space, which on a page sheaf had turned wasn't the
+  `/Rotate` the save wrote, so its geometry comes from the standard keys,
+  already PageSpace (a box is `/Rect` less `/RD` or the old writer's pad;
+  text markup is `/QuadPoints`; lines and paths are `/L`, `/Vertices`,
+  `/InkList` and `/CL`; a replacement's struck text is its grouped
+  StrikeOut's, found through an index of the page's StrikeOuts made
+  once), its `turn` is the page's `/Rotate`, and it's a mark while
+  the JSON's `modified` is `/M`. A mark that fails either check was
+  edited by another tool, and opens as that tool's comment, in the list
+  other tools' comments are in: shown, deletable and adoptable, never
+  reverted. `file::is_ours` asks the same reader, so the old writers keep
+  its dictionary as the other tool wrote it.
+- **Copied marks get new ids.** `/NM` need only be unique on its page,
+  and Acrobat's Insert Pages copies `sheaf:<id>` with the page. At the
+  open the first mark, in page and then `/Annots` order, keeps an id, and
+  each later one with it gets a new one from an rng seeded by the file's
+  hash, so the same bytes open with the same ids; a reply copied with its
+  parent follows it, and so does another tool's reply to the copy, which
+  the open lists under the new name. `ready` says which have a new `/NM`
+  coming (`ViewFacts.renamed`; one that kept another tool's `/NM` only
+  changes id), the app shows one notice, and the next save writes their
+  pages with the new `/NM`. Until then the file names them by the old
+  ids: the document keeps each source's renames
+  (`Document::set_source_renamed`, which `ready` calls for the file and
+  the app for a file whose pages it inserts), and the old writers follow
+  other tools' replies to a copy through them to its new object
+  (`save::write_page_annots`). A page the tree lists twice shares its
+  `/Annots`, so its second listing's marks are renamed too.
+- **OCR words** are PageSpace, and `upright` is the page's absolute
+  rotation when it was recognized: the frame its words group into lines
+  in and its invisible text runs in. The engine's pixels go through the
+  `Geom` the page was rendered with, captured with the job.
+- **Bookmark positions** (`DestView::Xyz`) are PageSpace, as the file has
+  them, read and written unchanged. The outline panel records the
+  window's top and the page's left edge as shown, through the pane frame,
+  and a jump goes back the same way, a missing coordinate staying
+  missing.
+- **Regions** (Shift+drag) are held in PageSpace, and the plugin host
+  gets them so.
+- **Plugins under API 0.3 keep their frame:** a page's coordinates are
+  its source page as the file displays it, after the file's own
+  `/Rotate` and before any turn sheaf adds. The adapter (`sheaf-plugin`'s
+  `api/shared.rs`) maps marks, OCR text, bookmark positions and region
+  events into that frame on the way out, and back into PageSpace on the
+  way in, a mark's `turn` the frame's rotation. `page-info`'s size is the
+  page as shown, sheaf's turn included, while its coordinates aren't;
+  API 0.4's to-view and from-view matrices end that (slice 20).
+- **PDFium's text is still in the source page's displayed space**
+  (`page_chars`, `search_page`, `pattern_search_page` and
+  `text_boxes_in_rect`, through a device 16 times the page's size) until
+  slice 14's text service. The app maps it into PageSpace where it
+  arrives, through the source page's `from_view` (`PageChars::from_engine`,
+  `merge_source_hits`); the plugins' text source passes it on as it is,
+  since that is 0.3's frame.
+- **The clipboard** (version 2) holds marks in the edit frame of the page
+  they were copied from, each turned relative to it. A paste maps them
+  through the target page's frame, so they land where they were seen and
+  read the same way on a page with another `/Rotate`, crop box or media
+  box origin. A version 1 clipboard, in the old displayed space, isn't
+  pasted.
+
+`to_view ∘ from_view` is the identity within 1/16 pt over `/Rotate`, the
+pane's rotation, crop boxes and media boxes off the origin (a property
+test, `geom.rs`), and `to_view` is PDFium's page-to-device mapping on
+every corpus page and widget checked (`sheaf-render`'s
+`pdfium::frames`).
+
+## Page content: the toolkit (M10.5 slice 6)
+
+sheaf reads and writes page content through `sheaf-doc`'s `content`
+module, brought forward from M11, never through lopdf's
+`Content::decode` and `encode`, which re-encode what they read, drop
+comments and spacing, and end an inline image at the first `EI` they
+meet. The watermark's install and read (until slice 16) and the flatten
+(until 19) are their last users, and a clippy ban lands when the flatten
+goes (the plan's lint ledger).
+
+- **Lexing** (`content::lex`) gives each token with its bytes as
+  written and where they are: an operator, an operand (a number, name,
+  string, array or dictionary, each one token, nested strings, escapes
+  and all), or an inline image, `BI` to `EI`. Comments are skipped, and a
+  stray closing delimiter is an operand of its own, which PDFium skips
+  too. An error (`LexError`: a string, array, dictionary or image that
+  doesn't end, or a cap) says where; lexing stops there, never panics or
+  loops, and is linear in what it reads.
+- **A page's content is one concatenation.** PDFium lexes a page's
+  `/Contents` streams joined with a space between each, so a string or a
+  marked range may open in one stream and close in the next.
+  `PageContent::read` decodes them within `Limits.content` (see the
+  Core idea) into one buffer (`Concat`), and maps any place in it back
+  to a stream and an offset (`Pos`, `SpanAcross`). A missing entry reads
+  as nothing, as PDFium draws nothing for it; a stream that won't decode
+  is a fault, never its raw bytes. `forms::check` reads a `/DA`'s font
+  (the last `Tf`'s name) by lexing it, and the stamp library's page form
+  takes its page's content through the concatenation, so a page of
+  several streams, state carried across them, draws as it shows.
+- **Inline images end where PDFium ends them** (`ReadInlineStream`'s
+  rules, in order): unfiltered data by its exact count (rows padded; no
+  `/CS`, or a name the resources don't have, counts as one 1-bit
+  component, as in PDFium); `/AHx`, `/A85` and `/RL` data at its end of
+  data; DCT at the JPEG's end of image, the search remembered so many
+  such images stay linear; then `/L` or `/Length`; and only then a scan
+  for `EI` with white-space either side. After the first four the image
+  ends at the next `EI` operator. An image whose end marker or exact
+  count runs past the content is an error; PDFium loses the rest of the
+  page then. An ignored test compares the lexer's painting operators by
+  kind (text, paths, images inline or not, forms, shadings) with
+  PDFium's page objects on the 402-file pool: they agree on all 23,628
+  pages.
+- **Marked content, balance and names.** `marked` gives every marked
+  range with its tag, its property list (inline, or named in the
+  resources' `/Properties`) and how deep it is; marked content that
+  doesn't balance is an error, which no page in the corpus or the pool
+  has. `balance` is the `q`/`Q` count: what's left open at the end
+  (`net`) and the lowest it went (`min_prefix`). `names_used` gives the
+  resource names the content uses (fonts, XObjects, graphics states,
+  shadings, color spaces and patterns, named property lists), for slice
+  16's pruning.
+- **Splicing is safe or refused.** `splice` takes ranges out of a page's
+  streams and keeps every other byte as it was; a stream nothing is taken
+  from is borrowed, and a space goes where what's kept either side of a
+  cut (or of cuts that touch) would join two tokens. A range is taken out
+  only when that can't change what's drawn after it, lexically. It sets
+  no graphics state outside a `q`…`Q` of its own (no `cm`, color, line
+  style, `gs`, clip or text state, which would last past it). Outside a
+  text object its `q`s and `Q`s and its `BT`s and `ET`s balance on their
+  own. Inside one it stays inside, its `q`s balance, it moves no line
+  (`Td TD Tm T* ' "`, which `q` doesn't save), and if it shows text no
+  text is shown after it before the line moves or the object ends, since
+  shown text moves the next on; setting text state doesn't move a line.
+  It starts and ends outside a path being made. Marked content draws
+  nothing, but for optional content (`/OC`), which hides what it marks:
+  so a range may open marked content, none of it optional, that a later
+  range closes, as long as no marked content is kept between them, and
+  closes only what it or an earlier range opened. A range must also
+  start and end between operators, never inside a token or a comment or
+  between an operator and its operands. Anything else is refused:
+  removing a running head drawn in the middle of a text object can't
+  shift the body text, and a color an artifact sets can't leak onto what
+  follows. An op reports a refusal as a `ContentError` that names the
+  page ("page 12's content can't be changed without changing what else
+  it draws; nothing was changed"; one that can't be read, "page 12's
+  content can't be read; nothing was changed").
+- **What a page draws, classified: `Source::blocks(i)`**, a
+  `PageBlocks`, read the first time an op asks and kept by the source,
+  one per page, for as long as the source lives: a fact of the bytes,
+  never history, and never read at open. Its streams are read without
+  being kept (`LazyPdf::object_unkept`, a vendor patch), so classifying
+  7,000 pages keeps none of their content. It holds the artifact ranges
+  and sheaf's marked blocks, the **pagination artifacts** (an
+  `/Artifact` range whose `/Subtype` is `/Header`, `/Footer`,
+  `/Watermark` or `/Background`, the outermost one) with who drew each,
+  sheaf's blocks by stream marker (`/SheafBlock`) and by marked-content
+  marker (`/SheafGen`, `/SheafOcrBlock`), the isolating streams
+  (`/SheafBlock << /K /Isolate >>`), the OCR layer sheaf wrote before
+  (its `q` and its layer, marked `/SheafOcrLayer`), the balance, and
+  whether a form the page draws outside its pagination artifacts has one
+  inside, which removing the page's would leave in place. A source reads
+  each XObject its pages draw once, whatever names and pages draw it
+  (`DrawnForms`); a form with no resources of its own draws with its
+  page's, so it's read for each page. Forms are read within what the
+  page's streams leave of `Limits.content.decompressed`: one past the
+  cap, or met once that's spent, counts as having an artifact inside.
+  Who drew an artifact (`PagOrigin`):
+  - **`Sheaf`:** it's in a `/SheafBlock` stream or its list has
+    `/SheafGen` (nothing writes these until slices 16 to 18);
+  - **`SheafLegacy`:** sheaf before M10.5: `/SheafStamp` or
+    `/SheafSettings` in its list, drawn in the `/SheafHF` font, or in a
+    `/SheafOcrLayer` stream;
+  - **`Acrobat`:** it paints nothing but forms, at least one, and each
+    has `/PieceInfo /ADBE_CompoundType /Private` a pagination kind;
+  - **`Authored`:** any other, the author's own running heads, as Word,
+    LibreOffice and InDesign mark them, which sheaf never removes
+    unasked.
+
+  On the corpus's 24,256 pages Acrobat drew 117 headers, 45 watermarks
+  and 30 backgrounds, and authors 3,122 headers, 3,638 footers, 70
+  watermarks and 7 backgrounds; 246 Word and LibreOffice files mark
+  2,323 artifacts, every one `Authored`. Spliced out alone, as a strip
+  cuts them, 191 of Acrobat's 192 go (the one left has the body's `q`
+  and `BT` inside its range), and 2,443 of the authors' 6,837: theirs
+  set color and fonts at the top level of a text object, or nest `q`
+  and marked content across each other.
+- **Removing the header and footer** (`stamps::strip`, until slice 17's
+  generators) splices the page's streams, writes each it changed as a
+  new object and rewrites `/Contents`, so a stream another page shares is
+  never changed under it. It removes the asked-for kinds that sheaf or
+  Acrobat drew and leaves an author's own (proposal 31,
+  `stamps::stripped`); removing those too is slice 17's
+  `include_authored`. Acrobat opens the first artifact on a page with
+  the `Q` that ends the `q` it put before the page's content: that run
+  of `Q`s stays (`Pagination::cuts`), the artifact's start and the rest
+  of it cut either side, as sheaf's own header keeps its `Q` outside its
+  range. The pages to strip are the ones whose blocks have such
+  artifacts (`derive::strip_stamps` and the watermark's), so a source
+  with none is never loaded, and the scan that decompressed every page
+  to look is gone.
+- **`ContentWriter`** writes content the same bytes for the same calls,
+  on any thread: `q`/`Q` and `cm`, gray, RGB and CMYK colors, graphics
+  states (`/ExtGState` with opacity and blend mode), line styles, paths
+  and their painting and clipping, text through a `Font`, images, and
+  `place_form`, which maps a form's `/Matrix`·`/BBox` onto a box.
+  Numbers have at most four decimals, never an exponent or `-0`; strings
+  are literal, or hex when a byte is a control code. Marked content names
+  its property list in the resources' `/Properties`: lists are never
+  written inline. Resources are held by what they are (`Res`, named by a
+  `ResId`, a digest of their objects) and named only when the content is
+  finished: `/Sh` and six base32 characters of the digest, the next name
+  up where the resources already bind it to something else, and the
+  same name again where they bind it to the same thing, so a header
+  written again keeps its list's name. The old writers' legacy names,
+  `/SheafHF` (until slice 17) and `/SheafOcr` (until 18), are given, and
+  never made for anything else. Until slice 9's emitter names and writes
+  them, `content::ResObjects` writes a content's resources into the
+  file, one object a resource a save.
+- **Fonts** (`content::Font`: `encode`, `advance`, `wrap`, `covers`,
+  `resource`). `Std14` is the 14 standard fonts with Adobe's Core 14 AFM
+  widths (`crates/sheaf-doc/assets/afm`, with Adobe's notice) and exact
+  encoders: WinAnsi as cp1252, and Symbol's and ZapfDingbats' own, glyph
+  names read by the Adobe Glyph List; text is composed (NFC) first.
+  `Glyphless` is the OCR layer's: Tesseract's glyphless font, each UTF-16
+  code unit a CID, read back through its ToUnicode, so it draws any
+  text. A font sheaf embeds keeps its glyph ids (CID = GID); Glyphless,
+  whose one glyph serves every CID, is the exception, and the rule is
+  for M10 slice 7's Noto subsets. These replace four encoders and three
+  width tables (the header and footer's, the marks', the watermark's
+  UTF-8 written as WinAnsi, and the summary's); marks, tapes, the header
+  and footer, the watermark's text, OCR layers and the comment summary
+  all draw through them. A tick draws ZapfDingbats' heavy check and
+  cross (✔ ✘), as it always has.
+- **Text a font can't draw shows as `?`** in the drawing only:
+  `/Contents`, the mark's JSON and the header's spec keep the exact text
+  (ZapfDingbats has no `?`, so there the character is left out). An edit
+  whose drawing would lose characters says so in its outcome
+  (`EditOutcome.unencodable`: adding or changing a mark or a connector,
+  the marks pages bring with them when inserted or replacing others, a
+  header and footer, and the app's watermark), and
+  `Document::unencodable_notice` gives the notice once a document: "Some
+  characters can't be drawn in the built-in fonts and show as “?” in the
+  file; the text itself is kept". A tape's minus and subtotal sign, which
+  Helvetica lacks, draw in Symbol. M10 slice 7's Noto fallback ends it.
+- **The words a page draws** (`text_bag`) are decoded through its fonts
+  (`FontDecoders`: a `/ToUnicode` CMap, else a simple font's encoding
+  and `/Differences`, else Symbol's or ZapfDingbats' own, else the code
+  as it is) and counted as NFC words, so the same text in two subsets
+  with different codes gives equal bags. Slice 10's removal check
+  compares them.
+- **Stamps and attachments come from the document** until slice 8 puts
+  them in the marks themselves. A mark still names its stamp's page and
+  its attachment's file by a stem, and the document's `MarkAssets`
+  (`assets.rs`, outside history, shared with its snapshots) says where
+  each is: the form a file's saved appearance draws, or the embedded file
+  it holds (what `file::annots_in` finds; registered at ready, for files
+  whose pages come in, and for the file a save wrote); a stamp placed
+  from the library or a mark pasted (the clipboard carries their bytes);
+  and last the generated cache by path, read once (a library stamp a
+  plugin names, until slice 19, and an attachment not yet saved, until
+  8). A stem names the same bytes wherever it's found, but nothing checks
+  that, so what's known stays: a file whose pages come in, a paste or a
+  placement can't put other bytes behind a stem the document knows. Only
+  the file a save wrote takes the place of what was known, since the
+  save wrote each from the table. Nothing is made again in the cache at
+  open, so a file opens with its stamps and attachments on a machine
+  that never saw them. A page
+  stamp whose appearance draws no page, or an attachment with no
+  embedded file, opens as another tool's comment, as a stale mark does,
+  and a save keeps it so. The stamp library's page form bakes its page's
+  rotation and visible box into the form's `/Matrix`, so a stamp from a
+  cropped or turned page lands as PDFium shows that page.
+- **Stamp and tape pictures are made in memory**: the app renders a
+  stamp's page and a turned tape with PDFium, transparent where nothing
+  is drawn, and keeps the pictures for the session, a stamp's by its
+  stem and a tape's by what it is. One that can't be made isn't asked
+  for again until it may be: from bytes given, never; from a document's
+  stamps, once what they know has changed (`MarkAssets::generation`).
+  Nothing is written to disk for them.
+
+Every corpus page's content (24,256 pages, 575 MB, and the 5,273 forms
+they draw) reads, lexes into tokens that tile it, splices back to each
+stream's own bytes read apart, balances as lopdf's decoder counts it, is
+classified, and has each pagination artifact spliced out, in about 8 s
+in the test profile; classifying every page of the 7k fixtures, cold,
+takes 141 ms (synthetic), 203 ms (heavy) and 77 ms (scanned), which is
+most of what a first Bates apply costs there.
 
 ## Undo/redo: snapshots, not inverse commands
 
@@ -74,16 +587,89 @@ Snapshots win. Undo/redo cannot be wrong because there is no inverse logic;
 moves 50 pages pushes one version at the end of the gesture. Dirty tracking
 is `cursor != saved`. "Revert to saved" is `cursor = saved`.
 
+History also keeps what each edit changed (M10.5 slice 1), so a snapshot
+dropped to save memory is rebuilt exactly, never by running the edit again:
+
+```
+Version   { parent, children, redo_to,   // undo goes to the parent, redo to redo_to
+            label, author, at,
+            steps: Vec<Step>,            // the edits from the parent
+            state: Option<DocState>,     // the snapshot, unless trimmed
+            snapshot_bytes, step_bytes,  // what it holds (see Decisions)
+            job, saves, damaged }
+Step      { edit: Edit,
+            line: String,                // what it did, in words
+            prims: Arc<[Prim]> }         // what it changed
+Prim      { key: Key, before: Option<Val>, after: Option<Val> }
+```
+
+- **An edit records what it changed.** It reads the state and writes only
+  through a recording context (`prim::Rec`), which makes a `Prim` for
+  each slot it wrote: the slot (`key`), the value it held and the value it
+  holds now, `None` for absent. The keys are transitional, one per field
+  of `DocState` until M10.5 slice 8 replaces them with the records' keys:
+  `Pages`, `Outline`, `AnnotsOf(page)`, `TextLayer(page)`,
+  `RemovedOf(page)`, `Labels`, `HeaderFooter`, `Field(id)` and
+  `WidgetsOf(page)`. Before-values cost nothing: they are the parent's im
+  and `Arc` values.
+- **A no-op makes no version.** A slot written back to what it held makes
+  no prim (the same im nodes or `Arc`, else equal), and a batch's or job's
+  prims are coalesced per key into one, from the first before to the last
+  after, on the last step that changed the slot. So a batch that rotates a
+  page and rotates it back has none, and nothing is pushed. No whole state
+  is ever compared.
+- **Replay is exact and checked.** Undo, redo and jump rebuild a version
+  whose snapshot was trimmed from the nearest ancestor that kept one, by
+  applying each version's prims on the way. `DocState::apply` refuses a
+  prim whose before isn't what its slot holds (`Mismatch`), and replay
+  never runs an edit again, so what an edit reads without recording it
+  (source sizes, the forms, random mark ids) can't make it differ. A
+  mismatch is a bug: the version is marked damaged and can't be reached,
+  the History panel shows "History is damaged at version N", undo and redo
+  return `Err(Damaged)` instead of doing nothing, and a debug build
+  panics.
+- **A VersionId names one state, which never changes.** A job's amend
+  (see Text layers), a save and the end of a file's opening
+  (`Document::ready`) each put a new version, with a new id, in the old
+  one's place under the same parent, and the old id stops resolving.
+- **One `IdAlloc`.** Page, bookmark and field ids come from counters that
+  only go up, so an id is never handed out twice, whatever undo does. The
+  prims hold the ids an edit drew, so a replay draws none. Mark ids are
+  random below 2^53.
+- **Lines are made once.** describe runs at apply, against the state just
+  before that edit, so the second edit of "move pages 3–4 before 1, then
+  delete page 4" says "Delete page 4". The line is stored on the step, and
+  the History panel reads it whether or not the parent's snapshot is kept.
+- **Saves pin snapshots.** Until M10.5 slice 9 a save re-expresses its
+  version over the saved file (`rebase_to_saved`), so that version's
+  prims don't lead to it, and those of its children made before the save
+  don't start from it. Both keep their snapshots, and nothing is replayed
+  across a save.
+
+`model/history_tests.rs` is the proof: over random runs of all 21 kinds
+of edit, with batches, jobs, undo, redo, jumps and trims down to one
+snapshot, every version rebuilt from its prims equals the state it was
+made as, ids included, and each kind's no-op pushes nothing.
+
 Costs and how they're bounded:
 
-- Per-version memory is proportional to what changed, except `pages`, which
-  is cloned whole (`Arc<Vec<PageRef>>`, 16 bytes per page). At 7,000 pages
-  and a 200-version cap that is ~22 MB worst case. If it ever matters, swap
-  `Vec` for `im::Vector` and the clone becomes O(log n); nothing else changes.
-- Outline and annotation maps are persistent from the start (`im` crate), so
-  per-page markup edits don't scale with document size.
-- Sources referenced only by undone versions are freed when the history is
-  truncated (new edit after undo) or capped.
+- Per-version memory is proportional to what changed. `pages` is an
+  `im::Vector`, so a reorder of 7,000 pages copies tree nodes, by one split
+  and two joins, not the list. Outline, marks, layers and fields are
+  persistent too (`im` crate), so per-page edits don't scale with document
+  size. At 7,000 pages and 20,000 marks, adding a mark takes 0.7 ms and
+  moving half the pages before the first 1 ms (release;
+  `history_at_7k_pages_and_20k_marks` in the 7k gate harness,
+  `crates/sheaf-ops/tests/gate_7k.rs`).
+- Sources referenced only by undone versions are counted and freed. Each
+  version owns the registrations made for it, and pruning a version
+  drops them; a blob goes when its last registration does.
+  `HistoryStats` counts every live blob once (`blob_bytes`) and those only
+  versions off the current line registered (`undone_source_bytes`), and
+  `MemoryBudget` weighs the second (see Decisions). Pruning is by count
+  until M10.5 slice 12 prunes by bytes. Inserting a 400-page scan, undoing
+  it and editing past `MAX_VERSIONS` frees its bytes
+  (`pruning_an_undone_400_page_scan_frees_its_bytes`).
 
 What an `Edit` looks like:
 
@@ -112,8 +698,9 @@ pub enum Edit {
 
 impl Document {
     pub fn apply(&mut self, edit: Edit, label: impl Into<String>) -> Result<()>;
-    pub fn undo(&mut self) -> Option<&str>;   // returns the label of what was undone
-    pub fn redo(&mut self) -> Option<&str>;
+    // the label of what was undone, or None with nothing to undo
+    pub fn undo(&mut self) -> Result<Option<&str>, Damaged>;
+    pub fn redo(&mut self) -> Result<Option<&str>, Damaged>;
     pub fn state(&self) -> &DocState;
 }
 ```
@@ -130,12 +717,16 @@ bookmarks that targeted it.
 
 - Caches (previews, tiles, sizes) key by `PageId`, not display index, so a
   reorder costs nothing visually.
-- `Job` gains `rotation`; PDFium renders rotated bitmaps, so tiles at a
+- `Job` gains `rotation`: the page's `render_delta`, the turn on top of
+  the source page's own `/Rotate` (which PDFium applies itself), plus the
+  pane's rotate view. PDFium renders rotated bitmaps, so tiles at a
   different rotation are just a cache miss.
 - `DocView` holds a `Document` instead of a bare `RenderHandle`; sidebar
   thumbnails become the primary editing surface (drag to reorder,
   multi-select, keyboard rotate/delete).
-- Sizes and outline come from `DocState`, not from the worker, after open.
+- Sizes come from the sources' page tables (`Geom`) from the first paint,
+  and the outline from `DocState`, which the open reads from the source;
+  the worker is never asked for either.
 
 ## Saving
 
@@ -144,11 +735,12 @@ for object serialization.
 
 **Rewrite** (M2 slice 3, first): load `sources[0]` in lopdf, rebuild the page
 tree from `state.pages` (copying page object subgraphs from other sources
-with renumbering), set `/Rotate` per page, rebuild `/Outlines`, write
-sheaf's marks (`annot::to_pdf_in`, each with its appearance and its JSON in
-`/SheafAnnot`), then cut whatever still points at a page that isn't kept
-(`kept::keep_only`: links, named destinations, the open action, form
-widgets, the structure tree) so pruning takes it out, and save. A copy
+with renumbering), write each page's rotation as its `/Rotate`, rebuild
+`/Outlines`, write sheaf's marks (`annot::to_pdf_in`, each with its
+appearance and, in `/SheafAnnot`, its PageSpace JSON and staleness digest:
+version 2, see Coordinates), then cut whatever still points at a page that
+isn't kept (`kept::keep_only`: links, named destinations, the open action,
+form widgets, the structure tree) so pruning takes it out, and save. A copy
 never follows a reference to a page it isn't copying (`save::remap`).
 Simple, always correct, O(file). Used for "Save As" and as the fallback.
 
@@ -162,13 +754,360 @@ writer of our own on top of lopdf's object serializer. Only possible when
 `sources[0]` is the file being saved to; otherwise fall back to rewrite.
 Also a rewrite when anything in the file was removed since it was saved (a
 page, a mark, a bookmark, OCR text replaced: `Snapshot::removes_content`),
-since an incremental save would leave it in the earlier revision.
+since an incremental save would leave it in the earlier revision. It writes
+a page's `/Rotate` only where the page's rotation isn't its source page's
+(then explicitly, 0 too), and marks as a rewrite writes them.
+
+Either way, what a save draws goes through the content toolkit's
+`ContentWriter` (see Page content): marks' appearances, tapes, the header
+and footer, OCR layers and the watermark's text, in the built-in fonts'
+exact encodings, where a character a font can't draw is a `?` in the
+drawing and the text itself is kept. The resources they draw with are
+named `/Sh` and six characters of their digest, and are one object a
+save whichever marks and pages use them (`annot::WriteCx`, with
+`content::ResObjects`; bug 19): one mark of every kind draws with three
+fonts and two graphics states between them. A page stamp's page is
+written once a save, as a form drawn under such a name (`/SheafStamp` is
+only read), and an attachment's file once, as its source stores it. Both
+come from the document's table, not this machine's cache, and the file
+being saved over keeps its own in place, so an incremental save doesn't
+append another copy. The header and footer's marked content names its
+property list in the page's `/Properties`.
 
 Either way the save runs on a background thread from a cloned snapshot. On
-completion the saved file is reopened as a fresh single source replacing all
-the others, and `saved = cursor`. History is kept (undo across a save works;
-the snapshots still reference the old sources, which stay alive until
-truncated).
+completion the saved file is read back into the store as a fresh single
+source replacing all the others, and `saved = cursor`; each page keeps its
+rotation, now its saved page's own. History is kept (undo across a save
+works; the snapshots still reference the old sources, which stay registered
+until the versions holding them are pruned).
+
+## Rendering edited pages: the spikes (M10.5 slice 2)
+
+From M10.5 slice 13 an edited page renders from an **overlay**: an append
+section built in memory over the source's own bytes, in which each edited
+page is replaced in place under its own object number, so it keeps its
+inherited attributes and shared resources. The section is its group's,
+and scoped to it (GROUP, below): its root `/Pages` lists only the
+group's pages and its AcroForm only their fields, so in the group's
+engine a page's index is its place in the group. PDFium loads the base
+and the section as two segments through `FPDF_LoadCustomDocument`,
+without copying the base, and an edit reopens only its group's engine
+(`todos/m10.5-edit-api.md`, §10.1 and §10.3).
+Before anything depended on that, slice 2 measured it with three
+throwaway spikes against written criteria and set the realizer's and the
+engine pool's numbers from the results. The spike code is gone; this
+section keeps the criteria, the results and the verdicts.
+
+**How they ran.** Sections came from vendored lopdf's
+`IncrementalDocument`: the base's xref kind, `/Prev`, `/ID` kept,
+`/Encrypt` repeated and each new object encrypted by `encrypt_object`; a
+stale `/XRefStm` and `/DecodeParms` dropped; offsets counted from the
+header on a file with leading junk; new objects numbered above `/Size`.
+The reference was lopdf's Full write of the same edit, decrypted for an
+encrypted base. A two-segment `Read + Seek` reader went to pdfium-render's
+`load_pdf_from_reader`. Pages were compared at 1,024 px, pixel for pixel,
+with no tolerance, two ways: **appearances only** (each shown annotation
+flattened, then the page rendered, as `render_appearances` does), which
+the criteria use, and **live** (widgets by `FPDF_FFLDraw`, as the page
+view draws them). Machine: AMD EPYC 7302P, 32 threads, release builds,
+libpdfium chromium/7881, pdfium-render 0.9.4.
+
+### Spike A: encrypted overlay sections
+
+*Criterion:* overlays on RC4-128, AES-128 and AES-256 bases render
+pixel-equal to a decrypted Full write. *Fallback:* a decrypted in-memory
+image per source.
+
+The synthetic 7k was encrypted by lopdf (user and owner passwords), pages
+0, 3,499 and 6,999 were replaced in place, and the base and section were
+loaded through two segments with the password. Three edited and two
+untouched pages were compared:
+
+| Algorithm | Pixels differing, appearances / live | Overlay open | Base open | Section |
+|---|---|---|---|---|
+| RC4-128 (V2) | 0 / 0 on all five | 1.52 ms | 1.49 ms | 2,840 B |
+| AES-128 (V4, AESV2) | 0 / 0 | 1.52 ms | 1.49 ms | 3,181 B |
+| AES-256 (V5 R6, AESV3) | 0 / 0 | 8.14 ms | 8.09 ms | 3,180 B |
+
+Each edited page differs from the base and each untouched one doesn't,
+the section holds none of the edit's text in plain text, and poppler
+renders the overlay as it renders the Full write. 50 encrypted corpus
+files (the first 75 encrypted rows of the inventory, at most 15 an
+algorithm; 30 of them xref-stream bases) pass too: AES-128 15, AES-256
+10, RC4-128 11, RC4-128 under V4 6, RC4-40 8. **A passes on all three; no
+fallback.** An AES-256 (R6) source pays its key derivation on every
+open: 8.1 ms at 7k, against 1.5 ms.
+
+### Spike B: overlays on real files
+
+*Criterion:* per base class, at least 99% of sampled pages pixel-equal
+(appearances only) to a Full write, and RSS per engine within the cap the
+spike sets. *Fallback:* a failing class realizes as a standalone PDF per
+group.
+
+883 bases: the 402-file pool sample (`bench/pool-sample.txt`), all 76
+government forms with fields, a seeded 400 of the corpus's other 3,976
+SafeDocs forms with fields, and five built bases (the synthetic, heavy and
+scanned 7k, the synthetic with leading junk, and the synthetic with a
+broken `startxref`). The first, middle and last pages are edited; two
+others are left alone. A base is in each class it has: classic table or
+xref stream (its newest section's kind, which the overlay writes), hybrid
+(`/XRefStm`), linearized, damaged (lopdf rebuilt the xref, or lopdf and
+PDFium count different pages), leading junk, encrypted. Times are
+medians, base → overlay, of the middle edited page drawn live at
+1,024 px; cold is the first render in a fresh engine, warm the next.
+
+| Class | Bases | Pages | Pixel-equal | Open, ms | Cold, ms | Warm, ms | MB per engine, median / p99 |
+|---|---|---|---|---|---|---|---|
+| classic table | 355 | 1,057 | 100% | 0.23 → 0.24 | 24.9 → 32.9 | 17.3 → 17.7 | 1.20 / 9.63 |
+| xref stream | 527 | 1,517 | 99.93% | 0.58 → 0.61 | 24.3 → 29.1 | 14.5 → 14.5 | 1.80 / 13.36 |
+| hybrid | 36 | 107 | 100% | 0.44 → 0.42 | 22.1 → 29.4 | 15.8 → 16.4 | 2.74 / 9.09 |
+| linearized | 502 | 1,448 | 99.93% | 0.54 → 0.56 | 24.5 → 30.2 | 14.8 → 14.8 | 1.80 / 10.47 |
+| damaged | 3 | 6 | 100% | 55.0 → 55.7 | 22.9 → 24.3 | 12.7 → 14.3 | 5.35 / 5.35 |
+| leading junk | 2 | 6 | 100% | 1.55 → 1.56 | 24.3 → 24.0 | 15.1 → 15.5 | 5.34 / 5.34 |
+| encrypted | 69 | 166 | 99.40% | 0.58 → 0.64 | 22.9 → 28.1 | 15.2 → 14.9 | 1.51 / 10.11 |
+| all | 883 | 2,574 | 99.96% | 0.43 → 0.45 | 24.5 → 30.3 | 15.4 → 15.4 | 1.55 / 10.87 |
+
+- The one miss in the xref-stream, linearized and encrypted rows is one
+  page: lopdf's write of `pool/safedocs/2932/2932995.pdf` recolours page
+  0's logo with no edit at all, and the overlay matches the base. In
+  this run no page differed because of the overlay, and live renders
+  matched at the same rates. Two pool files are untestable: lopdf finds
+  no pages in 0676477 (PDFium 47) and rejects 2289457's xref.
+- **RSS per engine** is measured over 24 overlay engines on one base,
+  each with its own section and one page rendered, from
+  `/proc/self/statm` after `malloc_trim`; the growth is glibc heap,
+  linear in the engine count. The pool sample's: median 1.82 MB, p95
+  7.74, p99 10.87, max 22.11. **The per-engine cap is 16 MB:** the pool
+  sample's p99, rounded up to a multiple of 8 MB. Every class's p99 is
+  within it.
+- The 7k bases, one at a time:
+
+  | Base | MB per engine | Open, ms | Cold, ms | Warm, ms |
+  |---|---|---|---|---|
+  | synthetic | 5.34 | 1.52 → 1.50 | 23.0 → 24.1 | 5.63 → 5.97 |
+  | heavy | 35.42, over the cap | 8.66 → 9.36 | 738 → 751 | 5.50 → 6.31 |
+  | scanned | 7.20 | 3.66 → 3.67 | 37.3 → 63.8 | 16.4 → 17.1 |
+  | leading junk | 5.34 | 1.55 → 1.56 | 24.3 → 24.0 | 5.32 → 5.91 |
+  | damaged | 5.35 | 55.0 → 55.7 | 22.9 → 24.3 | 5.75 → 5.93 |
+
+  25 MB of the heavy's engine, and nearly all of its cold render, is
+  PDFium's form environment loading all 7,000 fields at the first page
+  load. Scoped group sections (GROUP, below) remove both.
+
+**The thin classes, again.** That run's damaged and leading-junk rows
+are 3 and 2 bases, mostly built: too few for a 99% criterion. A second
+run took 90 pool files outside the sample, in inventory order: the first
+50 with `%PDF-` past offset 0 (1 to 307 bytes in, 37 of them behind a
+UTF-8 byte-order mark) and the first 50 whose `startxref` leads to no
+xref (10 are both). Both runs together:
+
+| Class | Bases | Pages | Pixel-equal | MB per engine, median / p99 |
+|---|---|---|---|---|
+| damaged | 56 | 133 | 80.45% | 0.96 / 5.35 |
+| leading junk | 52 | 130 | 100% | 0.11 / 5.34 |
+
+- Leading junk passes, with the section's offsets counted from the
+  header (§11.7). 32 of the 50 picks load without a rebuilt xref; 18 are
+  damaged too.
+- Damaged fails: 26 pages of 24 bases differ, all of them damaged and
+  none because of lopdf's writer. On 22 signed files the overlay loses
+  the visible signature stamp on page 0 that the Full write shows; on
+  one a page left alone loses a seal; on one (encrypted, linearized) the
+  edit doesn't show. Five picks were untestable (lopdf finds no
+  pages in two and rejects three xrefs).
+
+**B passes on every class but damaged,** and damaged bases realize as a
+standalone PDF per group, which §10.1 has for them by design.
+
+### Spike C: render-time box edits
+
+*Criterion:* a crop rendered from the base engine, through
+`FPDF_RenderPageBitmapWithMatrix` and a clip, is pixel-equal to the crop
+written as `/CropBox` on 100% of the sample. *Fallback:* crops realize
+as overlays.
+
+1,267 pages: the first page of 400 pool files; spike B's widget pages of
+the forms (165 government, 683 SafeDocs); 16 synthetic pages, four boxes
+(plain, off the origin, an offset fractional CropBox, an upside-down
+MediaBox with a negative origin) at each `/Rotate`; and three heavy
+pages. 1,231 are at `/Rotate` 0, 19 at 90, 4 at 180 and 13 at 270, and
+1,046 have widgets. The crop is inset 7.3% left, 11.1% bottom, 5.7% right
+and 13.9% top. The matrix is solved in PDFium's own f32 arithmetic so
+that it composes to the written page's transform, bit for bit on 3,364
+of 3,801 transforms. Two other geometry edits were compared the same way:
+the crop with a 90° turn, and the turn alone through today's rotate
+parameter.
+
+| Edit | Pixel-equal, live | Appearances only |
+|---|---|---|
+| crop | 590 (46.60%) | 1,266 (99.92%) |
+| crop and a 90° turn | 549 (43.36%) | 1,167 (92.11%) |
+| the turn alone | 1,228 (97.00%) | 1,232 (97.31%) |
+
+- `FPDF_FFLDraw` takes an integer rect and a rotate, never a matrix, so
+  a matrix render draws no live widgets: 676 of the 1,046 widget pages
+  lose them. All 221 pages without widgets are equal both ways.
+- Some translations can't be landed exactly in f32: one crop (3 px, one
+  level), and 17 (live) to 100 (appearances) with a turn, 99 of those by
+  at most one level. A sub-ulp difference resamples a whole image.
+- The turn alone isn't the written `/Rotate` on 38 pages live: 32
+  transforms f32 can't make exact, 22 of them resampling an image across
+  its area (over 1,000 px) and 10 off by one level, and 6 forms whose
+  widgets `FPDF_FFLDraw` draws differently under a rotate.
+- Edge rounding and annotations outside the box caused no failure.
+
+**C fails: crops, and every box edit, realize as overlays.** No
+geometry-only page renders from the base engine.
+
+### The verdicts
+
+**GROUP = 128 pages, scoped.** *Rule:* the largest G whose overlay opens
+within 0.5 ms of the bare base and whose engine, with every page of its
+group previewed, is within the 16 MB per-engine cap, on all three 7k
+fixtures (8 engines a fixture, a header and a watermark on every page of
+the group). In place, the heavy's engine is 35–46 MB at every G, so no G
+fits. **Scoped**, the section replaces the root `/Pages` with one whose
+`/Kids` are the group's pages, in order, and the AcroForm with one whose
+`/Fields` are the top-level fields with a widget on those pages, so an
+engine's page j is its group's page j and its form loads no other field.
+Engine MB, in place → scoped, and the scoped open and cold render:
+
+| G | Synthetic, MB | Heavy, MB | Scanned, MB | Scoped open, ms | Scoped cold, ms |
+|---|---|---|---|---|---|
+| 8 | 5.01 → 0.94 | 35.16 → 4.02 | 7.19 → 1.82 | 1.39 / 7.72 / 2.02 | 9.0 / 8.8 / 28.5 |
+| 16 | 5.11 → 1.05 | 35.48 → 4.41 | 7.75 → 2.39 | 1.39 / 7.78 / 2.05 | 9.0 / 8.9 / 28.3 |
+| 32 | 5.32 → 1.28 | 36.20 → 5.21 | 8.88 → 3.54 | 1.36 / 7.70 / 2.06 | 9.2 / 8.9 / 28.3 |
+| 64 | 5.75 → 1.73 | 37.63 → 6.77 | 11.18 → 5.87 | 1.42 / 7.76 / 2.12 | 9.1 / 9.2 / 28.7 |
+| **128** | 6.62 → 2.68 | 40.44 → 9.89 | 15.74 → 10.51 | 1.49 / 7.86 / 2.16 | 9.1 / 10.1 / 28.3 |
+| 256 | 8.44 → 4.57 | 46.27 → 16.32 | 24.91 → 19.80 | 1.60 / 7.90 / 2.28 | 9.1 / 12.8 / 28.2 |
+
+The bare bases open in 1.35–1.42, 8.58–8.73 and 3.59–3.69 ms (synthetic,
+heavy, scanned), and in place the cold renders are 24, 740 and 48 ms. A
+scoped section of 128 is 55–58 KB. Scoped renders matched in place on
+every page previewed, and on the corpus (spike B again) matched the Full
+write on 1,982 of 1,982 edited pages over 881 bases, 854 of them form
+pages with widgets, live and appearances only. Scoping also spares
+PDFium's first `FPDF_LoadPage(k)` in a document, which loads every page
+dictionary up to k (20 ms at the synthetic's middle page).
+
+**What scoping gives up.** §10.1 has an edited page keep "its page
+index, AcroForm, OCProperties, inherited attributes and shared
+resources". A scoped section keeps the last three and not the first two,
+which slice 13 builds on:
+- **The page tree is flattened, and inconsistent:** each page's
+  `/Parent` still names its own node, whose `/Kids` and `/Count` still
+  list pages outside the group. Inherited attributes resolve because
+  PDFium walks `/Parent`. Slice 13 can instead write each page's
+  inheritable keys out and point its `/Parent` at the new root, as §11.6
+  does for duplicates.
+- **An edited page's index is its place in its group's engine**
+  (`PageView.index`), not its base index. Whatever reads an edited page
+  from its realization, a render, a size or §10.5's text, goes through
+  `PageView`.
+- **Destinations into other groups** (a link's `/Dest` or `/GoTo`, a
+  named destination) name page objects the group's engine doesn't list,
+  so they resolve to no page there. Sheaf reads links and the outline
+  from the file through lopdf, not from engines.
+- **A field whose widgets span groups** is listed in each group that has
+  one of them, and its other widgets are on pages that engine doesn't
+  list; a calculation order (`/CO`) or script naming a field outside the
+  group finds nothing. Widgets still draw from their appearances and the
+  field's value.
+
+**LRU count: 6 group engines, pinned ones included.** *Rule:* in each
+pane of the page view (two when the window is split, each scrolled on its
+own) the visible pages with `PREFETCH` span at most two groups, and so do
+the thumbnails in view, while each shows fewer than GROUP + 1 pages. They
+do: two-up at `ZOOM_MIN` in a 2,160 px view shows 48 pages and prefetches
+2; the strip shows 10 thumbnails at `THUMB_W` and 27 at its 40 px
+minimum. Two groups a pane, two panes and two for the strip: 6. The count
+holds the pinned engines (those serving visible pages, §10.3) with the
+rest, so it never closes a visible group's engine, and what the pinned
+ones leave keeps the groups last scrolled away from: 2 with one pane.
+Each visible source's base engine is pinned and outside the count.
+
+**Engine byte cap: 96 MB,** 6 × the 16 MB per-engine cap, pinned engines
+included. In the fill below the screen's engines peaked at 48.5 MB
+(heavy) and 12.9 MB (synthetic), no group was opened twice, and both
+panes' pinned engines stayed open.
+
+**Background budget: 2 engines, 32 MB** (2 × the per-engine cap).
+*Rule:* an engine for each of two background consumers walking at once,
+such as OCR beside Trim White, a job or a plugin's page scan (a document
+runs each of those on its own). One walk in page order never goes back
+to a group, so it needs one engine; two taking turns need one each.
+Measured on the heavy 7k at 300 dpi, every page behind a scoped group of
+128, while the screen holds its 6 engines pinned: two walks taking turns,
+one from the first page and one from the middle, 1,024 pages each, opened
+14 engines with 2, none twice, at most 16.8 MB of them, in 106.9 s; with
+1, they opened 1,538, 1,524 of them a group again, in 136.3 s. Neither
+closed any of the screen's. One walk over all 7,000 pages with 2: 364.5 s
+(52.1 ms a page), 49 engines opened, none twice, at most 20.6 MB, and 768
+renders served by the screen's engines. A third consumer at once shares
+the 2 and reopens at every turn, as the 1-engine case shows: 2 is chosen
+for two at once, not measured to be enough for more.
+
+**Thumbnail fill rate: 310 pages/s.** *Definition:* 320 px previews
+(`PREVIEW_W`) of all 7,000 pages in order, every page behind a scoped
+group overlay of 128 with a header, a watermark and the crop in the
+section, through the screen's LRU (6 engines, 96 MB) with two panes'
+groups pinned; pages over the time spent in engine opens and renders.
+*Rule:* the heavy 7k's rate, 318 pages/s, rounded down to a multiple of
+10. The synthetic fills at 389. The bare base, through one engine, fills
+at 389 (heavy) and 512 (synthetic) pages/s while that engine grows to 338
+and 91 MB. The scanned 7k isn't held to the rate: decoding a 1275 × 1650
+image a page caps its previews at about 150 pages/s on the bare base.
+
+The rate leaves out building the sections: lopdf took 121 ms a group on
+the heavy and 21 ms on the synthetic, and that isn't slice 13's assembly.
+Slice 13's strip gate counts its own assembly in the time: at 310
+pages/s, the heavy's 22.0 s of opens and renders leave 0.57 s for its 55
+groups, about 10 ms a group of 128.
+
+### What the spikes found
+
+- **Widgets draw only through `FPDF_FFLDraw` or a flatten.** A render
+  with `FPDF_ANNOT` alone draws none, form environment or not, and
+  `FPDF_FFLDraw` takes no matrix.
+- **A section numbers its objects above `/Size`** and above every xref
+  stream's own number. Numbered from lopdf's `max_id`, a section on
+  `pool/safedocs/5801/5801985.pdf` (`max_id` 76, `/Size` 78, the newest
+  xref stream 77) put a content stream at 77, and PDFium read it as the
+  xref stream.
+- **The two-segment reader fills each read across the boundary.**
+  pdfium-render hands each of PDFium's block requests to one
+  `Read::read`, and PDFium takes any nonzero count as the whole block.
+- **What a fresh engine costs:** an open of 1.5 ms (synthetic 7k),
+  8.6 ms (heavy), 3.6 ms (scanned) or 55 ms (damaged, the xref rebuilt),
+  and about 6.6 ms more on an AES-256 R6 source; then, unscoped, the
+  first page load walks the page tree up to it, and the first form page
+  loads every field (0.7 s and 25 MB on the heavy).
+- **The base engine isn't bounded by the LRU:** after previewing every
+  page it holds 91 MB (synthetic) and 338 MB (heavy).
+- **A rotation delta carried by the render isn't a written `/Rotate`**
+  on 38 of 1,267 pages (`RotatePolicy::KeepBase`, §10.1).
+- **Slice 13's realize gates, read early, without the realize:** with
+  scoped sections the synthetic's open and cold render take 1.49 + 9.1 =
+  10.6 ms, so realizing the page, the section's assembly included, must
+  fit in the 4.4 ms left of the gate's 15 ms. The heavy's open and cold
+  render take 18.0 ms, 2.9× its warm render in the same run (6.12 ms)
+  against ≤ 1.7×, and its bare open alone, 8.6 ms, is about 1.7× its
+  warm render.
+- **A damaged base's overlay isn't its Full write:** on 22 damaged,
+  signed files the overlay loses the signature stamp the Full write
+  shows. Damaged bases realize standalone (§10.1).
+- **Appearances-only renders need care.** PDFium's `FPDFPage_Flatten`
+  writes `/MediaBox` and `/CropBox` from the page's own keys, so a page
+  that inherits a box other than letter comes out 612 × 792
+  (`forms/safedocs/0163162.pdf` page 2, 419.5 × 595.3), and
+  `render_appearances` sizes its render from the flattened page.
+  pdfium-render 0.9.4's `PdfPage::flatten` reloads the page under a new
+  handle but leaves `boundaries()` on the closed one.
+
+The 7k fixtures and the planning scripts are in `bench/`
+(`bench/README.md`). The gate harness, `crates/sheaf-ops/tests/gate_7k.rs`,
+prints today's numbers on the three fixtures beside slice 2's baselines.
 
 ## Non-goals of this design
 
@@ -187,7 +1126,7 @@ truncated).
 
   ```rust
   pub trait HistoryPolicy {
-      /// How many of the oldest versions to drop, given current stats.
+      /// How many of the oldest snapshots to drop, given current stats.
       fn trim(&self, stats: &HistoryStats) -> usize;
   }
   pub struct FixedCount(pub usize);
@@ -195,11 +1134,33 @@ truncated).
   pub struct AllOf(pub Vec<Box<dyn HistoryPolicy>>); // drop until all are satisfied
   ```
 
-  `HistoryStats` reports each version's *marginal* bytes — what it doesn't
-  share with its neighbour, estimated at push time via `Arc::ptr_eq` per
-  field and `im`'s `diff()` — plus source bytes referenced only by undone
-  versions (an inserted scan that was then undone). Default:
-  `AllOf([FixedCount(200), MemoryBudget(256 MB)])`.
+  `HistoryStats` reports what each kept snapshot holds that no other
+  version does (`snapshot_bytes`: the `im` nodes it copied for the slots
+  its version changed), what all versions' steps hold (`step_bytes`: their
+  edits, lines and prims' values, each counted once, by the version that
+  made it, and an `Arc` once however many of its prims put it), the bytes
+  of every blob the store holds, each once (`blob_bytes`), and those of
+  the blobs only versions off the current line registered
+  (`undone_source_bytes`: an inserted scan that was then undone). Steps
+  name sources by registration, so source bytes are never step bytes.
+  Snapshot and step bytes are computed when a version is made, from its
+  prims and the sizes of the maps they changed. They are estimates, and
+  one is coarse: the pages, the outline and the labels are each one value,
+  and a prim that puts one counts all of it, walking it, though `im`
+  shares all but the changed path with the version before (about 170 KB to
+  rotate one page of 7,000, about 375 KB to rename one bookmark of 2,000).
+  So in a long session of such edits the steps alone can pass
+  `MemoryBudget`, which then drops every snapshot it may, and undo replays
+  from the nearest version that kept one. M10.5 slice 8's records leave
+  only the page order, the outline's top level and the labels counted this
+  way. Trimming frees snapshot bytes only; a version's step bytes, and the
+  registrations it holds, go when it is pruned (past `MAX_VERSIONS`, and
+  by bytes from M10.5 slice 12), and a blob goes with the last
+  registration holding it (an engine opened on it keeps its bytes until
+  M10.5 slice 13's engine pool closes it). A policy weighs undone
+  sources but not `blob_bytes`, so a large undone insert makes
+  `MemoryBudget` drop every snapshot it may until its branch is pruned.
+  Default: `AllOf([FixedCount(200), MemoryBudget(256 MB)])`.
 - **Deleting pages cascades to bookmarks that target them**, with a
   non-modal notice ("Deleted 3 pages and 2 bookmarks — Undo"). No modal;
   snapshot undo makes the cascade zero-risk. Rationale: for both "delete a
@@ -213,36 +1174,46 @@ truncated).
   bookmarks (the outline panel already greys them), so they need a fix path.
 - Thumbnails show a bookmark glyph on pages that are bookmark targets, so a
   cascade is visible before the delete.
-- `PageRef.rotation` is a **delta** over the source page as PDFium renders
-  it (i.e. on top of its own `/Rotate`). Reading originals up front would
-  cost a page load per page; the absolute value is only needed at save time,
-  where lopdf has the original anyway.
+- `PageRef.rotation` is the page's `/Rotate`, **absolute**, as a save
+  writes it (M10.5 slice 5): a page starts with its source page's own, and
+  a save keeps it. A render takes `Document::render_delta`, the turn PDFium
+  adds to the source page's own `/Rotate`. It was a delta over the source
+  page until then, since reading the originals up front cost a page load
+  per page; the page table (M10.5 slice 3) has every page's `Geom`, its
+  `/Rotate` among them, from the open, so the original is free.
 - `im` is MPL-2.0 (file-scoped copyleft); fine as an unmodified dependency
   of an MIT/Apache project.
 
 ## Text layers (OCR)
 
 Added in M5. An OCR run produces, per page, a `TextLayer`: words with boxes
-in the source page's displayed space (the same space annotations use), the
-frame the text reads upright in (`upright`, the page's extra rotation at
-recognition time) and the engine's name. It lives in
+in PageSpace (M10.5 slice 5; see Coordinates), like marks, the frame the
+text reads upright in (`upright`, the page's absolute rotation when it was
+recognized) and the engine's name. It lives in
 `DocState.text_layers: im::HashMap<PageId, Arc<TextLayer>>`.
 
 - **Presence means unsaved.** A save writes every layer into its page as an
-  invisible text layer (text render mode 3 with Tesseract's glyphless
-  embedded font, `/Contents` turned into `[q, original…, layer]`), and
-  `rebase_to_saved` drops them, exactly as it resets rotation deltas. The
-  model never reads layers back: once in the file, PDFium owns the text.
+  invisible text layer (text render mode 3 in `content::Glyphless`,
+  Tesseract's glyphless font embedded, each UTF-16 code unit of a word a
+  CID and the text read back through its ToUnicode, written by
+  `ContentWriter` under the legacy name `/SheafOcr`; `/Contents` turned
+  into `[q, original…, layer]`, the `q` and the layer marked
+  `/SheafOcrLayer`, until slice 18's blocks), and `rebase_to_saved` drops
+  them. The model never reads layers back: once
+  in the file, PDFium owns the text.
   Older versions keep their layers, so undo across a save still works.
 - **Edits**: `SetTextLayers` and `ClearTextLayers`. Delete removes a page's
   layer, Duplicate shares it (same `Arc`), Replace drops it (the page shows
-  other content), Move and Rotate leave it alone.
+  other content), Move, Rotate and Crop leave it alone.
 - **Coalesced undo.** Results arrive in batches over minutes, but a run is
   one undo step: `Document::begin_job` returns a `JobId`, and
-  `apply_in_job` amends the newest version in place when that version
-  belongs to the job and isn't the saved one; otherwise it pushes and tags
-  the new version. A save or an unrelated edit mid-run splits the run into
-  two steps. `job_is_undone` tells the runner to stop rather than put undone
+  `apply_in_job` amends the newest version when that version belongs to
+  the job, has nothing after it and was never saved; otherwise it pushes
+  and tags the new version. An amend coalesces the run's prims and
+  replaces the version with a new `VersionId` under the same parent (an id
+  names one state), and a run whose batches put back all they did leaves
+  no version. A save or an unrelated edit mid-run splits the run into two
+  steps. `job_is_undone` tells the runner to stop rather than put undone
   results back.
 - **Search.** PDFium can't see unsaved layers, so Find and Patterns run the
   same literal/regex search over the model's layers

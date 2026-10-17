@@ -80,7 +80,8 @@ pub enum Object {
     Null,
     Boolean(bool),
     Integer(i64),
-    Real(f32),
+    // sheaf: f64, so a round trip keeps a coordinate's or a large number's digits (SHEAF.md).
+    Real(f64),
     Name(Vec<u8>),
     String(Vec<u8>, StringFormat),
     Array(Vec<Object>),
@@ -147,13 +148,20 @@ impl<'a> From<&'a str> for Object {
 
 impl From<f64> for Object {
     fn from(number: f64) -> Self {
-        Object::Real(number as f32)
+        Object::Real(number)
     }
 }
 
+/// sheaf: the f64 nearest the f32's shortest decimal, which is what an f32 is written as: 0.1f32
+/// writes `0.1`, where `f64::from` would give 0.10000000149011612. Every f32's `Display`
+/// (`inf` and `NaN` too) parses as an f64. Finding the shortest decimal is most of the cost, so a
+/// whole number below 2^24, which is its own shortest decimal, skips it.
 impl From<f32> for Object {
     fn from(number: f32) -> Self {
-        Object::Real(number)
+        if number.fract() == 0.0 && number.abs() < 16_777_216.0 {
+            return Object::Real(number.into());
+        }
+        Object::Real(number.to_string().parse().expect("an f32's Display parses as an f64"))
     }
 }
 
@@ -208,10 +216,10 @@ impl Object {
     }
 
     /// Get the object value as a float.
-    /// Unlike [`Object::as_f32`] this will also cast an Integer to a Real.
-    pub fn as_float(&self) -> Result<f32> {
+    /// Unlike [`Object::as_f64`] this will also cast an Integer to a Real.
+    pub fn as_float(&self) -> Result<f64> {
         match self {
-            Object::Integer(value) => Ok(*value as f32),
+            Object::Integer(value) => Ok(*value as f64),
             Object::Real(value) => Ok(*value),
             _ => Err(self.type_error("Integer or Real")),
         }
@@ -220,7 +228,7 @@ impl Object {
     object_copy_getters! {
         as_bool: Boolean => bool = "Boolean", value;
         as_i64: Integer => i64 = "Integer", value;
-        as_f32: Real => f32 = "Real", value;
+        as_f64: Real => f64 = "Real", value;
         as_reference: Reference => ObjectId = "Reference", value;
     }
 

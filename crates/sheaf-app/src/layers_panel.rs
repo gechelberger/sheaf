@@ -65,7 +65,7 @@ impl DocView {
         let Some(src) = doc.model.source(sid) else {
             return;
         };
-        let (path, password) = (src.path.clone(), src.password.clone());
+        let src = src.src.clone();
         let hidden = doc.layers_hidden.clone();
         let generation = {
             doc.layers_generation += 1;
@@ -77,21 +77,11 @@ impl DocView {
             let opened = cx
                 .background_executor()
                 .spawn(async move {
-                    let mut pdf = sheaf_doc::file::load_pdf(&path, password.as_deref())?;
+                    let mut pdf = sheaf_doc::file::load_pdf_mem(src.bytes(), src.password())?;
                     sheaf_doc::layers::set_hidden(&mut pdf, &hidden);
                     let mut bytes = Vec::new();
                     pdf.save_to(&mut bytes)?;
-                    let dir = std::env::temp_dir();
-                    let tmp = dir.join(format!(
-                        "sheaf-layers-{}-{generation}.pdf",
-                        std::process::id()
-                    ));
-                    std::fs::write(&tmp, &bytes)?;
-                    // The renderer reads the whole file when it opens, so
-                    // the copy can go right away.
-                    let handle = RenderHandle::open(tmp.clone(), None);
-                    let _ = std::fs::remove_file(&tmp);
-                    handle
+                    RenderHandle::open_bytes(bytes.into(), None)
                 })
                 .await;
             this.update(cx, |v, cx| {
@@ -140,7 +130,7 @@ impl DocView {
                 .p_2()
                 .text_sm()
                 .text_color(theme::TEXT_MUTED)
-                .child(if doc.facts_loaded {
+                .child(if doc.model.is_ready() {
                     "This document has no layers"
                 } else {
                     "Reading layers…"

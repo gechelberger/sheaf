@@ -6,13 +6,15 @@
 //! a drag to where its text goes.
 
 use gpui::{AnyElement, Context, prelude::*};
-use sheaf_core::{PageSize, Rotation};
+use sheaf_core::Rotation;
+use sheaf_doc::geom::Geom;
 use sheaf_doc::{AnnotKind, Box2, PageId, Pt};
 
 use crate::docview::{DocView, State};
-use crate::markup_tools::{Tool, rotate_pt, stroke_canvas};
+use crate::markup_tools::{Tool, stroke_canvas};
 
-/// A shape being drawn: its page and the vertices so far.
+/// A shape being drawn: its page and the vertices so far, in its edit
+/// frame.
 pub struct PolyDraft {
     pub page: usize,
     pub page_id: PageId,
@@ -258,22 +260,24 @@ impl DocView {
 }
 
 /// The shape being drawn on `page`: its lines so far, and one on to the
-/// pointer.
+/// pointer. It's in the edit frame of `edit`, and the page is drawn as
+/// `pane` shows it, at `k` px a point.
 pub(crate) fn draft_preview(
     doc: &crate::docview::Doc,
     color: gpui::Rgba,
     page: usize,
-    src: PageSize,
-    rot: Rotation,
+    edit: &Geom,
+    pane: &Geom,
     k: f32,
 ) -> Option<AnyElement> {
     let d = doc.poly.as_ref()?;
     if d.page != page {
         return None;
     }
+    let (to_pane, size) = (pane.to_view(), pane.shown());
     if let Some(what) = d.measure {
         let points: Vec<Pt> = d.points.iter().chain(d.hover.iter()).copied().collect();
-        let mut m = sheaf_doc::Annot {
+        let drawn = sheaf_doc::Annot {
             id: sheaf_doc::AnnotId(0),
             kind: AnnotKind::Measure {
                 what,
@@ -292,33 +296,35 @@ pub(crate) fn draft_preview(
             modified: String::new(),
             created: String::new(),
             fill: None,
-            dashed: false,
+            dashed: true,
             cloudy: false,
+            turn: Rotation::R0,
             name: String::new(),
         };
-        m.dashed = true;
+        let m = drawn.to_page(edit);
         return Some(
             gpui::div()
                 .absolute()
                 .inset_0()
-                .children(crate::docview::annot_elements(&m, src, rot, k))
+                .children(crate::docview::annot_elements(
+                    &m,
+                    doc.model.assets(),
+                    &to_pane,
+                    size,
+                    k,
+                ))
                 .into_any_element(),
         );
     }
+    let from_edit = edit.from_view().then(to_pane);
     let pts: Vec<(f32, f32)> = d
         .points
         .iter()
         .chain(d.hover.iter())
         .map(|p| {
-            let q = rotate_pt(*p, src, rot);
+            let q = from_edit.apply(*p);
             (q.x * k, q.y * k)
         })
         .collect();
-    Some(stroke_canvas(
-        vec![pts],
-        color,
-        1.5 * k,
-        src.rotated(rot),
-        k,
-    ))
+    Some(stroke_canvas(vec![pts], color, 1.5 * k, size, k))
 }

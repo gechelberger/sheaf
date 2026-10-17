@@ -5,17 +5,23 @@
 //! `#<id>=<name>`, and the file's `/Info /Title` names the collection. An
 //! Acrobat stamp file reads the same way.
 //!
-//! A stamp placed in a document is its page alone, a one-page PDF in the
-//! generated-file cache, named by content (`generated::store`). Saved, its
-//! appearance is that page as a Form XObject; on a machine without the
-//! cache file, [`form_to_pdf`] makes it again from the saved appearance.
+//! A stamp placed in a document is its page alone, a one-page PDF named
+//! by content (`generated::store`), which the document keeps
+//! (`assets::MarkAssets`). Saved, its appearance draws that page as a
+//! Form XObject ([`page_form`]), which the file holds from then on;
+//! [`form_to_pdf`] makes a one-page PDF of it again, to show or copy.
 
 use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
-use sheaf_core::PageSize;
+use sheaf_core::{PageSize, Rotation};
+
+use crate::attachments::Objects;
+use crate::content::{self, PageContent};
+use crate::geom::{Affine, Geom, Rect};
+use crate::source::Limits;
 
 /// Marks a stamp page's dynamic text template (`<<initials>> <<date>>`),
 /// drawn over the page when it's placed.
@@ -50,8 +56,6 @@ pub fn read_collection(pdf: &Pdf) -> (Option<String>, Vec<StampPage>) {
         .map(|(i, id)| {
             let dict = pdf.get_dictionary(id).ok();
             let geom = crate::file::page_geom(pdf, id);
-            let [x0, y0, x1, y1] = geom.media;
-            let (w, h) = (x1 - x0, y1 - y0);
             StampPage {
                 name: names
                     .get(&id)
@@ -61,17 +65,7 @@ pub fn read_collection(pdf: &Pdf) -> (Option<String>, Vec<StampPage>) {
                     .and_then(|d| d.get(TEXT_KEY.as_bytes()).ok())
                     .map(crate::file::pdf_text)
                     .filter(|t| !t.is_empty()),
-                size: if geom.rotate % 180 == 0 {
-                    PageSize {
-                        width: w,
-                        height: h,
-                    }
-                } else {
-                    PageSize {
-                        width: h,
-                        height: w,
-                    }
-                },
+                size: geom.shown(),
             }
         })
         .collect();
@@ -139,17 +133,20 @@ pub fn one_page(pdf: &Pdf, index: usize) -> Result<Vec<u8>> {
     let mut dict = page_without_extras(pdf, page, &mut out, &mut map)?;
     // What the page inherits, it takes along.
     let geom = crate::file::page_geom(pdf, page);
-    dict.set(
-        "MediaBox",
-        Object::Array(geom.media.iter().map(|v| Object::Real(*v)).collect()),
-    );
-    if geom.rotate != 0 {
-        dict.set("Rotate", geom.rotate as i64);
+    dict.set("MediaBox", visible_array(&geom));
+    if geom.rotate != Rotation::R0 {
+        dict.set("Rotate", geom.rotate.degrees());
     }
     dict.set("Parent", pages_id);
     let page_id = map[&page];
     out.objects.insert(page_id, Object::Dictionary(dict));
     finish(&mut out, pages_id, vec![page_id], None, Vec::new())
+}
+
+/// A page's visible box as a PDF rectangle.
+fn visible_array(geom: &Geom) -> Object {
+    let v = geom.visible();
+    Object::Array([v.x0, v.y0, v.x1, v.y1].map(Object::from).to_vec())
 }
 
 /// A page copied into `dst` without what a stamp doesn't need: its
@@ -211,10 +208,9 @@ pub fn build_collection(
             .context("a stamp with no page")?;
         let mut map = HashMap::new();
         let mut dict = page_without_extras(&src, page, &mut out, &mut map)?;
-        let geom = crate::file::page_geom(&src, page);
         dict.set(
             "MediaBox",
-            Object::Array(geom.media.iter().map(|v| Object::Real(*v)).collect()),
+            visible_array(&crate::file::page_geom(&src, page)),
         );
         dict.set("Parent", pages_id);
         dict.remove(TEXT_KEY.as_bytes());
@@ -336,7 +332,7 @@ pub fn image_stamp(path: &Path) -> Result<Vec<u8>> {
     ));
     let page = out.add_object(dictionary! {
         "Type" => "Page", "Parent" => pages_id, "Contents" => content,
-        "MediaBox" => vec![0.into(), 0.into(), Object::Real(pw), Object::Real(ph)],
+        "MediaBox" => vec![0.into(), 0.into(), Object::from(pw), Object::from(ph)],
         "Resources" => dictionary! { "XObject" => dictionary! { "Im" => image } },
     });
     finish(&mut out, pages_id, vec![page], None, Vec::new())
@@ -347,33 +343,44 @@ fn compressed(mut s: Stream) -> Stream {
     s
 }
 
-/// The page of a one-page stamp PDF as a Form XObject in `dst`, and its
-/// size. Its content is the page's, its resources copied over.
-pub fn page_form(stamp: &Pdf, dst: &mut Pdf) -> Result<(ObjectId, PageSize)> {
+/// The page of a one-page stamp PDF as a Form XObject in `dst`. Its
+/// content is the page's, its resources copied over; it draws the page as
+/// shown, from the origin ([`PageForm`]).
+pub fn page_form(stamp: &Pdf, dst: &mut Pdf) -> Result<PageForm> {
     let page = *stamp
         .get_pages()
         .values()
         .next()
         .context("a stamp with no page")?;
-    let (id, geom) = page_forms(stamp, &[page], dst)?[0];
-    let [x0, y0, x1, y1] = geom.media;
-    Ok((
-        id,
-        PageSize {
-            width: x1 - x0,
-            height: y1 - y0,
-        },
-    ))
+    Ok(page_forms(stamp, &[page], dst)?.remove(0))
 }
 
-/// `pages` of `src` as Form XObjects in `dst`, each with its visible box
-/// (the form's `/BBox`, in the page's user space) and `/Rotate`. What
-/// they share, fonts and images, is copied once.
-pub fn page_forms(
-    src: &Pdf,
-    pages: &[ObjectId],
-    dst: &mut Pdf,
-) -> Result<Vec<(ObjectId, crate::annot::PageGeom)>> {
+/// A page made a Form XObject: its `/BBox` is the page's visible box, in
+/// the page's user space, and its `/Matrix` turns and moves that as the
+/// page shows, so the form draws the page as shown with its bottom-left
+/// corner at the origin, [`Geom::shown`] across.
+#[derive(Debug, Clone, Copy)]
+pub struct PageForm {
+    pub id: ObjectId,
+    pub bbox: Rect,
+    pub matrix: Affine,
+    /// The page's boxes and rotation.
+    pub geom: Geom,
+}
+
+/// The matrix that draws a page of `geom` as it shows: [`Geom::to_view`],
+/// with y turned up from the bottom.
+fn shown_matrix(geom: &Geom) -> Affine {
+    geom.to_view().then(Affine {
+        d: -1.0,
+        f: geom.shown().height,
+        ..Affine::IDENTITY
+    })
+}
+
+/// `pages` of `src` as Form XObjects in `dst` ([`PageForm`]). What they
+/// share, fonts and images, is copied once.
+pub fn page_forms(src: &Pdf, pages: &[ObjectId], dst: &mut Pdf) -> Result<Vec<PageForm>> {
     // Copy from a trimmed clone, so annotations aren't copied at all, nor
     // the content, which goes in the form itself.
     let mut scratch = src.clone();
@@ -405,36 +412,46 @@ pub fn page_forms(
                 crate::save::remap(&scratch, &r, dst, &mut map)?,
             );
         }
-        let content = src.get_page_content(page);
-        let [x0, y0, x1, y1] = geom.media;
+        // The page's streams as one, as a viewer draws them.
+        let content = PageContent::read(
+            src,
+            &content::contents(src.get_dictionary(page)?),
+            &Limits::DEFAULT,
+        )
+        .with_context(|| format!("reading the content of page {} {} R", page.0, page.1))?;
+        let (bbox, matrix) = (geom.visible(), shown_matrix(&geom));
         let mut form = dictionary! {
             "Type" => "XObject",
             "Subtype" => "Form",
-            "BBox" => vec![Object::Real(x0), Object::Real(y0), Object::Real(x1), Object::Real(y1)],
+            "BBox" => visible_array(&geom),
         };
+        if matrix != Affine::IDENTITY {
+            let Affine { a, b, c, d, e, f } = matrix;
+            // Adding 0 makes a -0 0.
+            let matrix = [a, b, c, d, e, f].map(|v| Object::from(v + 0.0));
+            form.set("Matrix", matrix.to_vec());
+        }
         if let Ok(r) = dict.get(b"Resources") {
             form.set("Resources", r.clone());
         }
-        out.push((dst.add_object(compressed(Stream::new(form, content))), geom));
+        let form = Stream::new(form, content.into_bytes());
+        out.push(PageForm {
+            id: dst.add_object(compressed(form)),
+            bbox,
+            matrix,
+            geom,
+        });
     }
     Ok(out)
 }
 
 /// A one-page PDF of the Form XObject `form` in `src`: a placed stamp's
-/// page, back from its saved appearance.
-pub fn form_to_pdf(src: &Pdf, form: ObjectId) -> Result<Vec<u8>> {
-    let Object::Stream(s) = src.get_object(form)? else {
-        bail!("not a form");
-    };
-    let bbox: Vec<f32> = s
-        .dict
-        .get(b"BBox")
-        .ok()
-        .and_then(|b| src.dereference(b).ok())
-        .and_then(|(_, b)| b.as_array().ok())
-        .map(|a| a.iter().map(|v| v.as_float().unwrap_or(0.0)).collect())
-        .filter(|b: &Vec<f32>| b.len() == 4)
-        .context("a form with no box")?;
+/// page, back from its saved appearance. The page is the box the form's
+/// `/Matrix` makes of its `/BBox`, which is what it draws.
+pub fn form_to_pdf<P: Objects + ?Sized>(src: &P, form: ObjectId) -> Result<Vec<u8>> {
+    let (bbox, matrix) = form_frame(src, form).context("a form with no box")?;
+    let frame = matrix.bounds(bbox);
+    let media = [frame.x0, frame.y0, frame.x1, frame.y1];
     let mut out = Pdf::with_version("1.5");
     let pages_id = out.new_object_id();
     let mut map = HashMap::new();
@@ -442,15 +459,40 @@ pub fn form_to_pdf(src: &Pdf, form: ObjectId) -> Result<Vec<u8>> {
     let content = out.add_object(Stream::new(dictionary! {}, b"/Stamp Do".to_vec()));
     let page = out.add_object(dictionary! {
         "Type" => "Page", "Parent" => pages_id, "Contents" => content,
-        "MediaBox" => bbox.iter().map(|v| Object::Real(*v)).collect::<Vec<_>>(),
+        "MediaBox" => media.map(Object::from).to_vec(),
         "Resources" => dictionary! { "XObject" => dictionary! { "Stamp" => copied } },
     });
     finish(&mut out, pages_id, vec![page], None, Vec::new())
 }
 
+/// Form `form`'s `/BBox` and `/Matrix` (the identity when it has none);
+/// None when it isn't a form with a box.
+pub(crate) fn form_frame<P: Objects + ?Sized>(src: &P, form: ObjectId) -> Option<(Rect, Affine)> {
+    let Ok(Object::Stream(s)) = src.get_object(form) else {
+        return None;
+    };
+    let numbers = |key: &[u8], n: usize| -> Option<Vec<f32>> {
+        let (_, array) = src.dereference(s.dict.get(key).ok()?).ok()?;
+        let values: Vec<f32> = array
+            .as_array()
+            .ok()?
+            .iter()
+            .map(|v| v.as_float().unwrap_or(0.0) as f32)
+            .collect();
+        (values.len() == n).then_some(values)
+    };
+    let bbox = numbers(b"BBox", 4)?;
+    let matrix = match numbers(b"Matrix", 6).as_deref() {
+        Some(&[a, b, c, d, e, f]) => Affine { a, b, c, d, e, f },
+        _ => Affine::IDENTITY,
+    };
+    Some((Rect::new(bbox[0], bbox[1], bbox[2], bbox[3]), matrix))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::annot::Pt;
 
     fn square(color: &str) -> Vec<u8> {
         let mut out = Pdf::with_version("1.5");
@@ -520,12 +562,67 @@ mod tests {
         assert_eq!(read_collection(&pdf).1[0].name, "Paid");
     }
 
+    /// A page cropped off the origin and turned a quarter becomes a form
+    /// that draws it as it shows from the origin: its matrix takes the
+    /// visible box to the shown page's, and the page made back from the
+    /// form is the shown size.
+    #[test]
+    fn a_cropped_turned_page_is_a_form_drawn_as_it_shows() {
+        let mut pdf = Pdf::with_version("1.5");
+        let pages_id = pdf.new_object_id();
+        let content = pdf.add_object(Stream::new(
+            dictionary! {},
+            b"0 0 1 rg 60 70 10 10 re f".to_vec(),
+        ));
+        let page = pdf.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages_id, "Contents" => content,
+            "MediaBox" => vec![0.into(), 0.into(), 300.into(), 200.into()],
+            "CropBox" => vec![50.into(), 60.into(), 250.into(), 160.into()],
+            "Rotate" => 90,
+        });
+        let bytes = finish(&mut pdf, pages_id, vec![page], None, Vec::new()).unwrap();
+        let stamp = Pdf::load_mem(&bytes).unwrap();
+        let mut dst = Pdf::with_version("1.5");
+        let form = page_form(&stamp, &mut dst).unwrap();
+        let size = form.geom.shown();
+        assert_eq!((size.width, size.height), (100.0, 200.0));
+        assert_eq!(form_frame(&dst, form.id), Some((form.bbox, form.matrix)));
+        let form = form.id;
+        let s = dst.get_object(form).unwrap().as_stream().unwrap();
+        let numbers = |key: &[u8]| -> Vec<f32> {
+            let array = s.dict.get(key).unwrap().as_array().unwrap();
+            array.iter().map(|v| v.as_float().unwrap() as f32).collect()
+        };
+        assert_eq!(numbers(b"BBox"), [50.0, 60.0, 250.0, 160.0]);
+        let [a, b, c, d, e, f] = numbers(b"Matrix")[..] else {
+            panic!("a matrix")
+        };
+        let m = Affine { a, b, c, d, e, f };
+        // Turned a quarter clockwise, the box's bottom-left is the shown
+        // top-left, and its top-right the shown bottom-right.
+        let at = |x, y| m.apply(Pt { x, y });
+        assert_eq!(at(50.0, 60.0), Pt { x: 0.0, y: 200.0 });
+        assert_eq!(at(250.0, 160.0), Pt { x: 100.0, y: 0.0 });
+        let back = Pdf::load_mem(&form_to_pdf(&dst, form).unwrap()).unwrap();
+        let page = back.get_pages()[&1];
+        let media = back.get_dictionary(page).unwrap().get(b"MediaBox").unwrap();
+        let media: Vec<f32> = media
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_float().unwrap() as f32)
+            .collect();
+        assert_eq!(media, [0.0, 0.0, 100.0, 200.0]);
+    }
+
     #[test]
     fn a_stamp_page_becomes_a_form_and_comes_back() {
         let stamp = Pdf::load_mem(&square("1 0 0")).unwrap();
         let mut dst = Pdf::with_version("1.5");
-        let (form, size) = page_form(&stamp, &mut dst).unwrap();
+        let form = page_form(&stamp, &mut dst).unwrap();
+        let size = form.geom.shown();
         assert_eq!((size.width, size.height), (100.0, 50.0));
+        let form = form.id;
         let Object::Stream(s) = dst.get_object(form).unwrap() else {
             panic!()
         };

@@ -3,18 +3,24 @@
 //! about the form: its class, scripts, usage rights and signatures
 //! (proposal 19).
 //!
+//! It's read from the source, lazily: only the objects the form reaches
+//! are parsed, and the widgets are found through the page table's
+//! `/Annots`, so a page the tree lists twice has its widgets at both of
+//! its indexes.
+//!
 //! The tree comes from untrusted files and is read for every file that
-//! opens, so it's read within limits: a visited set on `/Kids` (a cycle is
-//! damage; a field or widget listed twice is read where it's reached
-//! first), at most 32 deep, 100,000 nodes, 200,000 entries in `/Fields`
-//! and the `/Kids` arrays together (so many fields sharing kids can't make
-//! work), 100,000 widgets on pages, full names of at most 64 KiB each and
-//! 64 MiB in all, `/Opt` and list values of at most 10,000 items, and
-//! values, scripts and the rest of the text of at most 1 MiB each and
-//! 64 MiB in all. Past any of them the form is damaged: none of its fields
-//! are kept, so nothing can be filled, and the file still opens. Rects,
-//! widths and colors are made finite and clamped. `/MaxLen` is kept as the
-//! file has it; layout uses at most 1,000 of it.
+//! opens, so it's read within the source's [`FormLimits`]: a visited set
+//! on `/Kids` (a cycle is damage; a field or widget listed twice is read
+//! where it's reached first), and by default at most 32 deep, 100,000
+//! nodes, 200,000 entries in `/Fields` and the `/Kids` arrays together (so
+//! many fields sharing kids can't make work), 100,000 widgets on pages,
+//! full names of at most 64 KiB each and 64 MiB in all, `/Opt` and list
+//! values of at most 10,000 items, and values, scripts and the rest of the
+//! text of at most 1 MiB each and 64 MiB in all. Past any of them the form
+//! is damaged: none of its fields are kept, so nothing can be filled, and
+//! the file still opens. Rects, widths and colors are made finite and
+//! clamped. `/MaxLen` is kept as the file has it; layout uses at most
+//! 1,000 of it.
 //!
 //! Fields are read down `/Kids` from `/Fields`, as PDFium reads them;
 //! `/Parent` isn't followed (the form check reports kids whose `/Parent`
@@ -28,51 +34,29 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
-use lopdf::{Dictionary, Document as Pdf, Object, ObjectId};
+use lopdf::{Dictionary, Document as Pdf, LazyPdf, Object, ObjectId};
 
 use super::field::{
     Action, Border, BorderStyle, Choice, Color, Field, FieldId, FieldKind, Mk, Trigger, Value,
     Widget,
 };
-use crate::attachments::resolve;
+use crate::attachments::{Objects, once, resolve};
 use crate::file::pdf_text_bytes;
 use crate::model::SourceId;
+use crate::source::{FormLimits, Limits, PageFacts, Source};
 
-/// How deep the field tree may go.
-pub const MAX_DEPTH: usize = 32;
-/// Field tree nodes read before the form is damaged.
-pub const MAX_NODES: usize = 100_000;
-/// Entries in `/Fields` and every `/Kids` array the tree reaches. A field
-/// or widget listed twice is read once, but each list is looked through,
-/// so fields that share one `/Kids` array each cost its length.
-pub const MAX_ENTRIES: usize = 2 * MAX_NODES;
-/// Widgets on pages.
-pub const MAX_WIDGETS: usize = 100_000;
-/// The longest full name, in bytes, and all of them together. Real ones
-/// are under 2 KiB, and a parent's name is in each of its kids'.
-pub const MAX_NAME: usize = 64 << 10;
-pub const MAX_NAMES: usize = 64 << 20;
-/// Items in an `/Opt` or a list box's value.
-pub const MAX_ITEMS: usize = 10_000;
-/// The longest value, script or other text, and all of them together.
-pub const MAX_TEXT: usize = 1 << 20;
-pub const MAX_TEXTS: usize = 64 << 20;
 /// The most of `/MaxLen` layout uses: comb cells and character limits.
 pub const MAX_LAYOUT_LEN: u32 = 1000;
 /// How far from the origin a widget's rect may reach, in points.
 pub const MAX_COORD: f32 = 1_000_000.0;
-/// The longest `/DA` read. Real ones are a few dozen bytes.
-const MAX_DA: usize = 1024;
-/// Name tree entries, kids and scripts, read for document scripts.
-const MAX_SCRIPT_ENTRIES: usize = 100_000;
 
 /// A file's form as read when it opens.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FileForm {
     pub facts: FormFacts,
     /// Terminal fields, in tree order, with ids from 0 and source 0 (the
-    /// primary's, at open): `Document::set_initial_fields` takes them as
-    /// they are. None when the form is damaged.
+    /// primary's, at open): `Document::ready` takes them as they are.
+    /// None when the form is damaged.
     pub fields: Vec<Field>,
     /// Their widgets on pages, by page index, each page's in `/Annots`
     /// order. A widget on two pages is on both.
@@ -228,14 +212,16 @@ fn count(n: usize, what: &str) -> String {
     }
 }
 
-/// Read the form in `pdf`.
-pub fn read(pdf: &Pdf) -> FileForm {
+/// Read the form in `src`, within its [`FormLimits`].
+pub fn read(src: &Source) -> FileForm {
+    let pdf = src.pdf();
+    let limits = &src.limits().forms;
     let catalog = pdf.catalog().ok();
     let form = catalog
         .and_then(|c| c.get(b"AcroForm").ok())
         .and_then(|f| resolve(pdf, f))
         .and_then(|f| f.as_dict().ok());
-    let mut r = Reader::new(pdf);
+    let mut r = Reader::new(pdf, limits);
     let mut facts = FormFacts::default();
     if let Some(form) = form {
         facts.xfa = form
@@ -260,26 +246,7 @@ pub fn read(pdf: &Pdf) -> FileForm {
                 facts.fonts.push(latin1(name));
             }
         }
-        let mut roots: Vec<ObjectId> = form
-            .get(b"Fields")
-            .ok()
-            .and_then(|f| resolve(pdf, f))
-            .and_then(|f| f.as_array().ok())
-            .map(|f| f.iter().filter_map(|o| o.as_reference().ok()).collect())
-            .unwrap_or_default();
-        match listed_as_kids(pdf, &roots) {
-            Some(kids) => {
-                // Roots that are kids too come last, so their parents read
-                // them first.
-                roots.sort_by_key(|id| kids.contains(id));
-                for root in roots {
-                    r.node(root, Inherited::default(), "", 1);
-                }
-            }
-            None => r.damage(format!(
-                "/Fields and /Kids list more than {MAX_ENTRIES} entries"
-            )),
-        }
+        r.tree(form);
     }
     facts.dynamic = catalog.is_some_and(|c| boolean(pdf, c, b"NeedsRendering"));
     let perms = catalog
@@ -294,9 +261,9 @@ pub fn read(pdf: &Pdf) -> FileForm {
     };
     facts.usage_rights = perm(b"UR3") || perm(b"UR");
     facts.certified = perm(b"DocMDP");
-    (facts.document_scripts, facts.version_checks) = document_scripts(pdf);
+    (facts.document_scripts, facts.version_checks) = document_scripts(pdf, limits);
 
-    let widgets = r.on_pages();
+    let widgets = r.on_pages(src.pages());
     let fields = std::mem::take(&mut r.fields);
     // A damaged form has a field tree, however little of it was read: a
     // damaged hybrid form isn't XFA-only.
@@ -337,7 +304,7 @@ pub fn read(pdf: &Pdf) -> FileForm {
     facts.calculation_order = order
         .into_iter()
         .flatten()
-        .take(MAX_NODES)
+        .take(limits.nodes)
         .filter_map(|o| by_object.get(&o.as_reference().ok()?).copied())
         .collect();
 
@@ -355,7 +322,7 @@ pub fn read(pdf: &Pdf) -> FileForm {
         && !facts.dynamic
         && let Some(form) = form
     {
-        let xfa = super::xfa::Lookup::new(super::xfa::read(pdf, form));
+        let xfa = super::xfa::Lookup::new(super::xfa::read(pdf, form, limits));
         for f in &mut fields {
             let Some(x) = xfa.get(&f.name) else {
                 continue;
@@ -373,6 +340,16 @@ pub fn read(pdf: &Pdf) -> FileForm {
         fields,
         widgets,
     }
+}
+
+/// The terminal fields of `form`, an AcroForm in an eager document, as
+/// [`read`] reads them; None when its tree is damaged. For the old writers
+/// (`forms::rules`), which read the file they're writing: transitional
+/// (M10.5), gone with them in slice 9.
+pub(crate) fn fields_of(pdf: &Pdf, form: &Dictionary) -> Option<Vec<Field>> {
+    let mut r = Reader::new(pdf, &Limits::DEFAULT.forms);
+    r.tree(form);
+    r.damaged.is_none().then_some(r.fields)
 }
 
 /// Whether field `f` lacks `value`, which its XFA copy holds: text it
@@ -407,8 +384,9 @@ struct Inherited<'a> {
     options: Option<Arc<[Choice]>>,
 }
 
-struct Reader<'a> {
-    pdf: &'a Pdf,
+struct Reader<'a, P: Objects + ?Sized> {
+    pdf: &'a P,
+    limits: FormLimits,
     fields: Vec<Field>,
     /// Each widget's field (by index in `fields`), and whether it's a kid
     /// rather than the field's own dictionary.
@@ -427,10 +405,11 @@ struct Reader<'a> {
     actions: HashMap<ObjectId, Option<Action>>,
 }
 
-impl<'a> Reader<'a> {
-    fn new(pdf: &'a Pdf) -> Self {
+impl<'a, P: Objects + ?Sized> Reader<'a, P> {
+    fn new(pdf: &'a P, limits: &FormLimits) -> Self {
         Reader {
             pdf,
+            limits: *limits,
             fields: Vec::new(),
             widget_of: HashMap::new(),
             seen: HashSet::new(),
@@ -449,17 +428,43 @@ impl<'a> Reader<'a> {
         self.damaged.get_or_insert(why);
     }
 
-    /// Count `bytes` more of text against [`MAX_TEXTS`]; false (and the
-    /// form damaged) past it.
+    /// Count `bytes` more of text against [`FormLimits::texts`]; false
+    /// (and the form damaged) past it.
     fn spend(&mut self, bytes: usize) -> bool {
         self.text += bytes;
-        if self.text > MAX_TEXTS {
+        if self.text > self.limits.texts {
             self.damage(format!(
                 "its text comes to more than {} MiB",
-                MAX_TEXTS >> 20
+                self.limits.texts >> 20
             ));
         }
         self.damaged.is_none()
+    }
+
+    /// The field tree from `form`'s `/Fields`.
+    fn tree(&mut self, form: &Dictionary) {
+        let pdf = self.pdf;
+        let mut roots: Vec<ObjectId> = form
+            .get(b"Fields")
+            .ok()
+            .and_then(|f| resolve(pdf, f))
+            .and_then(|f| f.as_array().ok())
+            .map(|f| f.iter().filter_map(|o| o.as_reference().ok()).collect())
+            .unwrap_or_default();
+        match listed_as_kids(pdf, &roots, self.limits.entries) {
+            Some(kids) => {
+                // Roots that are kids too come last, so their parents read
+                // them first.
+                roots.sort_by_key(|id| kids.contains(id));
+                for root in roots {
+                    self.node(root, Inherited::default(), "", 1);
+                }
+            }
+            None => self.damage(format!(
+                "/Fields and /Kids list more than {} entries",
+                self.limits.entries
+            )),
+        }
     }
 
     /// Read field `id`, a kid of the field with full name `up_name`.
@@ -467,8 +472,9 @@ impl<'a> Reader<'a> {
         if self.damaged.is_some() {
             return;
         }
-        if depth > MAX_DEPTH {
-            return self.damage(format!("the field tree is more than {MAX_DEPTH} deep"));
+        let limits = self.limits;
+        if depth > limits.depth {
+            return self.damage(format!("the field tree is more than {} deep", limits.depth));
         }
         if self.path.contains(&id) {
             return self.damage(cycle());
@@ -478,28 +484,34 @@ impl<'a> Reader<'a> {
             return;
         }
         self.nodes += 1;
-        if self.nodes > MAX_NODES {
-            return self.damage(format!("the field tree has more than {MAX_NODES} nodes"));
+        if self.nodes > limits.nodes {
+            return self.damage(format!(
+                "the field tree has more than {} nodes",
+                limits.nodes
+            ));
         }
         let pdf = self.pdf;
-        let Ok(dict) = pdf.get_dictionary(id) else {
+        let Some(dict) = pdf.dictionary(id) else {
             return;
         };
         let part = dict.get(b"T").ok().and_then(|t| resolve(pdf, t));
         let name = match part.and_then(|t| t.as_str().ok()) {
-            Some(t) if t.len() > MAX_NAME => None,
+            Some(t) if t.len() > limits.name => None,
             Some(t) if up_name.is_empty() => Some(pdf_text_bytes(t)),
             Some(t) => Some(format!("{up_name}.{}", pdf_text_bytes(t))),
             None => Some(up_name.to_string()),
         };
-        let Some(name) = name.filter(|n| n.len() <= MAX_NAME) else {
-            return self.damage(format!("a full name is longer than {} KiB", MAX_NAME >> 10));
+        let Some(name) = name.filter(|n| n.len() <= limits.name) else {
+            return self.damage(format!(
+                "a full name is longer than {} KiB",
+                limits.name >> 10
+            ));
         };
         self.names += name.len();
-        if self.names > MAX_NAMES {
+        if self.names > limits.names {
             return self.damage(format!(
                 "the full names come to more than {} MiB",
-                MAX_NAMES >> 20
+                limits.names >> 20
             ));
         }
 
@@ -532,7 +544,7 @@ impl<'a> Reader<'a> {
             return;
         }
 
-        // `listed_as_kids` has counted these against MAX_ENTRIES.
+        // `listed_as_kids` has counted these against `limits.entries`.
         let kids = dict
             .get(b"Kids")
             .ok()
@@ -547,7 +559,7 @@ impl<'a> Reader<'a> {
         let mut field_kids = false;
         self.path.insert(id);
         for kid in kids.iter().filter_map(|k| k.as_reference().ok()) {
-            let Ok(k) = pdf.get_dictionary(kid) else {
+            let Some(k) = pdf.dictionary(kid) else {
                 continue;
             };
             // A kid with a name is a field; one without is a widget,
@@ -611,8 +623,9 @@ impl<'a> Reader<'a> {
         let value = match resolve(self.pdf, v) {
             Some(Object::Name(n)) => self.spend(n.len()).then(|| Value::State(latin1(n).into())),
             Some(Object::Array(items)) => {
-                if items.len() > MAX_ITEMS {
-                    self.damage(format!("a value has more than {MAX_ITEMS} items"));
+                if items.len() > self.limits.items {
+                    let n = self.limits.items;
+                    self.damage(format!("a value has more than {n} items"));
                     None
                 } else {
                     let items: Vec<Arc<str>> =
@@ -640,8 +653,9 @@ impl<'a> Reader<'a> {
         let items = resolve(self.pdf, opt).and_then(|o| o.as_array().ok());
         let items = items.map(Vec::as_slice).unwrap_or_default();
         let mut choices = Vec::new();
-        if items.len() > MAX_ITEMS {
-            self.damage(format!("an /Opt has more than {MAX_ITEMS} items"));
+        if items.len() > self.limits.items {
+            let n = self.limits.items;
+            self.damage(format!("an /Opt has more than {n} items"));
         } else {
             for item in items {
                 let pair = resolve(self.pdf, item).and_then(|o| o.as_array().ok());
@@ -665,12 +679,14 @@ impl<'a> Reader<'a> {
         choices
     }
 
-    /// A string's or stream's text, at most [`MAX_TEXT`] bytes of it.
+    /// A string's or stream's text, at most [`FormLimits::text`] bytes of
+    /// it.
     fn text(&mut self, o: &Object) -> Option<Arc<str>> {
-        let too_long = || format!("a value or script is longer than {} MiB", MAX_TEXT >> 20);
+        let max = self.limits.text;
+        let too_long = || format!("a value or script is longer than {} MiB", max >> 20);
         let bytes = match resolve(self.pdf, o)? {
             Object::String(s, _) => std::borrow::Cow::Borrowed(s.as_slice()),
-            Object::Stream(s) => match s.decompressed_content_with_limit(MAX_TEXT) {
+            Object::Stream(s) => match s.decompressed_content_with_limit(max) {
                 Ok(c) => std::borrow::Cow::Owned(c),
                 Err(lopdf::Error::Decompress(lopdf::DecompressError::MemoryLimitExceeded {
                     ..
@@ -682,7 +698,7 @@ impl<'a> Reader<'a> {
             },
             _ => return None,
         };
-        if bytes.len() > MAX_TEXT {
+        if bytes.len() > max {
             self.damage(too_long());
             return None;
         }
@@ -690,10 +706,10 @@ impl<'a> Reader<'a> {
             .then(|| pdf_text_bytes(&bytes).into())
     }
 
-    /// A dictionary's `/DA`, unless it's longer than [`MAX_DA`].
+    /// A dictionary's `/DA`, unless it's longer than [`FormLimits::da`].
     fn da(&mut self, d: &Dictionary) -> Option<Arc<str>> {
         let da = resolve(self.pdf, d.get(b"DA").ok()?)?.as_str().ok()?;
-        (da.len() <= MAX_DA && self.spend(da.len())).then(|| latin1(da).into())
+        (da.len() <= self.limits.da && self.spend(da.len())).then(|| latin1(da).into())
     }
 
     /// A field's actions in `d`'s `/AA`; or a widget's, and its `/A`.
@@ -750,35 +766,36 @@ impl<'a> Reader<'a> {
         action
     }
 
-    /// Every page's widgets that belong to a field, by page index.
-    fn on_pages(&mut self) -> BTreeMap<u32, Vec<Widget>> {
+    /// Every page's widgets that belong to a field, by page index: what
+    /// each page's `/Annots` in the page table lists. An array pages share
+    /// is looked through once.
+    fn on_pages(&mut self, pages: &[PageFacts]) -> BTreeMap<u32, Vec<Widget>> {
         let pdf = self.pdf;
         let mut out: BTreeMap<u32, Vec<Widget>> = BTreeMap::new();
         if self.damaged.is_some() || self.widget_of.is_empty() {
             return out;
         }
+        // Each array's widgets, by slot.
+        let mut arrays: HashMap<*const [Object], Vec<(usize, ObjectId)>> = HashMap::new();
         let mut count = 0;
-        for (index, page) in pdf.get_pages().into_values().enumerate() {
-            let annots = pdf
-                .get_dictionary(page)
-                .ok()
-                .and_then(|p| p.get(b"Annots").ok())
-                .and_then(|a| resolve(pdf, a))
-                .and_then(|a| a.as_array().ok());
-            for (slot, a) in annots.into_iter().flatten().enumerate() {
-                let Some((id, &(field, kid))) = a
-                    .as_reference()
-                    .ok()
-                    .and_then(|id| Some((id, self.widget_of.get(&id)?)))
-                else {
-                    continue;
-                };
+        for (index, page) in pages.iter().enumerate() {
+            let widgets = arrays.entry(Arc::as_ptr(&page.annots)).or_insert_with(|| {
+                page.annots
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(slot, a)| Some((slot, a.as_reference().ok()?)))
+                    .filter(|(_, id)| self.widget_of.contains_key(id))
+                    .collect()
+            });
+            for &(slot, id) in widgets.iter() {
+                let (field, kid) = self.widget_of[&id];
                 count += 1;
-                if count > MAX_WIDGETS {
-                    self.damage(format!("it has more than {MAX_WIDGETS} widgets on pages"));
+                if count > self.limits.widgets {
+                    let n = self.limits.widgets;
+                    self.damage(format!("it has more than {n} widgets on pages"));
                     return out;
                 }
-                let Ok(d) = pdf.get_dictionary(id) else {
+                let Some(d) = pdf.dictionary(id) else {
                     continue;
                 };
                 let widget = self.widget(id, d, FieldId(field as u64), slot, kid);
@@ -805,7 +822,7 @@ impl<'a> Reader<'a> {
             .and_then(|r| r.as_array().ok())
             .and_then(|r| <&[Object; 4]>::try_from(r.as_slice()).ok())
             .map(|r| {
-                let v = |o: &Object| clamp_coord(o.as_float().unwrap_or(0.0));
+                let v = |o: &Object| clamp_coord(o.as_float().unwrap_or(0.0) as f32);
                 let (x0, y0, x1, y1) = (v(&r[0]), v(&r[1]), v(&r[2]), v(&r[3]));
                 [x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1)]
             })
@@ -836,7 +853,7 @@ impl<'a> Reader<'a> {
                     .ok()
                     .and_then(|w| resolve(pdf, w))
                     .and_then(|w| w.as_float().ok())
-                    .map_or(1.0, clamp_width),
+                    .map_or(1.0, |w| clamp_width(w as f32)),
                 style: match bs.get(b"S").ok().and_then(|s| s.as_name().ok()) {
                     Some(b"D") => BorderStyle::Dashed,
                     Some(b"B") => BorderStyle::Beveled,
@@ -847,7 +864,7 @@ impl<'a> Reader<'a> {
             }),
             (None, Some(Object::Array(b))) => {
                 b.get(2).and_then(|w| w.as_float().ok()).map(|w| Border {
-                    width: clamp_width(w),
+                    width: clamp_width(w as f32),
                     style: BorderStyle::Solid,
                 })
             }
@@ -911,23 +928,26 @@ fn cycle() -> String {
 
 /// Every field and widget the tree under `roots` lists as a kid; none when
 /// the roots and the `/Kids` of every node they reach come to more than
-/// [`MAX_ENTRIES`]. The read walks no list this doesn't, so this bounds it
+/// `max` entries. The read walks no list this doesn't, so this bounds it
 /// too.
-fn listed_as_kids(pdf: &Pdf, roots: &[ObjectId]) -> Option<HashSet<ObjectId>> {
+fn listed_as_kids<P: Objects + ?Sized>(
+    pdf: &P,
+    roots: &[ObjectId],
+    max: usize,
+) -> Option<HashSet<ObjectId>> {
     let mut out = HashSet::new();
     let mut seen = HashSet::new();
     let mut todo = roots.to_vec();
     let mut entries = roots.len();
     while let Some(id) = todo.pop() {
-        if entries > MAX_ENTRIES {
+        if entries > max {
             return None;
         }
         if !seen.insert(id) {
             continue;
         }
         let kids = pdf
-            .get_dictionary(id)
-            .ok()
+            .dictionary(id)
             .and_then(|d| d.get(b"Kids").ok())
             .and_then(|k| resolve(pdf, k))
             .and_then(|k| k.as_array().ok())
@@ -939,7 +959,7 @@ fn listed_as_kids(pdf: &Pdf, roots: &[ObjectId]) -> Option<HashSet<ObjectId>> {
             todo.push(kid);
         }
     }
-    (entries <= MAX_ENTRIES).then_some(out)
+    (entries <= max).then_some(out)
 }
 
 fn is_widget(d: &Dictionary) -> bool {
@@ -954,11 +974,11 @@ fn latin1(bytes: &[u8]) -> String {
     bytes.iter().map(|&b| b as char).collect()
 }
 
-fn number(pdf: &Pdf, d: &Dictionary, key: &[u8]) -> Option<i64> {
+fn number<P: Objects + ?Sized>(pdf: &P, d: &Dictionary, key: &[u8]) -> Option<i64> {
     resolve(pdf, d.get(key).ok()?)?.as_i64().ok()
 }
 
-fn boolean(pdf: &Pdf, d: &Dictionary, key: &[u8]) -> bool {
+fn boolean<P: Objects + ?Sized>(pdf: &P, d: &Dictionary, key: &[u8]) -> bool {
     d.get(key)
         .ok()
         .and_then(|o| resolve(pdf, o))
@@ -967,7 +987,7 @@ fn boolean(pdf: &Pdf, d: &Dictionary, key: &[u8]) -> bool {
 }
 
 /// `/Q`, when it's 0, 1 or 2.
-fn align(pdf: &Pdf, d: &Dictionary) -> Option<u8> {
+fn align<P: Objects + ?Sized>(pdf: &P, d: &Dictionary) -> Option<u8> {
     number(pdf, d, b"Q")
         .filter(|q| (0..=2).contains(q))
         .map(|q| q as u8)
@@ -997,7 +1017,7 @@ fn color(o: &Object) -> Option<Color> {
         .ok()?
         .iter()
         .map(|p| match p.as_float() {
-            Ok(v) if v.is_finite() => v.clamp(0.0, 1.0),
+            Ok(v) if v.is_finite() => v.clamp(0.0, 1.0) as f32,
             _ => 0.0,
         })
         .collect();
@@ -1012,8 +1032,8 @@ fn color(o: &Object) -> Option<Color> {
 /// Document-level scripts in the catalog's `/Names /JavaScript`: those
 /// that would run, and Adobe's version checks (`!ADBE::`). Each node and
 /// array is read once, however many nodes list it, and the walk stops
-/// after [`MAX_SCRIPT_ENTRIES`] kids and scripts.
-fn document_scripts(pdf: &Pdf) -> (usize, usize) {
+/// after [`FormLimits::scripts`] kids and scripts.
+fn document_scripts(pdf: &LazyPdf, limits: &FormLimits) -> (usize, usize) {
     let tree = pdf
         .catalog()
         .ok()
@@ -1025,7 +1045,7 @@ fn document_scripts(pdf: &Pdf) -> (usize, usize) {
     let mut seen = HashSet::new();
     let (mut entries, mut scripts, mut checks) = (0, 0, 0);
     'walk: while let Some(node) = todo.pop() {
-        if entries > MAX_SCRIPT_ENTRIES {
+        if entries > limits.scripts {
             break;
         }
         let Some(d) = once(pdf, &mut seen, node).and_then(|n| n.as_dict().ok()) else {
@@ -1042,7 +1062,7 @@ fn document_scripts(pdf: &Pdf) -> (usize, usize) {
         // Pairs of a name and an action.
         for name in names.iter().step_by(2) {
             entries += 1;
-            if entries > MAX_SCRIPT_ENTRIES {
+            if entries > limits.scripts {
                 break 'walk;
             }
             let name = resolve(pdf, name).and_then(|n| n.as_str().ok());
@@ -1054,16 +1074,6 @@ fn document_scripts(pdf: &Pdf) -> (usize, usize) {
         }
     }
     (scripts, checks)
-}
-
-/// `o` resolved, unless it's a reference `seen` already has.
-fn once<'a>(pdf: &'a Pdf, seen: &mut HashSet<ObjectId>, o: &'a Object) -> Option<&'a Object> {
-    if let Ok(id) = o.as_reference()
-        && !seen.insert(id)
-    {
-        return None;
-    }
-    resolve(pdf, o)
 }
 
 #[cfg(test)]

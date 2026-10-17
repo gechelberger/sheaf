@@ -5,11 +5,13 @@ use std::path::{Path, PathBuf};
 
 use lopdf::content::{Content, Operation};
 use lopdf::{Document as Pdf, Object, ObjectId, Stream, dictionary};
+use sheaf_core::Rotation;
 
 use crate::annot::{Annot, AnnotId, AnnotKind, Pt};
 use crate::history::FixedCount;
 use crate::model::{Document, Edit, SourceInfo};
 use crate::save::{Strategy, rewrite, save_to_path};
+use crate::store::Store;
 
 fn tempdir() -> PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -96,24 +98,10 @@ fn catalog(pdf: &mut Pdf) -> &mut lopdf::Dictionary {
     pdf.get_dictionary_mut(id).unwrap()
 }
 
-fn opened(path: &Path, n: u32) -> Document {
-    Document::new(
-        SourceInfo {
-            path: path.to_path_buf(),
-            page_count: n,
-            first_page: sheaf_core::PageSize {
-                width: 612.0,
-                height: 792.0,
-            },
-            page_sizes: None,
-            bytes: std::fs::metadata(path).unwrap().len() as usize,
-            password: None,
-            data: None,
-            derived: None,
-        },
-        &[],
-        Box::new(FixedCount(10)),
-    )
+fn opened(path: &Path) -> Document {
+    let store = Store::new();
+    let primary = SourceInfo::read(&store, path, None).unwrap();
+    Document::new(store, primary, &[], Box::new(FixedCount(10)))
 }
 
 /// Whether any stream in the file says `text`, decompressed.
@@ -181,7 +169,7 @@ fn a_deleted_page_leaves_the_file_whatever_points_at_it() {
             a.push(named.into());
             page.set("Annots", a);
         });
-        let mut model = opened(&path, 3);
+        let mut model = opened(&path);
         let third = model.page(2).unwrap().id;
         model
             .apply(Edit::DeletePages { ids: vec![third] }, "del")
@@ -245,7 +233,7 @@ fn a_reply_keeps_no_comment_of_a_deleted_page() {
                 .unwrap()
                 .set("Annots", vec![reply.into()]);
         });
-        let mut model = opened(&path, 2);
+        let mut model = opened(&path);
         let second = model.page(1).unwrap().id;
         model
             .apply(Edit::DeletePages { ids: vec![second] }, "del")
@@ -266,20 +254,8 @@ fn inserting_one_page_brings_only_that_page() {
             link(pdf, p[0], p[2]);
             link(pdf, p[0], p[1]);
         });
-        let mut model = opened(&a, 1);
-        let sb = model.add_source(SourceInfo {
-            path: b.clone(),
-            page_count: 3,
-            first_page: sheaf_core::PageSize {
-                width: 612.0,
-                height: 792.0,
-            },
-            page_sizes: None,
-            bytes: 0,
-            password: None,
-            data: None,
-            derived: None,
-        });
+        let mut model = opened(&a);
+        let sb = model.add_source(SourceInfo::read(model.store(), &b, None).unwrap());
         // B's first and third pages: the link between them stays, the one
         // to its second goes, and the second isn't in the file.
         for range in [0..1, 2..3] {
@@ -413,7 +389,7 @@ fn fields_tags_and_threads_let_go_of_a_deleted_page() {
         c.set("MarkInfo", dictionary! { "Marked" => true });
         c.set("Threads", vec![Object::from(thread)]);
     });
-    let mut model = opened(&path, 3);
+    let mut model = opened(&path);
     let third = model.page(2).unwrap().id;
     model
         .apply(Edit::DeletePages { ids: vec![third] }, "del")
@@ -469,7 +445,7 @@ fn copies_hold_only_the_pages_copied() {
         link(pdf, p[0], p[2]);
         link(pdf, p[0], p[1]);
     });
-    let mut model = opened(&path, 3);
+    let mut model = opened(&path);
     let (p0, p1) = (model.page(0).unwrap().id, model.page(1).unwrap().id);
     // Extract pages 1 and 2: page 3 doesn't come, nor does the link to it.
     let bytes = crate::save::extract_bytes(&model.snapshot(), &[p0, p1]).unwrap();
@@ -513,6 +489,7 @@ fn note(text: &str) -> Annot {
         fill: None,
         dashed: false,
         cloudy: false,
+        turn: Rotation::R0,
         name: String::new(),
     }
 }
@@ -521,7 +498,7 @@ fn note(text: &str) -> Annot {
 fn a_deleted_mark_is_gone_from_the_saved_bytes() {
     let dir = tempdir();
     let path = file(&dir, "a.pdf", "A", 1, |_, _| {});
-    let mut model = opened(&path, 1);
+    let mut model = opened(&path);
     let p0 = model.page(0).unwrap().id;
     model
         .apply(
@@ -536,29 +513,16 @@ fn a_deleted_mark_is_gone_from_the_saved_bytes() {
         save_to_path(&model.snapshot(), &path).unwrap(),
         Strategy::Incremental
     );
-    let saved = std::fs::read(&path).unwrap();
-    model.rebase_to_saved(SourceInfo {
-        path: path.clone(),
-        page_count: 1,
-        first_page: sheaf_core::PageSize {
-            width: 612.0,
-            height: 792.0,
-        },
-        page_sizes: None,
-        bytes: saved.len(),
-        password: None,
-        data: None,
-        derived: None,
-    });
+    model.rebase_to_saved(SourceInfo::read(model.store(), &path, None).unwrap());
     let id = model.state().annots_on(p0).unwrap()[0].id;
     model
         .apply(Edit::AnnotDelete { page: p0, id }, "delete")
         .unwrap();
     assert!(model.snapshot().removes_content);
     // Undone, it's the saved version again: nothing removed.
-    model.undo();
+    model.undo().unwrap();
     assert!(!model.snapshot().removes_content);
-    model.redo();
+    model.redo().unwrap();
     assert_eq!(
         save_to_path(&model.snapshot(), &path).unwrap(),
         Strategy::Rewrite
@@ -574,7 +538,7 @@ fn replacing_saved_ocr_text_takes_the_old_out() {
     use crate::text_layer::{OcrWord, TextLayer};
     let dir = tempdir();
     let path = file(&dir, "a.pdf", "A", 1, |_, _| {});
-    let mut model = opened(&path, 1);
+    let mut model = opened(&path);
     let p0 = model.page(0).unwrap().id;
     let layer = |text: &str| {
         std::sync::Arc::new(TextLayer::from_engine(
@@ -588,11 +552,7 @@ fn replacing_saved_ocr_text_takes_the_old_out() {
                 },
                 confidence: 0.9,
             }],
-            sheaf_core::PageSize {
-                width: 612.0,
-                height: 792.0,
-            },
-            sheaf_core::Rotation::R0,
+            &crate::geom::Geom::read(None, None, 0),
             "test",
         ))
     };
@@ -626,19 +586,7 @@ fn replacing_saved_ocr_text_takes_the_old_out() {
     );
     let saved = std::fs::read(&path).unwrap();
     assert_eq!(layers(&saved), 1);
-    model.rebase_to_saved(SourceInfo {
-        path: path.clone(),
-        page_count: 1,
-        first_page: sheaf_core::PageSize {
-            width: 612.0,
-            height: 792.0,
-        },
-        page_sizes: None,
-        bytes: saved.len(),
-        password: None,
-        data: None,
-        derived: None,
-    });
+    model.rebase_to_saved(SourceInfo::read(model.store(), &path, None).unwrap());
     // Recognized again: the old text would stay in the earlier revision,
     // so it's a full save.
     model

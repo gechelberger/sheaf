@@ -1,5 +1,5 @@
 //! File > Properties (Alt+Enter): Description, Security and Fonts, as
-//! Acrobat's Document Properties has them. The file is read in the
+//! Acrobat's Document Properties has them. The source is read in the
 //! background when the dialog opens.
 
 use std::path::PathBuf;
@@ -8,6 +8,7 @@ use gpui::{
     AnyElement, App, Context, EventEmitter, FocusHandle, Focusable, MouseButton, SharedString,
     Window, div, prelude::*, px,
 };
+use sheaf_doc::Src;
 use sheaf_doc::properties::{Embedding, Properties};
 use sheaf_ui::button::Button;
 use sheaf_ui::{dialog, theme};
@@ -20,10 +21,9 @@ pub const KEY_CONTEXT: &str = "PropertiesDialog";
 pub struct PropertiesContext {
     /// The document's path, as shown.
     pub path: PathBuf,
-    /// The file to read (the same, unless showing recovered changes).
-    pub source: PathBuf,
-    pub password: Option<String>,
-    pub bytes: usize,
+    /// The source to read: the file's (another, when showing recovered
+    /// changes).
+    pub source: Src,
     /// The current page's size as shown, in points.
     pub page_size: Option<(f32, f32)>,
     pub dirty: bool,
@@ -49,7 +49,7 @@ pub enum PropertiesEvent {
 pub struct PropertiesDialog {
     focus: FocusHandle,
     ctx: PropertiesContext,
-    props: Option<Result<Properties, String>>,
+    props: Option<Properties>,
     tab: Tab,
 }
 
@@ -65,14 +65,14 @@ impl PropertiesDialog {
     pub fn new(ctx: PropertiesContext, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        let (source, password) = (ctx.source.clone(), ctx.password.clone());
+        let source = ctx.source.clone();
         cx.spawn(async move |this, cx| {
             let read = cx
                 .background_executor()
-                .spawn(async move { sheaf_doc::properties::read(&source, password.as_deref()) })
+                .spawn(async move { sheaf_doc::properties::read(&source) })
                 .await;
             this.update(cx, |d, cx| {
-                d.props = Some(read.map_err(|e| format!("{e:#}")));
+                d.props = Some(read);
                 cx.notify();
             })
             .ok();
@@ -121,15 +121,15 @@ impl PropertiesDialog {
             })
             .unwrap_or_default();
         let yes_no = |b: bool| if b { "Yes" } else { "No" }.to_string();
+        let bytes = self.ctx.source.bytes().len();
         let rows: Vec<(&str, String)> = vec![
             ("File", file_name),
             ("Location", folder),
             (
                 "File size",
                 format!(
-                    "{} ({} bytes)",
-                    crate::attachments_panel::fmt_size(self.ctx.bytes as u64),
-                    self.ctx.bytes
+                    "{} ({bytes} bytes)",
+                    crate::attachments_panel::fmt_size(bytes as u64),
                 ),
             ),
             ("Title", p.title.clone()),
@@ -163,7 +163,7 @@ impl PropertiesDialog {
             ];
         };
         let mut out = vec![row("Security Method", s.method.clone())];
-        if self.ctx.password.is_some() {
+        if self.ctx.source.password().is_some() {
             out.push(row(
                 "Opened with",
                 "the password you entered; a save writes an unprotected copy".into(),
@@ -266,8 +266,7 @@ impl Render for PropertiesDialog {
                     .px_2()
                     .into_any_element(),
             ],
-            Some(Err(e)) => vec![dialog::message(e.clone(), true).into_any_element()],
-            Some(Ok(p)) => match self.tab {
+            Some(p) => match self.tab {
                 Tab::Description => self.description(p),
                 Tab::Security => self.security(p),
                 Tab::Fonts => self.fonts(p),

@@ -28,9 +28,11 @@
 use gpui::{
     AnyElement, Context, Entity, Focusable, KeyDownEvent, Subscription, Window, div, prelude::*, px,
 };
+use sheaf_core::Rotation;
 use sheaf_doc::annot::tape_size;
+use sheaf_doc::geom::Affine;
 use sheaf_doc::tape::{Line, Op, Row, Tape, TapeLook, fmt_amount, parse_amount};
-use sheaf_doc::{AnnotId, AnnotKind, Box2, Edit, PageId, Pt};
+use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, Edit, PageId, Pt};
 use sheaf_ui::text_input::{TextInput, TextInputEvent};
 use sheaf_ui::theme;
 
@@ -467,8 +469,8 @@ impl DocView {
         true
     }
 
-    /// Pick on: a click on a page enters the number under it. True when
-    /// the click was taken.
+    /// Pick on: a click on a page, at `p` in PageSpace, enters the number
+    /// under it. True when the click was taken.
     pub(crate) fn pick_number_at(
         &mut self,
         page: PageId,
@@ -482,21 +484,25 @@ impl DocView {
         self.with_chars(page, cx, move |v, chars, cx| {
             let hit = chars.and_then(|c| {
                 let at = c.boundary_at(p, tolerance)?;
-                c.words()
+                let (w, _, r) = c
+                    .words()
                     .into_iter()
-                    .find(|(_, (a, b), _)| *a <= at && at <= *b)
+                    .find(|(_, (a, b), _)| *a <= at && at <= *b)?;
+                Some((sheaf_doc::tape::number_in(&w)?, r, c.upright))
             });
-            match hit.and_then(|(w, _, r)| Some((sheaf_doc::tape::number_in(&w)?, r))) {
-                Some((value, r)) => v.picked(page, vec![(value, r)], cx),
+            match hit {
+                Some((value, r, upright)) => v.picked(page, vec![(value, r)], upright, cx),
                 None => v.set_notice("No number there", cx),
             }
         });
         true
     }
 
-    /// Pick on, Shift+drag: every number in the region.
+    /// Pick on, Shift+drag: every number in the region (`rect`, in
+    /// PageSpace).
     pub(crate) fn pick_numbers_in(&mut self, page: PageId, rect: Box2, cx: &mut Context<Self>) {
         self.with_chars(page, cx, move |v, chars, cx| {
+            let upright = chars.as_ref().map_or(Rotation::R0, |c| c.upright);
             let found: Vec<(f64, Box2)> = chars
                 .map(|c| {
                     c.words()
@@ -514,14 +520,21 @@ impl DocView {
             if found.is_empty() {
                 v.set_notice("No numbers there", cx);
             } else {
-                v.picked(page, found, cx);
+                v.picked(page, found, upright, cx);
             }
         });
     }
 
-    /// Numbers picked on `page`: onto the tape, each with the tickmark
-    /// beside it when there's one (as one undo step).
-    fn picked(&mut self, page: PageId, numbers: Vec<(f64, Box2)>, cx: &mut Context<Self>) {
+    /// Numbers picked on `page` (their boxes in PageSpace, the text reading
+    /// upright turned `upright`): onto the tape, each with the tickmark
+    /// after it as it reads, when there's one (as one undo step).
+    fn picked(
+        &mut self,
+        page: PageId,
+        numbers: Vec<(f64, Box2)>,
+        upright: Rotation,
+        cx: &mut Context<Self>,
+    ) {
         self.ensure_calc(cx);
         let calc = self.calc.as_mut().unwrap();
         for (value, _) in &numbers {
@@ -536,9 +549,13 @@ impl DocView {
         let n = numbers.len();
         let sum: f64 = numbers.iter().map(|(v, _)| v).sum();
         if let Some(glyph) = tick {
+            // Laid out where the text reads upright, and turned to read
+            // with it.
+            let up = Affine::upright(upright);
             let edits: Vec<Edit> = numbers
                 .iter()
                 .map(|(_, r)| {
+                    let r = up.apply_box(*r);
                     let h = (r.h * 1.2).max(10.0);
                     let w = crate::contrib::mark_width(&glyph, h);
                     let a = self.new_annot(
@@ -554,7 +571,13 @@ impl DocView {
                         crate::markup_tools::color_of(crate::markup_tools::Tool::Tick, cx),
                         cx,
                     );
-                    Edit::AnnotAdd { page, annot: a }
+                    Edit::AnnotAdd {
+                        page,
+                        annot: Annot {
+                            turn: upright,
+                            ..a.mapped(&up.inverse())
+                        },
+                    }
                 })
                 .collect();
             self.apply_batch(edits, &format!("Tick {n} picked"), cx);
@@ -602,7 +625,7 @@ impl DocView {
     }
 
     /// The tape being edited, written back over the placed one: new rows,
-    /// the same place, its size fitted to them.
+    /// the same place (its top-left as it reads), its size fitted to them.
     fn update_placed_tape(&mut self, page: PageId, id: AnnotId, cx: &mut Context<Self>) {
         let Some(calc) = &mut self.calc else { return };
         let (tape, decimals, contents) = (calc.tape.clone(), calc.decimals, calc.contents());
@@ -618,9 +641,11 @@ impl DocView {
         let Some(mut a) = annot else {
             return self.set_notice("That tape is gone", cx);
         };
+        // Sized as it reads, in the frame it reads upright in.
+        let upright = a.upright();
         let AnnotKind::Tape {
             rect, size, look, ..
-        } = &a.kind
+        } = &upright
         else {
             return;
         };
@@ -639,7 +664,8 @@ impl DocView {
             size: *size,
             tape,
             look,
-        };
+        }
+        .mapped(&Affine::upright(a.turn).inverse());
         a.contents = contents;
         a.modified = sheaf_doc::pdf_date_now();
         self.apply(Edit::AnnotUpdate { page, annot: a }, "Update tape", cx);

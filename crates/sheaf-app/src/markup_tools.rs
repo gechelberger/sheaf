@@ -2,21 +2,30 @@
 //! previews while dragging, selection/move/delete of our annotations, and
 //! path-based drawing for lines and ink.
 //!
-//! Coordinates: the page container reports window positions; those become
-//! page-local logical px, then points in the page's *displayed* orientation,
-//! then points in the source page's own orientation (what the model stores).
+//! Coordinates (M10.5 §5): the page container reports window positions;
+//! those become page-local logical px, then points on the page as the pane
+//! shows it, then PageSpace, which the model stores. Gestures work in the
+//! page's edit frame (see `Doc::edit_geom`): the page as it shows without
+//! rotate view, y down, so a drag reads the same in a turned pane. A mark
+//! built or reshaped there reaches the model through [`Annot::to_page`],
+//! once; [`Annot::to_frame`] brings one back into the frame to be moved,
+//! reshaped or copied.
+
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
 
 use gpui::{
     AnyElement, Context, CursorStyle, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     PathBuilder, Pixels, Point, Window, canvas, div, prelude::*, px, rgb,
 };
 use sheaf_core::{PageSize, Rotation};
+use sheaf_doc::assets::MarkAssets;
+use sheaf_doc::geom::{Affine, Geom};
 use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, Edit, PageId, Pt};
-use sheaf_render::Rect;
 use sheaf_ui::theme;
 use sheaf_ui::tooltip::Tooltip;
 
-use crate::docview::{DocView, State, rotate_rect};
+use crate::docview::{DocView, State};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
@@ -244,13 +253,14 @@ pub(crate) fn color_of(tool: Tool, cx: &gpui::App) -> [u8; 3] {
 pub struct Drag {
     pub page: usize,
     pub page_id: PageId,
-    /// Points in source-page space.
+    /// Points in the page's edit frame.
     pub start: Pt,
     pub current: Pt,
     /// Every sampled point (ink).
     pub path: Vec<Pt>,
-    /// Marks being moved, as they were: the one grabbed and the others
-    /// selected on its page.
+    /// Marks being moved, as they were, in the page's edit frame
+    /// ([`Annot::to_frame`]): the one grabbed and the others selected on its
+    /// page.
     pub moving: Vec<Annot>,
     /// A mark being reshaped by one of its handles.
     pub resize: Option<Resize>,
@@ -274,10 +284,11 @@ pub enum Spot {
 #[derive(Debug, Clone)]
 pub struct Resize {
     pub spot: Spot,
+    /// The mark as it was, in the page's edit frame ([`Annot::to_frame`]).
     pub orig: Annot,
 }
 
-/// A mark's handles, in source-page space.
+/// A mark's handles, in the frame it's in.
 pub fn handle_spots(a: &Annot) -> Vec<(Spot, Pt)> {
     use sheaf_doc::annot::Handles;
     match a.kind.handles() {
@@ -307,7 +318,7 @@ pub fn handle_spots(a: &Annot) -> Vec<(Spot, Pt)> {
             }
             _ => Vec::new(),
         },
-        Handles::Box => box_spots(a.bounds()),
+        Handles::Box => box_spots(a.kind.bounds()),
     }
 }
 
@@ -344,7 +355,7 @@ pub fn reshaped(r: &Resize, p: Pt, shift: bool) -> Annot {
             // A callout's box handles size its box, not the leader.
             let b = match &r.orig.kind {
                 AnnotKind::Callout { rect, .. } => *rect,
-                _ => r.orig.bounds(),
+                _ => r.orig.kind.bounds(),
             };
             // The corner or side opposite the handle stays put.
             let anchor = Pt {
@@ -437,46 +448,13 @@ pub fn reshaped(r: &Resize, p: Pt, shift: bool) -> Annot {
     out
 }
 
-/// Map a point in the page's displayed (rotated) space back to the source
-/// page's own orientation.
-pub fn unrotate_pt(p: Pt, src: PageSize, rot: Rotation) -> Pt {
-    match rot {
-        Rotation::R0 => p,
-        Rotation::R90 => Pt {
-            x: p.y,
-            y: src.height - p.x,
-        },
-        Rotation::R180 => Pt {
-            x: src.width - p.x,
-            y: src.height - p.y,
-        },
-        Rotation::R270 => Pt {
-            x: src.width - p.y,
-            y: p.x,
-        },
+/// `m`, a mark in an edit frame, moved as a drag from `a` to `b` in that
+/// frame moves it.
+fn dragged(m: &Annot, a: Pt, b: Pt) -> Annot {
+    Annot {
+        kind: m.kind.translated(b.x - a.x, b.y - a.y),
+        ..m.clone()
     }
-}
-
-pub fn rotate_pt(p: Pt, src: PageSize, rot: Rotation) -> Pt {
-    match rot {
-        Rotation::R0 => p,
-        Rotation::R90 => Pt {
-            x: src.height - p.y,
-            y: p.x,
-        },
-        Rotation::R180 => Pt {
-            x: src.width - p.x,
-            y: src.height - p.y,
-        },
-        Rotation::R270 => Pt {
-            x: p.y,
-            y: src.width - p.x,
-        },
-    }
-}
-
-fn translate(kind: &AnnotKind, dx: f32, dy: f32) -> AnnotKind {
-    kind.translated(dx, dy)
 }
 
 impl DocView {
@@ -504,44 +482,20 @@ impl DocView {
             cx.notify();
             return;
         };
-        let b = a.bounds();
+        let b = a.page_bounds();
         let Some(index) = doc.model.state().index_of(page_id) else {
             return;
         };
-        let Some(pref) = doc.shown_ref(index) else {
-            return;
-        };
-        let Some(src) = doc
-            .model
-            .source(pref.source)
-            .map(|s| s.page_size(pref.index))
-        else {
-            return;
-        };
-        let r = rotate_rect(
-            Rect {
-                x: b.x,
-                y: b.y,
-                w: b.w,
-                h: b.h,
-            },
-            src,
-            pref.rotation,
-        );
-        let ps = src.rotated(pref.rotation);
-        doc.scroll_to(crate::docview::ScrollTo::Reveal {
-            page: index,
-            fx: (r.x + r.w / 2.0) / ps.width.max(1.0),
-            fy: (r.y + r.h / 2.0) / ps.height.max(1.0),
-        });
+        doc.reveal(index, b);
         doc.select_mark(Some((page_id, id)));
         doc.notice = Some(format!("Page {}", index + 1));
         cx.notify();
     }
 
-    /// Window position → (page index, point in source-page space, the
-    /// page's scale in px per point, for hit areas that stay the same size
-    /// on screen).
+    /// Window position → (page index, point in its edit frame, the page's
+    /// scale in px per point, for hit areas that stay the same size on
+    /// screen). The pane shows the page turned by rotate view; the point
+    /// goes through PageSpace into the frame without it.
     pub(crate) fn page_point_k(&self, pos: Point<Pixels>) -> Option<(usize, Pt, f32)> {
         let State::Ready(doc) = &self.state else {
             return None;
@@ -557,20 +511,36 @@ impl DocView {
         if y < top || y > top + h || x < left || x > left + w {
             return None;
         }
-        let pref = layout.refs[i];
-        let src = doc
-            .model
-            .source(pref.source)
-            .map(|s| s.page_size(pref.index))?;
-        let k = w / src.rotated(pref.rotation).width.max(1.0);
-        let disp = Pt {
+        let pane = doc.model.geom(&layout.refs[i]);
+        let k = w / pane.shown().width.max(1.0);
+        let shown = Pt {
             x: (x - left) / k,
             y: (y - top) / k,
         };
-        Some((i, unrotate_pt(disp, src, pref.rotation), k))
+        let edit = doc.edit_geom(i)?;
+        Some((i, pane.from_view().then(edit.to_view()).apply(shown), k))
     }
 
-    /// The topmost of our marks on page `page_id` under `p`.
+    /// `p`, a point on page `index` in its edit frame, in PageSpace, where
+    /// text and regions are.
+    pub(crate) fn page_space(&self, index: usize, p: Pt) -> Pt {
+        match &self.state {
+            State::Ready(doc) => doc.edit_geom(index).map_or(p, |g| g.from_view().apply(p)),
+            _ => p,
+        }
+    }
+
+    /// Page `page_id`'s edit frame.
+    pub(crate) fn edit_geom_of(&self, page_id: PageId) -> Option<Geom> {
+        let State::Ready(doc) = &self.state else {
+            return None;
+        };
+        doc.edit_geom(doc.model.index_of(page_id)?)
+    }
+
+    /// The topmost of our marks on page `page_id` under `p`, a point in
+    /// its edit frame. Each mark is hit where it's drawn: laid out as it
+    /// reads.
     pub(crate) fn mark_at(&self, page_id: PageId, p: Pt, tolerance: f32) -> Option<Annot> {
         let State::Ready(doc) = &self.state else {
             return None;
@@ -579,17 +549,22 @@ impl DocView {
         if doc.comments_hidden {
             return None;
         }
+        let from_edit = self.edit_geom_of(page_id)?.from_view();
         doc.model.state().annots_on(page_id).and_then(|list| {
             list.iter()
                 .rev()
                 .filter(|a| !doc.hidden_marks.contains(&a.id))
-                .find(|a| a.hit(p, tolerance))
+                .find(|a| {
+                    let at = from_edit.then(Affine::upright(a.turn)).apply(p);
+                    a.hit(at, tolerance)
+                })
                 .cloned()
         })
     }
 
-    /// The handle of the selected mark under `p`, when one mark is selected
-    /// and it's on this page.
+    /// The handle of the selected mark under `p` (in the edit frame), when
+    /// one mark is selected and it's on this page; with the mark in the
+    /// edit frame, as a resize reshapes it there.
     fn handle_at(&self, page_id: PageId, p: Pt, tolerance: f32) -> Option<(Spot, Annot)> {
         let State::Ready(doc) = &self.state else {
             return None;
@@ -601,6 +576,7 @@ impl DocView {
             return None;
         }
         let (_, a) = doc.selected_mark_list().pop()?;
+        let a = a.to_frame(&self.edit_geom_of(page_id)?);
         handle_spots(&a)
             .into_iter()
             .find(|(_, q)| (q.x - p.x).abs() <= tolerance && (q.y - p.y).abs() <= tolerance)
@@ -648,6 +624,8 @@ impl DocView {
         } else {
             p
         };
+        // Where text and regions are.
+        let at = self.page_space(page, p);
         // Shift+click on a mark adds it to the selection (or takes it out);
         // Shift+drag elsewhere selects a region, whatever the tool (but a
         // Measure tool, where Shift keeps to 45°).
@@ -660,7 +638,7 @@ impl DocView {
                 cx.notify();
                 return;
             }
-            self.start_region(page, p, cx);
+            self.start_region(page, at, cx);
             return;
         }
         self.clear_region(cx);
@@ -670,7 +648,7 @@ impl DocView {
             return;
         }
         // Picking numbers into the calculator takes the click too.
-        if self.pick_number_at(page_id, p, tolerance, cx) {
+        if self.pick_number_at(page_id, at, tolerance, cx) {
             return;
         }
         // The Select tool grabs marks and their handles; with Ctrl, any
@@ -713,12 +691,15 @@ impl DocView {
                 if !doc.selected_marks.contains(&(page_id, a.id)) {
                     doc.select_mark(Some((page_id, a.id)));
                 }
+                let Some(edit) = doc.edit_geom(page) else {
+                    return;
+                };
                 // Everything selected on this page moves together.
                 let moving: Vec<Annot> = doc
                     .selected_mark_list()
                     .into_iter()
                     .filter(|(pid, _)| *pid == page_id)
-                    .map(|(_, m)| m)
+                    .map(|(_, m)| m.to_frame(&edit))
                     .collect();
                 doc.drag = Some(Drag {
                     page,
@@ -746,6 +727,9 @@ impl DocView {
                 let State::Ready(doc) = &mut self.state else {
                     return;
                 };
+                let Some(edit) = doc.edit_geom(page) else {
+                    return;
+                };
                 doc.select_mark(None);
                 doc.selected_foreign = Some(ix);
                 doc.adopting = Some(ix);
@@ -755,7 +739,7 @@ impl DocView {
                     start: p,
                     current: p,
                     path: Vec::new(),
-                    moving: vec![mark],
+                    moving: vec![mark.to_frame(&edit)],
                     resize: None,
                     shift: false,
                 });
@@ -764,15 +748,15 @@ impl DocView {
             }
             if self.tool == Tool::Select {
                 // Away from any mark: select text.
-                self.start_text_drag(page_id, page, p, tolerance, ev.click_count, cx);
+                self.start_text_drag(page_id, page, at, tolerance, ev.click_count, cx);
                 return;
             }
         }
         // The text tools select text when the press is on it, as the
         // Select tool does; letting go marks the selection up.
         if self.tool.marks_text() {
-            if self.over_text(page_id, p, tolerance) {
-                self.start_text_drag(page_id, page, p, tolerance, ev.click_count, cx);
+            if self.over_text(page_id, at, tolerance) {
+                self.start_text_drag(page_id, page, at, tolerance, ev.click_count, cx);
                 return;
             }
             if self.tool == Tool::TextEdit {
@@ -864,7 +848,8 @@ impl DocView {
                 _ => None,
             };
             if let Some(page_id) = page_id {
-                self.hover_page(page_id, p, 4.0 / k.max(0.01), cx);
+                let at = self.page_space(page, p);
+                self.hover_page(page_id, at, 4.0 / k.max(0.01), cx);
             }
             self.shape_hover(page, p, ev.modifiers.shift, k, cx);
             return;
@@ -872,10 +857,11 @@ impl DocView {
         if ev.pressed_button != Some(MouseButton::Left) {
             return;
         }
-        if self.drag_region(page, p, cx) {
+        let at = self.page_space(page, p);
+        if self.drag_region(page, at, cx) {
             return;
         }
-        if self.move_text_drag(page, p, cx) {
+        if self.move_text_drag(page, at, cx) {
             return;
         }
         let tool = self.tool;
@@ -923,11 +909,15 @@ impl DocView {
         };
         let Some(drag) = doc.drag.take() else { return };
         let adopting = doc.adopting.take();
+        let Some(edit) = doc.edit_geom(drag.page) else {
+            return;
+        };
         let page_id = drag.page_id;
         let (a, b) = (drag.start, drag.current);
         if let Some(r) = &drag.resize {
-            let mut changed = reshaped(r, b, drag.shift);
+            let changed = reshaped(r, b, drag.shift);
             if changed != r.orig {
+                let mut changed = changed.to_page(&edit);
                 changed.modified = sheaf_doc::pdf_date_now();
                 self.apply(
                     Edit::AnnotUpdate {
@@ -943,16 +933,12 @@ impl DocView {
         if let Some(ix) = adopting {
             // Another tool's comment, moved: ours now, where it was let go.
             let (dx, dy) = (b.x - a.x, b.y - a.y);
-            if dx.abs() >= 0.5 || dy.abs() >= 0.5 {
-                self.adopt_foreign(
-                    ix,
-                    |m| {
-                        m.kind = translate(&m.kind, dx, dy);
-                        m.modified = sheaf_doc::pdf_date_now();
-                    },
-                    "Move annotation",
-                    cx,
-                );
+            if (dx.abs() >= 0.5 || dy.abs() >= 0.5)
+                && let Some(m) = drag.moving.first()
+            {
+                let mut moved = dragged(m, a, b).to_page(&edit);
+                moved.modified = sheaf_doc::pdf_date_now();
+                self.adopt_foreign(ix, |m| *m = moved, "Move annotation", cx);
             }
             return;
         }
@@ -972,10 +958,9 @@ impl DocView {
             let n = drag.moving.len();
             let edits = drag
                 .moving
-                .into_iter()
-                .map(|orig| {
-                    let mut moved = orig.clone();
-                    moved.kind = translate(&orig.kind, dx, dy);
+                .iter()
+                .map(|m| {
+                    let mut moved = dragged(m, a, b).to_page(&edit);
                     moved.modified = now.clone();
                     Edit::AnnotUpdate {
                         page: page_id,
@@ -1002,7 +987,8 @@ impl DocView {
                 if too_small {
                     return;
                 }
-                self.markup_from_drag(tool, page_id, rect, cx);
+                let rect = edit.from_view().apply_box(rect);
+                self.markup_from_drag(tool, page_id, rect, edit.rotate, cx);
             }
             Tool::FreeText => {
                 if too_small {
@@ -1072,28 +1058,34 @@ impl DocView {
     }
 
     /// Mark up the text a rectangle dragged off the text covered (the
-    /// engine's, or an unsaved OCR layer's). Where there's no text, a
-    /// highlight covers the area; the line markups do nothing.
+    /// engine's, or an unsaved OCR layer's), with `rect` and the markup in
+    /// PageSpace, turned as the text reads. Where there's no text, a
+    /// highlight covers the area, turned `drawn`, as the page showed when
+    /// it was dragged; the line markups do nothing.
     fn markup_from_drag(
         &mut self,
         tool: Tool,
         page_id: PageId,
         rect: Box2,
+        drawn: Rotation,
         cx: &mut Context<Self>,
     ) {
         self.with_chars(page_id, cx, move |view, chars, cx| {
-            let mut rects = chars.map(|c| c.rects_in(rect)).unwrap_or_default();
-            if rects.is_empty() {
-                if tool != Tool::Highlight {
+            let on_text = chars
+                .map(|c| (c.rects_in(rect), c.upright))
+                .filter(|(rects, _)| !rects.is_empty());
+            let (rects, turn) = match on_text {
+                Some(found) => found,
+                None if tool == Tool::Highlight => (vec![rect], drawn),
+                None => {
                     if let State::Ready(doc) = &mut view.state {
                         doc.notice = Some(format!("{}: no text there", tool.label()));
                     }
                     cx.notify();
                     return;
                 }
-                rects = vec![rect];
-            }
-            view.add_text_markup(tool, page_id, rects, cx);
+            };
+            view.add_text_markup(tool, page_id, rects, turn, cx);
         });
     }
 
@@ -1283,14 +1275,16 @@ impl DocView {
         }
     }
 
-    /// Live preview of the current drag on `page`, in page-local logical px.
+    /// Live preview of the current drag on `page`, in page-local logical
+    /// px: the drag is in the edit frame of `edit`, and the page is drawn
+    /// as `pane` shows it, at `k` px a point.
     pub(crate) fn drag_preview(
         doc: &crate::docview::Doc,
         tool: Tool,
         color: [u8; 3],
         page: usize,
-        src: PageSize,
-        rot: Rotation,
+        edit: &Geom,
+        pane: &Geom,
         k: f32,
     ) -> Option<AnyElement> {
         let drag = doc.drag.as_ref()?;
@@ -1299,17 +1293,20 @@ impl DocView {
         }
         let c = rgb(((color[0] as u32) << 16) | ((color[1] as u32) << 8) | color[2] as u32);
         let (a, b) = (drag.start, drag.current);
-        // Moving or reshaping marks, whatever the tool (Ctrl+drag).
+        let (to_pane, size) = (pane.to_view(), pane.shown());
+        let from_edit = edit.from_view().then(to_pane);
+        let px_of = |p: Pt| {
+            let q = from_edit.apply(p);
+            (q.x * k, q.y * k)
+        };
+        // Moving or reshaping marks, whatever the tool (Ctrl+drag), shown
+        // as they'll be let go.
         let shown: Vec<Annot> = match &drag.resize {
-            Some(r) => vec![reshaped(r, b, drag.shift)],
+            Some(r) => vec![reshaped(r, b, drag.shift).to_page(edit)],
             None => drag
                 .moving
                 .iter()
-                .map(|orig| {
-                    let mut moved = orig.clone();
-                    moved.kind = translate(&orig.kind, b.x - a.x, b.y - a.y);
-                    moved
-                })
+                .map(|m| dragged(m, a, b).to_page(edit))
                 .collect(),
         };
         if !shown.is_empty() {
@@ -1317,37 +1314,24 @@ impl DocView {
                 div()
                     .absolute()
                     .inset_0()
-                    .children(
-                        shown
-                            .iter()
-                            .flat_map(|m| crate::docview::annot_elements(m, src, rot, k)),
-                    )
+                    .children(shown.iter().flat_map(|m| {
+                        crate::docview::annot_elements(m, doc.model.assets(), &to_pane, size, k)
+                    }))
                     .into_any_element(),
             );
         }
         match tool {
             Tool::Select => None,
-            Tool::Line | Tool::Arrow => {
-                let pa = rotate_pt(a, src, rot);
-                let pb = rotate_pt(b, src, rot);
-                Some(stroke_canvas(
-                    vec![vec![(pa.x * k, pa.y * k), (pb.x * k, pb.y * k)]],
-                    c,
-                    1.5 * k,
-                    src.rotated(rot),
-                    k,
-                ))
-            }
+            Tool::Line | Tool::Arrow | Tool::Callout => Some(stroke_canvas(
+                vec![vec![px_of(a), px_of(b)]],
+                c,
+                1.5 * k,
+                size,
+                k,
+            )),
             Tool::Ink => {
-                let pts: Vec<(f32, f32)> = drag
-                    .path
-                    .iter()
-                    .map(|p| {
-                        let q = rotate_pt(*p, src, rot);
-                        (q.x * k, q.y * k)
-                    })
-                    .collect();
-                Some(stroke_canvas(vec![pts], c, 2.0 * k, src.rotated(rot), k))
+                let pts: Vec<(f32, f32)> = drag.path.iter().map(|p| px_of(*p)).collect();
+                Some(stroke_canvas(vec![pts], c, 2.0 * k, size, k))
             }
             Tool::TextEdit => None,
             Tool::Highlight
@@ -1357,16 +1341,7 @@ impl DocView {
             | Tool::FreeText
             | Tool::Square
             | Tool::Ellipse => {
-                let r = rotate_rect(
-                    Rect {
-                        x: a.x.min(b.x),
-                        y: a.y.min(b.y),
-                        w: (a.x - b.x).abs(),
-                        h: (a.y - b.y).abs(),
-                    },
-                    src,
-                    rot,
-                );
+                let r = from_edit.apply_box(Box2::from_corners(a, b));
                 let el = div()
                     .absolute()
                     .left(px(r.x * k))
@@ -1408,25 +1383,23 @@ impl DocView {
                     fill: None,
                     dashed: false,
                     cloudy: false,
+                    turn: Rotation::R0,
                     name: String::new(),
-                };
+                }
+                .to_page(edit);
                 Some(
                     div()
                         .absolute()
                         .inset_0()
-                        .children(crate::docview::annot_elements(&m, src, rot, k))
+                        .children(crate::docview::annot_elements(
+                            &m,
+                            doc.model.assets(),
+                            &to_pane,
+                            size,
+                            k,
+                        ))
                         .into_any_element(),
                 )
-            }
-            Tool::Callout => {
-                let (pa, pb) = (rotate_pt(a, src, rot), rotate_pt(b, src, rot));
-                Some(stroke_canvas(
-                    vec![vec![(pa.x * k, pa.y * k), (pb.x * k, pb.y * k)]],
-                    c,
-                    1.5 * k,
-                    src.rotated(rot),
-                    k,
-                ))
             }
         }
     }
@@ -1541,9 +1514,96 @@ pub fn arrow_head(a: (f32, f32), b: (f32, f32), size: f32) -> Vec<(f32, f32)> {
 /// what other programs paste: the marks' text, or their kinds).
 #[derive(serde::Serialize, serde::Deserialize)]
 struct CopiedMarks {
-    /// Bumped if this changes incompatibly.
+    /// [`COPIED_MARKS`]; bumped if this changes incompatibly.
     sheaf_marks: u32,
+    /// As [`copied`] holds them.
     marks: Vec<Annot>,
+}
+
+/// The clipboard's version: 2 holds marks as their pages showed them (1
+/// held them in the frame the file displayed, before PageSpace).
+const COPIED_MARKS: u32 = 2;
+
+/// What the marks copied last hold, by stem: each page stamp's page, a
+/// one-page PDF, and each attachment's bytes (M10.5 §14.1's clipboard
+/// blob cache). A paste in any window gives them to its document, whose
+/// files may have neither. It holds one copy's, as the clipboard does.
+#[derive(Default)]
+struct CopiedAssets {
+    stamps: HashMap<String, Arc<[u8]>>,
+    files: HashMap<String, Arc<[u8]>>,
+}
+
+static COPIED_ASSETS: LazyLock<Mutex<CopiedAssets>> = LazyLock::new(Default::default);
+
+impl CopiedAssets {
+    /// What `marks` hold, from `assets`, their document's.
+    fn of(marks: &[Annot], assets: &MarkAssets) -> CopiedAssets {
+        let mut held = CopiedAssets::default();
+        for a in marks {
+            match &a.kind {
+                AnnotKind::PageStamp { stamp, .. } => {
+                    if let Some(pdf) = assets.stamp_pdf(stamp) {
+                        held.stamps.insert(stamp.clone(), pdf);
+                    }
+                }
+                AnnotKind::FileAttachment { file, name, .. } => match assets.file_bytes(file) {
+                    Ok(bytes) => {
+                        held.files.insert(file.clone(), bytes);
+                    }
+                    Err(e) => log::warn!("copying attachment {name}: {e:#}"),
+                },
+                _ => {}
+            }
+        }
+        held
+    }
+
+    /// What `marks` name of these, given to `assets`, the document they're
+    /// pasted into.
+    fn give(&self, marks: &[Annot], assets: &MarkAssets) {
+        for a in marks {
+            match &a.kind {
+                AnnotKind::PageStamp { stamp, .. } => {
+                    if let Some(pdf) = self.stamps.get(stamp) {
+                        assets.intern_stamp(stamp, pdf.clone());
+                    }
+                }
+                AnnotKind::FileAttachment { file, .. } => {
+                    if let Some(bytes) = self.files.get(file) {
+                        assets.intern_file(file, bytes.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// `marks`, copied from the page whose edit frame is `from`: as the page
+/// shows them, each turned relative to it ([`Annot::to_frame`]), so a paste
+/// onto any page puts them where they were seen.
+pub(crate) fn copied(marks: impl IntoIterator<Item = Annot>, from: &Geom) -> Vec<Annot> {
+    marks.into_iter().map(|a| a.to_frame(from)).collect()
+}
+
+/// Copied `marks` pasted onto the page whose edit frame is `onto`, moved
+/// `shift` points down and right as it shows them, and turned with it.
+pub(crate) fn pasted(
+    marks: impl IntoIterator<Item = Annot>,
+    onto: &Geom,
+    shift: f32,
+) -> Vec<Annot> {
+    marks
+        .into_iter()
+        .map(|a| {
+            let moved = Annot {
+                kind: a.kind.translated(shift, shift),
+                ..a
+            };
+            moved.to_page(onto)
+        })
+        .collect()
 }
 
 /// Opacities and line widths the properties bar offers.
@@ -1589,14 +1649,20 @@ impl DocView {
             return false;
         };
         // A reply or status pasted elsewhere would be in no thread.
-        let marks: Vec<Annot> = doc
-            .selected_mark_list()
-            .into_iter()
-            .map(|(_, a)| a)
-            .filter(|a| a.thread_parent().is_none())
-            .collect();
+        let mut marks = Vec::new();
+        for (page, a) in doc.selected_mark_list() {
+            if a.thread_parent().is_none()
+                && let Some(from) = doc.model.index_of(page).and_then(|i| doc.edit_geom(i))
+            {
+                marks.extend(copied([a], &from));
+            }
+        }
         if marks.is_empty() {
             return false;
+        }
+        let held = CopiedAssets::of(&marks, doc.model.assets());
+        if let Ok(mut copied) = COPIED_ASSETS.lock() {
+            *copied = held;
         }
         let text = marks
             .iter()
@@ -1613,7 +1679,7 @@ impl DocView {
         cx.write_to_clipboard(gpui::ClipboardItem::new_string_with_json_metadata(
             text,
             CopiedMarks {
-                sheaf_marks: 1,
+                sheaf_marks: COPIED_MARKS,
                 marks,
             },
         ));
@@ -1626,9 +1692,9 @@ impl DocView {
         true
     }
 
-    /// Paste copied marks onto the current page: a little down and right of
-    /// where they were, or exactly there (`in_place`). They come in
-    /// selected, as one undo step.
+    /// Paste copied marks onto the current page where they were seen on
+    /// theirs: a little down and right of there, or exactly there
+    /// (`in_place`). They come in selected, as one undo step.
     pub(crate) fn paste_marks(&mut self, in_place: bool, cx: &mut Context<Self>) -> bool {
         let Some(copied) = cx.read_from_clipboard().and_then(|item| {
             item.entries().iter().find_map(|e| match e {
@@ -1638,25 +1704,28 @@ impl DocView {
         }) else {
             return false;
         };
-        if copied.sheaf_marks != 1 || copied.marks.is_empty() {
+        if copied.sheaf_marks != COPIED_MARKS || copied.marks.is_empty() {
             return false;
         }
         let me = crate::prefs::get(cx).identity.name();
         let State::Ready(doc) = &mut self.state else {
             return false;
         };
-        let Some(page) = doc.page_ref(doc.current_page()).map(|p| p.id) else {
+        let index = doc.current_page();
+        let (Some(page), Some(onto)) = (doc.page_ref(index).map(|p| p.id), doc.edit_geom(index))
+        else {
             return false;
         };
+        if let Ok(held) = COPIED_ASSETS.lock() {
+            held.give(&copied.marks, doc.model.assets());
+        }
         let before = doc.model.state().annots_on(page).map_or(0, |l| l.len());
         let shift = if in_place { 0.0 } else { 10.0 };
         let now = sheaf_doc::pdf_date_now();
         let n = copied.marks.len();
-        let edits = copied
-            .marks
+        let edits = pasted(copied.marks, &onto, shift)
             .into_iter()
             .map(|mut a| {
-                a.kind = a.kind.translated(shift, shift);
                 // A pasted connector is on its own: its partner stayed put.
                 if let AnnotKind::Connector { partner, .. } = &mut a.kind {
                     *partner = None;
@@ -1986,6 +2055,22 @@ mod tests {
         }
     }
 
+    /// Copied marks take their stamps' pages and files with them, and a
+    /// paste gives them to a document that has neither.
+    #[test]
+    fn copied_marks_take_what_they_hold() {
+        use sheaf_doc::forms::fixture::{self, MARK_FILE, MARK_FILE_BYTES, MARK_STAMP};
+        let every = fixture::every_mark_kind();
+        let marks = [every[17].clone(), every[23].clone(), every[1].clone()];
+        let held = CopiedAssets::of(&marks, &fixture::mark_assets());
+        assert_eq!((held.stamps.len(), held.files.len()), (1, 1));
+        let other = MarkAssets::new(sheaf_doc::Store::new());
+        assert!(other.stamp(MARK_STAMP).is_none());
+        held.give(&marks, &other);
+        assert!(other.stamp_pdf(MARK_STAMP).is_some());
+        assert_eq!(&*other.file_bytes(MARK_FILE).unwrap(), MARK_FILE_BYTES);
+    }
+
     fn mark(kind: AnnotKind) -> Annot {
         Annot {
             id: AnnotId(1),
@@ -2000,6 +2085,7 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            turn: Rotation::R0,
             name: String::new(),
         }
     }
@@ -2133,5 +2219,202 @@ mod tests {
             (knee, point),
             (Pt { x: 80.0, y: 115.0 }, Pt { x: 40.0, y: 160.0 })
         );
+    }
+
+    /// A page turned `degrees`, its media box off the origin and its crop
+    /// box inset from it.
+    fn turned(degrees: i64) -> Geom {
+        use sheaf_doc::geom::Rect;
+        Geom::read(
+            Some(Rect::new(-37.0, 52.0, 575.0, 844.0)),
+            Some(Rect::new(-17.0, 62.0, 555.0, 824.0)),
+            degrees,
+        )
+    }
+
+    /// Within 1/64 pt.
+    fn near(a: Box2, b: Box2) -> bool {
+        [a.x - b.x, a.y - b.y, a.w - b.w, a.h - b.h]
+            .iter()
+            .all(|d| d.abs() <= 1.0 / 64.0)
+    }
+
+    fn square(rect: Box2) -> Annot {
+        mark(AnnotKind::Square { rect })
+    }
+
+    /// Whatever the page's turn, a mark moves on the page as the pointer
+    /// does in the edit frame, and keeps its own turn.
+    #[test]
+    fn a_drag_moves_a_mark_as_the_page_shows() {
+        for degrees in [0, 90, 180, 270] {
+            let edit = turned(degrees);
+            let a = Annot {
+                turn: Rotation::R90,
+                ..square(Box2 {
+                    x: 100.0,
+                    y: 200.0,
+                    w: 40.0,
+                    h: 20.0,
+                })
+            };
+            let before = edit.to_view().apply_box(a.page_bounds());
+            let moved = dragged(
+                &a.to_frame(&edit),
+                Pt { x: 10.0, y: 10.0 },
+                Pt { x: 25.0, y: 40.0 },
+            )
+            .to_page(&edit);
+            assert_eq!(moved.turn, a.turn, "{degrees}");
+            let after = edit.to_view().apply_box(moved.page_bounds());
+            let want = Box2 {
+                x: before.x + 15.0,
+                y: before.y + 30.0,
+                ..before
+            };
+            assert!(near(after, want), "{degrees}: {after:?}");
+        }
+    }
+
+    /// A corner handle reshapes a mark in the edit frame, so on a turned
+    /// page the corner dragged is the one under the pointer, and the mark
+    /// back in PageSpace keeps its turn.
+    #[test]
+    fn a_handle_reshapes_a_mark_as_the_page_shows() {
+        for degrees in [0, 90, 180, 270] {
+            let edit = turned(degrees);
+            let a = Annot {
+                turn: edit.rotate,
+                ..square(Box2 {
+                    x: 100.0,
+                    y: 200.0,
+                    w: 40.0,
+                    h: 20.0,
+                })
+            };
+            let shown = a.to_frame(&edit);
+            assert_eq!(shown.turn, Rotation::R0, "{degrees}");
+            let b = shown.kind.bounds();
+            // The bottom-right corner as shown, dragged 10 pt right and down.
+            let (spot, at) = handle_spots(&shown)[4];
+            assert_eq!(
+                at,
+                Pt {
+                    x: b.right(),
+                    y: b.bottom()
+                },
+                "{degrees}"
+            );
+            let r = Resize { spot, orig: shown };
+            let back = reshaped(
+                &r,
+                Pt {
+                    x: at.x + 10.0,
+                    y: at.y + 10.0,
+                },
+                false,
+            )
+            .to_page(&edit);
+            assert_eq!(back.turn, edit.rotate);
+            let want = Box2 {
+                w: b.w + 10.0,
+                h: b.h + 10.0,
+                ..b
+            };
+            let got = edit.to_view().apply_box(back.page_bounds());
+            assert!(near(got, want), "{degrees}: {got:?}");
+        }
+    }
+
+    /// A mark drawn in the edit frame lands where it was drawn, and reads
+    /// the way it was drawn: an arrow drawn rightwards runs rightwards as
+    /// laid out, whatever the page's turn.
+    #[test]
+    fn a_mark_drawn_on_a_turned_page_reads_as_drawn() {
+        for degrees in [0, 90, 180, 270] {
+            let edit = turned(degrees);
+            let (from, to) = (Pt { x: 50.0, y: 80.0 }, Pt { x: 150.0, y: 80.0 });
+            let drawn = mark(AnnotKind::Line {
+                a: from,
+                b: to,
+                arrow: true,
+                arrow_start: false,
+            });
+            let m = drawn.to_page(&edit);
+            assert_eq!(m.turn, edit.rotate, "{degrees}");
+            let AnnotKind::Line { a, b, .. } = m.mapped(&edit.to_view()).kind else {
+                panic!()
+            };
+            let back = Box2::from_corners(a, b);
+            assert!(
+                near(back, Box2::from_corners(from, to)),
+                "{degrees}: {back:?}"
+            );
+            let AnnotKind::Line { a, b, .. } = m.upright() else {
+                panic!()
+            };
+            assert!(
+                (a.y - b.y).abs() < 1e-3 && b.x - a.x > 99.0,
+                "{degrees}: {a:?} {b:?}"
+            );
+        }
+    }
+
+    /// Marks pasted onto a page with another `/Rotate` and crop land where
+    /// they were seen on theirs, or 10 pt down and right of there as seen,
+    /// and keep their turn relative to the page, either way between the
+    /// two.
+    #[test]
+    fn paste_keeps_the_place_as_seen_across_rotate_and_crop() {
+        use sheaf_doc::geom::Rect;
+        let page_a = Geom::read(
+            Some(Rect::new(0.0, 0.0, 612.0, 792.0)),
+            Some(Rect::new(40.0, 60.0, 572.0, 752.0)),
+            90,
+        );
+        let page_b = Geom::read(Some(Rect::new(-100.0, 200.0, 512.0, 992.0)), None, 0);
+        let marks = [
+            Annot {
+                turn: Rotation::R90,
+                ..square(Box2 {
+                    x: 100.0,
+                    y: 200.0,
+                    w: 40.0,
+                    h: 20.0,
+                })
+            },
+            Annot {
+                turn: Rotation::R180,
+                ..mark(AnnotKind::Line {
+                    a: Pt { x: 300.0, y: 400.0 },
+                    b: Pt { x: 350.0, y: 480.0 },
+                    arrow: true,
+                    arrow_start: false,
+                })
+            },
+            mark(AnnotKind::Note {
+                pos: Pt { x: 500.0, y: 100.0 },
+            }),
+        ];
+        for (from, onto) in [(&page_a, &page_b), (&page_b, &page_a)] {
+            let clip = copied(marks.clone(), from);
+            for shift in [0.0, 10.0] {
+                for (was, now) in marks.iter().zip(pasted(clip.clone(), onto, shift)) {
+                    let seen = from.to_view().apply_box(was.page_bounds());
+                    let want = Box2 {
+                        x: seen.x + shift,
+                        y: seen.y + shift,
+                        ..seen
+                    };
+                    let got = onto.to_view().apply_box(now.page_bounds());
+                    assert!(near(got, want), "{shift}: {got:?} not {want:?}");
+                    assert_eq!(
+                        now.turn.minus(onto.rotate),
+                        was.turn.minus(from.rotate),
+                        "{shift}"
+                    );
+                }
+            }
+        }
     }
 }

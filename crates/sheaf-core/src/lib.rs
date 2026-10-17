@@ -15,6 +15,19 @@ pub fn checksum_hex(bytes: &[u8]) -> String {
     format!("{:032x}", checksum(bytes))
 }
 
+/// The file at `path`, read into one shared buffer: what the store
+/// interns and the renderer reads, with no second copy.
+pub fn read_file(path: &std::path::Path) -> std::io::Result<std::sync::Arc<[u8]>> {
+    use std::io::Read as _;
+    let mut file = std::fs::File::open(path)?;
+    let len = usize::try_from(file.metadata()?.len()).map_err(std::io::Error::other)?;
+    // SAFETY: zeroed bytes are bytes.
+    let mut bytes = unsafe { std::sync::Arc::<[u8]>::new_zeroed_slice(len).assume_init() };
+    let buffer = std::sync::Arc::get_mut(&mut bytes).expect("nothing else holds a new buffer");
+    file.read_exact(buffer)?;
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod checksum_tests {
     #[test]
@@ -133,9 +146,9 @@ mod tests {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DestView {
     /// PDF `/XYZ`: show this point at the window's top-left, at this zoom
-    /// (1.0 = 100%). Coordinates are in the page's displayed space (points,
-    /// top-left origin, after the file's own `/Rotate`), like annotations.
-    /// `None` keeps the viewer's current value.
+    /// (1.0 = 100%). Coordinates are in PageSpace, the page's default user
+    /// space before `/Rotate`, as the file has them. `None` keeps the
+    /// viewer's current value.
     Xyz {
         left: Option<f32>,
         top: Option<f32>,
@@ -148,66 +161,4 @@ pub enum DestView {
         kind: String,
         params: Vec<Option<f32>>,
     },
-}
-
-/// A page's geometry for mapping between user space (PDF coordinates,
-/// bottom-left origin, before `/Rotate`) and displayed space (top-left
-/// origin, after `/Rotate`): its visible box (x0, y0, x1, y1; the CropBox, else
-/// the MediaBox) and `/Rotate`.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct PageFrame {
-    pub media: [f32; 4],
-    pub rotate: i32,
-}
-
-impl PageFrame {
-    /// Displayed (x, y) → user (x, y), one axis at a time, so a missing
-    /// coordinate stays missing. Each displayed axis maps to exactly one
-    /// user axis (which one depends on the rotation).
-    pub fn to_user(&self, x: Option<f32>, y: Option<f32>) -> (Option<f32>, Option<f32>) {
-        let [x0, y0, x1, y1] = self.media;
-        match self.rotate.rem_euclid(360) {
-            90 => (y.map(|y| x0 + y), x.map(|x| y0 + x)),
-            180 => (x.map(|x| x1 - x), y.map(|y| y0 + y)),
-            270 => (y.map(|y| x1 - y), x.map(|x| y1 - x)),
-            _ => (x.map(|x| x0 + x), y.map(|y| y1 - y)),
-        }
-    }
-
-    /// User (x, y) → displayed (x, y), one axis at a time.
-    pub fn to_display(&self, ux: Option<f32>, uy: Option<f32>) -> (Option<f32>, Option<f32>) {
-        let [x0, y0, x1, y1] = self.media;
-        match self.rotate.rem_euclid(360) {
-            90 => (uy.map(|uy| uy - y0), ux.map(|ux| ux - x0)),
-            180 => (ux.map(|ux| x1 - ux), uy.map(|uy| uy - y0)),
-            270 => (uy.map(|uy| y1 - uy), ux.map(|ux| x1 - ux)),
-            _ => (ux.map(|ux| ux - x0), uy.map(|uy| y1 - uy)),
-        }
-    }
-}
-
-#[cfg(test)]
-mod frame_tests {
-    use super::*;
-
-    #[test]
-    fn axes_round_trip_in_every_rotation() {
-        for rotate in [0, 90, 180, 270] {
-            let f = PageFrame {
-                media: [10.0, 20.0, 622.0, 812.0],
-                rotate,
-            };
-            let (ux, uy) = f.to_user(Some(100.0), Some(50.0));
-            assert_eq!(f.to_display(ux, uy), (Some(100.0), Some(50.0)), "{rotate}");
-            // A missing coordinate stays missing on the matching axis.
-            let (ux, uy) = f.to_user(None, Some(50.0));
-            assert_eq!(f.to_display(ux, uy), (None, Some(50.0)), "{rotate}");
-        }
-        // Unrotated: displayed top 0 is the top of the MediaBox.
-        let f = PageFrame {
-            media: [0.0, 0.0, 612.0, 792.0],
-            rotate: 0,
-        };
-        assert_eq!(f.to_user(Some(0.0), Some(0.0)), (Some(0.0), Some(792.0)));
-    }
 }

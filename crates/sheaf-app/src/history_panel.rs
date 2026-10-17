@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use gpui::{AnyElement, Context, FocusHandle, Window, div, prelude::*, px};
-use sheaf_doc::{VersionId, VersionView};
+use sheaf_doc::{Damaged, VersionId, VersionView};
 use sheaf_ui::list::ListLayout;
 use sheaf_ui::theme;
 
@@ -119,6 +119,7 @@ impl DocView {
         }
         if let Err(e) = doc.model.jump(id) {
             doc.notice = Some(format!("Can't go there: {e:#}"));
+            self.refresh_history();
             cx.notify();
             return;
         }
@@ -197,6 +198,14 @@ impl DocView {
         rows
     }
 
+    /// Build the rows again: a version was found damaged, which no edit
+    /// counts.
+    pub(crate) fn refresh_history(&mut self) {
+        if let Some(h) = &mut self.history {
+            h.cache = None;
+        }
+    }
+
     fn toggle_expanded(&mut self, id: VersionId, cx: &mut Context<Self>) {
         if let Some(h) = &mut self.history {
             if !h.expanded.remove(&id) {
@@ -244,7 +253,9 @@ impl DocView {
                     let expandable = view.edits.len() > 1
                         || view.edits.first().is_some_and(|e| *e != view.label);
                     let open = h.expanded.contains(&id);
-                    let meta = if view.edits.is_empty() {
+                    let meta = if view.damaged {
+                        Damaged { version: id }.to_string()
+                    } else if view.edits.is_empty() {
                         format!("Opened · {}", fmt_local(&view.at))
                     } else if view.author.is_empty() {
                         fmt_local(&view.at)
@@ -302,7 +313,11 @@ impl DocView {
                                 .child(
                                     div()
                                         .text_xs()
-                                        .text_color(theme::TEXT_MUTED)
+                                        .text_color(if view.damaged {
+                                            theme::ERROR
+                                        } else {
+                                            theme::TEXT_MUTED
+                                        })
                                         .overflow_hidden()
                                         .whitespace_nowrap()
                                         .text_ellipsis()

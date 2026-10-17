@@ -13,6 +13,8 @@ fixtures = []
 # Random mark ids, so copies of a file never hand out the same one.
 fastrand = "2"
 sheaf-core.workspace = true
+# How far an open has read (M10.5 §14.2).
+in-progress.workspace = true
 lopdf.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
@@ -26,11 +28,20 @@ sheaf-image.workspace = true
 flate2 = "1"
 # Stamps from images keep their transparency (a soft mask).
 image.workspace = true
-# XFDF, comments as XML (M9 slice 18).
+# XFDF, comments as XML (M9 slice 18); XMP's conformance claims.
 quick-xml = "0.41"
+# A file's password is wiped from memory when its blob goes.
+zeroize = "1.9"
+# Text in a mark's staleness digest is NFC, whatever another tool wrote
+# (M10.5 §3.6).
+unicode-normalization = "0.1"
 
 [dev-dependencies]
 image.workspace = true
 env_logger.workspace = true
 # Random field trees for the form reader (M10 slice 2).
 proptest = { version = "1", default-features = false, features = ["std"] }
+# The retired-symbols ledger reads the workspace's code (M10.5 slice 1),
+# and says where each hit is.
+syn = { version = "2", features = ["full", "visit"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }

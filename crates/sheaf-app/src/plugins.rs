@@ -682,27 +682,35 @@ pub fn dispatch_event(
         })
         .map(|(id, _)| id.clone())
         .collect();
-    let coalesce = kind == sheaf_plugin::EventKind::Region;
-    for id in to {
+    let calls: Vec<(String, Call)> = if kind == sheaf_plugin::EventKind::Opened {
+        // `opened` first, then the calls that waited for the file.
+        doc.update(cx, |d, _| d.release_plugin_calls(to))
+    } else {
+        to.into_iter()
+            .map(|id| (id, Call::Event(event.clone())))
+            .collect()
+    };
+    for (id, call) in calls {
         // Live while dragging: a plugin still busy with one region gets
         // only the newest next, not every mouse move.
-        if coalesce
+        if let Call::Event(region) = &call
+            && is_region(&call)
             && cx
                 .global_mut::<PluginHost>()
                 .regions
-                .offer(&id, (doc.downgrade(), event.clone()))
+                .offer(&id, (doc.downgrade(), region.clone()))
                 .is_none()
         {
             continue;
         }
-        run(
-            &id,
-            Call::Event(event.clone()),
-            Some(doc.clone()),
-            window,
-            cx,
-        );
+        run(&id, call, Some(doc.clone()), window, cx);
     }
+}
+
+/// Whether `call` is a region event (a region, or its clearing), which
+/// the host's `regions` coalesces.
+fn is_region(call: &Call) -> bool {
+    matches!(call, Call::Event(e) if e.kind() == sheaf_plugin::EventKind::Region)
 }
 
 /// Add a manifest's static contributions, reading command icons from the
@@ -911,7 +919,8 @@ impl sheaf_plugin::OcrSource for EngineOcr {
     fn recognize(
         &self,
         page: &sheaf_doc::PageRef,
-        size: sheaf_core::PageSize,
+        geom: &sheaf_doc::geom::Geom,
+        render: sheaf_core::Rotation,
         language: Option<String>,
         dpi: Option<u32>,
     ) -> Result<sheaf_doc::TextLayer> {
@@ -933,8 +942,8 @@ impl sheaf_plugin::OcrSource for EngineOcr {
                 id: page.id,
                 source: page.source,
                 index: page.index,
-                rotation: page.rotation,
-                size,
+                geom: *geom,
+                render,
             }],
             skip_pages_with_text: false,
             engine: config.engine,
@@ -1060,9 +1069,9 @@ fn sign_marks(edits: &mut [sheaf_doc::Edit], me: &Signer) {
 }
 
 /// A plugin rewrites a mark from what its API shows it. Every plugin's
-/// update keeps the mark's creation date, name and a tape's rows and look,
-/// which no API shows; a 0.2 plugin's (`api02`) keeps its fill, dashes,
-/// cloud and start arrowhead too, which 0.2 can't say.
+/// update keeps the mark's creation date, name, turn and a tape's rows and
+/// look, which no API shows; a 0.2 plugin's (`api02`) keeps its fill,
+/// dashes, cloud and start arrowhead too, which 0.2 can't say.
 fn keep_unseen(edits: &mut [sheaf_doc::Edit], st: &sheaf_doc::DocState, api02: bool) {
     for e in edits {
         let sheaf_doc::Edit::AnnotUpdate { page, annot } = e else {
@@ -1076,6 +1085,7 @@ fn keep_unseen(edits: &mut [sheaf_doc::Edit], st: &sheaf_doc::DocState, api02: b
         };
         annot.name = was.name.clone();
         annot.created = was.created.clone();
+        annot.turn = was.turn;
         if api02 {
             annot.fill = was.fill;
             annot.dashed = was.dashed;
@@ -1191,7 +1201,8 @@ pub fn plugin_name(id: &str, cx: &App) -> String {
 
 /// Run a plugin call against `doc` (the active document, if any): its UI
 /// requests go to the workspace, and the edits it submits are applied when
-/// it returns, one undo step per batch.
+/// it returns, one undo step per batch. While `doc` is still opening, the
+/// call waits for it (see [`Waiting`]).
 pub fn run(
     plugin_id: &str,
     call: Call,
@@ -1242,6 +1253,30 @@ pub fn run(
         );
         return;
     }
+    if let Some(d) = &doc
+        && d.read(cx).is_opening()
+    {
+        if matches!(call, Call::Event(sheaf_plugin::DocEvent::Closed)) {
+            // Closed before it opened: what waited goes with the view, and
+            // `closed` only follows an `opened` sent before (a recovery
+            // opens the file again).
+            if !d.read(cx).plugin_calls.opened() {
+                return;
+            }
+        } else {
+            if !matches!(call, Call::Event(_)) {
+                notice(&doc, format!("{label} runs once the file is open"), cx);
+            }
+            let region = is_region(&call);
+            d.update(cx, |d, _| d.plugin_calls.hold(plugin_id, call));
+            // Held, not running: the plugin is free for the next region,
+            // here or in another document.
+            if region {
+                region_done(plugin_id, window, cx);
+            }
+            return;
+        }
+    }
     let (ui_tx, mut ui_rx) = mpsc::unbounded();
     // Commands the user ran report progress to the document's status bar,
     // and Escape there stops them.
@@ -1258,10 +1293,7 @@ pub fn run(
         preferences: crate::prefs::get(cx).plugin_json(plugin_id),
     };
     let what = call.to_string();
-    let region_call = matches!(
-        call,
-        Call::Event(sheaf_plugin::DocEvent::Region { .. } | sheaf_plugin::DocEvent::RegionCleared)
-    );
+    let region_call = is_region(&call);
     let call_kind = match &call {
         Call::Event(_) => CallKind::Event,
         _ => CallKind::User,
@@ -1294,6 +1326,11 @@ pub fn run(
     cx.spawn_in(window, async move |ws, cx| {
         use futures::FutureExt;
         let mut rx = rx.fuse();
+        // The last progress line shown, to clear when the call ends: by
+        // then its tasks are gone, and the snapshot no longer makes it.
+        // The final snapshot still makes "stopping…", which Escape may
+        // have put up since the last tick, so that goes too.
+        let mut shown: Option<String> = None;
         let result = loop {
             let mut tick = cx
                 .background_executor()
@@ -1306,7 +1343,8 @@ pub fn run(
             if let (Some(t), Some(d)) = (&tracker, weak.as_ref().and_then(|w| w.upgrade())) {
                 let line = progress_line(&label, &t.snapshot());
                 if let Some(line) = line {
-                    d.update(cx, |d, cx| d.set_notice(line, cx));
+                    d.update(cx, |d, cx| d.set_notice(line.clone(), cx));
+                    shown = Some(line);
                 }
             }
         }
@@ -1317,10 +1355,11 @@ pub fn run(
                 d.update(cx, |d, cx| {
                     d.plugin_run = None;
                     // The last progress line goes with the run.
-                    if let Some(t) = &tracker
-                        && let Some(line) = progress_line(&label, &t.snapshot())
-                    {
-                        d.clear_notice_if(&line, cx);
+                    let now = tracker
+                        .as_ref()
+                        .and_then(|t| progress_line(&label, &t.snapshot()));
+                    for line in shown.iter().chain(&now) {
+                        d.clear_notice_if(line, cx);
                     }
                 });
             }
@@ -1410,6 +1449,53 @@ fn region_done(plugin: &str, window: &mut Window, cx: &mut Context<Workspace>) {
     }
 }
 
+/// A document's plugin calls while it opens (M10.5 proposal 28). A
+/// command, a panel action or an event given before the file's facts are
+/// read waits here; once they are, `opened` goes out first and the calls
+/// follow in the order given, each made from the document as it is then.
+#[derive(Default)]
+pub struct Waiting {
+    calls: Vec<(String, Call)>,
+    /// `opened` has gone out for the view (a recovery opens it again).
+    opened: bool,
+}
+
+impl Waiting {
+    /// Keep `call` for `plugin` until the document is ready. A region
+    /// event takes the place of the one the plugin had waiting, as the
+    /// newest does while it's busy.
+    pub fn hold(&mut self, plugin: &str, call: Call) {
+        if is_region(&call) {
+            self.calls.retain(|(p, c)| p != plugin || !is_region(c));
+        }
+        self.calls.push((plugin.to_string(), call));
+    }
+
+    /// The calls to make now, by plugin: none while `doc` is still
+    /// opening; once it's ready, `opened` to each of `subscribers`, then
+    /// every call held, in order.
+    pub fn release(
+        &mut self,
+        doc: &sheaf_doc::Document,
+        subscribers: Vec<String>,
+    ) -> Vec<(String, Call)> {
+        if !doc.is_ready() {
+            return Vec::new();
+        }
+        self.opened = true;
+        subscribers
+            .into_iter()
+            .map(|id| (id, Call::Event(sheaf_plugin::DocEvent::Opened)))
+            .chain(std::mem::take(&mut self.calls))
+            .collect()
+    }
+
+    /// Whether `opened` has gone out for the view.
+    pub fn opened(&self) -> bool {
+        self.opened
+    }
+}
+
 /// Per-key "latest wins" queue: while a key is busy, newer items replace
 /// the one waiting instead of piling up.
 pub struct Latest<T> {
@@ -1475,6 +1561,149 @@ mod tests {
             "id = \"p\"\nname = \"P\"\nversion = \"1.0.0\"\napi = \"^0.2\"\n[permissions]\n{perms}"
         ))
         .unwrap()
+    }
+
+    fn command(id: &str) -> Call {
+        Call::Command {
+            id: id.into(),
+            args: None,
+        }
+    }
+
+    /// A one-page document, still opening.
+    fn opening() -> sheaf_doc::Document {
+        let store = sheaf_doc::Store::new();
+        let primary = sheaf_doc::SourceInfo::blank(&store, 1);
+        sheaf_doc::open::start(store, primary, sheaf_doc::history::default_policy())
+    }
+
+    #[test]
+    fn nothing_leaves_the_queue_before_ready() {
+        let mut doc = opening();
+        let mut waiting = Waiting::default();
+        let held = [
+            ("tax".to_string(), command("scan")),
+            (
+                "tax".to_string(),
+                Call::PanelAction {
+                    panel: "found".into(),
+                    row: "1".into(),
+                    action: "go".into(),
+                },
+            ),
+            (
+                "notes".to_string(),
+                Call::Event(sheaf_plugin::DocEvent::SelectionChanged),
+            ),
+        ];
+        for (plugin, call) in held.clone() {
+            waiting.hold(&plugin, call);
+            assert!(waiting.release(&doc, vec!["tax".into()]).is_empty());
+        }
+        doc.ready(Default::default()).unwrap();
+        // All of them waited, and none was lost.
+        let out = waiting.release(&doc, Vec::new());
+        assert_eq!(out, held);
+        assert!(waiting.release(&doc, Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn a_queued_call_runs_after_opened() {
+        let mut doc = opening();
+        let mut waiting = Waiting::default();
+        waiting.hold("tax", command("scan"));
+        waiting.hold("notes", command("list"));
+        waiting.hold("tax", command("tick"));
+        doc.ready(Default::default()).unwrap();
+        let opened = || Call::Event(sheaf_plugin::DocEvent::Opened);
+        assert_eq!(
+            waiting.release(&doc, vec!["notes".into(), "tax".into()]),
+            [
+                ("notes".into(), opened()),
+                ("tax".into(), opened()),
+                ("tax".into(), command("scan")),
+                ("notes".into(), command("list")),
+                ("tax".into(), command("tick")),
+            ]
+        );
+    }
+
+    /// `opened` goes out with the facts: while the view's open is reading
+    /// them, and once it has read them but not yet taken them in, calls
+    /// wait and nothing is released; once it has, `opened` leads, and the
+    /// document the calls are made from holds the file's mark and field.
+    #[test]
+    fn opened_goes_out_with_the_facts() {
+        use sheaf_doc::{SourceInfo, Store};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("facts.pdf");
+        std::fs::write(&path, sheaf_doc::forms::fixture::every_fact().bytes()).unwrap();
+        let store = Store::new();
+        let primary = SourceInfo::read(&store, &path, None).unwrap();
+        let (src, blob) = (primary.src.clone(), primary.src.id());
+        let mut doc = crate::docview::opening_model(store, primary, "Me".into());
+        let mut waiting = Waiting::default();
+        let wants = || vec!["notes".to_string()];
+        waiting.hold("tax", command("scan"));
+        assert!(waiting.release(&doc, wants()).is_empty(), "reading");
+        let facts = sheaf_doc::open::finish(&src, &sheaf_ops::NoProgress);
+        waiting.hold("tax", command("tick"));
+        assert!(waiting.release(&doc, wants()).is_empty(), "read, not taken");
+        assert!(!waiting.opened());
+        crate::docview::take_facts(&mut doc, blob, facts, false).unwrap();
+        let opened = Call::Event(sheaf_plugin::DocEvent::Opened);
+        assert_eq!(
+            waiting.release(&doc, wants()),
+            [
+                ("notes".into(), opened),
+                ("tax".into(), command("scan")),
+                ("tax".into(), command("tick")),
+            ]
+        );
+        assert!(waiting.opened(), "a close now says `closed`");
+        // What a plugin's context is made from when `opened` goes out.
+        let seen = doc.snapshot();
+        assert_eq!(
+            seen.state.annots.values().map(|l| l.len()).sum::<usize>(),
+            1
+        );
+        assert_eq!(seen.state.fields.len(), 1);
+    }
+
+    /// While the file opens, a plugin keeps only its newest region event,
+    /// as it would while busy with one; other calls, and other plugins'
+    /// regions, keep their places.
+    #[test]
+    fn a_held_region_gives_way_to_the_newest() {
+        use sheaf_plugin::DocEvent;
+        let mut doc = opening();
+        let region = |x: f32| {
+            Call::Event(DocEvent::Region {
+                page: doc.page(0).unwrap().id,
+                rect: sheaf_doc::Box2 {
+                    x,
+                    y: 0.0,
+                    w: 10.0,
+                    h: 10.0,
+                },
+            })
+        };
+        let (first, second, theirs) = (region(1.0), region(2.0), region(3.0));
+        let mut waiting = Waiting::default();
+        waiting.hold("tax", first);
+        waiting.hold("tax", command("scan"));
+        waiting.hold("sum", theirs.clone());
+        waiting.hold("tax", Call::Event(DocEvent::RegionCleared));
+        waiting.hold("tax", second.clone());
+        doc.ready(Default::default()).unwrap();
+        assert_eq!(
+            waiting.release(&doc, Vec::new()),
+            [
+                ("tax".into(), command("scan")),
+                ("sum".into(), theirs),
+                ("tax".into(), second),
+            ]
+        );
     }
 
     #[test]
@@ -1672,24 +1901,12 @@ mod tests {
 
     #[test]
     fn a_plugin_update_keeps_what_it_cant_see() {
-        use sheaf_doc::{Annot, AnnotId, AnnotKind, Document, Edit, FixedCount, Pt, SourceInfo};
-        let mut d = Document::new(
-            SourceInfo {
-                path: "a.pdf".into(),
-                page_count: 1,
-                first_page: sheaf_core::PageSize {
-                    width: 612.0,
-                    height: 792.0,
-                },
-                page_sizes: None,
-                bytes: 0,
-                password: None,
-                data: None,
-                derived: None,
-            },
-            &[],
-            Box::new(FixedCount(10)),
-        );
+        use sheaf_doc::{
+            Annot, AnnotId, AnnotKind, Document, Edit, FixedCount, Pt, SourceInfo, Store,
+        };
+        let store = Store::new();
+        let primary = SourceInfo::blank(&store, 1);
+        let mut d = Document::new(store, primary, &[], Box::new(FixedCount(10)));
         let page = d.page(0).unwrap().id;
         let line = Annot {
             id: AnnotId(1),
@@ -1709,16 +1926,19 @@ mod tests {
             fill: None,
             dashed: true,
             cloudy: false,
+            turn: sheaf_core::Rotation::R90,
             name: String::new(),
         };
         d.apply(Edit::AnnotAdd { page, annot: line }, "Line")
             .unwrap();
         let mut placed = d.state().annots_on(page).unwrap()[0].clone();
-        // What a 0.2 plugin hands back: the styles it can't see are lost.
+        // What a 0.2 plugin hands back: the styles it can't see are lost,
+        // and it reads upright as the file shows the page.
         let mut back = placed.clone();
         back.contents = "checked".into();
         back.dashed = false;
         back.created = "D:2".into();
+        back.turn = sheaf_core::Rotation::R0;
         if let AnnotKind::Line { arrow_start, .. } = &mut back.kind {
             *arrow_start = false;
         }
@@ -1735,6 +1955,7 @@ mod tests {
         let mut back = placed.clone();
         back.dashed = false;
         back.created = "D:2".into();
+        back.turn = sheaf_core::Rotation::R0;
         let mut edits = vec![Edit::AnnotUpdate { page, annot: back }];
         keep_unseen(&mut edits, d.state(), false);
         let Edit::AnnotUpdate { annot, .. } = &edits[0] else {
@@ -1742,6 +1963,7 @@ mod tests {
         };
         assert!(!annot.dashed);
         assert_eq!(annot.created, "D:0");
+        assert_eq!(annot.turn, sheaf_core::Rotation::R90);
     }
 
     #[test]
@@ -1775,6 +1997,7 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            turn: sheaf_core::Rotation::R0,
             name: String::new(),
         };
         let mut edits = vec![Edit::AnnotAdd {
@@ -1789,6 +2012,30 @@ mod tests {
         assert_eq!(annot.contents, "Checked by Pat Q. Smith at 9:00 AM");
         assert!(
             matches!(&annot.kind, AnnotKind::TextStamp { text, .. } if text == "REVIEWED\nPQS 10/15/2026")
+        );
+    }
+
+    /// A step's line goes with it: the snapshot's step goes back to the
+    /// call's tracker, which counts nothing. So the poll loop remembers the
+    /// last line it showed, to clear it when the call ends. "Stopping…"
+    /// needs no step, so the final snapshot still makes that one.
+    #[test]
+    fn a_finished_step_leaves_no_progress_line() {
+        use sheaf_ops::{Progress, Tracker};
+        let t = Tracker::new();
+        let step = t.child("Counting", 1.0);
+        step.set_total(Some(10), Default::default());
+        step.set(3);
+        assert_eq!(
+            progress_line("Count", &t.snapshot()).as_deref(),
+            Some("Counting: 3 of 10 items…")
+        );
+        drop(step);
+        assert_eq!(progress_line("Count", &t.snapshot()), None);
+        t.cancel();
+        assert_eq!(
+            progress_line("Count", &t.snapshot()).as_deref(),
+            Some("Count: stopping…")
         );
     }
 }

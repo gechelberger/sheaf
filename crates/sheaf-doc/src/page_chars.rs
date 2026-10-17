@@ -2,18 +2,19 @@
 //! text selection works on, and what text editing will. Built from the
 //! engine's characters, or from an OCR layer that isn't saved yet.
 //!
-//! Boxes are in the source page's displayed space, like marks
-//! (`annot.rs`). Lines read along x in the [`PageChars::upright`] frame,
-//! so a page recognized while turned still selects along its lines.
+//! Boxes are in PageSpace (M10.5 §5), like marks. Lines read along x in
+//! the [`PageChars::upright`] frame, so a page recognized while turned
+//! still selects along its lines.
 //!
 //! A position in the text is a *boundary*: 0 is before the first
 //! character, `len()` after the last. A selection is the characters
 //! between two boundaries.
 
-use sheaf_core::{PageSize, Rotation};
+use sheaf_core::Rotation;
 
 use crate::annot::{Box2, Pt, caret_box};
-use crate::text_layer::{TextLayer, overlaps_line, rotate_box};
+use crate::geom::{Affine, Geom};
+use crate::text_layer::{TextLayer, overlaps_line};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Glyph {
@@ -30,18 +31,18 @@ pub struct PageChars {
     pub glyphs: Vec<Glyph>,
     /// The frame the text reads upright in.
     pub upright: Rotation,
-    /// Source-displayed page size, to turn boxes into the upright frame.
-    pub page: PageSize,
 }
 
 impl PageChars {
-    /// From the engine's characters, in its order. Lines are found by
-    /// where the characters are, not by the engine's line breaks, which
-    /// it sometimes puts mid-line (on a page with `/Rotate 270`, say): a
-    /// character starts a new line when it isn't level with the line so
-    /// far or goes back left. A break the engine left inside a line reads
-    /// as a space; one it left out between lines is added.
-    pub fn from_engine(chars: Vec<(char, Option<Box2>)>, page: PageSize) -> PageChars {
+    /// From the engine's characters, in its order, with boxes in the view
+    /// frame of `base`, the page the engine read as its file shows it.
+    /// Lines are found there, by where the characters are, not by the
+    /// engine's line breaks, which it sometimes puts mid-line (on a page
+    /// with `/Rotate 270`, say): a character starts a new line when it
+    /// isn't level with the line so far or goes back left. A break the
+    /// engine left inside a line reads as a space; one it left out between
+    /// lines is added. The boxes are then stored in PageSpace.
+    pub fn from_engine(chars: Vec<(char, Option<Box2>)>, base: &Geom) -> PageChars {
         let mut glyphs: Vec<Glyph> = Vec::with_capacity(chars.len());
         let mut line = 0;
         // The line so far, and the last character on it.
@@ -90,10 +91,13 @@ impl PageChars {
                 }
             }
         }
+        let from_view = base.from_view();
+        for g in &mut glyphs {
+            g.rect = g.rect.map(|r| from_view.apply_box(r));
+        }
         PageChars {
             glyphs,
-            upright: Rotation::R0,
-            page,
+            upright: base.rotate,
         }
     }
 
@@ -140,7 +144,6 @@ impl PageChars {
         PageChars {
             glyphs,
             upright: layer.upright,
-            page: layer.page,
         }
     }
 
@@ -152,19 +155,14 @@ impl PageChars {
         self.glyphs.is_empty()
     }
 
-    /// A box in the upright frame.
+    /// A box in the upright frame (y down; where on the page doesn't
+    /// matter, only which way the text runs).
     fn up(&self, b: Box2) -> Box2 {
-        rotate_box(b, self.page, self.upright)
+        Affine::upright(self.upright).apply_box(b)
     }
 
     fn up_pt(&self, p: Pt) -> Pt {
-        let b = self.up(Box2 {
-            x: p.x,
-            y: p.y,
-            w: 0.0,
-            h: 0.0,
-        });
-        Pt { x: b.x, y: b.y }
+        Affine::upright(self.upright).apply(p)
     }
 
     /// The boundary before or after glyph `i`, whichever half of it `p`
@@ -279,11 +277,7 @@ impl PageChars {
         let x = if after_it { r.right() } else { r.x };
         let b = caret_box(x, r.bottom(), r.h);
         // Back from the upright frame.
-        Some(rotate_box(
-            b,
-            self.page.rotated(self.upright),
-            Rotation::R0.minus(self.upright),
-        ))
+        Some(Affine::upright(self.upright).inverse().apply_box(b))
     }
 
     /// The word around boundary `at`: the run of characters that aren't
@@ -373,26 +367,36 @@ mod tests {
     use super::*;
     use crate::text_layer::OcrWord;
 
-    fn page() -> PageSize {
-        PageSize {
-            width: 612.0,
-            height: 792.0,
-        }
+    /// A Letter page turned `r`.
+    fn letter(r: Rotation) -> Geom {
+        Geom::read(None, None, r.degrees() as i64)
+    }
+
+    /// A point given as it shows on an upright Letter page, in PageSpace.
+    fn shown(x: f32, y: f32) -> Pt {
+        letter(Rotation::R0).from_view().apply(Pt { x, y })
+    }
+
+    /// A PageSpace box as it shows on an upright Letter page.
+    fn as_shown(b: Box2) -> Box2 {
+        letter(Rotation::R0).to_view().apply_box(b)
+    }
+
+    /// A 10-by-12-point character at (`x`, `y`) as shown.
+    fn g(ch: char, x: f32, y: f32) -> (char, Option<Box2>) {
+        (
+            ch,
+            Some(Box2 {
+                x,
+                y,
+                w: 10.0,
+                h: 12.0,
+            }),
+        )
     }
 
     /// "ab cd\nef": 10-point-wide characters, lines 20 points apart.
     fn sample() -> PageChars {
-        let g = |ch: char, x: f32, y: f32| {
-            (
-                ch,
-                Some(Box2 {
-                    x,
-                    y,
-                    w: 10.0,
-                    h: 12.0,
-                }),
-            )
-        };
         PageChars::from_engine(
             vec![
                 g('a', 100.0, 100.0),
@@ -405,7 +409,7 @@ mod tests {
                 g('e', 100.0, 120.0),
                 g('f', 110.0, 120.0),
             ],
-            page(),
+            &letter(Rotation::R0),
         )
     }
 
@@ -414,21 +418,13 @@ mod tests {
         let c = sample();
         assert_eq!(c.text(0, c.len()), "ab cd\nef");
         assert_eq!(c.glyphs.iter().filter(|g| g.line == 1).count(), 2);
+        // Stored in PageSpace: 'a' is 100 to 112 down the page.
+        let a = c.glyphs[0].rect.unwrap();
+        assert_eq!((a.x, a.y, a.h), (100.0, 680.0, 12.0));
     }
 
     #[test]
     fn lines_follow_the_characters_not_the_engines_breaks() {
-        let g = |ch: char, x: f32, y: f32| {
-            (
-                ch,
-                Some(Box2 {
-                    x,
-                    y,
-                    w: 10.0,
-                    h: 12.0,
-                }),
-            )
-        };
         let c = PageChars::from_engine(
             vec![
                 g('a', 100.0, 100.0),
@@ -438,7 +434,7 @@ mod tests {
                 // No break from the engine, but a new line.
                 g('c', 100.0, 120.0),
             ],
-            page(),
+            &letter(Rotation::R0),
         );
         assert_eq!(c.text(0, c.len()), "a b\nc");
         assert_eq!(c.rects(0, c.len()).len(), 2);
@@ -447,21 +443,21 @@ mod tests {
     #[test]
     fn a_point_on_a_character_is_the_nearer_boundary() {
         let c = sample();
-        assert_eq!(c.boundary_at(Pt { x: 102.0, y: 105.0 }, 0.0), Some(0));
-        assert_eq!(c.boundary_at(Pt { x: 108.0, y: 105.0 }, 0.0), Some(1));
-        assert_eq!(c.boundary_at(Pt { x: 300.0, y: 105.0 }, 0.0), None);
+        assert_eq!(c.boundary_at(shown(102.0, 105.0), 0.0), Some(0));
+        assert_eq!(c.boundary_at(shown(108.0, 105.0), 0.0), Some(1));
+        assert_eq!(c.boundary_at(shown(300.0, 105.0), 0.0), None);
     }
 
     #[test]
     fn dragging_off_the_text_still_finds_a_boundary() {
         let c = sample();
         // Right of the first line: its end, before the break.
-        assert_eq!(c.boundary_near(Pt { x: 400.0, y: 104.0 }), 5);
+        assert_eq!(c.boundary_near(shown(400.0, 104.0)), 5);
         // Left of the second line: its start.
-        assert_eq!(c.boundary_near(Pt { x: 10.0, y: 125.0 }), 6);
+        assert_eq!(c.boundary_near(shown(10.0, 125.0)), 6);
         // Above and below everything.
-        assert_eq!(c.boundary_near(Pt { x: 120.0, y: 10.0 }), 0);
-        assert_eq!(c.boundary_near(Pt { x: 120.0, y: 700.0 }), c.len());
+        assert_eq!(c.boundary_near(shown(120.0, 10.0)), 0);
+        assert_eq!(c.boundary_near(shown(120.0, 700.0)), c.len());
         // Selecting across the break takes it along.
         assert_eq!(c.text(3, 7), "cd\ne");
         assert_eq!(c.rects(3, 7).len(), 2);
@@ -471,13 +467,30 @@ mod tests {
     fn carets_sit_between_characters() {
         let c = sample();
         // After "ab": at b's right edge, straddling the bottom of the text.
-        let b = c.caret_at(2).unwrap();
+        let b = as_shown(c.caret_at(2).unwrap());
         assert_eq!(b.x + b.w / 2.0, 120.0);
         assert!(b.y < 112.0 && b.bottom() > 112.0);
         // At the start of the second line: before "e".
-        let e = c.caret_at(6).unwrap();
+        let e = as_shown(c.caret_at(6).unwrap());
         assert_eq!(e.x + e.w / 2.0, 100.0);
         assert!(e.y > 120.0);
+    }
+
+    /// On a page the file turns 90°, the text reads along the page as it
+    /// shows: up PageSpace's y.
+    #[test]
+    fn a_turned_page_reads_as_it_shows() {
+        let base = letter(Rotation::R90);
+        let c = PageChars::from_engine(vec![g('a', 100.0, 100.0), g('b', 110.0, 100.0)], &base);
+        assert_eq!(c.upright, Rotation::R90);
+        let (a, b) = (c.glyphs[0].rect.unwrap(), c.glyphs[1].rect.unwrap());
+        assert!(b.y > a.y && a.x == b.x, "{a:?} {b:?}");
+        // The right half of 'a' as shown is the boundary after it.
+        let on_a = base.from_view().apply(Pt { x: 108.0, y: 105.0 });
+        assert_eq!(c.boundary_at(on_a, 0.0), Some(1));
+        // The caret after "ab" is at b's far edge as shown.
+        let caret = base.to_view().apply_box(c.caret_at(2).unwrap());
+        assert!((caret.x + caret.w / 2.0 - 120.0).abs() < 1e-3, "{caret:?}");
     }
 
     #[test]
@@ -527,22 +540,20 @@ mod tests {
                 confidence: 0.9,
             },
         ];
-        let layer = TextLayer::from_engine(words, page(), Rotation::R0, "test");
+        let layer = TextLayer::from_engine(words, &letter(Rotation::R0), "test");
         let c = PageChars::from_layer(&layer);
         assert_eq!(c.text(0, c.len()), "Total 42");
         // "o" is the second tenth-point-wide slice of "Total".
         assert_eq!(c.glyphs[1].rect.unwrap().x, 110.0);
-        let at = c.boundary_at(Pt { x: 172.0, y: 105.0 }, 0.0).unwrap();
+        let at = c.boundary_at(shown(172.0, 105.0), 0.0).unwrap();
         assert_eq!(c.text(at, c.len()), "2");
-        assert_eq!(
-            c.rects_in(Box2 {
-                x: 95.0,
-                y: 95.0,
-                w: 40.0,
-                h: 20.0
-            })
-            .len(),
-            1
-        );
+        let over = Box2 {
+            x: 95.0,
+            y: 95.0,
+            w: 40.0,
+            h: 20.0,
+        };
+        let over = letter(Rotation::R0).from_view().apply_box(over);
+        assert_eq!(c.rects_in(over).len(), 1);
     }
 }

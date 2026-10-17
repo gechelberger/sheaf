@@ -125,30 +125,29 @@ impl DocView {
         let Some(src) = doc.model.source(doc.model.primary()) else {
             return;
         };
-        let (path, password, sid) = (src.path.clone(), src.password.clone(), doc.model.primary());
+        let (src, sid) = (src.src.clone(), doc.model.primary());
         cx.spawn(async move |this, cx| {
-            let facts = cx
+            let (attachments, collection, layers) = cx
                 .background_executor()
                 .spawn(async move {
-                    let pdf = sheaf_doc::file::load_pdf(&path, password.as_deref())?;
-                    anyhow::Ok(sheaf_doc::file::facts_in(&pdf))
+                    let pdf = src.pdf();
+                    (
+                        sheaf_doc::attachments::attachments_in(pdf, src.page_ids()),
+                        sheaf_doc::portfolio::collection(pdf),
+                        sheaf_doc::layers::layers_in(pdf),
+                    )
                 })
                 .await;
             this.update(cx, |v, cx| {
                 let State::Ready(doc) = &mut v.state else {
                     return;
                 };
-                match facts {
-                    Ok(f) => {
-                        if doc.model.primary() == sid {
-                            doc.attachments = f.attachments;
-                            doc.collection = f.collection;
-                            doc.attachment_selected = None;
-                            // Same groups; keep what the user has hidden.
-                            doc.layers = f.layers;
-                        }
-                    }
-                    Err(e) => log::warn!("re-reading the saved file: {e:#}"),
+                if doc.model.primary() == sid {
+                    doc.attachments = attachments;
+                    doc.collection = collection;
+                    doc.attachment_selected = None;
+                    // Same groups; keep what the user has hidden.
+                    doc.layers = layers;
                 }
                 cx.notify();
             })
@@ -238,15 +237,14 @@ impl DocView {
         let Some(src) = doc.model.source(doc.model.primary()) else {
             return;
         };
-        let (file, password) = (src.path.clone(), src.password.clone());
+        let (src, assets) = (src.src.clone(), doc.model.assets().clone());
         let at: AttachmentRef = a.at.clone();
         let name = a.name.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let bytes =
-                        sheaf_doc::attachments::read_attachment(&file, password.as_deref(), &at)?;
+                    let bytes = sheaf_doc::attachments::read_attachment(&src, &assets, &at)?;
                     let (dest, open) = match then {
                         Then::SaveTo(p) => (p, false),
                         Then::Open => (temp_path(&name)?, true),
@@ -299,7 +297,7 @@ impl DocView {
                 .p_2()
                 .text_sm()
                 .text_color(theme::TEXT_MUTED)
-                .child(if doc.facts_loaded {
+                .child(if doc.model.is_ready() {
                     "This document has no attachments"
                 } else {
                     "Reading attachments…"

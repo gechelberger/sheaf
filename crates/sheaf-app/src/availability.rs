@@ -10,7 +10,7 @@
 
 use gpui::{App, Window};
 
-use crate::commands::Command;
+use crate::commands::{Command, Target};
 use crate::docview::State;
 use crate::markup_tools::Tool;
 use crate::pane::Spread;
@@ -18,12 +18,17 @@ use crate::presentation::Presentation;
 use crate::workspace::{Panel, Side, Workspace};
 
 /// A condition a command can require, as a manifest's `when` names it.
-/// Built-ins only need `Document`; the rest are for plugins.
+/// Built-ins need `Document`, and `Ready` too when they edit the document
+/// or write it out; the rest are for plugins. `Ready` isn't a manifest
+/// word: a plugin's call given while the file opens waits for it instead.
 #[cfg_attr(not(feature = "plugins"), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum When {
     /// A document is open (and loaded).
     Document,
+    /// The document has finished opening: its facts are read, so it can
+    /// be edited and written out (M10.5 proposal 28).
+    Ready,
     /// An annotation is selected.
     Selection,
     /// Pages are selected in the thumbnails.
@@ -53,6 +58,11 @@ impl When {
 #[derive(Debug, Clone, Default)]
 pub struct Facts {
     pub document: bool,
+    /// The document's facts are read: it can be edited and written out.
+    pub ready: bool,
+    /// A document is still opening, shown or not yet: a plugin's call
+    /// waits for it, so plugin commands are grey.
+    pub opening: bool,
     pub selection: bool,
     /// Marks of sheaf's selected (what Copy takes).
     pub marks: bool,
@@ -110,11 +120,13 @@ impl Facts {
             return f;
         };
         let view = view.read(cx);
+        f.opening = view.is_opening();
         let State::Ready(doc) = &view.state else {
             return f;
         };
         let pane = doc.pane();
         f.document = true;
+        f.ready = doc.model.is_ready();
         f.selection = !doc.selected_marks.is_empty() || doc.selected_foreign.is_some();
         f.marks = !doc.selected_marks.is_empty();
         f.text = doc.text_sel.is_some_and(|s| !s.is_empty());
@@ -139,6 +151,7 @@ impl Facts {
     pub fn holds(&self, when: When) -> bool {
         match when {
             When::Document => self.document,
+            When::Ready => self.ready,
             When::Selection => self.selection,
             When::Pages => self.pages,
             When::Region => self.region,
@@ -171,8 +184,11 @@ pub struct CommandState {
 }
 
 pub fn state(command: &Command, facts: &Facts) -> CommandState {
+    // A plugin's call waits while the document opens (see plugins.rs).
+    let waits = matches!(command.target, Target::Plugin { .. }) && facts.opening;
     CommandState {
-        enabled: command.when.iter().all(|&w| facts.holds(w))
+        enabled: !waits
+            && command.when.iter().all(|&w| facts.holds(w))
             && command.enabled.is_none_or(|rule| rule(facts)),
         checked: command.checked.map(|rule| rule(facts)),
     }
@@ -211,11 +227,14 @@ pub struct Builtin {
 
 /// Rules for the built-in commands, by id. Commands not listed are always
 /// enabled (beyond whether their action has a handler where focus is).
+/// What edits the document or writes, prints or exports it waits for the
+/// file to finish opening; looking around doesn't.
 pub fn builtin(id: &str) -> Builtin {
     const DOC: &[When] = &[When::Document];
+    const READY: &[When] = &[When::Document, When::Ready];
     let (when, enabled, checked): (&[When], Option<Rule>, Option<Rule>) = match id {
         "workspace::ClearRecent" => (&[], Some(|f| f.recent_files), None),
-        "docview::Save" => (DOC, Some(|f| f.can_save), None),
+        "docview::Save" => (READY, Some(|f| f.can_save), None),
         "docview::SaveAs"
         | "docview::ExportCleanCopy"
         | "docview::ExportFlattened"
@@ -244,7 +263,16 @@ pub fn builtin(id: &str) -> Builtin {
         | "workspace::ResetStatus"
         | "workspace::FindBlankPages"
         | "workspace::Print"
-        | "workspace::DocumentProperties"
+        | "docview::RotatePageCw"
+        | "docview::RotatePageCcw"
+        | "docview::InsertPdf"
+        | "docview::DuplicatePages"
+        | "docview::ExtractPages"
+        | "docview::DeletePage"
+        | "docview::NewBookmark"
+        | "docview::PasteMarks"
+        | "docview::PasteMarksInPlace" => (READY, None, None),
+        "workspace::DocumentProperties"
         | "workspace::CloseDocument"
         | "docview::SelectAllPages"
         | "docview::Find"
@@ -259,23 +287,14 @@ pub fn builtin(id: &str) -> Builtin {
         | "docview::PrevPage"
         | "docview::NextPage"
         | "docview::LastPage"
-        | "docview::GoToPage"
-        | "docview::RotatePageCw"
-        | "docview::RotatePageCcw"
-        | "docview::InsertPdf"
-        | "docview::DuplicatePages"
-        | "docview::ExtractPages"
-        | "docview::DeletePage"
-        | "docview::NewBookmark"
-        | "docview::PasteMarks"
-        | "docview::PasteMarksInPlace" => (DOC, None, None),
+        | "docview::GoToPage" => (DOC, None, None),
         "docview::CopySelection" => (DOC, Some(|f| f.marks || f.text), None),
         "docview::ToggleComments" => (DOC, None, Some(|f| f.comments_shown)),
         "comments::ReplyToComment" | "comments::ToggleCheckmark" => {
-            (DOC, Some(|f| f.selection), None)
+            (READY, Some(|f| f.selection), None)
         }
-        "docview::Undo" => (DOC, Some(|f| f.can_undo), None),
-        "docview::Redo" => (DOC, Some(|f| f.can_redo), None),
+        "docview::Undo" => (READY, Some(|f| f.can_undo), None),
+        "docview::Redo" => (READY, Some(|f| f.can_redo), None),
         "docview::SinglePage" => (DOC, None, Some(|f| f.mode(Spread::Single, false))),
         "docview::SinglePageContinuous" => (DOC, None, Some(|f| f.mode(Spread::Single, true))),
         "docview::TwoUp" => (DOC, None, Some(|f| f.two_up() && !f.continuous)),
@@ -308,43 +327,43 @@ pub fn builtin(id: &str) -> Builtin {
         "workspace::ToggleRightDock" => (&[], None, Some(|f| f.dock(Side::Right))),
         "workspace::ToggleBottomDock" => (&[], None, Some(|f| f.dock(Side::Bottom))),
         "workspace::ToggleToolbar" => (&[], None, Some(|f| f.toolbar)),
-        "workspace::RecognizeText" => (DOC, Some(|f| !f.ocr_running), None),
+        "workspace::RecognizeText" => (READY, Some(|f| !f.ocr_running), None),
         "docview::CancelOcr" => (DOC, Some(|f| f.ocr_running), None),
         "tools::ToolSelect" => (DOC, None, Some(|f| f.tool == Some(Tool::Select))),
-        "tools::ToolNote" => (DOC, None, Some(|f| f.tool == Some(Tool::Note))),
-        "tools::ToolHighlight" => (DOC, None, Some(|f| f.tool == Some(Tool::Highlight))),
-        "tools::ToolUnderline" => (DOC, None, Some(|f| f.tool == Some(Tool::Underline))),
-        "tools::ToolStrikeOut" => (DOC, None, Some(|f| f.tool == Some(Tool::StrikeOut))),
-        "tools::ToolSquiggly" => (DOC, None, Some(|f| f.tool == Some(Tool::Squiggly))),
-        "tools::ToolTextEdit" => (DOC, None, Some(|f| f.tool == Some(Tool::TextEdit))),
-        "tools::CycleTextMarkup" => (DOC, None, None),
-        "tools::ToolFreeText" => (DOC, None, Some(|f| f.tool == Some(Tool::FreeText))),
-        "tools::ToolSquare" => (DOC, None, Some(|f| f.tool == Some(Tool::Square))),
-        "tools::ToolEllipse" => (DOC, None, Some(|f| f.tool == Some(Tool::Ellipse))),
-        "tools::ToolLine" => (DOC, None, Some(|f| f.tool == Some(Tool::Line))),
-        "tools::ToolArrow" => (DOC, None, Some(|f| f.tool == Some(Tool::Arrow))),
-        "tools::ToolInk" => (DOC, None, Some(|f| f.tool == Some(Tool::Ink))),
-        "tools::ToolTick" => (DOC, None, Some(|f| f.tool == Some(Tool::Tick))),
-        "tools::ToolConnector" => (DOC, None, Some(|f| f.tool == Some(Tool::Connector))),
-        "tools::ToolStamp" => (DOC, None, Some(|f| f.tool == Some(Tool::Stamp))),
-        "tools::ToolPolygon" => (DOC, None, Some(|f| f.tool == Some(Tool::Polygon))),
-        "tools::ToolPolyline" => (DOC, None, Some(|f| f.tool == Some(Tool::Polyline))),
-        "tools::ToolCloud" => (DOC, None, Some(|f| f.tool == Some(Tool::Cloud))),
-        "tools::ToolCallout" => (DOC, None, Some(|f| f.tool == Some(Tool::Callout))),
-        "tools::ToolDistance" => (DOC, None, Some(|f| f.tool == Some(Tool::Distance))),
-        "tools::ToolPerimeter" => (DOC, None, Some(|f| f.tool == Some(Tool::Perimeter))),
-        "tools::ToolArea" => (DOC, None, Some(|f| f.tool == Some(Tool::Area))),
-        "tools::CalibrateScale" => (DOC, None, None),
-        "tools::ToolAttachFile" => (DOC, None, Some(|f| f.tool == Some(Tool::AttachFile))),
-        "tools::CycleStampTools" => (DOC, None, None),
+        "tools::ToolNote" => (READY, None, Some(|f| f.tool == Some(Tool::Note))),
+        "tools::ToolHighlight" => (READY, None, Some(|f| f.tool == Some(Tool::Highlight))),
+        "tools::ToolUnderline" => (READY, None, Some(|f| f.tool == Some(Tool::Underline))),
+        "tools::ToolStrikeOut" => (READY, None, Some(|f| f.tool == Some(Tool::StrikeOut))),
+        "tools::ToolSquiggly" => (READY, None, Some(|f| f.tool == Some(Tool::Squiggly))),
+        "tools::ToolTextEdit" => (READY, None, Some(|f| f.tool == Some(Tool::TextEdit))),
+        "tools::CycleTextMarkup" => (READY, None, None),
+        "tools::ToolFreeText" => (READY, None, Some(|f| f.tool == Some(Tool::FreeText))),
+        "tools::ToolSquare" => (READY, None, Some(|f| f.tool == Some(Tool::Square))),
+        "tools::ToolEllipse" => (READY, None, Some(|f| f.tool == Some(Tool::Ellipse))),
+        "tools::ToolLine" => (READY, None, Some(|f| f.tool == Some(Tool::Line))),
+        "tools::ToolArrow" => (READY, None, Some(|f| f.tool == Some(Tool::Arrow))),
+        "tools::ToolInk" => (READY, None, Some(|f| f.tool == Some(Tool::Ink))),
+        "tools::ToolTick" => (READY, None, Some(|f| f.tool == Some(Tool::Tick))),
+        "tools::ToolConnector" => (READY, None, Some(|f| f.tool == Some(Tool::Connector))),
+        "tools::ToolStamp" => (READY, None, Some(|f| f.tool == Some(Tool::Stamp))),
+        "tools::ToolPolygon" => (READY, None, Some(|f| f.tool == Some(Tool::Polygon))),
+        "tools::ToolPolyline" => (READY, None, Some(|f| f.tool == Some(Tool::Polyline))),
+        "tools::ToolCloud" => (READY, None, Some(|f| f.tool == Some(Tool::Cloud))),
+        "tools::ToolCallout" => (READY, None, Some(|f| f.tool == Some(Tool::Callout))),
+        "tools::ToolDistance" => (READY, None, Some(|f| f.tool == Some(Tool::Distance))),
+        "tools::ToolPerimeter" => (READY, None, Some(|f| f.tool == Some(Tool::Perimeter))),
+        "tools::ToolArea" => (READY, None, Some(|f| f.tool == Some(Tool::Area))),
+        "tools::CalibrateScale" => (READY, None, None),
+        "tools::ToolAttachFile" => (READY, None, Some(|f| f.tool == Some(Tool::AttachFile))),
+        "tools::CycleStampTools" => (READY, None, None),
         "tools::CycleDrawingTools" | "tools::CycleTextTools" | "tools::UndoVertex" => {
-            (DOC, None, None)
+            (READY, None, None)
         }
-        "tools::NextConnectorLabel" => (DOC, None, None),
+        "tools::NextConnectorLabel" => (READY, None, None),
         "tools::GroupNext"
         | "tools::GroupPrev"
         | "tools::GroupPagesWith"
-        | "tools::GroupPagesWithout" => (DOC, Some(|f| f.marks), None),
+        | "tools::GroupPagesWithout" => (READY, Some(|f| f.marks), None),
         _ => (&[], None, None),
     };
     Builtin {
@@ -369,17 +388,56 @@ mod tests {
 
     #[test]
     fn rules_follow_the_facts() {
-        let reg = crate::commands::CommandRegistry::builtin();
+        let mut reg = crate::commands::CommandRegistry::builtin();
+        reg.add(Command {
+            id: "tax::scan".into(),
+            label: "Scan".into(),
+            category: "Tax".into(),
+            icon: "plugin-icons/x.svg".into(),
+            help: "Scans.".into(),
+            keywords: Vec::new(),
+            when: Vec::new(),
+            enabled: None,
+            checked: None,
+            target: Target::plugin("tax", "scan"),
+        })
+        .unwrap();
         let at = |id: &str, f: &Facts| state(reg.get(id).unwrap(), f);
         let none = Facts::default();
         assert!(!at("docview::Save", &none).enabled, "no document");
         assert!(at("workspace::OpenFile", &none).enabled);
+        assert!(at("tax::scan", &none).enabled, "plugins run without one");
         let open = Facts {
             document: true,
+            ready: true,
             spread: Some(Spread::Single),
             tool: Some(Tool::Select),
             ..Facts::default()
         };
+        // While the file opens, what edits or writes it waits, and so do
+        // plugins; looking around doesn't.
+        let opening = Facts {
+            ready: false,
+            opening: true,
+            ..open.clone()
+        };
+        assert!(!at("docview::RotatePageCw", &opening).enabled);
+        assert!(!at("tools::ToolNote", &opening).enabled);
+        assert!(!at("docview::SaveAs", &opening).enabled);
+        assert!(!at("workspace::Print", &opening).enabled);
+        assert!(!at("tax::scan", &opening).enabled);
+        assert!(at("docview::ZoomIn", &opening).enabled);
+        assert!(at("docview::NextPage", &opening).enabled);
+        assert!(at("docview::Find", &opening).enabled);
+        assert!(at("docview::RotatePageCw", &open).enabled);
+        assert!(at("docview::SaveAs", &open).enabled);
+        assert!(at("tax::scan", &open).enabled);
+        // Before a document shows, a plugin's call waits for it too.
+        let shown_soon = Facts {
+            opening: true,
+            ..Facts::default()
+        };
+        assert!(!at("tax::scan", &shown_soon).enabled);
         assert!(!at("docview::Save", &open).enabled, "nothing to save");
         assert!(!at("docview::Undo", &open).enabled);
         assert!(at("docview::ZoomIn", &open).enabled);

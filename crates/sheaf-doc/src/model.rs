@@ -2,8 +2,9 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, bail};
 use im::Vector;
@@ -11,8 +12,13 @@ use serde::{Deserialize, Serialize};
 use sheaf_core::{DestView, PageSize, Rotation};
 
 use crate::annot::{Annot, AnnotId, AnnotKind};
+use crate::assets::{MarkAssets, SourceAssets};
 use crate::forms::{Field, FieldId, FileForm, Widget};
+use crate::geom::Geom;
 use crate::history::{HistoryPolicy, HistoryStats};
+use crate::open::{Facts, Renamed, ViewFacts};
+use crate::prim::{HeapSize, Key, Prim, Rec, Val, same};
+use crate::store::{BlobKind, Src, Store};
 use crate::text_layer::TextLayer;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -25,27 +31,20 @@ pub struct PageId(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct OutlineId(pub u64);
 
-/// What the model knows about an opened file. Sizes are as the engine
-/// renders them (after the file's own `/Rotate`). `page_sizes` may be absent
-/// briefly after open while the engine enumerates them.
+/// A file registered for the document's pages: its source, and the name
+/// it goes by. Every insert registers anew, so inserting the same file
+/// twice gives two registrations of one [`Src`], and two forms (until
+/// M10.5 slice 11 makes the source its blob). The bytes, page table and
+/// password are the source's.
 #[derive(Debug, Clone)]
 pub struct SourceInfo {
-    pub path: PathBuf,
-    pub page_count: u32,
-    pub first_page: PageSize,
-    pub page_sizes: Option<Vec<PageSize>>,
-    /// File size, for the history memory estimate.
-    pub bytes: usize,
-    /// The password the file was opened with, if it needed one. Saves
-    /// decrypt with it; the written file is not re-encrypted.
-    pub password: Option<String>,
-    /// The file's bytes as read when it was opened, when the opener kept
-    /// them (the app does, sharing the renderer's copy). Saves read these,
-    /// not the path: after a save in place the path holds the new file, and
-    /// a version from before the save still means the old one. Without
-    /// them, the path is read (a cached file sheaf made, which never
-    /// changes; or a headless run).
-    pub data: Option<SourceData>,
+    pub src: Src,
+    /// The path the bytes came from, or a derived copy's original's name.
+    /// Notices, rename stems (`name_apart`), `form_notice`, the recovery
+    /// sidecar and save's same-file check read it; it's never read for
+    /// bytes: after a save in place the path holds the new file, and a
+    /// version from before the save still means the old one.
+    pub name: PathBuf,
     /// For a copy sheaf made of another source's pages (cropped,
     /// watermarked, a header/footer stripped): which pages. A save writes
     /// each as the page it was made from, with its annotations and form
@@ -61,22 +60,36 @@ pub struct Derived {
     pub pages: Vec<u32>,
 }
 
-/// A file's bytes, shared (an `Arc`, cheap to clone).
-#[derive(Clone)]
-pub struct SourceData(pub Arc<Vec<u8>>);
-
-impl std::fmt::Debug for SourceData {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "SourceData({} bytes)", self.0.len())
-    }
-}
-
 impl SourceInfo {
-    pub fn page_size(&self, index: u32) -> PageSize {
-        self.page_sizes
-            .as_ref()
-            .and_then(|s| s.get(index as usize).copied())
-            .unwrap_or(self.first_page)
+    /// The file at `path`, read once, opened with `password` and parsed
+    /// into `store`, under its own path. A wrong or missing password is
+    /// [`OpenError::Password`](crate::source::OpenError::Password) in the
+    /// chain.
+    pub fn read(store: &Store, path: &Path, password: Option<&str>) -> Result<SourceInfo> {
+        let bytes =
+            sheaf_core::read_file(path).with_context(|| format!("reading {}", path.display()))?;
+        let src = store
+            .open(bytes, BlobKind::file(path, password))
+            .with_context(|| format!("opening {}", path.display()))?;
+        Ok(SourceInfo {
+            src,
+            name: path.to_path_buf(),
+            derived: None,
+        })
+    }
+
+    /// For tests: `pages` blank Letter pages, named `a.pdf`, parsed into
+    /// `store`.
+    #[cfg(any(test, feature = "fixtures"))]
+    pub fn blank(store: &Store, pages: u32) -> SourceInfo {
+        let bytes = crate::generated::blank_pages(612.0, 792.0, pages as usize)
+            .expect("blank pages are written");
+        let kind = BlobKind::file(Path::new("a.pdf"), None);
+        SourceInfo {
+            src: store.open(bytes.into(), kind).expect("blank pages open"),
+            name: "a.pdf".into(),
+            derived: None,
+        }
     }
 }
 
@@ -86,7 +99,8 @@ pub struct PageRef {
     pub id: PageId,
     pub source: SourceId,
     pub index: u32,
-    /// Extra rotation on top of the source page as rendered.
+    /// The page's `/Rotate`, absolute, as a save writes it: its source
+    /// page's own until it's rotated.
     pub rotation: Rotation,
 }
 
@@ -99,6 +113,9 @@ pub struct OutlineNode {
     pub view: Option<DestView>,
     pub color: Option<[u8; 3]>,
     pub style: TextStyle,
+    /// Whether its children show, as the file has it: a save writes a
+    /// closed one's `/Count` negative.
+    pub open: bool,
     pub children: Vector<OutlineNode>,
 }
 
@@ -126,12 +143,22 @@ pub struct FlatOutlineItem {
     /// Where on `page` it lands (see [`OutlineNode::view`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view: Option<DestView>,
-    /// `/C` and `/F`, which PDFium's outline leaves out (see
-    /// `file::style_flat_items`).
+    /// `/C` and `/F`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<[u8; 3]>,
     #[serde(default, skip_serializing_if = "TextStyle::is_plain")]
     pub style: TextStyle,
+    /// Its `/Count` isn't negative (see [`OutlineNode::open`]).
+    #[serde(default = "yes", skip_serializing_if = "is_yes")]
+    pub open: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn is_yes(b: &bool) -> bool {
+    *b
 }
 
 /// One bookmark of a subtree inserted by [`Edit::OutlineInsertTree`], in
@@ -146,8 +173,10 @@ pub struct NewOutlineItem {
     pub depth: u16,
 }
 
-/// One immutable snapshot of the document.
-#[derive(Debug, Clone, PartialEq)]
+/// One immutable snapshot of the document. Only tests compare whole
+/// states; history knows what an edit changed from its prims.
+#[derive(Debug, Clone)]
+#[cfg_attr(any(test, feature = "fixtures"), derive(PartialEq))]
 pub struct DocState {
     pub pages: Vector<PageRef>,
     pub outline: Vector<OutlineNode>,
@@ -241,28 +270,6 @@ impl DocState {
             .max()
             .unwrap_or(0);
         (max + 1).to_string()
-    }
-
-    /// Every mark in `group` (see `annot::group_of`), in document order:
-    /// by page, then down the page, then across. With each, its page's
-    /// position.
-    pub fn group_members(&self, group: &crate::annot::Group) -> Vec<(usize, PageId, Annot)> {
-        let mut out = Vec::new();
-        for (i, p) in self.pages.iter().enumerate() {
-            let mut on_page: Vec<&Annot> = self
-                .annots
-                .get(&p.id)
-                .into_iter()
-                .flatten()
-                .filter(|a| crate::annot::group_of(&a.kind).as_ref() == Some(group))
-                .collect();
-            on_page.sort_by(|a, b| {
-                let (ba, bb) = (a.bounds(), b.bounds());
-                ba.y.total_cmp(&bb.y).then(ba.x.total_cmp(&bb.x))
-            });
-            out.extend(on_page.into_iter().map(|a| (i, p.id, a.clone())));
-        }
-        out
     }
 
     pub fn index_of(&self, id: PageId) -> Option<usize> {
@@ -451,9 +458,8 @@ pub enum Edit {
         ids: Vec<PageId>,
     },
     /// Show pages from other source pages (a cropped copy, say) while
-    /// keeping their ids, rotation and bookmarks. Their marks and OCR text
-    /// move by each `shift` (source-displayed points) to stay on the same
-    /// content.
+    /// keeping their ids, rotation, bookmarks, marks and OCR text, which
+    /// are in PageSpace, which a copy keeps: nothing moves.
     RebasePages {
         pages: Vec<Rebase>,
     },
@@ -473,7 +479,6 @@ pub struct Rebase {
     pub id: PageId,
     pub source: SourceId,
     pub index: u32,
-    pub shift: (f32, f32),
 }
 
 /// Serde for `Option<Option<T>>` fields that distinguishes "absent"
@@ -517,28 +522,48 @@ pub struct EditOutcome {
     /// Files whose signed fields came in with their pages: the signatures
     /// don't cover this file (M10 proposal 7).
     pub signatures_in: Vec<SourceId>,
+    /// Text it added or changed (a mark's, a header's or footer's) has
+    /// characters the built-in fonts can't draw: they show as `?` in the
+    /// file (see [`Document::unencodable_notice`]).
+    pub unencodable: bool,
 }
 
-/// A version's place in the history tree. Ids aren't reused.
+/// A version in the history tree. It names one state, which never changes:
+/// a job's amend or a save puts a new version in its place. Ids aren't
+/// reused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct VersionId(pub u64);
 
-/// One edit as applied, with what it takes to apply it again exactly: the
-/// id counters it started from and the seed its mark ids came from. So a
-/// replay hands out the same page, bookmark and mark ids as the first time.
+/// One edit as applied, and what it changed: prims with the values they
+/// replaced. A replay applies them and checks each before-value, so it
+/// rebuilds the version exactly, ids included, and never runs the edit
+/// again.
 #[derive(Debug, Clone)]
 pub struct Step {
     pub edit: Edit,
-    ids: Ids,
+    /// What it did, in words (see [`crate::describe`]), against the
+    /// document just before it.
+    pub line: String,
+    /// What it changed. Coalesced over its version's steps (see
+    /// [`coalesce`]), so a slot's change is on the last step that made
+    /// one, and an edit whose change a later one undid has none.
+    pub(crate) prims: Arc<[Prim]>,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct Ids {
-    next_page: u64,
-    next_outline: u64,
-    next_field: u64,
-    seed: u64,
+/// A version's prims don't fit the state they were made from: an internal
+/// bug, never the reader's. The version can't be rebuilt.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+#[error("History is damaged at version {}", .version.0)]
+pub struct Damaged {
+    pub version: VersionId,
 }
+
+/// An edit came while the file is still opening: its facts aren't read
+/// yet, so there's nothing to edit (M10.5 proposal 28). Slice 11 makes it
+/// `EditError::NotReady`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("the file is still opening")]
+pub struct NotReady;
 
 /// A save that wrote a version.
 #[derive(Debug, Clone, PartialEq)]
@@ -564,13 +589,21 @@ struct Version {
     /// The edits from the parent; empty for the root. A job's later
     /// batches add to its version's steps.
     steps: Vec<Step>,
-    /// Sources registered since the parent (inserted files), which the
-    /// steps refer to.
+    /// The registrations it holds: the files registered since the parent
+    /// (inserted ones, and the file a save wrote), which its steps and
+    /// state refer to; the first version holds those of the versions
+    /// pruned before it too. They go when it does (see `remove_version`).
     sources: Vec<SourceId>,
     /// The state, unless trimming dropped it; then a jump rebuilds it by
-    /// replaying the steps from the nearest ancestor that kept one.
+    /// applying the steps' prims from the nearest ancestor that kept one.
     state: Option<DocState>,
-    marginal_bytes: usize,
+    /// Rebuilding it failed (see [`Damaged`]), so it can't be reached.
+    damaged: bool,
+    /// What its snapshot holds that no other version's does, which
+    /// trimming frees, and what its steps hold, which only pruning the
+    /// version does (see [`accounting`]).
+    snapshot_bytes: usize,
+    step_bytes: usize,
     /// The job that produced this version, if it may still amend it.
     job: Option<JobId>,
     /// Saves that wrote it, oldest first.
@@ -598,6 +631,8 @@ pub struct VersionView {
     pub branches: Vec<VersionId>,
     /// Its snapshot was dropped to save memory; jumping there replays it.
     pub replays: bool,
+    /// Its replay failed, so it can't be reached (see [`Damaged`]).
+    pub damaged: bool,
 }
 
 /// Everything a save needs, detached from the document so it can run on
@@ -627,15 +662,130 @@ pub struct Snapshot {
     /// `Document::form_changed`): a save takes out what described it as
     /// it was, its XFA copy and usage rights (M10 proposals 6 and 7).
     pub form_changed: bool,
+    /// Each source's marks the open gave new ids (see
+    /// `Document::set_source_renamed`).
+    pub(crate) renamed: HashMap<SourceId, Arc<Renames>>,
+    /// The stamps and attachments the marks name (see
+    /// [`Document::assets`]).
+    pub assets: Arc<MarkAssets>,
 }
+
+/// A source's marks the open gave new ids ([`Renamed`]): by page index,
+/// the id each had, which the page's `/NM` says, and the one it has.
+pub(crate) type Renames = HashMap<u32, Vec<(AnnotId, AnnotId)>>;
 
 impl Snapshot {
     pub fn source(&self, id: SourceId) -> Option<&Arc<SourceInfo>> {
         self.sources.get(&id)
     }
+
+    /// [`Document::geom`].
+    pub fn geom(&self, page: &PageRef) -> Geom {
+        geom_in(&self.sources, page)
+    }
+
+    /// [`Document::render_delta`].
+    pub fn render_delta(&self, page: &PageRef) -> Rotation {
+        render_delta_in(&self.sources, page)
+    }
+
+    /// [`Document::group_members`].
+    pub fn group_members(&self, group: &crate::annot::Group) -> Vec<(usize, PageId, Annot)> {
+        group_members_in(&self.state, &self.sources, group)
+    }
+
+    /// The marks on page `index` of `source` the open gave new ids: the id
+    /// each had, which the page's `/NM` says, and the one it has.
+    pub(crate) fn renamed_on(&self, source: SourceId, index: u32) -> &[(AnnotId, AnnotId)] {
+        self.renamed
+            .get(&source)
+            .and_then(|r| r.get(&index))
+            .map_or(&[], Vec::as_slice)
+    }
+}
+
+/// Every mark of `state` in `group`, in document order: by page, then
+/// down the page as it shows, then across.
+fn group_members_in(
+    state: &DocState,
+    sources: &HashMap<SourceId, Arc<SourceInfo>>,
+    group: &crate::annot::Group,
+) -> Vec<(usize, PageId, Annot)> {
+    let in_group = |a: &&Annot| crate::annot::group_of(&a.kind).as_ref() == Some(group);
+    let mut out = Vec::new();
+    for (i, p) in state.pages.iter().enumerate() {
+        let on_page: Vec<&Annot> = state
+            .annots_on(p.id)
+            .into_iter()
+            .flatten()
+            .filter(in_group)
+            .collect();
+        if on_page.is_empty() {
+            continue;
+        }
+        let to_view = geom_in(sources, p).to_view();
+        let mut shown: Vec<(crate::annot::Box2, &Annot)> = on_page
+            .into_iter()
+            .map(|a| (to_view.apply_box(a.page_bounds()), a))
+            .collect();
+        shown.sort_by(|(a, _), (b, _)| a.y.total_cmp(&b.y).then(a.x.total_cmp(&b.x)));
+        out.extend(shown.into_iter().map(|(_, a)| (i, p.id, a.clone())));
+    }
+    out
+}
+
+/// Page `page`'s source page's boxes and `/Rotate`: a Letter page's when
+/// its source isn't in `sources`.
+fn source_geom(sources: &HashMap<SourceId, Arc<SourceInfo>>, page: &PageRef) -> Geom {
+    sources
+        .get(&page.source)
+        .map_or_else(|| Geom::read(None, None, 0), |s| s.src.geom(page.index))
+}
+
+fn geom_in(sources: &HashMap<SourceId, Arc<SourceInfo>>, page: &PageRef) -> Geom {
+    Geom {
+        rotate: page.rotation,
+        ..source_geom(sources, page)
+    }
+}
+
+fn render_delta_in(sources: &HashMap<SourceId, Arc<SourceInfo>>, page: &PageRef) -> Rotation {
+    page.rotation.minus(source_geom(sources, page).rotate)
+}
+
+/// Where page, bookmark and field ids come from. The counters only go up,
+/// so an id is never handed out twice, whatever undo does. Edits draw from
+/// it; a replay applies their prims, which hold the ids, and draws nothing.
+#[derive(Default)]
+struct IdAlloc {
+    page: AtomicU64,
+    outline: AtomicU64,
+    field: AtomicU64,
+}
+
+impl IdAlloc {
+    fn page(&self) -> PageId {
+        PageId(self.page.fetch_add(1, Ordering::Relaxed))
+    }
+
+    fn outline(&self) -> OutlineId {
+        OutlineId(self.outline.fetch_add(1, Ordering::Relaxed))
+    }
+
+    fn field(&self) -> FieldId {
+        FieldId(self.field.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// Field ids from `next` on: a file's fields keep the ids it read them
+    /// with.
+    fn fields_from(&self, next: u64) {
+        self.field.fetch_max(next, Ordering::Relaxed);
+    }
 }
 
 pub struct Document {
+    /// The blobs its sources are in, outside undo.
+    store: Arc<Store>,
     sources: HashMap<SourceId, Arc<SourceInfo>>,
     primary: SourceId,
     versions: HashMap<VersionId, Version>,
@@ -648,10 +798,7 @@ pub struct Document {
     unlogged_sources: Vec<SourceId>,
     /// Who makes the versions from now on (the app sets it).
     author: String,
-    /// Where mark ids come from: reseeded for every step (see [`Step`]).
-    rng: fastrand::Rng,
-    next_page: u64,
-    next_outline: u64,
+    ids: IdAlloc,
     next_source: u32,
     policy: Box<dyn HistoryPolicy>,
     next_job: u64,
@@ -666,24 +813,64 @@ pub struct Document {
     /// Fields as they are in the primary file on disk: their values for
     /// dirty tracking.
     saved_fields: im::OrdMap<FieldId, Field>,
-    next_field: u64,
     /// Each source's form as read (`set_source_form`), for the fields that
     /// come in with its pages.
     forms: HashMap<SourceId, Arc<FileForm>>,
+    /// Each source's marks the open gave new ids (`set_source_renamed`),
+    /// which its pages name by the old ones until a save writes them.
+    renamed: HashMap<SourceId, Arc<Renames>>,
+    /// The stamps and attachments the marks name, outside history.
+    assets: Arc<MarkAssets>,
     /// A save made one form of forms whose scripts came from more than one
     /// file (see [`Document::scripts_mixed`]).
     scripts_mixed: bool,
+    /// The reader has been told some text shows as `?` in the file
+    /// ([`Document::unencodable_notice`]). Outside history: undo doesn't
+    /// make it news again.
+    told_unencodable: bool,
+    /// The opened version holds the file's facts: until then edits are
+    /// refused (see [`NotReady`]).
+    ready: bool,
 }
 
 impl Document {
-    /// A document showing `primary` in its entirety.
+    /// A document showing `primary`, a source in `store`, in its
+    /// entirety, with `outline` and nothing else: a file sheaf has just
+    /// made, which says nothing more about itself. A file that's opened
+    /// opens through [`crate::open`], which reads what it says.
     pub fn new(
+        store: Arc<Store>,
         primary: SourceInfo,
         outline: &[FlatOutlineItem],
         policy: Box<dyn HistoryPolicy>,
     ) -> Self {
+        let mut doc = Self::loading(store, primary, policy);
+        let facts = Facts {
+            outline: outline.to_vec(),
+            ..Default::default()
+        };
+        let (state, _) = doc.opened(facts);
+        let root = doc.root;
+        doc.versions
+            .get_mut(&root)
+            .expect("the opened version")
+            .state = Some(state);
+        doc.ready = true;
+        doc
+    }
+
+    /// A document showing `primary` while it opens: its pages, from the
+    /// page table its source read as it opened, and nothing else, until
+    /// [`ready`](Self::ready). See [`crate::open::start`].
+    pub(crate) fn loading(
+        store: Arc<Store>,
+        primary: SourceInfo,
+        policy: Box<dyn HistoryPolicy>,
+    ) -> Self {
         let source = SourceId(0);
         let mut doc = Self {
+            assets: Arc::new(MarkAssets::new(store.clone())),
+            store,
             sources: HashMap::new(),
             primary: source,
             versions: HashMap::new(),
@@ -693,9 +880,7 @@ impl Document {
             next_version: 1,
             unlogged_sources: Vec::new(),
             author: crate::annot::default_author(),
-            rng: fastrand::Rng::new(),
-            next_page: 0,
-            next_outline: 0,
+            ids: IdAlloc::default(),
             next_source: 1,
             policy,
             next_job: 1,
@@ -705,22 +890,22 @@ impl Document {
             baked_header_footer: None,
             saved_annots: im::HashMap::new(),
             saved_fields: im::OrdMap::new(),
-            next_field: 0,
             forms: HashMap::new(),
+            renamed: HashMap::new(),
             scripts_mixed: false,
+            told_unencodable: false,
+            ready: false,
         };
-        let pages: Vector<PageRef> = (0..primary.page_count)
+        doc.debug_assert_ours(&primary);
+        let pages: Vector<PageRef> = (0..primary.src.page_count())
             .map(|index| PageRef {
-                id: doc.fresh_page_id(),
+                id: doc.ids.page(),
                 source,
                 index,
-                rotation: Rotation::R0,
+                rotation: primary.src.geom(index).rotate,
             })
             .collect();
         doc.sources.insert(source, Arc::new(primary));
-        let by_index: Vec<PageId> = pages.iter().map(|p| p.id).collect();
-        let outline = doc.outline_from_flat(outline, &by_index);
-        doc.saved_outline = outline.clone();
         doc.versions.insert(
             VersionId(0),
             Version {
@@ -734,7 +919,7 @@ impl Document {
                 sources: vec![source],
                 state: Some(DocState {
                     pages,
-                    outline,
+                    outline: Vector::new(),
                     annots: im::HashMap::new(),
                     text_layers: im::HashMap::new(),
                     removed_comments: im::HashMap::new(),
@@ -743,7 +928,9 @@ impl Document {
                     fields: im::OrdMap::new(),
                     widgets: im::HashMap::new(),
                 }),
-                marginal_bytes: 0,
+                damaged: false,
+                snapshot_bytes: 0,
+                step_bytes: 0,
                 job: None,
                 saves: Vec::new(),
             },
@@ -751,25 +938,132 @@ impl Document {
         doc
     }
 
+    /// The file has opened: `facts`, as [`crate::open::finish`] read them,
+    /// make the opened version complete. It's a new version in place of
+    /// the one with the pages alone, which no longer resolves; the current
+    /// and saved versions are this one, so the document isn't dirty and
+    /// there's nothing to undo. Gives what the view shows beside the
+    /// document. Only once, while the file opens: there are no late facts
+    /// (M10.5 proposal 28).
+    pub fn ready(&mut self, facts: Facts) -> Result<ViewFacts> {
+        if self.ready {
+            bail!("the file has opened already");
+        }
+        let (state, view) = self.opened(facts);
+        let old = self.root;
+        let mut v = self.versions.remove(&old).expect("the opened version");
+        v.state = Some(state);
+        self.replace(old, v);
+        self.ready = true;
+        Ok(view)
+    }
+
+    /// Whether the file's facts are in: until then edits are refused.
+    pub fn is_ready(&self) -> bool {
+        self.ready
+    }
+
+    /// The opened version's state: its pages, and what `facts` say about
+    /// them, each page index mapped to its page once. That's what the
+    /// primary file holds, so the `saved_*` baselines, the header/footer
+    /// drawn into the file and the primary's form are set from it. Gives
+    /// back what the state doesn't hold.
+    fn opened(&mut self, facts: Facts) -> (DocState, ViewFacts) {
+        let pages = self.state().pages.clone();
+        let by_index: Vec<PageId> = pages.iter().map(|p| p.id).collect();
+        let at = |index: usize| by_index.get(index).copied();
+        let outline = self.outline_from_flat(&facts.outline, &by_index);
+        let annots: im::HashMap<PageId, Vector<Annot>> = facts
+            .marks
+            .into_iter()
+            .filter_map(|(index, list)| Some((at(index as usize)?, list.into_iter().collect())))
+            .collect();
+        let labels = facts
+            .labels
+            .map(|ranges| -> Vector<_> {
+                crate::labels::to_specs(&ranges, &by_index)
+                    .into_iter()
+                    .collect()
+            })
+            .filter(|specs| !specs.is_empty());
+        let header_footer = facts.header_footer.map(|(mut hf, scope)| {
+            hf.pages = scope.map(|ix| ix.into_iter().filter_map(at).collect());
+            Arc::new(hf)
+        });
+        let form = facts.form;
+        let fields: im::OrdMap<FieldId, Field> = form
+            .fields
+            .iter()
+            .map(|f| {
+                let mut f = f.clone();
+                f.source = self.primary;
+                (f.id, f)
+            })
+            .collect();
+        let widgets = form
+            .widgets
+            .iter()
+            .filter_map(|(&index, list)| {
+                Some((at(index as usize)?, list.iter().cloned().collect()))
+            })
+            .collect();
+        self.ids
+            .fields_from(fields.keys().next_back().map_or(0, |id| id.0 + 1));
+        let renamed: Vec<(PageId, AnnotId)> = facts
+            .renamed
+            .iter()
+            .filter_map(|r| Some((at(r.page as usize)?, r.was)))
+            .collect();
+        self.set_source_renamed(self.primary, &facts.renamed);
+        self.set_source_assets(self.primary, &facts.assets);
+        self.saved_outline = outline.clone();
+        self.saved_labels = labels.clone();
+        self.baked_header_footer = header_footer.clone();
+        self.saved_annots = annots.clone();
+        // The file says other ids for the marks the open gave new ones:
+        // their pages are written at the next save, of either kind.
+        for (page, _) in &renamed {
+            self.saved_annots.remove(page);
+        }
+        self.saved_fields = fields.clone();
+        let view = ViewFacts {
+            renamed,
+            foreign: facts.foreign,
+            attachments: facts.attachments,
+            collection: facts.collection,
+            layers: facts.layers,
+            form: form.facts.clone(),
+        };
+        if !form.fields.is_empty() {
+            self.forms.insert(self.primary, Arc::new(form));
+        }
+        let state = DocState {
+            pages,
+            outline,
+            annots,
+            text_layers: im::HashMap::new(),
+            removed_comments: im::HashMap::new(),
+            labels,
+            header_footer,
+            fields,
+            widgets,
+        };
+        (state, view)
+    }
+
     /// Who the versions made from now on are by.
     pub fn set_author(&mut self, name: impl Into<String>) {
         self.author = name.into();
     }
 
-    /// Edits are only loaded into the opened version before any edit.
-    fn opened_state_mut(&mut self, what: &str) -> Result<&mut DocState> {
-        if self.versions.len() != 1 {
-            bail!("{what} can only be loaded before editing");
-        }
-        Ok(self
-            .versions
-            .get_mut(&self.root)
-            .and_then(|v| v.state.as_mut())
-            .expect("the opened version keeps its state"))
-    }
-
     pub fn primary(&self) -> SourceId {
         self.primary
+    }
+
+    /// Where its sources' bytes are: what a registration's source is
+    /// interned into.
+    pub fn store(&self) -> &Arc<Store> {
+        &self.store
     }
 
     pub fn source(&self, id: SourceId) -> Option<&Arc<SourceInfo>> {
@@ -781,7 +1075,9 @@ impl Document {
     }
 
     /// Register another file so its pages can be inserted. The next
-    /// version records it, with the edit that uses it.
+    /// version records it, with the edit that uses it, and the
+    /// registration goes when that version is pruned: an edit on another
+    /// branch registers the file again.
     pub fn add_source(&mut self, info: SourceInfo) -> SourceId {
         let id = self.register_source(info);
         self.unlogged_sources.push(id);
@@ -789,10 +1085,34 @@ impl Document {
     }
 
     fn register_source(&mut self, info: SourceInfo) -> SourceId {
+        self.debug_assert_ours(&info);
         let id = SourceId(self.next_source);
         self.next_source += 1;
         self.sources.insert(id, Arc::new(info));
         id
+    }
+
+    /// Forget registrations whose version is gone, and their forms and
+    /// renamed marks: a
+    /// source goes with the last registration holding it, and an engine
+    /// opened on it keeps only its bytes, until slice 13's engine pool. The
+    /// primary stays while it is the primary.
+    fn unregister(&mut self, ids: &[SourceId]) {
+        for id in ids.iter().filter(|&&id| id != self.primary) {
+            self.sources.remove(id);
+            self.forms.remove(id);
+            self.renamed.remove(id);
+        }
+    }
+
+    /// A registration's source is a blob of this document's store: the
+    /// store is what counts its bytes.
+    fn debug_assert_ours(&self, info: &SourceInfo) {
+        debug_assert!(
+            self.store.holds(info.src.blob()),
+            "{} is in another store",
+            info.name.display()
+        );
     }
 
     /// Source `id`'s form, as `forms::read` read it: the fields that come
@@ -802,6 +1122,48 @@ impl Document {
         if !form.fields.is_empty() {
             self.forms.insert(id, Arc::new(form));
         }
+    }
+
+    /// Source `id`'s marks the open gave new ids, as `open::finish` read
+    /// them: its pages name them by their old ids until a save writes
+    /// them, and a save follows other tools' replies to them through these
+    /// (see `save::write_page_annots`). Call it before the edit that brings
+    /// its pages.
+    pub fn set_source_renamed(&mut self, id: SourceId, renamed: &[Renamed]) {
+        let mut by_page = Renames::new();
+        for r in renamed {
+            by_page.entry(r.page).or_default().push((r.was, r.id));
+        }
+        if !by_page.is_empty() {
+            self.renamed.insert(id, Arc::new(by_page));
+        }
+    }
+
+    /// What source `id`'s marks hold, as `open::finish` read it: their
+    /// stamps' pages and attachments' files, which marks naming them draw
+    /// and embed from now on where the document didn't know them. Call it
+    /// before the edit that brings its pages.
+    pub fn set_source_assets(&self, id: SourceId, assets: &SourceAssets) {
+        if let Some(info) = self.sources.get(&id) {
+            self.assets.register(&info.src, assets);
+        }
+    }
+
+    /// What source `id`, the file a save wrote, holds for the marks: what
+    /// they draw and embed from now on, in place of what the save took
+    /// them from.
+    pub fn set_saved_assets(&self, id: SourceId, assets: &SourceAssets) {
+        if let Some(info) = self.sources.get(&id) {
+            self.assets.register_saved(&info.src, assets);
+        }
+    }
+
+    /// The stamps and attachments the marks name: those the document's
+    /// files hold, those placed or pasted since, and, failing those, the
+    /// generated cache's. Outside history: a stamp placed and undone is
+    /// still known, and every version's marks find theirs here.
+    pub fn assets(&self) -> &Arc<MarkAssets> {
+        &self.assets
     }
 
     /// Sources whose fields in the document, or the document scripts
@@ -854,7 +1216,7 @@ impl Document {
             let file = self
                 .sources
                 .get(sid)
-                .and_then(|s| s.path.file_name())
+                .and_then(|s| s.name.file_name())
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
             let scripted = st.fields.values().any(|f| {
@@ -879,7 +1241,7 @@ impl Document {
             let file = self
                 .sources
                 .get(sid)
-                .and_then(|s| s.path.file_name())
+                .and_then(|s| s.name.file_name())
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
             parts.push(format!("the signature from {file} is no longer valid here"));
@@ -903,108 +1265,24 @@ impl Document {
         Some(sentences.join(". "))
     }
 
-    /// Page sizes arrive after open; they're not part of any snapshot.
-    pub fn set_source_sizes(&mut self, id: SourceId, sizes: Vec<PageSize>) {
-        if let Some(src) = self.sources.get_mut(&id) {
-            let mut info = (**src).clone();
-            info.page_sizes = Some(sizes);
-            *src = Arc::new(info);
+    /// What to tell the reader when an edit brought text the built-in
+    /// fonts can't draw ([`EditOutcome::unencodable`]): once a document,
+    /// the first time, and never again after.
+    pub fn unencodable_notice(&mut self, out: &EditOutcome) -> Option<String> {
+        if !out.unencodable || self.told_unencodable {
+            return None;
         }
+        self.told_unencodable = true;
+        Some(
+            "Some characters can't be drawn in the built-in fonts and show as “?” in the file; \
+             the text itself is kept"
+                .into(),
+        )
     }
 
-    /// The outline also arrives after open. Only valid before any edit.
-    pub fn set_initial_outline(&mut self, outline: &[FlatOutlineItem]) -> Result<()> {
-        let by_index: Vec<PageId> = self
-            .opened_state_mut("the outline")?
-            .pages
-            .iter()
-            .map(|p| p.id)
-            .collect();
-        let outline = self.outline_from_flat(outline, &by_index);
-        self.opened_state_mut("the outline")?.outline = outline.clone();
-        self.saved_outline = outline;
-        Ok(())
-    }
-
-    /// Markup read back from the primary file (annotations sheaf wrote
-    /// earlier), keyed by source page index. Only valid before any edit.
     /// The header/footer differs from what the primary file has drawn.
     pub fn header_footer_dirty(&self) -> bool {
         self.state().header_footer != self.baked_header_footer
-    }
-
-    /// The header/footer sheaf drew into the file, read after open (page
-    /// scope by index).
-    pub fn set_initial_header_footer(
-        &mut self,
-        mut hf: crate::stamps::HeaderFooter,
-        indexes: Option<Vec<usize>>,
-    ) -> Result<()> {
-        let st = self.opened_state_mut("the header/footer")?;
-        let ids: Vec<PageId> = st.pages.iter().map(|p| p.id).collect();
-        hf.pages = indexes.map(|ix| ix.iter().filter_map(|&i| ids.get(i).copied()).collect());
-        let hf = Some(Arc::new(hf));
-        st.header_footer = hf.clone();
-        self.baked_header_footer = hf;
-        Ok(())
-    }
-
-    /// The file's page labels, read after open: ranges by page index.
-    pub fn set_initial_labels(&mut self, ranges: &[crate::labels::LabelRange]) -> Result<()> {
-        let st = self.opened_state_mut("page labels")?;
-        let ids: Vec<PageId> = st.pages.iter().map(|p| p.id).collect();
-        let specs: Vector<_> = crate::labels::to_specs(ranges, &ids).into_iter().collect();
-        let specs = (!specs.is_empty()).then_some(specs);
-        st.labels = specs.clone();
-        self.saved_labels = specs;
-        Ok(())
-    }
-
-    pub fn set_initial_annots(&mut self, by_index: HashMap<u32, Vec<Annot>>) -> Result<()> {
-        let st = self.opened_state_mut("annotations")?;
-        let ids: Vec<PageId> = st.pages.iter().map(|p| p.id).collect();
-        let mut map = im::HashMap::new();
-        for (index, list) in by_index {
-            if let Some(&pid) = ids.get(index as usize) {
-                map.insert(pid, list.into_iter().collect());
-            }
-        }
-        st.annots = map.clone();
-        self.saved_annots = map;
-        Ok(())
-    }
-
-    /// The primary file's form, read after open (`forms::read`): its
-    /// fields keep their ids, and their widgets go to the pages they're on
-    /// by index. Only before any edit, like the other `set_initial_*`.
-    pub fn set_initial_fields(&mut self, form: &crate::forms::FileForm) -> Result<()> {
-        let primary = self.primary;
-        let st = self.opened_state_mut("form fields")?;
-        let ids: Vec<PageId> = st.pages.iter().map(|p| p.id).collect();
-        let fields: im::OrdMap<FieldId, Field> = form
-            .fields
-            .iter()
-            .map(|f| {
-                let mut f = f.clone();
-                f.source = primary;
-                (f.id, f)
-            })
-            .collect();
-        let mut widgets = im::HashMap::new();
-        for (&index, list) in &form.widgets {
-            if let Some(&pid) = ids.get(index as usize) {
-                widgets.insert(pid, list.iter().cloned().collect());
-            }
-        }
-        let next = fields.keys().next_back().map_or(0, |id| id.0 + 1);
-        st.fields = fields.clone();
-        st.widgets = widgets;
-        self.saved_fields = fields;
-        self.next_field = self.next_field.max(next);
-        if !form.fields.is_empty() {
-            self.forms.insert(primary, Arc::new(form.clone()));
-        }
-        Ok(())
     }
 
     /// Fields that differ from what's in the primary file: changed, added
@@ -1066,42 +1344,6 @@ impl Document {
         dirty
     }
 
-    /// Bookmark colors and styles read from the file (which PDFium's
-    /// outline leaves out), matched to the loaded bookmarks in pre-order by
-    /// title. Only before any edit, like the other `set_initial_*`.
-    pub fn set_initial_outline_styles(
-        &mut self,
-        styles: &[crate::file::OutlineStyle],
-    ) -> Result<()> {
-        if styles.is_empty() {
-            return Ok(());
-        }
-        fn walk(
-            nodes: &Vector<OutlineNode>,
-            styles: &mut std::slice::Iter<crate::file::OutlineStyle>,
-        ) -> Vector<OutlineNode> {
-            nodes
-                .iter()
-                .map(|n| {
-                    let mut n = n.clone();
-                    if let Some(s) = styles.next()
-                        && s.title.trim() == n.title.trim()
-                    {
-                        n.color = s.color;
-                        n.style = s.style;
-                    }
-                    n.children = walk(&n.children, styles);
-                    n
-                })
-                .collect()
-        }
-        let st = self.opened_state_mut("bookmark styles")?;
-        let styled = walk(&st.outline, &mut styles.iter());
-        st.outline = styled.clone();
-        self.saved_outline = styled;
-        Ok(())
-    }
-
     pub fn state(&self) -> &DocState {
         self.versions[&self.cursor]
             .state
@@ -1121,6 +1363,8 @@ impl Document {
             fields_dirty: self.fields_dirty(),
             removes_content: self.removes_content(),
             form_changed: self.form_changed(),
+            renamed: self.renamed.clone(),
+            assets: self.assets.clone(),
         }
     }
 
@@ -1162,7 +1406,7 @@ impl Document {
                 .filter(|p| p.source == self.primary)
                 .map(|p| p.index)
                 .collect();
-            if (0..primary.page_count).any(|i| !shown.contains(&i)) {
+            if (0..primary.src.page_count()).any(|i| !shown.contains(&i)) {
                 return true;
             }
         }
@@ -1198,24 +1442,34 @@ impl Document {
     /// `saved`: register it as a new source and make the current version an
     /// identity mapping over it, keeping `PageId`s (and bookmarks) intact so
     /// the view doesn't flicker. Older versions still reference the old
-    /// sources, so undo across a save keeps working. Rotation deltas and OCR
-    /// layers are now baked into the file, so they reset to nothing.
+    /// sources, so undo across a save keeps working. OCR layers are now
+    /// baked into the file, so they reset to nothing; a page's rotation is
+    /// the saved file's `/Rotate`, so it stays.
     ///
-    /// The content is the same, so this re-expresses the version in place
-    /// rather than making a new one: a save is a mark on the version, not
-    /// an edit. Saved versions keep their snapshots (see `trim`), so
-    /// nothing is ever replayed across a save.
+    /// The content is the same, so this isn't an edit and makes no step,
+    /// but the state is expressed anew, so the version gets a new id under
+    /// the same parent (see [`replace`](Self::replace)). Its steps still
+    /// lead to its state as it was before the save; it keeps its snapshot,
+    /// as do its children (see `keeps_snapshot`), so nothing is ever
+    /// replayed across a save. The new version holds the saved file's
+    /// registration. M10.5 slice 9 deletes this.
     pub fn rebase_to_saved(&mut self, saved: SourceInfo) -> SourceId {
+        debug_assert!(self.is_ready(), "a save of a file still opening");
         // The forms it was made of are one now; whether their scripts
         // were from more than one is the session's to remember.
         self.scripts_mixed |= self.script_sources().len() > 1;
-        let path = saved.path.clone();
+        let path = saved.name.clone();
         let id = self.register_source(saved);
-        self.primary = id;
-        let v = self
-            .versions
-            .get_mut(&self.cursor)
-            .expect("current version");
+        let replaced = std::mem::replace(&mut self.primary, id);
+        // Versions made from it before (and undone) were made from it as
+        // it was, so their prims don't fit it re-expressed: they keep their
+        // states (see `keeps_snapshot`). A damaged one stays out of reach.
+        for child in self.versions[&self.cursor].children.clone() {
+            let _ = self.ensure_state(child);
+        }
+        let old = self.cursor;
+        let mut v = self.versions.remove(&old).expect("current version");
+        v.sources.push(id);
         v.saves.push(Saved {
             path,
             at: crate::annot::pdf_date_now(),
@@ -1233,7 +1487,7 @@ impl Document {
                 id: p.id,
                 source: id,
                 index: i as u32,
-                rotation: Rotation::R0,
+                rotation: p.rotation,
             })
             .collect();
         // Every field is the saved file's own now, under the name it was
@@ -1251,6 +1505,23 @@ impl Document {
                 (*fid, f)
             })
             .collect();
+        // The pages and fields expressed anew are its snapshot's alone.
+        v.snapshot_bytes = accounting(&v.steps, st).0
+            + st.pages.heap_size()
+            + st.fields
+                .values()
+                .map(|f| size_of::<(FieldId, Field)>() + f.heap_size())
+                .sum::<usize>();
+        let new = self.replace(old, v);
+        // The primary it replaces stayed only as the primary when pruning
+        // took the version that held it: nothing refers to it now.
+        let held = self
+            .versions
+            .values()
+            .any(|v| v.sources.contains(&replaced));
+        if !held {
+            self.unregister(&[replaced]);
+        }
         let st = self.state().clone();
         self.saved_outline = st.outline;
         self.saved_annots = st.annots;
@@ -1258,7 +1529,7 @@ impl Document {
         self.saved_removed = st.removed_comments;
         self.saved_labels = st.labels;
         self.baked_header_footer = st.header_footer;
-        self.saved = Some(self.cursor);
+        self.saved = Some(new);
         id
     }
 
@@ -1274,17 +1545,27 @@ impl Document {
         self.state().index_of(id)
     }
 
-    /// Displayed size of a page: its source size rotated by its delta.
+    /// A page's boxes, its source page's, with its rotation.
+    pub fn geom(&self, page: &PageRef) -> Geom {
+        geom_in(&self.sources, page)
+    }
+
+    /// The turn PDFium adds to the source page's own `/Rotate`: what a
+    /// render `Job` takes.
+    pub fn render_delta(&self, page: &PageRef) -> Rotation {
+        render_delta_in(&self.sources, page)
+    }
+
+    /// A page's size as shown.
     pub fn page_size(&self, page: &PageRef) -> PageSize {
-        let src = self
-            .sources
-            .get(&page.source)
-            .map(|s| s.page_size(page.index))
-            .unwrap_or(PageSize {
-                width: 612.0,
-                height: 792.0,
-            });
-        src.rotated(page.rotation)
+        self.geom(page).shown()
+    }
+
+    /// Every mark in `group` (see `annot::group_of`), in document order:
+    /// by page, then down the page as it shows, then across. With each,
+    /// its page's position.
+    pub fn group_members(&self, group: &crate::annot::Group) -> Vec<(usize, PageId, Annot)> {
+        group_members_in(self.state(), &self.sources, group)
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -1328,26 +1609,28 @@ impl Document {
             .or_else(|| v.children.last().copied())
     }
 
-    pub fn undo(&mut self) -> Option<&str> {
+    /// Back to the parent version: the label of the edit undone, or None
+    /// with nothing to undo.
+    pub fn undo(&mut self) -> Result<Option<&str>, Damaged> {
         let from = self.cursor;
-        let parent = self.versions[&from].parent?;
-        if let Err(e) = self.ensure_state(parent) {
-            log::warn!("undo: {e:#}");
-            return None;
-        }
+        let Some(parent) = self.versions[&from].parent else {
+            return Ok(None);
+        };
+        self.ensure_state(parent)?;
         self.versions.get_mut(&parent).expect("parent").redo_to = Some(from);
         self.cursor = parent;
-        Some(self.versions[&from].label.as_str())
+        Ok(Some(self.versions[&from].label.as_str()))
     }
 
-    pub fn redo(&mut self) -> Option<&str> {
-        let to = self.redo_target()?;
-        if let Err(e) = self.ensure_state(to) {
-            log::warn!("redo: {e:#}");
-            return None;
-        }
+    /// On to the version redo goes to: its label, or None with nothing to
+    /// redo.
+    pub fn redo(&mut self) -> Result<Option<&str>, Damaged> {
+        let Some(to) = self.redo_target() else {
+            return Ok(None);
+        };
+        self.ensure_state(to)?;
         self.cursor = to;
-        Some(self.versions[&to].label.as_str())
+        Ok(Some(self.versions[&to].label.as_str()))
     }
 
     /// Make `id` the current version, as undo and redo do: not an edit,
@@ -1371,17 +1654,22 @@ impl Document {
         self.cursor
     }
 
-    /// The edits that made version `id` from its parent, and the sources
-    /// that came in with them: the edge into it, which is what a merge
-    /// would replay (`todos/file-contention.md`).
+    /// The edits that made version `id` from its parent, and the
+    /// registrations it holds (the files that came in with them): the edge
+    /// into it, which is what a merge would replay
+    /// (`todos/file-contention.md`).
     pub fn edge(&self, id: VersionId) -> Option<(&[Step], &[SourceId])> {
         let v = self.versions.get(&id)?;
         Some((&v.steps, &v.sources))
     }
 
+    /// Run `edit` as a new version. Refused with [`NotReady`] while the
+    /// file opens, as are [`apply_batch`](Self::apply_batch) and
+    /// [`apply_in_job`](Self::apply_in_job).
     pub fn apply(&mut self, edit: Edit, label: impl Into<String>) -> Result<EditOutcome> {
+        self.check_ready()?;
         let (state, outcome, step) = self.step(self.state().clone(), edit)?;
-        if state == *self.state() {
+        if step.prims.is_empty() {
             return Ok(outcome);
         }
         self.push(state, label.into(), vec![step], None);
@@ -1396,6 +1684,7 @@ impl Document {
         edits: Vec<Edit>,
         label: impl Into<String>,
     ) -> Result<EditOutcome> {
+        self.check_ready()?;
         let mut state = self.state().clone();
         let mut total = EditOutcome::default();
         let mut steps = Vec::with_capacity(edits.len());
@@ -1411,8 +1700,10 @@ impl Document {
             total.bookmarks_added += out.bookmarks_added;
             total.forms_renamed.extend(out.forms_renamed);
             total.signatures_in.extend(out.signatures_in);
+            total.unencodable |= out.unencodable;
         }
-        if state != *self.state() {
+        coalesce(&mut steps);
+        if steps.iter().any(|s| !s.prims.is_empty()) {
             self.push(state, label.into(), steps, None);
         }
         Ok(total)
@@ -1426,39 +1717,62 @@ impl Document {
     }
 
     /// Like [`apply`](Self::apply), but when the current version was made
-    /// by `job`, has nothing after it, and isn't the saved one, the edit
-    /// joins it instead of making a new version. The first batch of a job
-    /// makes a version; later batches join it, so the whole job is one
-    /// undo step. A save, an undo or an unrelated edit in between ends the
-    /// chain, and the rest of the job becomes another step.
+    /// by `job`, has nothing after it, was never saved, and isn't the first
+    /// (pruning can make it so), the edit joins it instead of making a new
+    /// version. The first batch of a job makes a version; later batches
+    /// amend it, so the whole job is one undo step. An amend replaces the
+    /// version with a new id under the same parent, and when the job has
+    /// put back all it did, it leaves no version at all. A save, an undo or
+    /// an unrelated edit in between ends the chain, and the rest of the job
+    /// becomes another step.
     pub fn apply_in_job(
         &mut self,
         job: JobId,
         edit: Edit,
         label: impl Into<String>,
     ) -> Result<EditOutcome> {
+        self.check_ready()?;
         let (state, outcome, step) = self.step(self.state().clone(), edit)?;
+        if step.prims.is_empty() {
+            return Ok(outcome);
+        }
         let current = &self.versions[&self.cursor];
         let amend = current.job == Some(job)
+            && current.parent.is_some()
             && current.children.is_empty()
+            && current.saves.is_empty()
             && self.saved != Some(self.cursor);
-        if amend {
-            let marginal_bytes = current
-                .parent
-                .and_then(|p| self.versions[&p].state.as_ref())
-                .map_or(0, |prev| Self::marginal(prev, &state));
-            let v = self.versions.get_mut(&self.cursor).expect("current");
+        if !amend {
+            self.push(state, label.into(), vec![step], Some(job));
+            return Ok(outcome);
+        }
+        let old = self.cursor;
+        let mut v = self.versions.remove(&old).expect("current version");
+        let parent = v.parent.expect("a job's version has a parent");
+        v.steps.push(step);
+        coalesce(&mut v.steps);
+        if v.steps.iter().all(|s| s.prims.is_empty()) {
+            // The job put back all it did: back to the parent, whose state
+            // this is (trimming may have dropped its snapshot). What the
+            // version held waits for the next one, as if the job hadn't
+            // run.
+            let p = self.versions.get_mut(&parent).expect("parent");
+            p.children.retain(|c| *c != old);
+            if p.redo_to == Some(old) {
+                p.redo_to = None;
+            }
+            p.state.get_or_insert(state);
+            self.cursor = parent;
+            v.sources.append(&mut self.unlogged_sources);
+            self.unlogged_sources = v.sources;
+        } else {
+            (v.snapshot_bytes, v.step_bytes) = accounting(&v.steps, &state);
             v.state = Some(state);
             v.label = label.into();
-            v.steps.push(step);
-            v.marginal_bytes = marginal_bytes;
-            self.trim();
-        } else {
-            if state == *self.state() {
-                return Ok(outcome);
-            }
-            self.push(state, label.into(), vec![step], Some(job));
+            v.sources.append(&mut self.unlogged_sources);
+            self.replace(old, v);
         }
+        self.trim();
         Ok(outcome)
     }
 
@@ -1484,47 +1798,33 @@ impl Document {
         false
     }
 
-    /// Run `edit` on `state` as a new step, recording the id counters and a
-    /// fresh seed for its mark ids, so a replay hands out the same ids.
-    fn step(&mut self, state: DocState, edit: Edit) -> Result<(DocState, EditOutcome, Step)> {
-        let ids = Ids {
-            next_page: self.next_page,
-            next_outline: self.next_outline,
-            next_field: self.next_field,
-            seed: fastrand::u64(..),
-        };
-        self.rng = fastrand::Rng::with_seed(ids.seed);
-        let (state, out) = self.compute(state, edit.clone())?;
-        Ok((state, out, Step { edit, ids }))
+    /// Edits wait for the file's facts: there are none to edit before
+    /// them, and none come after.
+    fn check_ready(&self) -> Result<(), NotReady> {
+        if self.ready { Ok(()) } else { Err(NotReady) }
     }
 
-    /// Run a recorded step again, exactly as the first time.
-    fn replay_step(&mut self, state: DocState, step: &Step) -> Result<DocState> {
-        let (page, outline, field) = (self.next_page, self.next_outline, self.next_field);
-        self.next_page = step.ids.next_page;
-        self.next_outline = step.ids.next_outline;
-        self.next_field = step.ids.next_field;
-        self.rng = fastrand::Rng::with_seed(step.ids.seed);
-        let result = self.compute(state, step.edit.clone()).map(|(s, _)| s);
-        // Counters only grow; leave them as they were before the replay.
-        self.next_page = self.next_page.max(page);
-        self.next_outline = self.next_outline.max(outline);
-        self.next_field = self.next_field.max(field);
-        result
+    /// Run `edit` on `state` as a new step, recording what it changed and
+    /// describing it against `state`.
+    fn step(&self, state: DocState, edit: Edit) -> Result<(DocState, EditOutcome, Step)> {
+        let line = crate::describe::describe(&edit, &state);
+        let mut rec = Rec::new(state);
+        let out = self.compute(&mut rec, edit.clone())?;
+        let (state, prims) = rec.finish();
+        let prims = prims.into();
+        Ok((state, out, Step { edit, line, prims }))
     }
 
-    /// Make sure version `id` has its state, replaying its steps (and its
-    /// ancestors') from the nearest ancestor that kept one.
-    fn ensure_state(&mut self, id: VersionId) -> Result<()> {
-        if self.versions[&id].state.is_some() {
-            return Ok(());
-        }
+    /// Version `id`'s state, rebuilt from the nearest ancestor that kept
+    /// one by applying the prims of each version on the way. Damaged when
+    /// one of them is already, or when a prim doesn't fit.
+    fn replay(&self, id: VersionId) -> Result<DocState, Damaged> {
         let mut path = vec![id];
         let mut at = id;
         let base = loop {
             let parent = self.versions[&at]
                 .parent
-                .context("no version to replay from")?;
+                .expect("the opened version keeps its state");
             if self.versions[&parent].state.is_some() {
                 break parent;
             }
@@ -1532,16 +1832,42 @@ impl Document {
             at = parent;
         };
         let mut state = self.versions[&base].state.clone().expect("base state");
-        for v in path.iter().rev() {
-            let steps = self.versions[v].steps.clone();
-            for step in &steps {
-                state = self
-                    .replay_step(state, step)
-                    .with_context(|| format!("replaying {:?}", self.versions[v].label))?;
+        for &version in path.iter().rev() {
+            let v = &self.versions[&version];
+            if v.damaged {
+                return Err(Damaged { version });
+            }
+            for p in v.steps.iter().flat_map(|s| s.prims.iter()) {
+                if let Err(m) = state.apply(p) {
+                    log::error!("version {}: {m}", version.0);
+                    return Err(Damaged { version });
+                }
             }
         }
-        self.versions.get_mut(&id).expect("version").state = Some(state);
-        Ok(())
+        Ok(state)
+    }
+
+    /// Make sure version `id` has its state, replaying it when trimming
+    /// dropped it. A version that can't be rebuilt is marked damaged; that
+    /// is a bug, so a debug build stops there.
+    fn ensure_state(&mut self, id: VersionId) -> Result<(), Damaged> {
+        if self.versions[&id].state.is_some() {
+            return Ok(());
+        }
+        match self.replay(id) {
+            Ok(state) => {
+                self.versions.get_mut(&id).expect("version").state = Some(state);
+                Ok(())
+            }
+            Err(e) => {
+                self.versions.get_mut(&e.version).expect("version").damaged = true;
+                log::error!("{e}");
+                if cfg!(debug_assertions) {
+                    panic!("{e}");
+                }
+                Err(e)
+            }
+        }
     }
 
     /// A new version after the current one, with the edits that made it.
@@ -1550,10 +1876,7 @@ impl Document {
         let id = VersionId(self.next_version);
         self.next_version += 1;
         let parent = self.cursor;
-        let marginal_bytes = self.versions[&parent]
-            .state
-            .as_ref()
-            .map_or(0, |prev| Self::marginal(prev, &state));
+        let (snapshot_bytes, step_bytes) = accounting(&steps, &state);
         let p = self.versions.get_mut(&parent).expect("parent");
         p.children.push(id);
         p.redo_to = Some(id);
@@ -1569,7 +1892,9 @@ impl Document {
                 steps,
                 sources: std::mem::take(&mut self.unlogged_sources),
                 state: Some(state),
-                marginal_bytes,
+                damaged: false,
+                snapshot_bytes,
+                step_bytes,
                 job,
                 saves: Vec::new(),
             },
@@ -1578,14 +1903,53 @@ impl Document {
         self.trim();
     }
 
+    /// Put `v` in version `old`'s place under a new id: a VersionId names
+    /// one state, so a version that changes is another version. It takes
+    /// `old`'s place among its parent's children and as its children's
+    /// parent, and becomes the root, current or saved version where `old`
+    /// was. The caller has taken `old` out of the tree, so it no longer
+    /// resolves.
+    fn replace(&mut self, old: VersionId, v: Version) -> VersionId {
+        let id = VersionId(self.next_version);
+        self.next_version += 1;
+        if let Some(p) = v.parent {
+            let parent = self.versions.get_mut(&p).expect("parent");
+            for c in parent.children.iter_mut().filter(|c| **c == old) {
+                *c = id;
+            }
+            if parent.redo_to == Some(old) {
+                parent.redo_to = Some(id);
+            }
+        }
+        for c in &v.children {
+            self.versions.get_mut(c).expect("child").parent = Some(id);
+        }
+        if self.root == old {
+            self.root = id;
+        }
+        if self.cursor == old {
+            self.cursor = id;
+        }
+        if self.saved == Some(old) {
+            self.saved = Some(id);
+        }
+        self.versions.insert(id, v);
+        id
+    }
+
     /// Versions that must keep their snapshots: the opened one (every
-    /// replay starts somewhere), the current one, and every saved one (a
-    /// save re-expressed it in place, so it can't be replayed).
+    /// replay starts somewhere), the current one, every saved one (a save
+    /// re-expressed it, so its steps don't lead to it), and the children
+    /// of saved ones (those made before the save can't be replayed from it
+    /// either).
     fn keeps_snapshot(&self, id: VersionId) -> bool {
+        let v = &self.versions[&id];
         id == self.root
             || id == self.cursor
             || Some(id) == self.saved
-            || !self.versions[&id].saves.is_empty()
+            || !v.saves.is_empty()
+            || v.parent
+                .is_some_and(|p| !self.versions[&p].saves.is_empty())
     }
 
     /// The versions from the opened one to the current one.
@@ -1599,10 +1963,9 @@ impl Document {
     }
 
     /// Snapshots the policy may drop, in the order to drop them: versions
-    /// off the current line first (other branches, undone ones), then the
-    /// current line's, oldest first.
-    fn droppable(&self) -> Vec<VersionId> {
-        let line: HashSet<VersionId> = self.line().into_iter().collect();
+    /// off the current `line` first (other branches, undone ones), then the
+    /// line's, oldest first.
+    fn droppable(&self, line: &HashSet<VersionId>) -> Vec<VersionId> {
         let mut ids: Vec<VersionId> = self
             .versions
             .iter()
@@ -1614,8 +1977,9 @@ impl Document {
     }
 
     fn trim(&mut self) {
-        let droppable = self.droppable();
-        let stats = self.stats_for(&droppable);
+        let line = self.line().into_iter().collect();
+        let droppable = self.droppable(&line);
+        let stats = self.stats_for(&line, &droppable);
         let n = self.policy.trim(&stats).min(droppable.len());
         for id in &droppable[..n] {
             self.versions.get_mut(id).expect("version").state = None;
@@ -1626,7 +1990,9 @@ impl Document {
     /// Keep the tree to [`crate::history::MAX_VERSIONS`]: drop versions on
     /// other branches, oldest first, then the oldest versions before the
     /// saved one. Edits back to the last save always stay (a later merge
-    /// replays them).
+    /// replays them). A version dropped from a branch takes its
+    /// registrations with it; the first version's go to the next, whose
+    /// state was made over them.
     fn prune(&mut self) {
         let max = crate::history::MAX_VERSIONS;
         while self.versions.len() > max {
@@ -1661,17 +2027,23 @@ impl Document {
                     self.remove_subtree(sibling);
                 }
             }
-            self.versions.remove(&old);
+            let mut sources = self.versions.remove(&old).expect("old root").sources;
             let new_root = self.versions.get_mut(&next).expect("next");
             new_root.parent = None;
+            sources.append(&mut new_root.sources);
+            new_root.sources = sources;
             self.root = next;
             i += 1;
         }
     }
 
+    /// Take version `id` out of the tree, and the registrations it holds
+    /// out of the document.
     fn remove_version(&mut self, id: VersionId) {
-        if let Some(v) = self.versions.remove(&id)
-            && let Some(p) = v.parent
+        let Some(v) = self.versions.remove(&id) else {
+            return;
+        };
+        if let Some(p) = v.parent
             && let Some(parent) = self.versions.get_mut(&p)
         {
             parent.children.retain(|c| *c != id);
@@ -1682,6 +2054,7 @@ impl Document {
         if self.saved == Some(id) {
             self.saved = None;
         }
+        self.unregister(&v.sources);
     }
 
     fn remove_subtree(&mut self, id: VersionId) {
@@ -1694,7 +2067,7 @@ impl Document {
         }
     }
 
-    fn stats_for(&self, droppable: &[VersionId]) -> HistoryStats {
+    fn stats_for(&self, line: &HashSet<VersionId>, droppable: &[VersionId]) -> HistoryStats {
         let mut kept: Vec<VersionId> = self
             .versions
             .iter()
@@ -1703,22 +2076,54 @@ impl Document {
             .collect();
         // The current version's last.
         kept.sort_by_key(|id| (*id == self.cursor, *id));
-        let marginal_bytes: Vec<usize> = droppable
+        let snapshot_bytes: Vec<usize> = droppable
             .iter()
             .chain(&kept)
-            .map(|id| self.versions[id].marginal_bytes)
+            .map(|id| self.versions[id].snapshot_bytes)
             .collect();
         HistoryStats {
-            versions: marginal_bytes.len(),
-            cursor: marginal_bytes.len() - 1,
-            marginal_bytes,
-            undone_source_bytes: 0,
+            versions: snapshot_bytes.len(),
+            cursor: snapshot_bytes.len() - 1,
+            snapshot_bytes,
+            step_bytes: self.versions.values().map(|v| v.step_bytes).sum(),
+            blob_bytes: self.store.bytes(),
+            undone_source_bytes: self.undone_source_bytes(line),
         }
     }
 
-    /// Snapshots kept, and their estimated bytes (droppable ones first).
+    /// The bytes of the blobs only versions off the current `line` hold
+    /// registrations of (inserts that were undone), each blob once. A blob
+    /// a registration on the line, one waiting for the next version, or the
+    /// primary shares isn't counted: pruning wouldn't free it.
+    fn undone_source_bytes(&self, line: &HashSet<VersionId>) -> usize {
+        let held = self.versions.iter().flat_map(|(id, v)| {
+            let on_line = line.contains(id);
+            v.sources.iter().map(move |s| (s, on_line))
+        });
+        let waiting = self.unlogged_sources.iter().chain([&self.primary]);
+        let (mut kept, mut undone) = (HashSet::new(), HashMap::new());
+        for (sid, on_line) in held.chain(waiting.map(|s| (s, true))) {
+            let Some(blob) = self.sources.get(sid).map(|s| s.src.blob()) else {
+                continue;
+            };
+            if on_line {
+                kept.insert(blob.id());
+            } else {
+                undone.insert(blob.id(), blob.len());
+            }
+        }
+        undone
+            .into_iter()
+            .filter(|(id, _)| !kept.contains(id))
+            .map(|(_, len)| len)
+            .sum()
+    }
+
+    /// Snapshots kept and their estimated bytes (droppable ones first), the
+    /// bytes every version's steps hold, and the sources' bytes.
     pub fn stats(&self) -> HistoryStats {
-        self.stats_for(&self.droppable())
+        let line = self.line().into_iter().collect();
+        self.stats_for(&line, &self.droppable(&line))
     }
 
     /// How many versions the history holds, with or without snapshots.
@@ -1728,17 +2133,12 @@ impl Document {
 
     fn view(&self, id: VersionId, shown_child: Option<VersionId>, undone: bool) -> VersionView {
         let v = &self.versions[&id];
-        let before = v.parent.and_then(|p| self.versions[&p].state.as_ref());
         VersionView {
             id,
             label: v.label.clone(),
             author: v.author.clone(),
             at: v.at.clone(),
-            edits: v
-                .steps
-                .iter()
-                .map(|s| crate::describe::describe(&s.edit, before))
-                .collect(),
+            edits: v.steps.iter().map(|s| s.line.clone()).collect(),
             saves: v.saves.clone(),
             current: id == self.cursor,
             saved: Some(id) == self.saved,
@@ -1750,6 +2150,7 @@ impl Document {
                 .filter(|c| Some(*c) != shown_child)
                 .collect(),
             replays: v.state.is_none(),
+            damaged: v.damaged,
         }
     }
 
@@ -1794,53 +2195,17 @@ impl Document {
         out
     }
 
-    /// Rough bytes `new` holds that `old` doesn't share.
-    fn marginal(old: &DocState, new: &DocState) -> usize {
-        let mut bytes = 0;
-        if !old.pages.ptr_eq(&new.pages) {
-            // im shares structure, but assume the worst for a modified vector.
-            bytes += new.pages.len() * std::mem::size_of::<PageRef>();
-        }
-        if !old.outline.ptr_eq(&new.outline) {
-            bytes += new.outline_flat().len() * 96;
-        }
-        if !old.annots.ptr_eq(&new.annots) {
-            bytes += new.annots.values().map(|l| l.len() * 256).sum::<usize>();
-        }
-        if !old.widgets.ptr_eq(&new.widgets) {
-            bytes += new.widgets.values().map(|l| l.len() * 256).sum::<usize>();
-        }
-        if !old.fields.ptr_eq(&new.fields) {
-            bytes += new.fields.len() * 256;
-        }
-        if !old.text_layers.ptr_eq(&new.text_layers) {
-            bytes += new
-                .text_layers
-                .iter()
-                .filter(|(k, v)| old.text_layers.get(k).is_none_or(|o| !Arc::ptr_eq(o, v)))
-                .map(|(_, v)| v.byte_estimate())
-                .sum::<usize>();
-        }
-        bytes
-    }
-
-    fn fresh_page_id(&mut self) -> PageId {
-        let id = PageId(self.next_page);
-        self.next_page += 1;
-        id
-    }
-
     /// Source `source`'s fields with widgets on the pages coming in
     /// (`shown`: each page's index in the source, and the page showing it),
-    /// and its fields with no widget at all, into `st` as a copy of their
+    /// and its fields with no widget at all, into `rec` as a copy of their
     /// own (M10 proposal 5). Only widgets on those pages come along. When
     /// any of their names clashes with a field in the document, or a parent
     /// of one, they all go under a new parent field named for the file:
     /// its name. Pages of a file whose form is here already (a run of its
     /// pages after another, as Combine inserts them) join that form.
     fn take_in_fields(
-        &mut self,
-        st: &mut DocState,
+        &self,
+        rec: &mut Rec,
         source: SourceId,
         shown: &[(u32, PageId)],
     ) -> Option<String> {
@@ -1862,7 +2227,7 @@ impl Document {
             .collect();
         // The form as it's here already, by object: each field's id, and
         // the parent they're all under.
-        let here: HashMap<lopdf::ObjectId, (FieldId, Option<Arc<str>>)> = st
+        let here: HashMap<lopdf::ObjectId, (FieldId, Option<Arc<str>>)> = rec
             .fields
             .values()
             .filter(|f| f.source == source && f.copy == 0)
@@ -1881,15 +2246,15 @@ impl Document {
                         None => new.push(f),
                     }
                 }
-                ids.extend(self.bring_fields(st, source, 0, new, joined));
+                ids.extend(self.bring_fields(rec, source, 0, new, joined));
                 (None, ids)
             }
             None => {
-                let under = self.name_apart(st, source, fields.iter().map(|f| f.name.as_str()));
-                let copy = next_copy(st, source);
+                let under = self.name_apart(rec, source, fields.iter().map(|f| f.name.as_str()));
+                let copy = next_copy(rec, source);
                 (
                     under.clone(),
-                    self.bring_fields(st, source, copy, fields, under),
+                    self.bring_fields(rec, source, copy, fields, under),
                 )
             }
         };
@@ -1907,7 +2272,7 @@ impl Document {
                 })
                 .collect();
             if !list.is_empty() {
-                st.widgets.insert(page, list);
+                rec.put(Key::WidgetsOf(page), Some(Val::Widgets(list)));
             }
         }
         under
@@ -1917,16 +2282,12 @@ impl Document {
     /// copy of each form the pages show, renamed by
     /// [`take_in_fields`](Self::take_in_fields)'s rule, so filling one never
     /// fills the other (M10 bug 4). `copies` pairs each page with its copy.
-    fn copy_fields(
-        &mut self,
-        st: &mut DocState,
-        copies: &[(PageId, PageId)],
-    ) -> Vec<(String, SourceId)> {
+    fn copy_fields(&self, rec: &mut Rec, copies: &[(PageId, PageId)]) -> Vec<(String, SourceId)> {
         // The forms the pages show, and their fields there, in order.
         let mut forms: BTreeMap<(SourceId, u32), BTreeSet<FieldId>> = BTreeMap::new();
         for (page, _) in copies {
-            for w in st.widgets.get(page).into_iter().flatten() {
-                if let Some(f) = st.fields.get(&w.field) {
+            for w in rec.widgets.get(page).into_iter().flatten() {
+                if let Some(f) = rec.fields.get(&w.field) {
                     forms.entry((f.source, f.copy)).or_default().insert(f.id);
                 }
             }
@@ -1934,14 +2295,14 @@ impl Document {
         let mut renamed = Vec::new();
         let mut ids = HashMap::new();
         for ((source, _), fields) in forms {
-            let fields: Vec<Field> = fields.iter().map(|id| st.fields[id].clone()).collect();
-            let under = self.name_apart(st, source, fields.iter().map(|f| f.source_name()));
+            let fields: Vec<Field> = fields.iter().map(|id| rec.fields[id].clone()).collect();
+            let under = self.name_apart(rec, source, fields.iter().map(|f| f.source_name()));
             renamed.extend(under.clone().map(|u| (u, source)));
-            let copy = next_copy(st, source);
-            ids.extend(self.bring_fields(st, source, copy, fields.iter(), under));
+            let copy = next_copy(rec, source);
+            ids.extend(self.bring_fields(rec, source, copy, fields.iter(), under));
         }
         for &(page, copy) in copies {
-            let list: Vector<Widget> = st
+            let list: Vector<Widget> = rec
                 .widgets
                 .get(&page)
                 .into_iter()
@@ -1954,17 +2315,17 @@ impl Document {
                 })
                 .collect();
             if !list.is_empty() {
-                st.widgets.insert(copy, list);
+                rec.put(Key::WidgetsOf(copy), Some(Val::Widgets(list)));
             }
         }
         renamed
     }
 
-    /// `fields` of `source` into `st` with new ids, as copy `copy` of its
+    /// `fields` of `source` into `rec` with new ids, as copy `copy` of its
     /// form, under `under` when given. Each old id, and its new one.
     fn bring_fields<'a>(
-        &mut self,
-        st: &mut DocState,
+        &self,
+        rec: &mut Rec,
         source: SourceId,
         copy: u32,
         fields: impl IntoIterator<Item = &'a Field>,
@@ -1973,23 +2334,20 @@ impl Document {
         let under: Option<Arc<str>> = under.map(Arc::from);
         let mut ids = HashMap::new();
         for f in fields {
-            let id = FieldId(self.next_field);
-            self.next_field += 1;
+            let id = self.ids.field();
             let name = match &under {
                 Some(u) => format!("{u}.{}", f.source_name()),
                 None => f.source_name().to_string(),
             };
-            st.fields.insert(
+            let field = Field {
                 id,
-                Field {
-                    id,
-                    source,
-                    copy,
-                    under: under.clone(),
-                    name,
-                    ..f.clone()
-                },
-            );
+                source,
+                copy,
+                under: under.clone(),
+                name,
+                ..f.clone()
+            };
+            rec.put(Key::Field(id), Some(Val::Field(Box::new(field))));
             ids.insert(f.id, id);
         }
         ids
@@ -2013,7 +2371,7 @@ impl Document {
         let stem = self
             .sources
             .get(&source)
-            .and_then(|s| s.path.file_stem())
+            .and_then(|s| s.name.file_stem())
             .map(|s| s.to_string_lossy().replace('.', "_"))
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| "form".to_string());
@@ -2028,15 +2386,9 @@ impl Document {
             .find(|name| !existing.contains(name.as_str()))
     }
 
-    fn fresh_outline_id(&mut self) -> OutlineId {
-        let id = OutlineId(self.next_outline);
-        self.next_outline += 1;
-        id
-    }
-
     /// Nodes for [`Edit::OutlineInsertTree`]: pre-order items with depths
     /// that start at 0 and go down at most one level at a time.
-    fn tree_from_items(&mut self, items: &[NewOutlineItem]) -> Result<Vec<OutlineNode>> {
+    fn tree_from_items(&self, items: &[NewOutlineItem]) -> Result<Vec<OutlineNode>> {
         let mut roots: Vec<OutlineNode> = Vec::new();
         // Open path: (depth, node) from the current root down.
         let mut stack: Vec<(u16, OutlineNode)> = Vec::new();
@@ -2063,12 +2415,13 @@ impl Document {
             prev = Some(item.depth);
             close(&mut stack, &mut roots, item.depth);
             let node = OutlineNode {
-                id: self.fresh_outline_id(),
+                id: self.ids.outline(),
                 title: item.title.clone(),
                 target: item.target,
                 view: item.target.and(item.view.clone()),
                 color: None,
                 style: TextStyle::default(),
+                open: true,
                 children: Vector::new(),
             };
             stack.push((item.depth, node));
@@ -2078,7 +2431,7 @@ impl Document {
     }
 
     fn outline_from_flat(
-        &mut self,
+        &self,
         items: &[FlatOutlineItem],
         by_index: &[PageId],
     ) -> Vector<OutlineNode> {
@@ -2100,12 +2453,13 @@ impl Document {
         for item in items {
             flush(&mut stack, &mut roots, item.depth);
             let node = OutlineNode {
-                id: self.fresh_outline_id(),
+                id: self.ids.outline(),
                 title: item.title.clone(),
                 target: item.page.and_then(|p| by_index.get(p as usize).copied()),
                 view: item.view.clone(),
                 color: item.color,
                 style: item.style,
+                open: item.open,
                 children: Vector::new(),
             };
             stack.push((item.depth, node));
@@ -2116,7 +2470,7 @@ impl Document {
 
     // ----- edits ------------------------------------------------------------
 
-    fn compute(&mut self, mut st: DocState, edit: Edit) -> Result<(DocState, EditOutcome)> {
+    fn compute(&self, rec: &mut Rec, edit: Edit) -> Result<EditOutcome> {
         let mut out = EditOutcome::default();
         match edit {
             Edit::MovePages { ids, before } => {
@@ -2126,13 +2480,13 @@ impl Document {
                 {
                     bail!("cannot move pages before one of themselves");
                 }
-                let moving: Vec<PageRef> = st
+                let moving: Vec<PageRef> = rec
                     .pages
                     .iter()
                     .filter(|p| set.contains(&p.id))
                     .copied()
                     .collect();
-                let mut rest: Vector<PageRef> = st
+                let rest: Vector<PageRef> = rec
                     .pages
                     .iter()
                     .filter(|p| !set.contains(&p.id))
@@ -2145,14 +2499,11 @@ impl Document {
                         .context("destination page not found")?,
                     None => rest.len(),
                 };
-                for (k, p) in moving.into_iter().enumerate() {
-                    rest.insert(at + k, p);
-                }
-                st.pages = rest;
+                rec.put(Key::Pages, Some(Val::Pages(splice(&rest, at, moving))));
             }
             Edit::RotatePages { ids, by } => {
                 let set: HashSet<PageId> = ids.into_iter().collect();
-                st.pages = st
+                let pages = rec
                     .pages
                     .iter()
                     .map(|p| {
@@ -2166,25 +2517,26 @@ impl Document {
                         }
                     })
                     .collect();
+                rec.put(Key::Pages, Some(Val::Pages(pages)));
             }
             Edit::DeletePages { ids } => {
                 let set: HashSet<PageId> = ids.into_iter().collect();
-                let before = st.pages.len();
-                st.pages = st
+                let pages: Vector<PageRef> = rec
                     .pages
                     .iter()
                     .filter(|p| !set.contains(&p.id))
                     .copied()
                     .collect();
-                out.pages_removed = before - st.pages.len();
-                for id in &set {
-                    st.annots.remove(id);
-                    st.text_layers.remove(id);
-                    st.removed_comments.remove(id);
-                    st.widgets.remove(id);
+                out.pages_removed = rec.pages.len() - pages.len();
+                rec.put(Key::Pages, Some(Val::Pages(pages)));
+                for &id in &set {
+                    rec.put(Key::AnnotsOf(id), None);
+                    rec.put(Key::TextLayer(id), None);
+                    rec.put(Key::RemovedOf(id), None);
+                    rec.put(Key::WidgetsOf(id), None);
                 }
-                let (outline, removed) = cascade_delete(&st.outline, &set);
-                st.outline = outline;
+                let (outline, removed) = cascade_delete(&rec.outline, &set);
+                rec.put(Key::Outline, Some(Val::Outline(outline)));
                 out.bookmarks_removed = removed;
             }
             Edit::InsertPages {
@@ -2195,38 +2547,37 @@ impl Document {
                 annots,
             } => {
                 let info = self.sources.get(&source).context("unknown source")?.clone();
-                if range.end > info.page_count {
+                if range.end > info.src.page_count() {
                     bail!("range exceeds source page count");
                 }
                 let at = match before {
-                    Some(b) => st.index_of(b).context("destination page not found")?,
-                    None => st.pages.len(),
+                    Some(b) => rec.index_of(b).context("destination page not found")?,
+                    None => rec.pages.len(),
                 };
                 let new: Vec<PageRef> = range
                     .clone()
                     .map(|index| PageRef {
-                        id: self.fresh_page_id(),
+                        id: self.ids.page(),
                         source,
                         index,
-                        rotation: Rotation::R0,
+                        rotation: info.src.geom(index).rotate,
                     })
                     .collect();
                 out.pages_added = new.len();
                 // Map source index -> new PageId for bookmark targets.
-                let mut by_index = vec![PageId(u64::MAX); info.page_count as usize];
+                let mut by_index = vec![PageId(u64::MAX); info.src.page_count() as usize];
                 for p in &new {
                     by_index[p.index as usize] = p.id;
                 }
-                for (k, p) in new.into_iter().enumerate() {
-                    st.pages.insert(at + k, p);
-                }
+                let pages = splice(&rec.pages, at, new);
+                rec.put(Key::Pages, Some(Val::Pages(pages)));
                 if let Some(items) = outline {
                     let valid: Vec<PageId> = by_index.to_vec();
                     let incoming = self.outline_from_flat(&items, &valid);
                     // Targets outside the inserted range resolve to a sentinel; drop them.
                     let incoming = strip_targets(&incoming, PageId(u64::MAX));
-                    let (merged, added) = merge_outline(&st.outline, &incoming);
-                    st.outline = merged;
+                    let (merged, added) = merge_outline(&rec.outline, &incoming);
+                    rec.put(Key::Outline, Some(Val::Outline(merged)));
                     out.bookmarks_added = added;
                 }
                 let incoming = annots
@@ -2236,12 +2587,12 @@ impl Document {
                         (page != PageId(u64::MAX)).then_some((page, list))
                     })
                     .collect();
-                import_marks(&mut self.rng, &mut st, incoming);
+                out.unencodable = import_marks(rec, incoming);
                 let shown: Vec<(u32, PageId)> = range.map(|i| (i, by_index[i as usize])).collect();
-                if let Some(under) = self.take_in_fields(&mut st, source, &shown) {
+                if let Some(under) = self.take_in_fields(rec, source, &shown) {
                     out.forms_renamed.push((under, source));
                 }
-                if signed_from(&st, source) {
+                if signed_from(rec, source) {
                     out.signatures_in.push(source);
                 }
             }
@@ -2250,34 +2601,34 @@ impl Document {
                 let mut pages = Vector::new();
                 // (page, its copy), for their fields.
                 let mut copies = Vec::new();
-                for p in st.pages.iter() {
-                    pages.push_back(*p);
+                for p in rec.pages.clone() {
+                    pages.push_back(p);
                     if set.contains(&p.id) {
-                        let copy = self.fresh_page_id();
-                        if let Some(list) = st.annots.get(&p.id).cloned() {
+                        let copy = self.ids.page();
+                        if let Some(list) = rec.annots.get(&p.id).cloned() {
                             let mut taken = HashSet::new();
                             let list: Vector<Annot> = list
                                 .into_iter()
                                 .map(|mut a| {
-                                    a.id = fresh_annot_id(&mut self.rng, &st, &mut taken);
+                                    a.id = fresh_annot_id(rec, &mut taken);
                                     // The copy isn't the comment replies
                                     // elsewhere are to.
                                     a.name.clear();
                                     a
                                 })
                                 .collect();
-                            st.annots.insert(copy, list);
+                            rec.put(Key::AnnotsOf(copy), Some(Val::Annots(list)));
                         }
-                        if let Some(layer) = st.text_layers.get(&p.id).cloned() {
-                            st.text_layers.insert(copy, layer);
+                        if let Some(layer) = rec.text_layers.get(&p.id).cloned() {
+                            rec.put(Key::TextLayer(copy), Some(Val::TextLayer(layer)));
                         }
                         copies.push((p.id, copy));
-                        pages.push_back(PageRef { id: copy, ..*p });
+                        pages.push_back(PageRef { id: copy, ..p });
                         out.pages_added += 1;
                     }
                 }
-                st.pages = pages;
-                out.forms_renamed = self.copy_fields(&mut st, &copies);
+                rec.put(Key::Pages, Some(Val::Pages(pages)));
+                out.forms_renamed = self.copy_fields(rec, &copies);
             }
             Edit::ReplacePages {
                 ids,
@@ -2286,7 +2637,7 @@ impl Document {
                 annots,
             } => {
                 let info = self.sources.get(&source).context("unknown source")?.clone();
-                if range.end > info.page_count {
+                if range.end > info.src.page_count() {
                     bail!("range exceeds source page count");
                 }
                 let mut replacements = range.clone();
@@ -2294,14 +2645,14 @@ impl Document {
                 let mut extra_old = HashSet::new();
                 // Which page now shows each replacement, for its marks.
                 let mut shown_by: HashMap<u32, PageId> = HashMap::new();
-                let pos = st.page_positions();
-                let mut pages = st.pages.clone();
+                let pos = rec.page_positions();
+                let mut pages = rec.pages.clone();
                 for id in &ids {
                     let i = *pos.get(id).context("page to replace not found")?;
                     // The page shows different content now; its OCR is
                     // stale, and its widgets aren't on it.
-                    st.text_layers.remove(id);
-                    st.widgets.remove(id);
+                    rec.put(Key::TextLayer(*id), None);
+                    rec.put(Key::WidgetsOf(*id), None);
                     match replacements.next() {
                         Some(index) => {
                             pages.set(
@@ -2310,7 +2661,7 @@ impl Document {
                                     id: *id,
                                     source,
                                     index,
-                                    rotation: Rotation::R0,
+                                    rotation: info.src.geom(index).rotate,
                                 },
                             );
                             shown_by.insert(index, *id);
@@ -2323,20 +2674,20 @@ impl Document {
                 }
                 // Extra replacements go after the last replaced page.
                 let at = last_pos.map(|i| i + 1).unwrap_or(pages.len());
-                for (k, index) in replacements.enumerate() {
-                    let id = self.fresh_page_id();
-                    pages.insert(
-                        at + k,
+                let extra: Vec<PageRef> = replacements
+                    .map(|index| {
+                        let id = self.ids.page();
+                        shown_by.insert(index, id);
                         PageRef {
                             id,
                             source,
                             index,
-                            rotation: Rotation::R0,
-                        },
-                    );
-                    shown_by.insert(index, id);
-                    out.pages_added += 1;
-                }
+                            rotation: info.src.geom(index).rotate,
+                        }
+                    })
+                    .collect();
+                out.pages_added += extra.len();
+                pages = splice(&pages, at, extra);
                 if !extra_old.is_empty() {
                     out.pages_removed = extra_old.len();
                     pages = pages
@@ -2344,26 +2695,26 @@ impl Document {
                         .filter(|p| !extra_old.contains(&p.id))
                         .copied()
                         .collect();
-                    for id in &extra_old {
-                        st.annots.remove(id);
-                        st.text_layers.remove(id);
+                    for &id in &extra_old {
+                        rec.put(Key::AnnotsOf(id), None);
+                        rec.put(Key::TextLayer(id), None);
                     }
-                    let (outline, removed) = cascade_delete(&st.outline, &extra_old);
-                    st.outline = outline;
+                    let (outline, removed) = cascade_delete(&rec.outline, &extra_old);
+                    rec.put(Key::Outline, Some(Val::Outline(outline)));
                     out.bookmarks_removed = removed;
                 }
-                st.pages = pages;
+                rec.put(Key::Pages, Some(Val::Pages(pages)));
                 let incoming = annots
                     .into_iter()
                     .filter_map(|(index, list)| Some((*shown_by.get(&index)?, list)))
                     .collect();
-                import_marks(&mut self.rng, &mut st, incoming);
+                out.unencodable = import_marks(rec, incoming);
                 let mut shown: Vec<(u32, PageId)> = shown_by.into_iter().collect();
                 shown.sort();
-                if let Some(under) = self.take_in_fields(&mut st, source, &shown) {
+                if let Some(under) = self.take_in_fields(rec, source, &shown) {
                     out.forms_renamed.push((under, source));
                 }
-                if signed_from(&st, source) {
+                if signed_from(rec, source) {
                     out.signatures_in.push(source);
                 }
             }
@@ -2375,15 +2726,17 @@ impl Document {
                 view,
             } => {
                 let node = OutlineNode {
-                    id: self.fresh_outline_id(),
+                    id: self.ids.outline(),
                     title,
                     view: target.and(view),
                     target,
                     color: None,
                     style: TextStyle::default(),
+                    open: true,
                     children: Vector::new(),
                 };
-                st.outline = outline_insert(&st.outline, parent, after, node)?;
+                let outline = outline_insert(&rec.outline, parent, after, node)?;
+                rec.put(Key::Outline, Some(Val::Outline(outline)));
                 out.bookmarks_added = 1;
             }
             Edit::OutlineInsertTree {
@@ -2393,12 +2746,14 @@ impl Document {
             } => {
                 let roots = self.tree_from_items(&items)?;
                 out.bookmarks_added = items.len();
+                let mut outline = rec.outline.clone();
                 let mut after = after;
                 for node in roots {
                     let id = node.id;
-                    st.outline = outline_insert(&st.outline, parent, after, node)?;
+                    outline = outline_insert(&outline, parent, after, node)?;
                     after = Some(id);
                 }
+                rec.put(Key::Outline, Some(Val::Outline(outline)));
             }
             Edit::OutlineMove {
                 id,
@@ -2406,26 +2761,27 @@ impl Document {
                 after,
                 with_pages,
             } => {
-                if parent == Some(id) || outline_find(&st.outline, id).is_none() {
+                if parent == Some(id) || outline_find(&rec.outline, id).is_none() {
                     bail!("bookmark not found or moved into itself");
                 }
                 if let Some(p) = parent
-                    && subtree_contains(&st.outline, id, p)
+                    && subtree_contains(&rec.outline, id, p)
                 {
                     bail!("cannot move a bookmark under its own descendant");
                 }
-                let (without, node) = outline_remove(&st.outline, id);
+                let (without, node) = outline_remove(&rec.outline, id);
                 let node = node.context("bookmark not found")?;
-                let span = with_pages.then(|| bookmark_span(&st, &node)).flatten();
-                st.outline = outline_insert(&without, parent, after, node.clone())?;
+                let span = with_pages.then(|| bookmark_span(rec, &node)).flatten();
+                let outline = outline_insert(&without, parent, after, node.clone())?;
+                rec.put(Key::Outline, Some(Val::Outline(outline)));
                 if let Some(span) = span {
                     // Destination: right after the span of whatever precedes the
                     // moved node in the new pre-order (or the start).
-                    let flat = st.outline_flat();
+                    let flat = rec.outline_flat();
                     let my_pos = flat.iter().position(|(_, n)| n.id == id).unwrap();
                     let moving: Vec<PageId> = span.iter().map(|p| p.id).collect();
                     let moving_set: HashSet<PageId> = moving.iter().copied().collect();
-                    let rest: Vector<PageRef> = st
+                    let rest: Vector<PageRef> = rec
                         .pages
                         .iter()
                         .filter(|p| !moving_set.contains(&p.id))
@@ -2436,14 +2792,14 @@ impl Document {
                             // End of the previous bookmark's span, in `rest`.
                             let rest_state = DocState {
                                 pages: rest.clone(),
-                                outline: st.outline.clone(),
-                                annots: st.annots.clone(),
-                                text_layers: st.text_layers.clone(),
-                                labels: st.labels.clone(),
-                                header_footer: st.header_footer.clone(),
-                                removed_comments: st.removed_comments.clone(),
-                                fields: st.fields.clone(),
-                                widgets: st.widgets.clone(),
+                                outline: rec.outline.clone(),
+                                annots: rec.annots.clone(),
+                                text_layers: rec.text_layers.clone(),
+                                labels: rec.labels.clone(),
+                                header_footer: rec.header_footer.clone(),
+                                removed_comments: rec.removed_comments.clone(),
+                                fields: rec.fields.clone(),
+                                widgets: rec.widgets.clone(),
                             };
                             let prev_node = flat[..my_pos]
                                 .iter()
@@ -2463,11 +2819,7 @@ impl Document {
                         }
                         None => 0,
                     };
-                    let mut pages = rest;
-                    for (k, p) in span.into_iter().enumerate() {
-                        pages.insert(dest + k, p);
-                    }
-                    st.pages = pages;
+                    rec.put(Key::Pages, Some(Val::Pages(splice(&rest, dest, span))));
                 }
             }
             Edit::OutlineEdit {
@@ -2478,7 +2830,7 @@ impl Document {
                 view,
                 style,
             } => {
-                let updated = outline_update(&st.outline, id, |n| {
+                let updated = outline_update(&rec.outline, id, |n| {
                     if let Some(t) = &title {
                         n.title = t.clone();
                     }
@@ -2502,25 +2854,27 @@ impl Document {
                         n.style = s;
                     }
                 });
-                st.outline = updated.context("bookmark not found")?;
+                let outline = updated.context("bookmark not found")?;
+                rec.put(Key::Outline, Some(Val::Outline(outline)));
             }
             Edit::OutlineDelete { id } => {
-                let (without, node) = outline_remove(&st.outline, id);
+                let (without, node) = outline_remove(&rec.outline, id);
                 let node = node.context("bookmark not found")?;
                 out.bookmarks_removed = 1 + count_nodes(&node.children);
-                st.outline = without;
+                rec.put(Key::Outline, Some(Val::Outline(without)));
             }
             Edit::AnnotAdd { page, mut annot } => {
-                if st.index_of(page).is_none() {
+                if rec.index_of(page).is_none() {
                     bail!("page not found");
                 }
-                annot.id = fresh_annot_id(&mut self.rng, &st, &mut HashSet::new());
-                let mut list = st.annots.get(&page).cloned().unwrap_or_default();
+                annot.id = fresh_annot_id(rec, &mut HashSet::new());
+                out.unencodable = annot.unencodable();
+                let mut list = rec.annots.get(&page).cloned().unwrap_or_default();
                 list.push_back(annot);
-                st.annots.insert(page, list);
+                rec.put(Key::AnnotsOf(page), Some(Val::Annots(list)));
             }
             Edit::AnnotUpdate { page, annot } => {
-                let mut list = st
+                let mut list = rec
                     .annots
                     .get(&page)
                     .cloned()
@@ -2529,11 +2883,12 @@ impl Document {
                     .iter()
                     .position(|a| a.id == annot.id)
                     .context("annotation not found")?;
+                out.unencodable = annot.unencodable();
                 list.set(i, annot);
-                st.annots.insert(page, list);
+                rec.put(Key::AnnotsOf(page), Some(Val::Annots(list)));
             }
             Edit::AnnotDelete { page, id } => {
-                let mut list = st
+                let mut list = rec
                     .annots
                     .get(&page)
                     .cloned()
@@ -2552,23 +2907,26 @@ impl Document {
                     gone.extend(thread.iter().map(Annot::name));
                     list = rest;
                 }
-                if list.is_empty() {
-                    st.annots.remove(&page);
-                } else {
-                    st.annots.insert(page, list);
-                }
+                rec.put(
+                    Key::AnnotsOf(page),
+                    (!list.is_empty()).then_some(Val::Annots(list)),
+                );
                 // A connector is one of a group by label: the others stay
                 // (M9 decision 8).
             }
             Edit::CommentsDelete { page, names } => {
-                if st.index_of(page).is_none() {
+                if rec.index_of(page).is_none() {
                     bail!("page not found");
                 }
-                let mut set = st.removed_comments.get(&page).cloned().unwrap_or_default();
+                // Only names not deleted yet change what a save leaves out.
+                let mut set = rec.removed_comments.get(&page).cloned().unwrap_or_default();
+                let had = set.len();
                 set.extend(names.iter().cloned());
-                st.removed_comments.insert(page, set);
+                if set.len() > had {
+                    rec.put(Key::RemovedOf(page), Some(Val::Removed(set)));
+                }
                 // Our replies and statuses to them, and to those.
-                if let Some(mut list) = st.annots.get(&page).cloned() {
+                if let Some(mut list) = rec.annots.get(&page).cloned() {
                     let mut gone = names;
                     while let Some(name) = gone.pop() {
                         let (thread, rest): (Vector<Annot>, Vector<Annot>) = list
@@ -2577,66 +2935,73 @@ impl Document {
                         gone.extend(thread.iter().map(Annot::name));
                         list = rest;
                     }
-                    if list.is_empty() {
-                        st.annots.remove(&page);
-                    } else {
-                        st.annots.insert(page, list);
-                    }
+                    rec.put(
+                        Key::AnnotsOf(page),
+                        (!list.is_empty()).then_some(Val::Annots(list)),
+                    );
                 }
             }
             Edit::ConnectorAdd {
                 a: (page_a, mut a),
                 b: (page_b, mut b),
             } => {
-                if st.index_of(page_a).is_none() || st.index_of(page_b).is_none() {
+                if rec.index_of(page_a).is_none() || rec.index_of(page_b).is_none() {
                     bail!("page not found");
                 }
                 let mut taken = HashSet::new();
-                a.id = fresh_annot_id(&mut self.rng, &st, &mut taken);
-                b.id = fresh_annot_id(&mut self.rng, &st, &mut taken);
+                a.id = fresh_annot_id(rec, &mut taken);
+                b.id = fresh_annot_id(rec, &mut taken);
                 if let AnnotKind::Connector { partner, .. } = &mut a.kind {
                     *partner = Some(b.id);
                 }
                 if let AnnotKind::Connector { partner, .. } = &mut b.kind {
                     *partner = Some(a.id);
                 }
+                out.unencodable = a.unencodable() || b.unencodable();
                 for (page, annot) in [(page_a, a), (page_b, b)] {
-                    let mut list = st.annots.get(&page).cloned().unwrap_or_default();
+                    let mut list = rec.annots.get(&page).cloned().unwrap_or_default();
                     list.push_back(annot);
-                    st.annots.insert(page, list);
+                    rec.put(Key::AnnotsOf(page), Some(Val::Annots(list)));
                 }
             }
             Edit::SetTextLayers { layers } => {
-                let pos = st.page_positions();
+                let pos = rec.page_positions();
                 for (id, layer) in layers {
                     if !pos.contains_key(&id) {
                         bail!("page not found");
                     }
-                    st.text_layers.insert(id, layer);
+                    rec.put(Key::TextLayer(id), Some(Val::TextLayer(layer)));
                 }
             }
             Edit::ClearTextLayers { ids } => {
                 for id in ids {
-                    st.text_layers.remove(&id);
+                    rec.put(Key::TextLayer(id), None);
                 }
             }
             Edit::SetHeaderFooter { header_footer } => {
-                st.header_footer = header_footer.filter(|h| !h.is_empty()).map(Arc::new);
+                let hf = header_footer.filter(|h| !h.is_empty());
+                out.unencodable = hf.as_ref().is_some_and(|h| h.unencodable());
+                rec.put(
+                    Key::HeaderFooter,
+                    hf.map(|h| Val::HeaderFooter(Arc::new(h))),
+                );
             }
             Edit::SetPageLabels { ranges } => {
-                st.labels = (!ranges.is_empty()).then(|| ranges.into_iter().collect());
+                let labels =
+                    (!ranges.is_empty()).then(|| Val::Labels(ranges.into_iter().collect()));
+                rec.put(Key::Labels, labels);
             }
-            Edit::RebasePages { pages } => {
-                let pos = st.page_positions();
-                for r in pages {
+            Edit::RebasePages { pages: rebases } => {
+                let pos = rec.page_positions();
+                let mut pages = rec.pages.clone();
+                for r in rebases {
                     let i = *pos.get(&r.id).context("page to rebase not found")?;
                     let info = self.sources.get(&r.source).context("unknown source")?;
-                    if r.index >= info.page_count {
+                    if r.index >= info.src.page_count() {
                         bail!("page {} isn't in the source", r.index);
                     }
-                    let size = info.page_size(r.index);
-                    let old = st.pages[i];
-                    st.pages.set(
+                    let old = pages[i];
+                    pages.set(
                         i,
                         PageRef {
                             id: r.id,
@@ -2645,26 +3010,141 @@ impl Document {
                             rotation: old.rotation,
                         },
                     );
-                    let (dx, dy) = r.shift;
-                    if let Some(list) = st.annots.get(&r.id).cloned() {
-                        let moved = list
-                            .into_iter()
-                            .map(|mut a| {
-                                a.kind = a.kind.translated(dx, dy);
-                                a
-                            })
-                            .collect();
-                        st.annots.insert(r.id, moved);
-                    }
-                    if let Some(layer) = st.text_layers.get(&r.id).cloned() {
-                        st.text_layers
-                            .insert(r.id, Arc::new(layer.shifted(dx, dy, size)));
-                    }
                 }
+                rec.put(Key::Pages, Some(Val::Pages(pages)));
             }
         }
-        Ok((st, out))
+        Ok(out)
     }
+}
+
+/// Each slot's change over `steps` as one prim, on the last step that
+/// changed it: from the first step's before to the last one's after, and
+/// none when they're the same (M10.5 §6.2). So a batch that puts a slot
+/// back changes nothing. Every step keeps its edit, with or without prims.
+fn coalesce(steps: &mut [Step]) {
+    // Each slot's first before, and the first and last steps that put it.
+    let mut spans: BTreeMap<Key, (Option<Val>, usize, usize)> = BTreeMap::new();
+    for (i, step) in steps.iter().enumerate() {
+        for p in step.prims.iter() {
+            spans
+                .entry(p.key)
+                .and_modify(|(_, _, last)| *last = i)
+                .or_insert_with(|| (p.before.clone(), i, i));
+        }
+    }
+    let spans_steps = |p: &Prim| {
+        let (_, first, last) = &spans[&p.key];
+        first != last
+    };
+    for (i, step) in steps.iter_mut().enumerate() {
+        if !step.prims.iter().any(spans_steps) {
+            continue;
+        }
+        step.prims = step
+            .prims
+            .iter()
+            .filter_map(|p| {
+                let (before, _, last) = &spans[&p.key];
+                (*last == i && !same(before.as_ref(), p.after.as_ref())).then(|| Prim {
+                    key: p.key,
+                    before: before.clone(),
+                    after: p.after.clone(),
+                })
+            })
+            .collect();
+    }
+}
+
+/// What a version holds that no other does (M10.5 §3.9), from the steps
+/// that made it and its state: its snapshot's bytes, which trimming frees,
+/// and its steps', which only pruning the version frees.
+///
+/// A step's before-values are its parent's after-values, so each value is
+/// counted once, by the version that made it, and an `Arc` once however
+/// many of the version's prims put it. Those values are the snapshot's
+/// too, so the snapshot adds only the im nodes it copied to change them:
+/// for each slot it changed in a per-page or per-field map, a path down
+/// from the root. A whole value (the pages, the outline, the labels)
+/// counts in full, though im shares all but its changed path with the
+/// parent's: an over-count M10.5 slice 8's records narrow.
+fn accounting(steps: &[Step], state: &DocState) -> (usize, usize) {
+    // im's HashMap is a tree of 32 entries a node; its OrdMap, of 64.
+    const HAMT: usize = 32;
+    const BTREE: usize = 64;
+    let mut step_bytes = 0;
+    let mut arcs = HashSet::new();
+    let (mut annots, mut layers, mut removed, mut fields, mut widgets) = (0, 0, 0, 0, 0);
+    // `DocState` holds fields by value, so its copy is its own.
+    let mut field_copies = 0;
+    for s in steps {
+        step_bytes += size_of::<Step>() + s.edit.heap_size() + s.line.heap_size();
+        for p in s.prims.iter() {
+            let counted = match &p.after {
+                Some(Val::TextLayer(l)) => arcs.insert(Arc::as_ptr(l).cast::<()>()),
+                Some(Val::HeaderFooter(h)) => arcs.insert(Arc::as_ptr(h).cast::<()>()),
+                _ => true,
+            };
+            step_bytes += size_of::<Prim>();
+            if counted {
+                step_bytes += p.after.heap_size();
+            }
+            match p.key {
+                Key::Pages | Key::Outline | Key::Labels | Key::HeaderFooter => {}
+                Key::AnnotsOf(_) => annots += 1,
+                Key::TextLayer(_) => layers += 1,
+                Key::RemovedOf(_) => removed += 1,
+                Key::Field(_) => {
+                    fields += 1;
+                    if let Some(Val::Field(f)) = &p.after {
+                        field_copies += Field::heap_size(f);
+                    }
+                }
+                Key::WidgetsOf(_) => widgets += 1,
+            }
+        }
+    }
+    let snapshot_bytes = size_of::<DocState>()
+        + field_copies
+        + path_copies::<(PageId, Vector<Annot>)>(annots, state.annots.len(), HAMT)
+        + path_copies::<(PageId, Arc<TextLayer>)>(layers, state.text_layers.len(), HAMT)
+        + path_copies::<(PageId, im::OrdSet<String>)>(removed, state.removed_comments.len(), HAMT)
+        + path_copies::<(FieldId, Field)>(fields, state.fields.len(), BTREE)
+        + path_copies::<(PageId, Vector<Widget>)>(widgets, state.widgets.len(), HAMT);
+    (snapshot_bytes, step_bytes)
+}
+
+/// The bytes of the im nodes copied to change `touched` of a map's `len`
+/// entries, at `fanout` entries `E` a node: a path down from the root to
+/// each, sharing the nodes near the root.
+fn path_copies<E>(touched: usize, len: usize, fanout: usize) -> usize {
+    if touched == 0 {
+        return 0;
+    }
+    let (mut nodes, mut level, mut reach) = (0, 1, fanout);
+    loop {
+        nodes += touched.min(level);
+        if reach >= len {
+            return nodes * fanout * size_of::<E>();
+        }
+        level *= fanout;
+        reach *= fanout;
+    }
+}
+
+/// `pages` with `new` put in at position `at`, by one split and two joins:
+/// inserting them one by one edits the tree once a page (189 ms for half
+/// of 7,000 pages, against half a millisecond).
+fn splice(
+    pages: &Vector<PageRef>,
+    at: usize,
+    new: impl IntoIterator<Item = PageRef>,
+) -> Vector<PageRef> {
+    let mut out = pages.clone();
+    let tail = out.split_off(at);
+    out.extend(new);
+    out.append(tail);
+    out
 }
 
 // ----- outline helpers (path-copying over im::Vector) ---------------------
@@ -2796,11 +3276,10 @@ fn outline_insert(
 /// A mark id no mark in `st` has, and not in `taken` (ids handed out
 /// earlier in the same edit, which records this one). Random rather than
 /// counted, so two copies of a file never give different marks the same
-/// `/NM`; 53 bits, so the JSON is exact in any reader. From the step's
-/// seeded `rng`, so a replay gives the same ids.
-fn fresh_annot_id(rng: &mut fastrand::Rng, st: &DocState, taken: &mut HashSet<AnnotId>) -> AnnotId {
+/// `/NM`; 53 bits, so the JSON is exact in any reader.
+fn fresh_annot_id(st: &DocState, taken: &mut HashSet<AnnotId>) -> AnnotId {
     loop {
-        let id = AnnotId(rng.u64(1..1 << 53));
+        let id = AnnotId(fastrand::u64(1..1 << 53));
         if !taken.contains(&id) && st.find_annot(id).is_none() {
             taken.insert(id);
             return id;
@@ -2841,18 +3320,20 @@ fn field_nodes<'a>(names: impl IntoIterator<Item = &'a str>) -> HashSet<&'a str>
 }
 
 /// Marks that came with pages from another file, onto their new pages in
-/// `st`. They get fresh ids (the file's could clash with ours), and a
-/// connector keeps its partner only if the partner came too.
-fn import_marks(rng: &mut fastrand::Rng, st: &mut DocState, incoming: Vec<(PageId, Vec<Annot>)>) {
+/// `rec`. They get fresh ids (the file's could clash with ours), and a
+/// connector keeps its partner only if the partner came too. Whether any
+/// draws text the built-in fonts can't ([`Annot::unencodable`]).
+fn import_marks(rec: &mut Rec, incoming: Vec<(PageId, Vec<Annot>)>) -> bool {
+    let unencodable = incoming.iter().flat_map(|(_, l)| l).any(Annot::unencodable);
     let mut taken = HashSet::new();
     let mut ids = HashMap::new();
     for (_, list) in &incoming {
         for a in list {
-            ids.insert(a.id, fresh_annot_id(rng, st, &mut taken));
+            ids.insert(a.id, fresh_annot_id(rec, &mut taken));
         }
     }
     for (page, list) in incoming {
-        let mut on_page = st.annots.get(&page).cloned().unwrap_or_default();
+        let mut on_page = rec.annots.get(&page).cloned().unwrap_or_default();
         for mut a in list {
             a.id = ids[&a.id];
             if let AnnotKind::Connector { partner, .. } = &mut a.kind {
@@ -2861,9 +3342,10 @@ fn import_marks(rng: &mut fastrand::Rng, st: &mut DocState, incoming: Vec<(PageI
             on_page.push_back(a);
         }
         if !on_page.is_empty() {
-            st.annots.insert(page, on_page);
+            rec.put(Key::AnnotsOf(page), Some(Val::Annots(on_page)));
         }
     }
+    unencodable
 }
 
 /// Remove nodes targeting deleted pages, promoting their children.
@@ -2976,27 +3458,35 @@ fn collect_ids(node: &OutlineNode, out: &mut HashSet<OutlineId>) {
 }
 
 #[cfg(test)]
+mod history_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::history::FixedCount;
 
-    fn src(n: u32) -> SourceInfo {
-        SourceInfo {
-            path: "a.pdf".into(),
-            page_count: n,
-            first_page: PageSize {
-                width: 612.0,
-                height: 792.0,
-            },
-            page_sizes: None,
-            bytes: 1000,
-            password: None,
-            data: None,
-            derived: None,
-        }
+    /// A document of `n` blank pages, in a store of its own.
+    pub(super) fn new_doc(
+        n: u32,
+        outline: &[FlatOutlineItem],
+        policy: Box<dyn HistoryPolicy>,
+    ) -> Document {
+        let store = Store::new();
+        let primary = SourceInfo::blank(&store, n);
+        Document::new(store, primary, outline, policy)
     }
 
-    fn flat(items: &[(&str, Option<u32>, u16)]) -> Vec<FlatOutlineItem> {
+    /// `n` blank pages opened as a file opens, saying `facts`: started on
+    /// its pages, then ready.
+    pub(super) fn opened_doc(n: u32, facts: Facts, policy: Box<dyn HistoryPolicy>) -> Document {
+        let store = Store::new();
+        let primary = SourceInfo::blank(&store, n);
+        let mut d = crate::open::start(store, primary, policy);
+        d.ready(facts).unwrap();
+        d
+    }
+
+    pub(super) fn flat(items: &[(&str, Option<u32>, u16)]) -> Vec<FlatOutlineItem> {
         items
             .iter()
             .map(|(t, p, d)| FlatOutlineItem {
@@ -3006,14 +3496,15 @@ mod tests {
                 view: None,
                 color: None,
                 style: Default::default(),
+                open: true,
             })
             .collect()
     }
 
     fn doc() -> Document {
         // Pages 0..6; bookmarks: A->0 { A1->1, A2->2 }, B->3, C->5
-        Document::new(
-            src(6),
+        new_doc(
+            6,
             &flat(&[
                 ("A", Some(0), 0),
                 ("A1", Some(1), 1),
@@ -3023,6 +3514,16 @@ mod tests {
             ]),
             Box::new(FixedCount(100)),
         )
+    }
+
+    /// A header of `text`, top left.
+    pub(super) fn header(text: String) -> crate::stamps::HeaderFooter {
+        let mut texts: [String; 6] = Default::default();
+        texts[0] = text;
+        crate::stamps::HeaderFooter {
+            texts,
+            ..Default::default()
+        }
     }
 
     fn order(d: &Document) -> Vec<u32> {
@@ -3051,11 +3552,100 @@ mod tests {
             .id
     }
 
+    /// While the file opens, every edit is refused before it draws an id
+    /// or makes a version; once it's ready, the same edits are taken.
+    #[test]
+    fn an_edit_before_ready_is_not_ready() {
+        let store = Store::new();
+        let primary = SourceInfo::blank(&store, 3);
+        let mut d = crate::open::start(store, primary, Box::new(FixedCount(10)));
+        assert!(!d.is_ready());
+        let page = id_at(&d, 0);
+        let duplicate = || Edit::DuplicatePages { ids: vec![page] };
+        let bookmark = || Edit::OutlineInsert {
+            parent: None,
+            after: None,
+            title: "One".into(),
+            target: Some(page),
+            view: None,
+        };
+        let drawn = |d: &Document| {
+            [&d.ids.page, &d.ids.outline, &d.ids.field].map(|c| c.load(Ordering::Relaxed))
+        };
+        let before = (d.current_version(), d.next_version, drawn(&d));
+        let job = d.begin_job();
+        let refused = [
+            d.apply(duplicate(), "Duplicate").unwrap_err(),
+            d.apply_batch(vec![duplicate(), bookmark()], "Both")
+                .unwrap_err(),
+            d.apply_in_job(job, bookmark(), "Bookmark").unwrap_err(),
+        ];
+        for e in &refused {
+            assert!(e.is::<NotReady>(), "{e:#}");
+        }
+        assert_eq!((d.current_version(), d.next_version, drawn(&d)), before);
+        assert_eq!(d.versions.len(), 1);
+        d.ready(Facts::default()).unwrap();
+        d.apply(duplicate(), "Duplicate").unwrap();
+        d.apply_batch(vec![duplicate(), bookmark()], "Both")
+            .unwrap();
+        d.apply_in_job(job, bookmark(), "Bookmark").unwrap();
+        assert_eq!((d.page_count(), d.state().outline.len()), (5, 2));
+        assert_eq!(d.versions.len(), 4);
+    }
+
+    /// `ready` puts the complete opened version in place of the one with
+    /// the pages alone: the facts are on the pages the document showed
+    /// while it opened, and there's nothing to save or undo. It's taken
+    /// once.
+    #[test]
+    fn ready_replaces_the_opened_version() {
+        let store = Store::new();
+        let bytes = crate::forms::fixture::every_fact().bytes();
+        let primary = file(&store, bytes, "facts.pdf");
+        let src = primary.src.clone();
+        let mut d = crate::open::start(store, primary, Box::new(FixedCount(10)));
+        let loading = d.current_version();
+        let pages: Vec<PageId> = d.state().pages.iter().map(|p| p.id).collect();
+        let st = d.state();
+        assert_eq!(pages.len(), 3);
+        assert!(st.outline.is_empty() && st.annots.is_empty() && st.fields.is_empty());
+        assert!(st.labels.is_none() && st.header_footer.is_none());
+        let view = d
+            .ready(crate::open::finish(&src, &in_progress::NoProgress))
+            .unwrap();
+        assert!(d.is_ready());
+        let opened = d.current_version();
+        assert_ne!(opened, loading);
+        assert!(!d.versions.contains_key(&loading));
+        assert!(d.jump(loading).is_err());
+        assert_eq!((d.root, d.saved), (opened, Some(opened)));
+        let now: Vec<PageId> = d.state().pages.iter().map(|p| p.id).collect();
+        assert_eq!(now, pages);
+        crate::open::tests::assert_every_fact(d.state());
+        assert_eq!(view.form.fields, 1);
+        assert!(!d.is_dirty() && !d.can_undo() && !d.can_redo());
+        let snap = d.snapshot();
+        assert!(!snap.outline_dirty && !snap.labels_dirty && !snap.header_footer_dirty);
+        assert!(snap.annots_dirty.is_empty() && snap.fields_dirty.is_empty());
+        assert!(!snap.removes_content && !snap.form_changed);
+        // Facts that came again would be late: they're refused.
+        assert!(
+            d.ready(crate::open::finish(&src, &in_progress::NoProgress))
+                .is_err()
+        );
+        assert_eq!(d.current_version(), opened);
+        crate::open::tests::assert_every_fact(d.state());
+    }
+
     #[test]
     fn form_fields_follow_their_pages() {
-        let form = crate::forms::read(&crate::forms::fixture::every_kind().pdf);
-        let mut d = Document::new(src(2), &[], Box::new(FixedCount(10)));
-        d.set_initial_fields(&form).unwrap();
+        let form = crate::forms::read(&crate::forms::fixture::every_kind().source());
+        let facts = Facts {
+            form,
+            ..Default::default()
+        };
+        let mut d = opened_doc(2, facts, Box::new(FixedCount(10)));
         let (p1, p2) = (id_at(&d, 0), id_at(&d, 1));
         let st = d.state();
         assert_eq!(st.fields.len(), 9);
@@ -3074,14 +3664,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(on(&d, p2), 4);
-        assert!(d.set_initial_fields(&form).is_err());
+        // The file's facts came once: none come after.
+        let again = crate::forms::read(&crate::forms::fixture::every_kind().source());
+        let late = Facts {
+            form: again,
+            ..Default::default()
+        };
+        assert!(d.ready(late).is_err());
         d.apply(Edit::DeletePages { ids: vec![p2] }, "delete")
             .unwrap();
         assert_eq!((on(&d, p2), d.state().fields.len()), (0, 9));
-        d.undo();
+        d.undo().unwrap();
         assert_eq!(on(&d, p2), 4);
         // A replaced page shows another page, without them.
-        let other = d.add_source(src(1));
+        let other = d.add_source(SourceInfo::blank(d.store(), 1));
         d.apply(
             Edit::ReplacePages {
                 ids: vec![p1],
@@ -3099,12 +3695,17 @@ mod tests {
 
     #[test]
     fn fields_dirty_compares_with_the_saved_form() {
-        let form = crate::forms::read(&crate::forms::fixture::every_kind().pdf);
-        let mut d = Document::new(src(2), &[], Box::new(FixedCount(10)));
-        d.set_initial_fields(&form).unwrap();
-        // A field changed, one gone and one added, as edits will do.
+        let form = crate::forms::read(&crate::forms::fixture::every_kind().source());
+        let facts = Facts {
+            form,
+            ..Default::default()
+        };
+        let mut d = opened_doc(2, facts, Box::new(FixedCount(10)));
+        // A field changed, one gone and one added in the state `ready` set,
+        // as edits will do.
         let (changed, gone, added) = (FieldId(0), FieldId(1), FieldId(99));
-        let st = d.opened_state_mut("test").unwrap();
+        let root = d.root;
+        let st = d.versions.get_mut(&root).unwrap().state.as_mut().unwrap();
         let mut f = st.fields.get(&changed).unwrap().clone();
         f.value = Some(crate::forms::Value::Text("Bo Ng".into()));
         st.fields.insert(changed, f.clone());
@@ -3115,8 +3716,68 @@ mod tests {
         assert_eq!(d.fields_dirty(), want);
         assert_eq!(d.snapshot().fields_dirty, want);
         // Saved, they're what's in the file.
-        d.rebase_to_saved(src(2));
+        d.rebase_to_saved(SourceInfo::blank(d.store(), 2));
         assert!(d.fields_dirty().is_empty() && d.snapshot().fields_dirty.is_empty());
+    }
+
+    /// One file's bytes, interned twice, are one source; each insert still
+    /// registers it anew, so each brings a form of its own (M10.5 slice 3:
+    /// form identity stays per registration until slice 11).
+    #[test]
+    fn inserting_the_same_file_twice_gives_two_registrations_and_two_forms() {
+        let mut fixture = crate::forms::fixture::every_kind();
+        let bytes: Arc<[u8]> = fixture.bytes().into();
+        let mut d = new_doc(1, &[], Box::new(FixedCount(10)));
+        let mut sids = Vec::new();
+        let mut renamed = Vec::new();
+        for _ in 0..2 {
+            let kind = BlobKind::file(Path::new("form.pdf"), None);
+            let src = d.store().open(bytes.clone(), kind).unwrap();
+            let form = crate::forms::read(&src);
+            let sid = d.add_source(SourceInfo {
+                src,
+                name: "form.pdf".into(),
+                derived: None,
+            });
+            d.set_source_form(sid, form);
+            let out = d
+                .apply(
+                    Edit::InsertPages {
+                        source: sid,
+                        range: 0..2,
+                        before: None,
+                        outline: None,
+                        annots: Vec::new(),
+                    },
+                    "insert",
+                )
+                .unwrap();
+            renamed.push(out.forms_renamed);
+            sids.push(sid);
+        }
+        let [a, b] = [sids[0], sids[1]];
+        assert_ne!(a, b);
+        let (first, second) = (&d.source(a).unwrap().src, &d.source(b).unwrap().src);
+        assert!(std::ptr::eq(&**first, &**second), "one source");
+        // Its bytes are in the store once, beside the blank primary's.
+        assert_eq!(
+            d.store().bytes(),
+            first.bytes().len() + d.source(d.primary()).unwrap().src.bytes().len()
+        );
+        // Two forms: the second's fields are under a name of their own.
+        let st = d.state();
+        let names = |sid| -> BTreeSet<&str> {
+            st.fields
+                .values()
+                .filter(|f| f.source == sid)
+                .map(|f| f.name.as_str())
+                .collect()
+        };
+        let (of_a, of_b) = (names(a), names(b));
+        assert_eq!((of_a.len(), of_b.len()), (9, 9));
+        assert!(of_a.is_disjoint(&of_b), "{of_a:?} {of_b:?}");
+        assert!(of_b.iter().all(|n| n.starts_with("form.")), "{of_b:?}");
+        assert_eq!(renamed, [vec![], vec![("form".to_string(), b)]]);
     }
 
     #[test]
@@ -3160,12 +3821,12 @@ mod tests {
         assert_eq!(d.page(0).unwrap().rotation, Rotation::R90);
         assert_eq!(d.page_size(d.page(0).unwrap()).width, 792.0);
         assert!(d.is_dirty());
-        assert_eq!(d.undo(), Some("rotate"));
+        assert_eq!(d.undo(), Ok(Some("rotate")));
         assert_eq!(d.page(0).unwrap().rotation, Rotation::R0);
-        assert_eq!(d.undo(), Some("move"));
+        assert_eq!(d.undo(), Ok(Some("move")));
         assert_eq!(order(&d), vec![0, 1, 2, 3, 4, 5]);
         assert!(!d.is_dirty());
-        assert_eq!(d.redo(), Some("move"));
+        assert_eq!(d.redo(), Ok(Some("move")));
         assert_eq!(order(&d), vec![5, 0, 1, 2, 3, 4]);
         // A new edit discards the redo branch.
         d.apply(Edit::DeletePages { ids: vec![p5] }, "delete")
@@ -3196,7 +3857,7 @@ mod tests {
                 (0, "C".into())
             ]
         );
-        d.undo();
+        d.undo().unwrap();
         assert_eq!(titles(&d).len(), 5);
     }
 
@@ -3204,8 +3865,8 @@ mod tests {
     fn insert_with_outline_merge() {
         let mut d = doc();
         let s = d.add_source(SourceInfo {
-            path: "b.pdf".into(),
-            ..src(3)
+            name: "b.pdf".into(),
+            ..SourceInfo::blank(d.store(), 3)
         });
         let out = d
             .apply(
@@ -3257,8 +3918,8 @@ mod tests {
     fn replace_keeps_ids_and_bookmarks() {
         let mut d = doc();
         let s = d.add_source(SourceInfo {
-            path: "b.pdf".into(),
-            ..src(2)
+            name: "b.pdf".into(),
+            ..SourceInfo::blank(d.store(), 2)
         });
         let p3 = id_at(&d, 3);
         d.apply(
@@ -3368,7 +4029,7 @@ mod tests {
         .unwrap();
         assert_eq!(order(&d), vec![3, 4, 0, 1, 2, 5]);
         assert_eq!(titles(&d)[0].1, "B");
-        d.undo();
+        d.undo().unwrap();
         assert_eq!(order(&d), vec![0, 1, 2, 5, 3, 4]);
     }
 
@@ -3408,8 +4069,8 @@ mod tests {
         rotate(&mut d, 0, "a");
         rotate(&mut d, 1, "b");
         rotate(&mut d, 2, "c");
-        d.undo();
-        d.undo();
+        d.undo().unwrap();
+        d.undo().unwrap();
         rotate(&mut d, 3, "d");
         let line: Vec<String> = d.timeline().iter().map(|v| v.label.clone()).collect();
         assert_eq!(line, vec!["Open", "a", "d"]);
@@ -3426,10 +4087,10 @@ mod tests {
         d.jump(b).unwrap();
         assert_eq!(d.page(1).unwrap().rotation, Rotation::R90);
         assert_eq!(d.page(3).unwrap().rotation, Rotation::R0);
-        assert_eq!(d.redo(), Some("c"));
+        assert_eq!(d.redo(), Ok(Some("c")));
         // Undo to a, and redo now follows the branch last visited.
-        d.undo();
-        d.undo();
+        d.undo().unwrap();
+        d.undo().unwrap();
         assert_eq!(d.redo_label(), Some("b"));
     }
 
@@ -3459,88 +4120,9 @@ mod tests {
         assert_eq!(d.timeline().len(), 11);
     }
 
-    /// Every version, rebuilt by replaying its edits, is the state it was
-    /// when it was made: over random edit sequences, with almost every
-    /// snapshot dropped.
-    #[test]
-    fn replaying_the_log_rebuilds_every_version() {
-        for seed in 0..20 {
-            let mut rng = fastrand::Rng::with_seed(seed);
-            let mut d = Document::new(
-                src(6),
-                &flat(&[("A", Some(0), 0), ("B", Some(3), 0)]),
-                Box::new(FixedCount(2)),
-            );
-            // Both files have forms: inserts and duplicates bring fields,
-            // renamed, with new ids (M10 slice 4).
-            let form = crate::forms::read(&crate::forms::fixture::every_kind().pdf);
-            d.set_initial_fields(&form).unwrap();
-            let other = d.add_source(src(4));
-            d.set_source_form(other, form);
-            let mut made: Vec<(VersionId, DocState)> = Vec::new();
-            for step in 0..25 {
-                let n = d.page_count();
-                let page =
-                    |rng: &mut fastrand::Rng, d: &Document| d.page(rng.usize(..n)).unwrap().id;
-                let edit = match rng.u8(..8) {
-                    0 => Edit::RotatePages {
-                        ids: vec![page(&mut rng, &d)],
-                        by: Rotation::R90,
-                    },
-                    1 if n > 2 => Edit::DeletePages {
-                        ids: vec![page(&mut rng, &d)],
-                    },
-                    2 => Edit::InsertPages {
-                        source: other,
-                        range: 0..rng.u32(1..4),
-                        before: Some(page(&mut rng, &d)),
-                        outline: Some(flat(&[("A", Some(0), 0), ("X", Some(1), 0)])),
-                        annots: vec![(0, vec![square(1)]), (1, vec![connector(2, 3)])],
-                    },
-                    3 => Edit::DuplicatePages {
-                        ids: vec![page(&mut rng, &d)],
-                    },
-                    4 => Edit::AnnotAdd {
-                        page: page(&mut rng, &d),
-                        annot: square(0),
-                    },
-                    5 => Edit::OutlineInsert {
-                        parent: None,
-                        after: None,
-                        title: format!("b{step}"),
-                        target: Some(page(&mut rng, &d)),
-                        view: None,
-                    },
-                    6 => Edit::MovePages {
-                        ids: vec![page(&mut rng, &d)],
-                        before: None,
-                    },
-                    _ => {
-                        // Go back a little first, so the tree branches.
-                        if rng.bool() {
-                            d.undo();
-                        }
-                        Edit::RotatePages {
-                            ids: vec![page(&mut rng, &d)],
-                            by: Rotation::R180,
-                        }
-                    }
-                };
-                if d.apply(edit, format!("e{step}")).is_ok() {
-                    made.push((d.current_version(), d.state().clone()));
-                }
-            }
-            assert!(d.stats().versions < made.len(), "snapshots were dropped");
-            for (id, want) in &made {
-                d.jump(*id).unwrap();
-                assert_eq!(d.state(), want, "seed {seed}, {id:?}");
-            }
-        }
-    }
-
     #[test]
     fn history_trims_snapshots_and_replays_them() {
-        let mut d = Document::new(src(3), &[], Box::new(FixedCount(3)));
+        let mut d = new_doc(3, &[], Box::new(FixedCount(3)));
         for i in 0..5 {
             d.apply(
                 Edit::RotatePages {
@@ -3557,15 +4139,108 @@ mod tests {
         assert_eq!(d.version_count(), 6);
         // Undo goes all the way back, replaying what was dropped.
         for i in (0..5).rev() {
-            assert_eq!(d.undo(), Some(format!("r{i}").as_str()));
+            assert_eq!(d.undo(), Ok(Some(format!("r{i}").as_str())));
             assert_eq!(d.page(0).unwrap().rotation.degrees(), (i * 90) % 360);
         }
         assert!(!d.can_undo());
         assert!(!d.is_dirty(), "the opened version is the saved one");
         for _ in 0..5 {
-            d.redo();
+            d.redo().unwrap();
         }
         assert_eq!(d.page(0).unwrap().rotation, Rotation::R90);
+    }
+
+    /// Three rotations, keeping only the snapshots that must stay (the
+    /// opened version's and the current one's): the versions, oldest
+    /// first.
+    fn trimmed_history() -> (Document, Vec<VersionId>) {
+        let mut d = new_doc(6, &[], Box::new(FixedCount(1)));
+        for i in 0..3 {
+            rotate(&mut d, i, &format!("r{i}"));
+        }
+        let ids = d.timeline().iter().map(|v| v.id).collect();
+        (d, ids)
+    }
+
+    /// Version `v`'s Pages prim, made to say the pages were in another
+    /// order before: the prim, as it is now.
+    fn damage_pages_before(d: &mut Document, v: VersionId) -> Prim {
+        let step = &mut d.versions.get_mut(&v).unwrap().steps[0];
+        let mut prims = step.prims.to_vec();
+        let p = prims.iter_mut().find(|p| p.key == Key::Pages).unwrap();
+        let Some(Val::Pages(pages)) = &p.before else {
+            panic!("pages hold a value");
+        };
+        p.before = Some(Val::Pages(pages.iter().rev().copied().collect()));
+        let damaged = p.clone();
+        step.prims = prims.into();
+        damaged
+    }
+
+    /// A version's lines are made when its edits are applied, so they still
+    /// name pages once its parent's snapshot is dropped.
+    #[test]
+    fn a_trimmed_version_keeps_its_lines() {
+        let (d, _) = trimmed_history();
+        let views = d.timeline();
+        assert!(
+            views[1].replays && views[2].replays,
+            "their snapshots were dropped"
+        );
+        let lines: Vec<&[String]> = views[1..].iter().map(|v| &v.edits[..]).collect();
+        assert_eq!(
+            lines,
+            [
+                ["Rotate page 1 90°"],
+                ["Rotate page 2 90°"],
+                ["Rotate page 3 90°"]
+            ]
+        );
+    }
+
+    #[test]
+    fn a_corrupted_before_value_is_a_mismatch() {
+        let (mut d, ids) = trimmed_history();
+        let (parent, v) = (ids[1], ids[2]);
+        assert!(d.versions[&v].state.is_none(), "its snapshot was dropped");
+        let p = damage_pages_before(&mut d, v);
+        assert_eq!(d.replay(v), Err(Damaged { version: v }));
+        let mut st = d.replay(parent).unwrap();
+        assert_eq!(st.apply(&p), Err(crate::prim::Mismatch { key: Key::Pages }));
+    }
+
+    /// `f`'s result in a release build. A debug build stops at damage in
+    /// history, once it's marked, so there `f` must panic.
+    fn unless_debug<T>(f: impl FnOnce() -> T) -> Option<T> {
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        assert_eq!(r.is_err(), cfg!(debug_assertions), "panics in debug only");
+        r.ok()
+    }
+
+    #[test]
+    fn undo_over_damaged_history_says_so() {
+        let (mut d, ids) = trimmed_history();
+        let (v, current) = (ids[2], ids[3]);
+        let prims = d.versions[&v].steps[0].prims.clone();
+        damage_pages_before(&mut d, v);
+        if let Some(undone) = unless_debug(|| d.undo().map(|l| l.map(str::to_owned))) {
+            assert_eq!(undone, Err(Damaged { version: v }));
+        }
+        assert_eq!(d.current_version(), current, "nothing was undone");
+        let damaged: Vec<VersionId> = d
+            .timeline()
+            .iter()
+            .filter(|view| view.damaged)
+            .map(|view| view.id)
+            .collect();
+        assert_eq!(damaged, [v]);
+        // Marked, it stays out of reach, even with its prims put right.
+        d.versions.get_mut(&v).unwrap().steps[0].prims = prims;
+        assert_eq!(d.replay(v), Err(Damaged { version: v }));
+        if let Some(jumped) = unless_debug(|| d.jump(v).is_ok()) {
+            assert!(!jumped, "it can't be reached");
+        }
+        assert_eq!(d.current_version(), current);
     }
 
     #[test]
@@ -3590,20 +4265,247 @@ mod tests {
         .unwrap();
         let old_primary = d.primary();
         let new = d.rebase_to_saved(SourceInfo {
-            path: "saved.pdf".into(),
-            ..src(6)
+            name: "saved.pdf".into(),
+            ..SourceInfo::blank(d.store(), 6)
         });
         assert_ne!(new, old_primary);
         assert!(!d.is_dirty());
         assert_eq!(d.page(0).unwrap().id, p5);
         assert_eq!(d.page(0).unwrap().source, new);
         assert_eq!(order(&d), vec![0, 1, 2, 3, 4, 5]);
-        assert_eq!(d.page(0).unwrap().rotation, Rotation::R0);
+        // The rotation is the page's /Rotate, which a save writes as is.
+        assert_eq!(d.page(0).unwrap().rotation, Rotation::R90);
         // Undo still reaches the pre-save version over the old source.
-        d.undo();
+        d.undo().unwrap();
         assert_eq!(d.page(0).unwrap().source, old_primary);
         assert_eq!(d.page(0).unwrap().index, 5);
         assert!(d.is_dirty());
+    }
+
+    /// One Letter page turned `degrees` by its `/Rotate`, or by its
+    /// parent's when `inherited`, as a source in `store`.
+    fn turned(store: &Store, own: Option<i64>, parent: Option<i64>) -> SourceInfo {
+        let mut f = crate::forms::fixture::Form::new(1);
+        let page = f.pages[0];
+        let up = f.dict(page).get(b"Parent").unwrap().as_reference().unwrap();
+        for (at, degrees) in [(page, own), (up, parent)] {
+            if let Some(degrees) = degrees {
+                f.dict(at).set("Rotate", degrees);
+            }
+        }
+        let kind = BlobKind::file(Path::new("turned.pdf"), None);
+        SourceInfo {
+            src: store.open(f.bytes().into(), kind).unwrap(),
+            name: "turned.pdf".into(),
+            derived: None,
+        }
+    }
+
+    /// `d` saved, incrementally or by a rewrite, and rebased onto the
+    /// saved file, which it returns.
+    fn save_and_rebase(d: &mut Document, incremental: bool) -> Src {
+        let snap = d.snapshot();
+        let bytes = if incremental {
+            crate::incremental::incremental(&snap)
+        } else {
+            crate::save::rewrite(&snap)
+        }
+        .unwrap();
+        let kind = BlobKind::file(Path::new("saved.pdf"), None);
+        let src = d.store().open(bytes.into(), kind).unwrap();
+        d.rebase_to_saved(SourceInfo {
+            src: src.clone(),
+            name: "saved.pdf".into(),
+            derived: None,
+        });
+        src
+    }
+
+    const LANDSCAPE: PageSize = PageSize {
+        width: 792.0,
+        height: 612.0,
+    };
+
+    /// A page from a file that turns it has that turn as its rotation,
+    /// with nothing for PDFium to add, and shows turned.
+    #[test]
+    fn an_inserted_page_keeps_its_own_rotate() {
+        let mut d = new_doc(1, &[], Box::new(FixedCount(10)));
+        let s = d.add_source(turned(d.store(), Some(90), None));
+        d.apply(
+            Edit::InsertPages {
+                source: s,
+                range: 0..1,
+                before: None,
+                outline: None,
+                annots: Vec::new(),
+            },
+            "insert",
+        )
+        .unwrap();
+        let p = *d.page(1).unwrap();
+        assert_eq!(p.rotation, Rotation::R90);
+        assert_eq!(d.render_delta(&p), Rotation::R0);
+        assert_eq!(d.page_size(&p), LANDSCAPE);
+        assert_eq!(d.geom(&p).rotate, Rotation::R90);
+        // Turned again, it's turned from there, and PDFium adds the turn.
+        d.apply(
+            Edit::RotatePages {
+                ids: vec![p.id],
+                by: Rotation::R90,
+            },
+            "rotate",
+        )
+        .unwrap();
+        let p = *d.page(1).unwrap();
+        assert_eq!(p.rotation, Rotation::R180);
+        assert_eq!(d.render_delta(&p), Rotation::R90);
+        assert_eq!(d.snapshot().render_delta(&p), Rotation::R90);
+        assert_eq!(d.page_size(&p).width, 612.0);
+    }
+
+    /// A page's rotation is its `/Rotate`: a save writes it as it is, and
+    /// the document rebased onto the saved file keeps it, with no turn
+    /// left for PDFium to add.
+    #[test]
+    fn a_rotation_survives_a_save() {
+        for incremental in [false, true] {
+            let mut d = new_doc(2, &[], Box::new(FixedCount(10)));
+            rotate(&mut d, 0, "rotate");
+            let saved = save_and_rebase(&mut d, incremental);
+            assert_eq!(saved.geom(0).rotate, Rotation::R90, "{incremental}");
+            assert_eq!(saved.geom(1).rotate, Rotation::R0, "{incremental}");
+            let p = *d.page(0).unwrap();
+            assert_eq!(p.rotation, Rotation::R90, "{incremental}");
+            assert_eq!(d.render_delta(&p), Rotation::R0, "{incremental}");
+            assert_eq!(d.page_size(&p), LANDSCAPE, "{incremental}");
+        }
+    }
+
+    /// A page turned upright is upright in the saved file whatever its
+    /// parent's `/Rotate`: an incremental save leaves it under its parent,
+    /// so it says 0. A page that's only marked keeps the `/Rotate` it has,
+    /// its own or its parent's, a 135 too, which reads as 90.
+    #[test]
+    fn a_page_turned_upright_stays_upright_through_a_save() {
+        let square = crate::annot::AnnotKind::Square {
+            rect: crate::annot::Box2 {
+                x: 100.0,
+                y: 100.0,
+                w: 50.0,
+                h: 40.0,
+            },
+        };
+        // The page's own /Rotate, its parent's, and the turn sheaf adds.
+        let cases = [
+            (None, Some(90), Some(Rotation::R270)),
+            (Some(90), Some(180), Some(Rotation::R270)),
+            (Some(0), Some(90), None),
+            (Some(135), Some(180), None),
+        ];
+        for (own, parent, by) in cases {
+            for incremental in [false, true] {
+                let case = format!("{own:?} under {parent:?}, turned {by:?}, {incremental}");
+                let store = Store::new();
+                let primary = turned(&store, own, parent);
+                let mut d = Document::new(store, primary, &[], Box::new(FixedCount(10)));
+                let page = id_at(&d, 0);
+                let was = d.page(0).unwrap().rotation;
+                let edit = match by {
+                    Some(by) => Edit::RotatePages {
+                        ids: vec![page],
+                        by,
+                    },
+                    None => Edit::AnnotAdd {
+                        page,
+                        annot: mark(0, square.clone()),
+                    },
+                };
+                d.apply(edit, "edit").unwrap();
+                let want = d.page(0).unwrap().rotation;
+                assert_eq!(want, was.plus(by.unwrap_or(Rotation::R0)), "{case}");
+                let saved = save_and_rebase(&mut d, incremental);
+                assert_eq!(saved.geom(0).rotate, want, "{case}");
+                assert_eq!(d.page(0).unwrap().rotation, want, "{case}");
+                if incremental && by.is_none() {
+                    let pdf = lopdf::Document::load_mem(saved.bytes()).unwrap();
+                    let dict = pdf.get_dictionary(pdf.get_pages()[&1]).unwrap();
+                    let rotate = dict.get(b"Rotate").and_then(lopdf::Object::as_i64).ok();
+                    assert_eq!(rotate, own, "{case}: the page's own /Rotate");
+                }
+            }
+        }
+    }
+
+    /// A mark on a page sheaf turned shows where it did after a save, and
+    /// the saved file has it where the model does: marks are in PageSpace,
+    /// which neither the save nor the rebase moves.
+    #[test]
+    fn a_mark_on_a_rotated_page_stays_put_through_a_save() {
+        let rect = crate::annot::Box2 {
+            x: 100.0,
+            y: 650.0,
+            w: 50.0,
+            h: 40.0,
+        };
+        for incremental in [false, true] {
+            let mut d = new_doc(1, &[], Box::new(FixedCount(10)));
+            rotate(&mut d, 0, "rotate");
+            let page = id_at(&d, 0);
+            let annot = mark(0, AnnotKind::Square { rect });
+            d.apply(Edit::AnnotAdd { page, annot }, "add").unwrap();
+            let shown = |d: &Document| {
+                let AnnotKind::Square { rect } = d.state().annots[&page][0].kind else {
+                    unreachable!("the square");
+                };
+                d.geom(d.page(0).unwrap()).to_view().apply_box(rect)
+            };
+            let before = shown(&d);
+            let saved = save_and_rebase(&mut d, incremental);
+            assert_eq!(shown(&d), before, "{incremental}");
+            let pdf = lopdf::Document::load_mem(saved.bytes()).unwrap();
+            let dict = pdf.get_dictionary(pdf.get_pages()[&1]).unwrap();
+            let annots = dict.get(b"Annots").unwrap().as_array().unwrap();
+            let (_, annot) = pdf.dereference(&annots[0]).unwrap();
+            let r: Vec<f32> = annot
+                .as_dict()
+                .unwrap()
+                .get(b"Rect")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_float().unwrap() as f32)
+                .collect();
+            let centre = ((r[0] + r[2]) / 2.0, (r[1] + r[3]) / 2.0);
+            let want = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+            assert!(
+                (centre.0 - want.0).abs() < 1.0 / 64.0 && (centre.1 - want.1).abs() < 1.0 / 64.0,
+                "{incremental}: /Rect {r:?}"
+            );
+        }
+    }
+
+    /// A save re-expresses the version it wrote, so the versions made from
+    /// it before (undone, then saved) keep their own states: their prims
+    /// are from it as it was.
+    #[test]
+    fn a_save_keeps_what_was_undone_before_it() {
+        let mut d = new_doc(3, &[], Box::new(FixedCount(1)));
+        rotate(&mut d, 0, "a");
+        rotate(&mut d, 1, "b");
+        let (b, want_b) = (d.current_version(), d.state().clone());
+        d.undo().unwrap();
+        rotate(&mut d, 2, "c");
+        let (c, want_c) = (d.current_version(), d.state().clone());
+        assert!(d.versions[&b].state.is_none(), "b's snapshot was dropped");
+        d.undo().unwrap();
+        d.rebase_to_saved(SourceInfo::blank(d.store(), 3));
+        rotate(&mut d, 0, "d");
+        d.jump(b).unwrap();
+        assert_eq!(*d.state(), want_b);
+        d.jump(c).unwrap();
+        assert_eq!(*d.state(), want_c);
     }
 
     #[test]
@@ -3633,6 +4535,7 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            turn: Rotation::R0,
             name: String::new(),
         };
         assert_eq!(d.state().next_connector_label(), "1");
@@ -3655,13 +4558,13 @@ mod tests {
             .unwrap();
         assert_eq!(d.state().annots_on(p0).unwrap().len(), 1);
         assert!(d.state().annots_on(p2).is_none());
-        d.undo();
+        d.undo().unwrap();
         assert_eq!(d.state().annots_on(p0).unwrap().len(), 1);
         assert_eq!(d.state().annots_on(p2).unwrap().len(), 1);
     }
 
     #[test]
-    fn a_group_runs_by_page_then_down_the_page() {
+    fn a_group_runs_by_page_then_down_the_page_as_it_shows() {
         use crate::annot::{AnnotKind, Box2, Group};
         let mut d = doc();
         let (p0, p1) = (d.page(0).unwrap().id, d.page(1).unwrap().id);
@@ -3694,13 +4597,30 @@ mod tests {
             )
             .unwrap();
         }
-        let order: Vec<(usize, f32)> = d
-            .state()
-            .group_members(&Group::Tickmark("✓".into()))
-            .iter()
-            .map(|(i, _, a)| (*i, a.bounds().y))
-            .collect();
-        assert_eq!(order, [(0, 500.0), (1, 100.0), (1, 300.0)]);
+        let order = |d: &Document| -> Vec<(usize, f32)> {
+            d.group_members(&Group::Tickmark("✓".into()))
+                .iter()
+                .map(|(i, _, a)| (*i, a.page_bounds().y))
+                .collect()
+        };
+        // PageSpace is y up: the higher one is first.
+        assert_eq!(order(&d), [(0, 500.0), (1, 300.0), (1, 100.0)]);
+        assert_eq!(
+            d.snapshot()
+                .group_members(&Group::Tickmark("✓".into()))
+                .len(),
+            3
+        );
+        // Turned, the page shows them side by side, the lower one left.
+        d.apply(
+            Edit::RotatePages {
+                ids: vec![p1],
+                by: Rotation::R90,
+            },
+            "rotate",
+        )
+        .unwrap();
+        assert_eq!(order(&d), [(0, 500.0), (1, 100.0), (1, 300.0)]);
     }
 
     fn mark(id: u64, kind: crate::annot::AnnotKind) -> Annot {
@@ -3717,11 +4637,79 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            turn: Rotation::R0,
             name: String::new(),
         }
     }
 
-    fn square(id: u64) -> Annot {
+    /// Text the built-in fonts can't draw (M10.5 proposal 22): a FreeText
+    /// in Japanese draws a `?` for each character, its `/Contents` keeps
+    /// the text exactly, and the reader is told once however many such
+    /// edits come. A header/footer is read the same way.
+    #[test]
+    fn cjk_text_draws_question_marks_and_is_told_once() {
+        use crate::annot::{AnnotKind, Box2};
+        let mut d = doc();
+        let page = id_at(&d, 0);
+        let text = "日本語のメモ";
+        let mut note = mark(
+            0,
+            AnnotKind::FreeText {
+                rect: Box2 {
+                    x: 10.0,
+                    y: 10.0,
+                    w: 200.0,
+                    h: 40.0,
+                },
+                size: 12.0,
+            },
+        );
+        note.contents = text.into();
+        let add = |d: &mut Document, annot: Annot| {
+            d.apply(Edit::AnnotAdd { page, annot }, "add").unwrap()
+        };
+        let first = add(&mut d, note.clone());
+        assert!(first.unencodable);
+        assert!(d.unencodable_notice(&first).is_some());
+        let second = add(&mut d, note);
+        assert!(second.unencodable);
+        assert_eq!(d.unencodable_notice(&second), None, "told once");
+        let plain = add(&mut d, square(0));
+        assert!(!plain.unencodable);
+
+        let written = &d.state().annots[&page][0];
+        let mut pdf = lopdf::Document::with_version("1.7");
+        let main = crate::annot::to_pdf(written, &mut pdf).main;
+        let utf16: Vec<u8> = [0xFE, 0xFF]
+            .into_iter()
+            .chain(text.encode_utf16().flat_map(u16::to_be_bytes))
+            .collect();
+        assert_eq!(main.get(b"Contents").unwrap().as_str().unwrap(), utf16);
+        let ap = main.get(b"AP").unwrap().as_dict().unwrap();
+        let ap = ap.get(b"N").unwrap().as_reference().unwrap();
+        let content = &pdf.get_object(ap).unwrap().as_stream().unwrap().content;
+        let drawn = b"(??????) Tj";
+        assert!(
+            content.windows(drawn.len()).any(|w| w == drawn),
+            "{}",
+            String::from_utf8_lossy(content)
+        );
+
+        let mut hf = crate::stamps::HeaderFooter::default();
+        hf.texts[1] = "<<file>>".into();
+        hf.file = "報告.pdf".into();
+        let set = |d: &mut Document, hf: &crate::stamps::HeaderFooter| {
+            let header_footer = Some(hf.clone());
+            d.apply(Edit::SetHeaderFooter { header_footer }, "hf")
+                .unwrap()
+        };
+        assert!(set(&mut d, &hf).unencodable);
+        hf.file = "report.pdf".into();
+        hf.texts[2] = "Page <<1>> of <<N>> – <<date>>".into();
+        assert!(!set(&mut d, &hf).unencodable);
+    }
+
+    pub(super) fn square(id: u64) -> Annot {
         use crate::annot::{AnnotKind, Box2};
         mark(
             id,
@@ -3736,7 +4724,7 @@ mod tests {
         )
     }
 
-    fn connector(id: u64, partner: u64) -> Annot {
+    pub(super) fn connector(id: u64, partner: u64) -> Annot {
         use crate::annot::{AnnotKind, Box2};
         mark(
             id,
@@ -3754,33 +4742,45 @@ mod tests {
     }
 
     #[test]
-    fn bookmark_styles_arriving_after_the_outline_are_matched_by_title() {
-        use crate::file::OutlineStyle;
-        let mut d = doc();
-        let style = |title: &str, bold| OutlineStyle {
-            title: title.into(),
-            color: Some([0, 0, 255]),
-            style: TextStyle {
-                bold,
-                italic: false,
-            },
+    fn bookmark_styles_come_from_the_file() {
+        use lopdf::{Object, dictionary};
+        let mut f = crate::forms::fixture::Form::new(3);
+        let item = |title: &str, color: Option<f32>, flags: i64| {
+            let mut d = dictionary! { "Title" => Object::string_literal(title), "F" => flags };
+            if let Some(blue) = color {
+                d.set("C", vec![0.into(), 0.into(), blue.into()]);
+            }
+            d
         };
-        // In pre-order: A, A1, A2, B, C. The third doesn't match its title.
-        d.set_initial_outline_styles(&[
-            style("A", true),
-            style("A1", false),
-            style("Not A2", false),
-            style("B", false),
-        ])
-        .unwrap();
+        crate::forms::fixture::outline_tree(
+            &mut f,
+            vec![
+                (0, item("A", Some(1.0), 2)),
+                (1, item("A1", Some(1.0), 0)),
+                (1, item("A2", None, 0)),
+                (0, item("B", Some(1.0), 1)),
+                (0, item("C", None, 0)),
+            ],
+        );
+        let store = Store::new();
+        let src = store
+            .open(f.bytes().into(), BlobKind::file(Path::new("a.pdf"), None))
+            .unwrap();
+        let outline = crate::open::outline(&src);
+        let primary = SourceInfo {
+            src,
+            name: "a.pdf".into(),
+            derived: None,
+        };
+        let d = Document::new(store, primary, &outline, Box::new(FixedCount(5)));
         let flat = d.state().outline_flat();
         let by = |t: &str| flat.iter().find(|(_, n)| n.title == t).unwrap().1.clone();
         assert!(by("A").style.bold);
         assert_eq!(by("A1").color, Some([0, 0, 255]));
         assert_eq!(by("A2").color, None);
-        assert_eq!(by("B").color, Some([0, 0, 255]));
-        assert_eq!(by("C").color, None);
-        // Loaded, not edited: nothing to save.
+        assert!(by("B").style.italic && by("B").color == Some([0, 0, 255]));
+        assert!(by("C").color.is_none() && by("C").style.is_plain());
+        // Read, not edited: nothing to save.
         assert!(!d.is_dirty());
     }
 
@@ -3795,7 +4795,7 @@ mod tests {
             "add",
         );
         assert!(mine.is_ok());
-        let sid = d.add_source(src(3));
+        let sid = d.add_source(SourceInfo::blank(d.store(), 3));
         d.apply(
             Edit::InsertPages {
                 source: sid,
@@ -3827,7 +4827,7 @@ mod tests {
         assert_eq!(on1[0].partner(), Some(on0[1].id));
         assert_eq!(on1[1].partner(), None);
         // Undo takes them away with the pages.
-        d.undo();
+        d.undo().unwrap();
         assert!(d.state().annots_on(new0).is_none());
     }
 
@@ -3845,7 +4845,7 @@ mod tests {
             )
             .unwrap();
         }
-        let sid = d.add_source(src(1));
+        let sid = d.add_source(SourceInfo::blank(d.store(), 1));
         d.apply(
             Edit::ReplacePages {
                 ids: vec![p1, p2],
@@ -3915,6 +4915,7 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            turn: Rotation::R0,
             name: String::new(),
         };
         d.apply(
@@ -3955,27 +4956,100 @@ mod tests {
         )
         .unwrap();
         assert!(d.state().annots_on(p1).is_none());
-        d.undo();
+        d.undo().unwrap();
         assert_eq!(d.state().annots_on(p1).unwrap().len(), 1);
     }
 
     #[test]
-    fn noop_edit_adds_no_version() {
+    fn a_batch_that_puts_things_back_pushes_nothing() {
         let mut d = doc();
-        d.apply(
-            Edit::RotatePages {
-                ids: vec![],
-                by: Rotation::R90,
-            },
-            "noop",
+        let n = d.version_count();
+        let (p0, p1) = (id_at(&d, 0), id_at(&d, 1));
+        let rotate = |by| Edit::RotatePages { ids: vec![p0], by };
+        d.apply_batch(vec![rotate(Rotation::R90), rotate(Rotation::R270)], "spin")
+            .unwrap();
+        let to = |before| Edit::MovePages {
+            ids: vec![p0],
+            before,
+        };
+        d.apply_batch(vec![to(None), to(Some(p1))], "there and back")
+            .unwrap();
+        d.apply_batch(
+            vec![
+                Edit::SetHeaderFooter {
+                    header_footer: Some(header("Draft".into())),
+                },
+                Edit::SetHeaderFooter {
+                    header_footer: None,
+                },
+            ],
+            "header",
+        )
+        .unwrap();
+        let roman = crate::labels::LabelSpec {
+            start: p0,
+            style: crate::labels::Style::LowerRoman,
+            prefix: String::new(),
+            first: 1,
+        };
+        d.apply_batch(
+            vec![
+                Edit::SetPageLabels {
+                    ranges: vec![roman],
+                },
+                Edit::SetPageLabels { ranges: Vec::new() },
+            ],
+            "labels",
         )
         .unwrap();
         assert!(!d.can_undo());
+        assert_eq!(d.version_count(), n);
+    }
+
+    #[test]
+    fn a_batch_keeps_each_slot_s_change_on_its_last_step() {
+        let mut d = doc();
+        let before = d.state().pages.clone();
+        let rotate = |d: &Document, i| Edit::RotatePages {
+            ids: vec![id_at(d, i)],
+            by: Rotation::R90,
+        };
+        d.apply_batch(vec![rotate(&d, 0), rotate(&d, 1)], "rotate two")
+            .unwrap();
+        let steps = &d.versions[&d.cursor].steps;
+        assert_eq!(steps.len(), 2, "each edit stays");
+        assert!(steps[0].prims.is_empty());
+        let [p] = &steps[1].prims[..] else {
+            panic!("one prim: {:?}", steps[1].prims)
+        };
+        assert_eq!(p.key, Key::Pages);
+        assert!(same(p.before.as_ref(), Some(&Val::Pages(before))));
+        assert!(same(p.after.as_ref(), d.state().get(&Key::Pages).as_ref()));
+    }
+
+    #[test]
+    fn a_batch_describes_each_edit_against_the_document_before_it() {
+        let mut d = doc();
+        // Pages 3 and 4 go first, which makes page 2 the 4th.
+        let (first, second) = (id_at(&d, 0), id_at(&d, 1));
+        d.apply_batch(
+            vec![
+                Edit::MovePages {
+                    ids: vec![id_at(&d, 2), id_at(&d, 3)],
+                    before: Some(first),
+                },
+                Edit::DeletePages { ids: vec![second] },
+            ],
+            "move and delete",
+        )
+        .unwrap();
+        let last = d.timeline().pop().unwrap();
+        assert_eq!(last.edits, ["Move pages 3, 4", "Delete page 4"]);
     }
 
     // ----- OCR text layers ---------------------------------------------------
 
-    fn tl(text: &str) -> Arc<TextLayer> {
+    pub(super) fn tl(text: &str) -> Arc<TextLayer> {
         Arc::new(TextLayer::from_engine(
             vec![crate::text_layer::OcrWord {
                 text: text.into(),
@@ -3987,11 +5061,7 @@ mod tests {
                 },
                 confidence: 1.0,
             }],
-            PageSize {
-                width: 612.0,
-                height: 792.0,
-            },
-            Rotation::R0,
+            &crate::geom::Geom::read(None, None, 0),
             "test",
         ))
     }
@@ -4019,9 +5089,9 @@ mod tests {
         assert_eq!(layer_texts(&d), vec![(1, "a".into()), (3, "a".into())]);
         assert!(d.state().has_text_layer(id_at(&d, 1)));
         assert!(d.is_dirty());
-        d.undo();
+        d.undo().unwrap();
         assert!(d.state().text_layers.is_empty());
-        d.redo();
+        d.redo().unwrap();
         assert_eq!(layer_texts(&d).len(), 2);
         // Replacing a page's layer is a new version.
         set(&mut d, &[1], "b");
@@ -4093,7 +5163,7 @@ mod tests {
             d.state().text_layer(copy).unwrap()
         ));
         // Replacing a page's content makes its OCR stale.
-        let other = d.add_source(src(2));
+        let other = d.add_source(SourceInfo::blank(d.store(), 2));
         d.apply(
             Edit::ReplacePages {
                 ids: vec![copy],
@@ -4126,11 +5196,11 @@ mod tests {
         assert_eq!(d.stats().versions, before + 1);
         assert_eq!(layer_texts(&d).len(), 3);
         assert_eq!(d.undo_label(), Some("OCR batch 2"));
-        d.undo();
+        d.undo().unwrap();
         assert!(d.state().text_layers.is_empty());
         assert!(!d.job_is_current(job));
         assert!(d.job_is_undone(job));
-        d.redo();
+        d.redo().unwrap();
         assert_eq!(layer_texts(&d).len(), 3);
         assert!(!d.job_is_undone(job));
     }
@@ -4159,7 +5229,7 @@ mod tests {
         .unwrap();
         assert_eq!(d.stats().versions, n + 1, "pushed, not amended");
         assert!(d.is_dirty());
-        d.undo();
+        d.undo().unwrap();
         assert!(!d.is_dirty(), "the saved version is intact");
         assert_eq!(layer_texts(&d).len(), 1);
     }
@@ -4198,7 +5268,7 @@ mod tests {
         assert_eq!(d.stats().versions, n + 1);
         assert!(d.job_is_current(job));
         // Undo peels the second batch, then the rotation, then the first.
-        d.undo();
+        d.undo().unwrap();
         assert_eq!(layer_texts(&d).len(), 1);
         assert_eq!(d.page(5).unwrap().rotation, Rotation::R90);
     }
@@ -4220,34 +5290,385 @@ mod tests {
         assert!(!d.job_is_current(job));
     }
 
+    /// A version names one state, so a job's later batch makes another
+    /// version in place of the one it amends.
+    #[test]
+    fn an_ocr_amend_gives_the_cursor_a_new_version() {
+        let mut d = doc();
+        let parent = d.current_version();
+        let job = d.begin_job();
+        let ocr = |d: &mut Document, page: usize| {
+            d.apply_in_job(
+                job,
+                Edit::SetTextLayers {
+                    layers: vec![(id_at(d, page), tl("a"))],
+                },
+                "ocr",
+            )
+            .unwrap();
+        };
+        ocr(&mut d, 0);
+        let v1 = d.current_version();
+        ocr(&mut d, 1);
+        let v2 = d.current_version();
+        assert_ne!(v2, v1);
+        assert!(d.jump(v1).is_err(), "the amended version is gone");
+        assert!(d.edge(v1).is_none());
+        let ids: Vec<VersionId> = d.timeline().iter().map(|view| view.id).collect();
+        assert_eq!(ids, [parent, v2]);
+        assert!(d.job_is_current(job));
+        assert_eq!(d.undo().unwrap(), Some("ocr"));
+        assert_eq!(d.current_version(), parent);
+        assert_eq!(d.redo().unwrap(), Some("ocr"));
+        assert_eq!(d.current_version(), v2);
+        assert_eq!(layer_texts(&d).len(), 2);
+    }
+
+    /// A save expresses the version anew over the saved file, so it's
+    /// another version, in the same place. The opened one too.
+    #[test]
+    fn a_save_gives_the_cursor_a_new_version() {
+        let mut d = doc();
+        let opened = d.current_version();
+        d.rebase_to_saved(SourceInfo::blank(d.store(), 6));
+        let root = d.current_version();
+        assert_ne!(root, opened);
+        assert!(d.jump(opened).is_err());
+        rotate(&mut d, 0, "rotate");
+        let old = d.current_version();
+        d.rebase_to_saved(SourceInfo::blank(d.store(), 6));
+        let new = d.current_version();
+        assert_ne!(new, old);
+        assert!(d.jump(old).is_err(), "the old id doesn't resolve");
+        assert!(!d.is_dirty());
+        let saved: Vec<VersionId> = d
+            .timeline()
+            .iter()
+            .filter(|view| view.saved)
+            .map(|view| view.id)
+            .collect();
+        assert_eq!(saved, [new]);
+        assert_eq!(d.undo().unwrap(), Some("rotate"));
+        assert_eq!(d.current_version(), root);
+        assert!(d.is_dirty());
+        assert_eq!(d.redo().unwrap(), Some("rotate"));
+        assert_eq!(d.current_version(), new);
+        assert!(!d.is_dirty());
+    }
+
+    /// A job whose batches put back all they did leaves no version: the
+    /// parent is current again, as if the job never ran, even when its
+    /// snapshot was dropped. A file registered before it waits for the
+    /// next version again.
+    #[test]
+    fn a_job_that_nets_to_nothing_leaves_no_version() {
+        let mut d = new_doc(3, &[], Box::new(FixedCount(1)));
+        rotate(&mut d, 2, "rotate");
+        let (parent, want) = (d.current_version(), d.state().clone());
+        let n = d.version_count();
+        let job = d.begin_job();
+        let p0 = id_at(&d, 0);
+        let s = d.add_source(SourceInfo::blank(d.store(), 1));
+        d.apply_in_job(
+            job,
+            Edit::SetTextLayers {
+                layers: vec![(p0, tl("a"))],
+            },
+            "ocr",
+        )
+        .unwrap();
+        let v = d.current_version();
+        assert_eq!(d.edge(v).unwrap().1, [s]);
+        assert!(d.versions[&parent].state.is_none(), "trimmed");
+        d.apply_in_job(job, Edit::ClearTextLayers { ids: vec![p0] }, "ocr")
+            .unwrap();
+        assert_eq!(d.current_version(), parent);
+        assert_eq!(d.version_count(), n);
+        assert!(d.jump(v).is_err());
+        assert!(!d.can_redo());
+        assert!(!d.job_is_current(job));
+        assert_eq!(*d.state(), want);
+        rotate(&mut d, 0, "rotate");
+        assert_eq!(d.edge(d.current_version()).unwrap().1, [s]);
+    }
+
+    /// An amend takes the sources added since the version it joins, and a
+    /// batch that changes nothing leaves that version as it is.
+    #[test]
+    fn a_job_s_amend_takes_its_sources_and_its_no_op_changes_nothing() {
+        let mut d = doc();
+        let job = d.begin_job();
+        let ocr = |d: &mut Document, page: usize, label: &str| {
+            d.apply_in_job(
+                job,
+                Edit::SetTextLayers {
+                    layers: vec![(id_at(d, page), tl("a"))],
+                },
+                label,
+            )
+            .unwrap();
+        };
+        ocr(&mut d, 0, "ocr");
+        let s = d.add_source(SourceInfo::blank(d.store(), 1));
+        ocr(&mut d, 1, "ocr");
+        let v = d.current_version();
+        let (steps, sources) = d.edge(v).unwrap();
+        assert_eq!((steps.len(), sources), (2, &[s][..]));
+        d.apply_in_job(job, Edit::SetTextLayers { layers: vec![] }, "other")
+            .unwrap();
+        assert_eq!(d.current_version(), v);
+        assert_eq!(d.undo_label(), Some("ocr"));
+        assert_eq!(d.edge(v).unwrap().0.len(), 2, "no step added");
+    }
+
+    /// Pruning past `MAX_VERSIONS` can make a job's version the first one,
+    /// with no parent to amend it under: the job's next batch makes a
+    /// version after it.
+    #[test]
+    fn a_job_s_version_pruned_to_the_first_is_not_amended() {
+        let mut d = new_doc(3, &[], Box::new(FixedCount(1)));
+        for i in 1..crate::history::MAX_VERSIONS {
+            rotate(&mut d, i % 3, "rotate");
+        }
+        d.rebase_to_saved(SourceInfo::blank(d.store(), 3));
+        let opened = d.timeline()[0].id;
+        d.jump(opened).unwrap();
+        let job = d.begin_job();
+        let ocr = |d: &mut Document, page: usize| {
+            d.apply_in_job(
+                job,
+                Edit::SetTextLayers {
+                    layers: vec![(id_at(d, page), tl("a"))],
+                },
+                "ocr",
+            )
+            .unwrap();
+        };
+        // One version too many: the saved branch goes, and the job's
+        // version becomes the first.
+        ocr(&mut d, 0);
+        let v = d.current_version();
+        assert_eq!(d.version_count(), 1);
+        assert!(!d.can_undo());
+        ocr(&mut d, 1);
+        assert_ne!(d.current_version(), v);
+        assert_eq!(d.undo().unwrap(), Some("ocr"));
+        assert_eq!(d.current_version(), v);
+        assert_eq!(layer_texts(&d).len(), 1);
+    }
+
     #[test]
     fn rebase_clears_text_layers() {
         let mut d = doc();
         set(&mut d, &[0], "a");
-        d.rebase_to_saved(src(6));
+        d.rebase_to_saved(SourceInfo::blank(d.store(), 6));
         assert!(d.state().text_layers.is_empty());
         assert!(!d.is_dirty());
         // The version before the save still carries its layer, so undoing
         // across the save re-emits it against the old source.
-        d.undo();
+        d.undo().unwrap();
         assert!(d.state().text_layers.is_empty(), "pre-OCR version");
-        d.redo();
+        d.redo().unwrap();
         assert!(d.state().text_layers.is_empty(), "rebased version");
     }
 
     #[test]
-    fn marginal_counts_layer_bytes() {
+    fn history_counts_the_layer_a_step_holds() {
         let mut d = doc();
-        set(&mut d, &[0], "hello");
-        let m = d.stats().marginal_bytes;
-        assert!(*m.last().unwrap() > 0);
-        // A duplicate costs the page list plus (at most) one layer estimate.
-        let dup = id_at(&d, 0);
-        d.apply(Edit::DuplicatePages { ids: vec![dup] }, "dup")
-            .unwrap();
-        let m2 = d.stats().marginal_bytes;
-        let pages = d.page_count() * std::mem::size_of::<PageRef>();
-        assert!(*m2.last().unwrap() <= *m.last().unwrap() + pages);
+        let layer = tl(&"x".repeat(100_000));
+        let p0 = id_at(&d, 0);
+        d.apply(
+            Edit::SetTextLayers {
+                layers: vec![(p0, layer.clone())],
+            },
+            "ocr",
+        )
+        .unwrap();
+        let stats = d.stats();
+        assert!(stats.step_bytes >= layer.byte_estimate());
+        assert!(
+            stats.step_bytes < 2 * layer.byte_estimate(),
+            "counted once, though the edit holds it too"
+        );
+        // The snapshot shares the layer: it adds only the map's nodes.
+        assert!(*stats.snapshot_bytes.last().unwrap() < 4 << 10);
+    }
+
+    #[test]
+    fn an_added_mark_costs_its_page_not_the_document() {
+        let marks = (0..2000u32)
+            .map(|i| (i, (1..=10).map(|j| square(u64::from(i) * 10 + j)).collect()))
+            .collect();
+        let facts = Facts {
+            marks,
+            ..Default::default()
+        };
+        let mut d = opened_doc(2000, facts, Box::new(FixedCount(10)));
+        let page = id_at(&d, 1000);
+        d.apply(
+            Edit::AnnotAdd {
+                page,
+                annot: square(0),
+            },
+            "add",
+        )
+        .unwrap();
+        // 256 bytes for each of the document's 20,000 marks was 5 MB.
+        let stats = d.stats();
+        assert!(stats.step_bytes < 4 << 10, "{}", stats.step_bytes);
+        let snapshot = *stats.snapshot_bytes.last().unwrap();
+        assert!(snapshot < 16 << 10, "{snapshot}");
+    }
+
+    /// `bytes` as the file `name`, parsed into `store`.
+    fn file(store: &Store, bytes: Vec<u8>, name: &str) -> SourceInfo {
+        let kind = BlobKind::file(Path::new(name), None);
+        SourceInfo {
+            src: store.open(bytes.into(), kind).unwrap(),
+            name: name.into(),
+            derived: None,
+        }
+    }
+
+    /// All of `info`'s pages inserted at the end, as a new version.
+    fn insert_all(d: &mut Document, info: SourceInfo) -> SourceId {
+        let count = info.src.page_count();
+        let source = d.add_source(info);
+        d.apply(
+            Edit::InsertPages {
+                source,
+                range: 0..count,
+                before: None,
+                outline: None,
+                annots: Vec::new(),
+            },
+            "insert",
+        )
+        .unwrap();
+        source
+    }
+
+    #[test]
+    fn an_undone_insert_counts_its_source_until_redo() {
+        let mut d = doc();
+        let primary = d.store().bytes();
+        let blank = |d: &Document| SourceInfo::blank(d.store(), 2);
+        let info = blank(&d);
+        let sid = insert_all(&mut d, info);
+        let len = d.source(sid).unwrap().src.bytes().len();
+        let stats = d.stats();
+        assert_eq!(stats.undone_source_bytes, 0);
+        assert_eq!(stats.blob_bytes, d.store().bytes());
+        assert_eq!(stats.blob_bytes, primary + len);
+        d.undo().unwrap();
+        let stats = d.stats();
+        assert_eq!(stats.undone_source_bytes, len);
+        assert_eq!(stats.blob_bytes, primary + len, "undo frees nothing");
+        assert_eq!(
+            stats.total_bytes(),
+            stats.snapshot_bytes.iter().sum::<usize>() + stats.step_bytes + len
+        );
+        d.redo().unwrap();
+        assert_eq!(d.stats().undone_source_bytes, 0);
+        // Undone again: the same bytes registered for the next version,
+        // then inserted on the line, share its blob.
+        d.undo().unwrap();
+        let waiting = d.add_source(blank(&d));
+        assert_eq!(d.stats().undone_source_bytes, 0);
+        d.apply(
+            Edit::InsertPages {
+                source: waiting,
+                range: 0..2,
+                before: None,
+                outline: None,
+                annots: Vec::new(),
+            },
+            "insert",
+        )
+        .unwrap();
+        assert_ne!(waiting, sid);
+        let stats = d.stats();
+        assert_eq!(stats.undone_source_bytes, 0);
+        assert_eq!(stats.blob_bytes, primary + len, "one blob");
+    }
+
+    #[test]
+    fn pruning_an_undone_400_page_scan_frees_its_bytes() {
+        use sheaf_image::io::{PageImage, Pixels};
+        let mut d = new_doc(3, &[], Box::new(FixedCount(1)));
+        let rasters: Vec<PageImage> = (0..400u32)
+            .map(|i| PageImage {
+                width: 8,
+                height: 8,
+                dpi: (72.0, 72.0),
+                rotate: 0,
+                pixels: Pixels::Gray((0..64).map(|j| (i * 7 + j) as u8).collect()),
+            })
+            .collect();
+        let scan = crate::images::to_pdf(&rasters, crate::images::PageFit::LETTER).unwrap();
+        let (len, before) = (scan.len(), d.store().bytes());
+        let info = file(d.store(), scan, "scan.pdf");
+        let sid = insert_all(&mut d, info);
+        let id = d.source(sid).unwrap().src.id();
+        assert_eq!((d.page_count(), d.store().bytes()), (403, before + len));
+        d.undo().unwrap();
+        assert_eq!(d.stats().undone_source_bytes, len);
+        // One edit branches off; past `MAX_VERSIONS`, the branch goes.
+        for i in 0..crate::history::MAX_VERSIONS {
+            rotate(&mut d, i % 3, "rotate");
+        }
+        assert!(d.source(sid).is_none(), "its registration went with it");
+        assert_eq!(d.store().bytes(), before);
+        assert!(d.store().get(id).is_none());
+        let stats = d.stats();
+        assert_eq!((stats.undone_source_bytes, stats.blob_bytes), (0, before));
+    }
+
+    #[test]
+    fn the_root_advancing_keeps_its_sources() {
+        let mut d = new_doc(3, &[], Box::new(FixedCount(1)));
+        // Unsaved, as a recovered document is: the first version can move.
+        d.mark_unsaved();
+        let info = SourceInfo::blank(d.store(), 1);
+        let gone = insert_all(&mut d, info);
+        d.undo().unwrap();
+        let info = SourceInfo::blank(d.store(), 2);
+        let kept = insert_all(&mut d, info);
+        for i in 0..crate::history::MAX_VERSIONS {
+            rotate(&mut d, i % 3, "rotate");
+        }
+        let first = &d.versions[&d.root];
+        assert!(!first.steps.is_empty(), "pruned to a later one");
+        assert_eq!(first.sources, [d.primary(), kept]);
+        assert!(d.source(gone).is_none(), "its branch was pruned");
+        assert_eq!(d.page_count(), 5);
+        assert!(d.state().pages.iter().all(|p| d.source(p.source).is_some()));
+        let bytes = |sid| d.source(sid).unwrap().src.bytes().len();
+        assert_eq!(d.store().bytes(), bytes(d.primary()) + bytes(kept));
+    }
+
+    /// A save's file stays while it's the primary, though pruning took the
+    /// version that held it, and goes when the next save replaces it.
+    #[test]
+    fn a_pruned_save_s_file_goes_when_the_next_save_replaces_it() {
+        let mut d = new_doc(3, &[], Box::new(FixedCount(1)));
+        for i in 1..crate::history::MAX_VERSIONS {
+            rotate(&mut d, i % 3, "rotate");
+        }
+        let a4 = crate::generated::blank_pages(595.0, 842.0, 3).unwrap();
+        let saved = d.rebase_to_saved(file(d.store(), a4, "saved.pdf"));
+        let id = d.source(saved).unwrap().src.id();
+        // Back to the first version, and one edit too many: the saved
+        // branch goes.
+        let opened = d.timeline()[0].id;
+        d.jump(opened).unwrap();
+        rotate(&mut d, 0, "rotate");
+        assert_eq!(d.version_count(), 1);
+        assert_eq!(d.primary(), saved);
+        assert!(d.store().get(id).is_some());
+        d.rebase_to_saved(SourceInfo::blank(d.store(), 3));
+        assert!(d.source(saved).is_none());
+        assert!(d.store().get(id).is_none());
     }
 
     #[test]
@@ -4282,7 +5703,7 @@ mod tests {
         .unwrap();
         assert_eq!(d.state().outline.len(), before.outline.len() + 2);
         assert_eq!(d.undo_label(), Some("Plugin edits"));
-        d.undo();
+        d.undo().unwrap();
         assert_eq!(*d.state(), before);
         assert!(!d.can_undo());
     }
@@ -4370,7 +5791,7 @@ mod tests {
             ]
         );
         assert_eq!(d.undo_label(), Some("Bookmark matches"));
-        d.undo();
+        d.undo().unwrap();
         assert_eq!(d.state().outline.len(), 3);
         // Depths must nest properly.
         let bad = d.apply(
@@ -4408,6 +5829,7 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            turn: Rotation::R0,
             name: String::new(),
         };
         let edits = vec![

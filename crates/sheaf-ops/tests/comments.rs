@@ -5,7 +5,6 @@
 //! Needs libpdfium (`scripts/fetch-pdfium.sh`), like the app itself.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use lopdf::{Document as Pdf, Object, Stream, dictionary};
 use sheaf_core::{PageIndex, Rotation};
@@ -95,12 +94,20 @@ fn mark(kind: AnnotKind, color: [u8; 3], contents: &str) -> Annot {
         fill: None,
         dashed: false,
         cloudy: false,
+        turn: Rotation::R0,
         name: String::new(),
     }
 }
 
+/// `a`, placed where page `i` of `doc` shows it, as the model keeps it:
+/// in PageSpace, reading upright as the page shows.
+fn placed(doc: &sheaf_doc::Document, i: usize, a: Annot) -> Annot {
+    a.to_page(&doc.geom(doc.page(i).unwrap()))
+}
+
 /// The file, with a red note of ours on page 1 at (100, 100) and a green
-/// tickmark on page 3 at (50, 60), and the other tools' comments in it.
+/// tickmark on page 3 at (50, 60), as they show, and the other tools'
+/// comments in it.
 fn opened(
     dir: &Path,
 ) -> (
@@ -119,7 +126,7 @@ fn opened(
     doc.apply(
         Edit::AnnotAdd {
             page: pages[0],
-            annot: note,
+            annot: placed(&doc, 0, note),
         },
         "note",
     )
@@ -140,7 +147,7 @@ fn opened(
     doc.apply(
         Edit::AnnotAdd {
             page: pages[2],
-            annot: tick,
+            annot: placed(&doc, 2, tick),
         },
         "tick",
     )
@@ -149,7 +156,7 @@ fn opened(
 }
 
 fn engine(bytes: Vec<u8>) -> PdfiumEngine {
-    PdfiumEngine::open_bytes(Arc::new(bytes), None).unwrap()
+    PdfiumEngine::open_bytes(bytes.into(), None).unwrap()
 }
 
 fn render(e: &PdfiumEngine, page: u32) -> Raster {
@@ -167,6 +174,41 @@ fn render(e: &PdfiumEngine, page: u32) -> Raster {
 fn px(r: &Raster, x: f32, y: f32) -> [u8; 3] {
     let i = ((y.round() as u32 * r.width + x.round() as u32) * 4) as usize;
     [r.data[i], r.data[i + 1], r.data[i + 2]]
+}
+
+/// The same summary gives the same pages, twice and on two threads:
+/// their content and resources, byte for byte, the file's creation date
+/// aside.
+#[test]
+fn the_summary_writes_the_same_pages_every_time() {
+    let dir = scratch("same");
+    let (doc, foreign) = opened(&dir);
+    let snap = doc.snapshot();
+    let write = || {
+        let bytes = comments::summary_pdf(
+            &snap,
+            &foreign,
+            &CommentFilter::default(),
+            "",
+            Layout::Pages,
+            "review.pdf",
+        )
+        .unwrap();
+        let mut pdf = Pdf::load_mem(&bytes).unwrap();
+        let info = pdf.trailer.remove(b"Info").unwrap();
+        pdf.objects.remove(&info.as_reference().unwrap());
+        let mut out = Vec::new();
+        pdf.save_to(&mut out).unwrap();
+        out
+    };
+    let first = write();
+    assert_eq!(write(), first);
+    std::thread::scope(|s| {
+        let threads: Vec<_> = (0..2).map(|_| s.spawn(write)).collect();
+        for t in threads {
+            assert_eq!(t.join().unwrap(), first);
+        }
+    });
 }
 
 #[test]

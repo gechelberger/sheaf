@@ -43,7 +43,8 @@ impl Default for Limits {
 pub trait TextSource: Send + Sync {
     fn page_text(&self, source: SourceId, index: u32) -> Result<String>;
     /// Every match of `re` on the page, with boxes in the page's displayed
-    /// space.
+    /// space: its source page as the file displays it, which is the API's
+    /// page coordinates.
     fn pattern_search(
         &self,
         source: SourceId,
@@ -69,12 +70,14 @@ pub trait TextSource: Send + Sync {
 
 /// Runs OCR for plugins. The app implements it over `sheaf_ocr`.
 pub trait OcrSource: Send + Sync {
-    /// Recognize one page. `size` is the page as displayed (after its
-    /// rotation in sheaf).
+    /// Recognize one page as it shows, `geom` (`Snapshot::geom`), rendered
+    /// turned `render` on top of its source page's own `/Rotate`
+    /// (`Snapshot::render_delta`).
     fn recognize(
         &self,
         page: &sheaf_doc::PageRef,
-        size: sheaf_core::PageSize,
+        geom: &sheaf_doc::geom::Geom,
+        render: sheaf_core::Rotation,
         language: Option<String>,
         dpi: Option<u32>,
     ) -> Result<sheaf_doc::TextLayer>;
@@ -90,7 +93,7 @@ pub enum DocEvent {
     Saved(String),
     SelectionChanged,
     Closed,
-    /// A region on a page, in its displayed space.
+    /// A region on a page, in PageSpace.
     Region {
         page: PageId,
         rect: sheaf_doc::Box2,
@@ -148,7 +151,7 @@ pub struct CallContext {
     pub presets: Vec<Preset>,
     /// Where the plugin's `progress` tasks report, and how the call is
     /// cancelled. None: tasks report nowhere and are never cancelled.
-    pub progress: Option<sheaf_progress::Tracker>,
+    pub progress: Option<in_progress::Tracker>,
     /// The plugin's section of the user's `settings.toml`, as JSON (API
     /// 0.3's `storage.preferences`), taken when the call starts so it
     /// stays the same throughout. Empty for none.
@@ -448,8 +451,14 @@ impl World {
             (World::V02(w), Call::PanelAction { panel, row, action }) => {
                 w.call_panel_action(store, panel, row, action)
             }
-            (World::V03(w), Call::Event(e)) => w.call_on_event(store, &api::v03::event_to_wit(e)),
-            (World::V02(w), Call::Event(e)) => w.call_on_event(store, &api::v02::event_to_wit(e)),
+            (World::V03(w), Call::Event(e)) => {
+                let e = api::v03::event_to_wit(store.data().doc().map(|d| &d.snapshot), e);
+                w.call_on_event(store, &e)
+            }
+            (World::V02(w), Call::Event(e)) => {
+                let e = api::v02::event_to_wit(store.data().doc().map(|d| &d.snapshot), e);
+                w.call_on_event(store, &e)
+            }
         }
     }
 }
@@ -672,7 +681,7 @@ impl HostState {
         self.call.as_ref()?.doc.as_ref()
     }
 
-    pub(crate) fn progress(&self) -> Option<&sheaf_progress::Tracker> {
+    pub(crate) fn progress(&self) -> Option<&in_progress::Tracker> {
         self.call.as_ref()?.progress.as_ref()
     }
 

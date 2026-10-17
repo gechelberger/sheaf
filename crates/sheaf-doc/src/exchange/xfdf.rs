@@ -104,7 +104,7 @@ pub fn write(comments: &Comments) -> Result<Vec<u8>> {
             }
         }
         if let Some(ca) = d.get(b"CA").ok().and_then(|o| o.as_float().ok()) {
-            attrs.push(("opacity", num(ca)));
+            attrs.push(("opacity", num(ca as f32)));
         }
         if let Some(f) = d.get(b"F").ok().and_then(|o| o.as_i64().ok()) {
             let names: Vec<&str> = FLAGS
@@ -125,7 +125,7 @@ pub fn write(comments: &Comments) -> Result<Vec<u8>> {
             .and_then(|bs| bs.get(b"W").ok())
             .and_then(|w| w.as_float().ok())
         {
-            attrs.push(("width", num(w)));
+            attrs.push(("width", num(w as f32)));
         }
         let cloudy = d
             .get(b"BE")
@@ -141,7 +141,7 @@ pub fn write(comments: &Comments) -> Result<Vec<u8>> {
                     .ok()
                     .and_then(|i| i.as_float().ok())
                     .unwrap_or(1.0);
-                attrs.push(("intensity", num(i)));
+                attrs.push(("intensity", num(i as f32)));
             }
             None => {
                 if let Some(style) = bs
@@ -409,7 +409,7 @@ fn annotation(subtype: &str, attrs: &[(String, String)]) -> (u32, Dictionary) {
             }
             "opacity" => {
                 if let Ok(o) = v.trim().parse::<f32>() {
-                    d.set("CA", Object::Real(o));
+                    d.set("CA", Object::from(o));
                 }
             }
             "flags" => {
@@ -422,7 +422,7 @@ fn annotation(subtype: &str, attrs: &[(String, String)]) -> (u32, Dictionary) {
             }
             "width" => {
                 if let Ok(w) = v.trim().parse::<f32>() {
-                    bs.set("W", Object::Real(w));
+                    bs.set("W", Object::from(w));
                 }
             }
             "style" if v == "cloudy" => {
@@ -433,7 +433,7 @@ fn annotation(subtype: &str, attrs: &[(String, String)]) -> (u32, Dictionary) {
                     .find(|(k, _)| k == "intensity")
                     .and_then(|(_, i)| i.trim().parse::<f32>().ok())
                     .unwrap_or(1.0);
-                be.set("I", Object::Real(i));
+                be.set("I", Object::from(i));
                 d.set("BE", be);
             }
             "style" => {
@@ -491,7 +491,7 @@ fn floats(pdf: &Pdf, a: &[Object]) -> Vec<f32> {
             pdf.dereference(o)
                 .ok()
                 .and_then(|(_, o)| o.as_float().ok())
-                .unwrap_or(0.0)
+                .unwrap_or(0.0) as f32
         })
         .collect()
 }
@@ -501,7 +501,7 @@ fn reals(s: &str) -> Object {
     Object::Array(
         s.split([',', ';', ' ', '\n', '\r', '\t'])
             .filter_map(|v| v.trim().parse::<f32>().ok())
-            .map(Object::Real)
+            .map(Object::from)
             .collect(),
     )
 }
@@ -546,7 +546,7 @@ fn rgb(hex: &str) -> Option<Object> {
     let part = |i: usize| {
         u8::from_str_radix(&h[i..i + 2], 16)
             .ok()
-            .map(|v| Object::Real(v as f32 / 255.0))
+            .map(|v| Object::from(v as f32 / 255.0))
     };
     Some(Object::Array(vec![part(0)?, part(2)?, part(4)?]))
 }

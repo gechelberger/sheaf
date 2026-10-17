@@ -580,6 +580,15 @@ impl Workspace {
         self.doc.as_ref()
     }
 
+    /// Whether a dialog over the document has to wait for it to open,
+    /// which it then says: such a dialog starts from what the file says,
+    /// and its keys open it even while the menus have it greyed out.
+    fn still_opening(&mut self, cx: &mut Context<Self>) -> bool {
+        self.doc()
+            .cloned()
+            .is_some_and(|d| d.update(cx, |d, cx| d.still_opening(cx)))
+    }
+
     /// Whether the dock on `side` is set to open (F4 aside).
     pub(crate) fn dock_shown(&self, side: Side) -> bool {
         self.dock(side).shows()
@@ -1223,7 +1232,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.doc().is_none() || self.insert_dialog.is_some() {
+        if self.doc().is_none() || self.insert_dialog.is_some() || self.still_opening(cx) {
             return;
         }
         let dialog = cx.new(|cx| crate::insert_dialog::InsertDialog::new(kind, window, cx));
@@ -1286,12 +1295,15 @@ impl Workspace {
             let p = file.clone();
             let counted = cx
                 .background_executor()
-                .spawn(async move { sheaf_ops::open::describe(&p, None) })
+                .spawn(async move {
+                    sheaf_doc::SourceInfo::read(&sheaf_doc::Store::new(), &p, None)
+                        .map(|info| info.src.page_count())
+                })
                 .await;
             ws.update_in(cx, |ws, window, cx| {
                 let Some(doc) = ws.doc().cloned() else { return };
                 let file_pages = match counted {
-                    Ok((info, _)) => info.page_count as usize,
+                    Ok(pages) => pages as usize,
                     Err(e) => {
                         doc.update(cx, |d, cx| d.set_notice(format!("Replace: {e:#}"), cx));
                         return;
@@ -1316,7 +1328,7 @@ impl Workspace {
 
     /// Document > Find Blank Pages….
     fn open_blanks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.blanks.is_some() {
+        if self.blanks.is_some() || self.still_opening(cx) {
             return;
         }
         let Some(doc) = self.doc().cloned() else {
@@ -1349,7 +1361,7 @@ impl Workspace {
 
     /// Bookmarks from Pages… or Color Bookmarks by Level….
     fn open_bookmark_tool(&mut self, color: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.bookmark_tool.is_some() {
+        if self.bookmark_tool.is_some() || self.still_opening(cx) {
             return;
         }
         let Some(doc) = self.doc().cloned() else {
@@ -1398,7 +1410,7 @@ impl Workspace {
 
     /// Document > Set Status…: on the selected bookmark.
     fn open_set_status(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.set_status.is_some() {
+        if self.set_status.is_some() || self.still_opening(cx) {
             return;
         }
         let Some(doc) = self.doc().cloned() else {
@@ -1441,7 +1453,7 @@ impl Workspace {
     /// Watermark… or Background…: read what's there (in the background,
     /// since it means opening the files), then the dialog.
     fn open_watermark(&mut self, behind: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.watermark.is_some() {
+        if self.watermark.is_some() || self.still_opening(cx) {
             return;
         }
         let Some(doc) = self.doc().cloned() else {
@@ -1500,7 +1512,7 @@ impl Workspace {
 
     /// Header & Footer… (or Bates Numbering…, which starts with Bates on).
     fn open_header_footer(&mut self, bates: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.header_footer.is_some() {
+        if self.header_footer.is_some() || self.still_opening(cx) {
             return;
         }
         let Some(doc) = self.doc().cloned() else {
@@ -1563,6 +1575,9 @@ impl Workspace {
             cx.notify();
             return;
         }
+        if self.still_opening(cx) {
+            return;
+        }
         let Some(doc) = self.doc().cloned() else {
             return;
         };
@@ -1613,6 +1628,9 @@ impl Workspace {
             cx.notify();
             return;
         }
+        if self.still_opening(cx) {
+            return;
+        }
         let Some(doc) = self.doc().cloned() else {
             return;
         };
@@ -1658,6 +1676,9 @@ impl Workspace {
             cx.notify();
             return;
         }
+        if self.still_opening(cx) {
+            return;
+        }
         let Some(snapshot) = self.doc().and_then(|d| d.read(cx).model_snapshot()) else {
             return;
         };
@@ -1685,6 +1706,9 @@ impl Workspace {
         if self.export.take().is_some() {
             self.focus_active(window, cx);
             cx.notify();
+            return;
+        }
+        if self.still_opening(cx) {
             return;
         }
         let Some(ctx) = self.doc().and_then(|d| d.read(cx).export_context()) else {
@@ -1715,6 +1739,9 @@ impl Workspace {
             d.update(cx, |d, _| d.release(window));
             self.focus_active(window, cx);
             cx.notify();
+            return;
+        }
+        if self.still_opening(cx) {
             return;
         }
         let prefs = crate::state::get(cx).print.clone();
@@ -1771,6 +1798,9 @@ impl Workspace {
         if self.ocr_dialog.take().is_some() {
             self.focus_active(window, cx);
             cx.notify();
+            return;
+        }
+        if self.still_opening(cx) {
             return;
         }
         let Some(doc) = self.doc().cloned() else {

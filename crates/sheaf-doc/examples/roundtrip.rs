@@ -10,7 +10,7 @@ use std::time::Instant;
 use anyhow::Result;
 use lopdf::content::{Content, Operation};
 use lopdf::{Document, Object, Stream, dictionary};
-use sheaf_core::PageIndex;
+use sheaf_doc::store::{BlobKind, Store};
 
 fn synth_pdf(path: &std::path::Path) -> Result<()> {
     let mut doc = Document::with_version("1.5");
@@ -37,7 +37,7 @@ fn synth_pdf(path: &std::path::Path) -> Result<()> {
         let content_id = doc.add_object(Stream::new(dictionary! {}, content.encode()?));
         let page_id = doc.add_object(dictionary! {
             "Type" => "Page", "Parent" => pages_id, "Contents" => content_id,
-            // Rotate the middle page so page_geometry has something to find.
+            // Rotate the middle page so its geometry has something to show.
             "Rotate" => if n == 2 { 90 } else { 0 },
         });
         kids.push(page_id.into());
@@ -114,13 +114,15 @@ fn main() -> Result<()> {
     let load = t.elapsed();
     let n = doc.page_count();
     println!("{}: {n} pages, loaded in {load:?}", input.display());
+    let src = Store::new().open(sheaf_core::read_file(&input)?, BlobKind::file(&input, None))?;
     for i in 0..n.min(5) {
-        let (size, rot) = doc.page_geometry(PageIndex(i))?;
+        let geom = src.geom(i);
+        let size = geom.shown();
         println!(
             "  page {i}: {:.0}x{:.0} pt, rotate {}",
             size.width,
             size.height,
-            rot.degrees()
+            geom.rotate.degrees()
         );
     }
 

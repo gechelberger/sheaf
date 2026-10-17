@@ -91,7 +91,7 @@ fn appearances_only() {
 
     // The page view draws the bare value, and redraws the others from
     // theirs (NeedAppearances).
-    let engine = PdfiumEngine::open_bytes(std::sync::Arc::new(bytes), None).unwrap();
+    let engine = PdfiumEngine::open_bytes(bytes.into(), None).unwrap();
     let job = Job::Page {
         width: 612,
         rotation: Rotation::R0,

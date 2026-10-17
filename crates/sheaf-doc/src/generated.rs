@@ -1,8 +1,11 @@
 //! PDFs sheaf makes for pages that have no file of their own (images, blank
-//! pages). Sources are files, since save, recovery and the renderer all
-//! reopen them by path, so these are written to a content-addressed cache:
-//! the same bytes give the same file, and a file outlives a crash so
-//! recovery can still use it.
+//! pages), and the stamps and attachments marks name, written to a
+//! content-addressed cache: the same bytes give the same file, and a file
+//! outlives a crash so recovery can still use it. Blank and image pages
+//! go in as files, read from here into the document's store; marks name
+//! their stamps and attachments by the file's stem, which a document finds
+//! in its own table first ([`MarkAssets`](crate::assets::MarkAssets)) and
+//! here only when it has no other copy.
 
 use std::path::PathBuf;
 
@@ -33,20 +36,11 @@ fn name_of(bytes: &[u8]) -> String {
     format!("{}-{}", sheaf_core::checksum_hex(bytes), bytes.len())
 }
 
-/// The name `bytes` had before xxh3 (FNV-1a, 64 bits), to recognize one.
-pub(crate) fn legacy_name_of(bytes: &[u8]) -> String {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in bytes {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    format!("{h:016x}-{}", bytes.len())
-}
-
-/// Whether `stem` is a name the cache gives ([`name_of`], or
-/// [`legacy_name_of`]): hex, a dash, and digits. Marks carry these names
-/// from whatever file they're read from, so nothing else is taken for
-/// one; a name in a crafted file can't point outside the cache.
+/// Whether `stem` is a name the cache gives ([`name_of`], or the FNV-1a
+/// name of 16 hex digits it gave before xxh3): hex, a dash, and digits.
+/// Marks carry these names from whatever file they're read from, so
+/// nothing else is taken for one; a name in a crafted file can't point
+/// outside the cache.
 pub fn is_stem(stem: &str) -> bool {
     let Some((hash, len)) = stem.split_once('-') else {
         return false;
@@ -105,17 +99,6 @@ pub fn stem_of(path: &std::path::Path) -> String {
         .unwrap_or_default()
 }
 
-/// Write `pdf` to the cache as `stem`, for a file recovered from a saved
-/// document whose original isn't on this machine.
-pub fn store_as(stem: &str, pdf: &[u8]) -> Result<PathBuf> {
-    let path = path_of(stem).with_context(|| format!("{stem:?} isn't a cache name"))?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    }
-    write_new(&path, pdf)?;
-    Ok(path)
-}
-
 /// Keep any file's bytes in the cache (an attachment until it's saved
 /// into the document), named by content; returns the name.
 pub fn store_blob(bytes: &[u8]) -> Result<String> {
@@ -127,22 +110,6 @@ pub fn store_blob(bytes: &[u8]) -> Result<String> {
         write_new(&path, bytes)?;
     }
     Ok(stem)
-}
-
-/// Write `bytes` to the cache as `stem`, for an attachment recovered from
-/// a saved document: under the name its mark has, as long as that's the
-/// name of these bytes (now or before xxh3). Anything else could put one
-/// file's bytes in another's place, for every document that has it.
-pub fn store_blob_as(stem: &str, bytes: &[u8]) -> Result<PathBuf> {
-    if stem != name_of(bytes) && stem != legacy_name_of(bytes) {
-        anyhow::bail!("the file embedded isn't the one {stem:?} names");
-    }
-    let path = blob_path(stem).with_context(|| format!("{stem:?} isn't a cache name"))?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    }
-    write_new(&path, bytes)?;
-    Ok(path)
 }
 
 /// Where the cache keeps the file named `stem` (see [`store_blob`]).
@@ -167,7 +134,7 @@ pub fn blank_pages(width: f32, height: f32, count: usize) -> Result<Vec<u8>> {
             pdf.add_object(dictionary! {
                 "Type" => "Page",
                 "Parent" => pages_id,
-                "MediaBox" => vec![0.into(), 0.into(), Object::Real(width), Object::Real(height)],
+                "MediaBox" => vec![0.into(), 0.into(), Object::from(width), Object::from(height)],
                 "Contents" => content,
                 "Resources" => dictionary! {},
             })
@@ -208,10 +175,9 @@ mod tests {
 
     #[test]
     fn only_cache_names_are_paths() {
-        let bytes = b"notes";
-        assert!(is_stem(&name_of(bytes)));
-        assert!(is_stem(&legacy_name_of(bytes)));
-        assert_eq!(legacy_name_of(b""), "cbf29ce484222325-0");
+        assert!(is_stem(&name_of(b"notes")));
+        // Named by FNV-1a, before xxh3.
+        assert!(is_stem("cbf29ce484222325-0"));
         for bad in [
             "",
             "../../.bashrc",
@@ -228,10 +194,6 @@ mod tests {
                 path_of(bad).is_none() && blob_path(bad).is_none(),
                 "{bad:?}"
             );
-            assert!(store_as(bad, b"%PDF").is_err(), "{bad:?}");
         }
-        // A recovered file is kept only under its own name.
-        assert!(store_blob_as(&name_of(b"other"), bytes).is_err());
-        assert!(store_blob_as("../x", bytes).is_err());
     }
 }

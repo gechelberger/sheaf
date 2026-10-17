@@ -21,8 +21,8 @@ use image::imageops::FilterType;
 use image::{DynamicImage, GrayImage, Luma, Rgb, RgbImage};
 use imageproc::geometric_transformations::{Border, Interpolation, Projection};
 use imageproc::point::Point;
+use in_progress::{Progress, Unit};
 use serde::{Deserialize, Serialize};
-use sheaf_progress::{Progress, Unit};
 
 /// Side length that analysis runs at.
 const ANALYSIS: u32 = 1000;
@@ -144,7 +144,7 @@ pub fn clean_with(
     progress: &dyn Progress,
     stage: &mut dyn FnMut(Stage, &RgbImage),
 ) -> Result<Cleaned> {
-    progress.set_total(Some(6), Unit::Items);
+    progress.set_total(Some(6), Unit::ITEMS);
     let mut image = image;
     let mut quad = None;
     if params.crop

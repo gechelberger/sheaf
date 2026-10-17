@@ -4,8 +4,8 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use in_progress::{Level, Snapshot, Tracker};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-use sheaf_progress::{Level, Snapshot, Tracker};
 
 /// The op Ctrl-C cancels.
 static CURRENT: Mutex<Option<Tracker>> = Mutex::new(None);

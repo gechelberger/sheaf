@@ -5,9 +5,12 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use in_progress::{NoProgress, Progress, Unit};
 use serde::{Deserialize, Serialize};
-use sheaf_doc::{Document, Edit, FlatOutlineItem, NewOutlineItem, PageId, SourceId};
-use sheaf_progress::{Progress, Unit};
+use sheaf_doc::open::Facts;
+use sheaf_doc::{
+    Document, Edit, FlatOutlineItem, NewOutlineItem, PageId, SourceId, SourceInfo, Store,
+};
 
 use crate::images::Paper;
 
@@ -108,7 +111,8 @@ pub fn build(
     if items.is_empty() {
         bail!("nothing to combine");
     }
-    progress.set_total(Some(items.len() as u64), Unit::Items);
+    progress.set_total(Some(items.len() as u64), Unit::ITEMS);
+    let store = Store::new();
     let mut doc: Option<Document> = None;
     let mut report = CombineReport::default();
     let (mut renamed, mut signed) = (Vec::new(), Vec::new());
@@ -121,9 +125,9 @@ pub fn build(
             .unwrap_or_default();
         let file = page_source(&item.path, params.image_page)
             .with_context(|| format!("reading {}", item.path.display()))?;
-        let (info, outline) = crate::open::describe(&file, item.password.as_deref())
+        let info = SourceInfo::read(&store, &file, item.password.as_deref())
             .with_context(|| format!("opening {name}"))?;
-        let count = info.page_count as usize;
+        let count = info.src.page_count() as usize;
         let wanted: Vec<u32> = match &item.pages {
             Some(r) if !r.trim().is_empty() => crate::pages::parse(r, count)
                 .map_err(anyhow::Error::msg)
@@ -131,26 +135,38 @@ pub fn build(
                 .into_iter()
                 .map(|i| i as u32)
                 .collect(),
-            _ => (0..info.page_count).collect(),
+            _ => (0..info.src.page_count()).collect(),
         };
-        // Its marks, and its form (M10 slice 4).
-        let (marks, form) = if is_pdf(&item.path) {
-            sheaf_doc::file::read_open(&file, item.password.as_deref())
-                .map(|(a, facts)| (a.sheaf, facts.form))
-                .unwrap_or_default()
+        // Its marks and what they hold, its form (M10 slice 4) and its
+        // bookmarks; an image's page has none.
+        let Facts {
+            marks,
+            assets,
+            form,
+            outline,
+            ..
+        } = if is_pdf(&item.path) {
+            sheaf_doc::open::finish(&info.src, &NoProgress)
         } else {
-            Default::default()
+            Facts::default()
         };
         // Page ids of this file's pages, by index in the file.
         let ids: Vec<(u32, PageId)> = match doc.as_mut() {
             None => {
-                let mut d = Document::new(info, &[], sheaf_doc::history::default_policy());
-                if !marks.is_empty() {
-                    d.set_initial_annots(marks.clone())?;
-                }
-                if !form.fields.is_empty() || !form.widgets.is_empty() {
-                    d.set_initial_fields(&form)?;
-                }
+                // The first file opens as the document, with its marks and
+                // form. Its bookmarks go under its own below, like every
+                // file's, and its labels and header/footer aren't taken.
+                let mut d = sheaf_doc::open::start(
+                    store.clone(),
+                    info,
+                    sheaf_doc::history::default_policy(),
+                );
+                d.ready(Facts {
+                    marks,
+                    assets,
+                    form,
+                    ..Default::default()
+                })?;
                 let all: Vec<PageId> = d.state().pages.iter().map(|p| p.id).collect();
                 let drop: Vec<PageId> = all
                     .iter()
@@ -168,6 +184,7 @@ pub fn build(
             Some(d) => {
                 let sid = d.add_source(info);
                 d.set_source_form(sid, form);
+                d.set_source_assets(sid, &assets);
                 let ids = insert_runs(d, sid, &wanted, &mut renamed, &mut signed)?;
                 for &(index, id) in &ids {
                     for annot in marks.get(&index).into_iter().flatten() {
@@ -328,6 +345,73 @@ pub fn combine(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each file's page stamps and attachments come with its marks: the
+    /// combined document finds them in the files, whose stems no cache
+    /// has, and writes them, and every mark reopens as sheaf's.
+    #[test]
+    fn marks_bring_what_they_hold() {
+        use sheaf_doc::AnnotKind;
+        use sheaf_doc::annot::{WriteCx, to_pdf_in};
+        use sheaf_doc::assets::Stamp;
+        use sheaf_doc::forms::fixture::{self, Form};
+        let dir = std::env::temp_dir().join(format!(
+            "sheaf-combine-{}-{:x}",
+            std::process::id(),
+            fastrand::u64(..)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let every = fixture::every_mark_kind();
+        let held = fixture::mark_assets();
+        let pdf = held.stamp_pdf(fixture::MARK_STAMP).unwrap();
+        let file = held.file_bytes(fixture::MARK_FILE).unwrap();
+        // The page stamp and the attachment, each file's named its own.
+        let items = ["a", "b"].map(|name| {
+            let (stamp, attached) = (format!("{name}-stamp"), format!("{name}-file"));
+            held.intern_stamp(&stamp, pdf.clone());
+            held.intern_file(&attached, file.clone());
+            let mut marks = [every[17].clone(), every[23].clone()];
+            if let AnnotKind::PageStamp { stamp: s, .. } = &mut marks[0].kind {
+                *s = stamp;
+            }
+            if let AnnotKind::FileAttachment { file: f, .. } = &mut marks[1].kind {
+                *f = attached;
+            }
+            let mut f = Form::new(1);
+            let mut cx = WriteCx::new(held.clone());
+            let mut annots = Vec::new();
+            for a in &marks {
+                let main = to_pdf_in(a, &mut f.pdf, &mut cx).main;
+                annots.push(lopdf::Object::Reference(f.pdf.add_object(main)));
+            }
+            let page = f.pages[0];
+            f.dict(page).set("Annots", annots);
+            let path = dir.join(format!("{name}.pdf"));
+            std::fs::write(&path, f.bytes()).unwrap();
+            CombineItem {
+                path,
+                pages: None,
+                password: None,
+            }
+        });
+        let (doc, _) = build(&items, &CombineParams::default(), &NoProgress).unwrap();
+        let assets = doc.assets();
+        for name in ["a", "b"] {
+            let stamp = assets.stamp(&format!("{name}-stamp"));
+            assert!(matches!(stamp, Some(Stamp::Form { .. })), "{name}");
+            let file = assets.file_bytes(&format!("{name}-file")).unwrap();
+            assert_eq!(&*file, fixture::MARK_FILE_BYTES, "{name}");
+        }
+        let out = dir.join("combined.pdf");
+        sheaf_doc::save::rewrite_to_path(&doc.snapshot(), &out).unwrap();
+        let back = sheaf_doc::open::file(&out, None).unwrap();
+        assert!(back.view.foreign.is_empty(), "{:?}", back.view.foreign);
+        let st = back.doc.state();
+        for p in st.pages.iter() {
+            assert_eq!(st.annots_on(p.id).map(|l| l.len()), Some(2));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn args_split_off_a_range() {

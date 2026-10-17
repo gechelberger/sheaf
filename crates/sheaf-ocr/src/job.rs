@@ -15,7 +15,8 @@ use std::sync::{Arc, Mutex, mpsc};
 
 use anyhow::{Context, Result};
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
-use sheaf_core::{PageSize, Rotation};
+use sheaf_core::Rotation;
+use sheaf_doc::geom::Geom;
 use sheaf_doc::{PageId, SourceId, TextLayer};
 use sheaf_image::raster::{PixelFormat, Raster};
 use sheaf_render::{Job, RenderHandle, RenderRequest};
@@ -35,12 +36,11 @@ pub struct OcrPage {
     pub source: SourceId,
     /// Index within the source file.
     pub index: u32,
-    /// The page's extra rotation; it is rendered and recognized that way.
-    pub rotation: Rotation,
-    /// Size in points as rendered (after `rotation`). Only a fallback: the
-    /// job asks the source for the real size, since the app's size table
-    /// fills in asynchronously after a file opens.
-    pub size: PageSize,
+    /// The page as it's rendered and recognized: its boxes and rotation.
+    pub geom: Geom,
+    /// The turn `geom` adds to the source page's own `/Rotate`, which the
+    /// render takes.
+    pub render: Rotation,
 }
 
 #[derive(Debug, Clone)]
@@ -54,9 +54,6 @@ pub struct OcrRequest {
 /// What the job needs from an opened file. Implemented for the render
 /// worker; faked in tests.
 pub trait PageSource: Send + Sync {
-    /// The page's size in points as the file shows it (after its own
-    /// `/Rotate`, before any extra rotation).
-    fn page_size(&self, page: u32) -> Result<PageSize>;
     /// Real characters of text on the page (0 for image-only).
     fn text_len(&self, page: u32) -> Result<usize>;
     /// Render the page `width_px` wide, rotated by `rotation`.
@@ -64,10 +61,6 @@ pub trait PageSource: Send + Sync {
 }
 
 impl PageSource for RenderHandle {
-    fn page_size(&self, page: u32) -> Result<PageSize> {
-        futures::executor::block_on(self.page_size(page)).context("render worker gone")?
-    }
-
     fn text_len(&self, page: u32) -> Result<usize> {
         futures::executor::block_on(self.page_text_len(page)).context("render worker gone")?
     }
@@ -289,21 +282,10 @@ fn coordinate(
                 }
             }
         }
-        // The real size, so the pixel→point mapping is exact even before
-        // the app has enumerated every page.
-        let size = match src.page_size(page.index) {
-            Ok(s) => s.rotated(page.rotation),
-            Err(e) => {
-                log::warn!("ocr: page {} size: {e:#}; using the app's", page.index);
-                page.size
-            }
-        };
-        let page = OcrPage {
-            size,
-            ..page.clone()
-        };
-        let width = (size.width * dpi as f32 / 72.0).round().max(1.0) as u32;
-        let raster = match src.render(page.index, width, page.rotation) {
+        let width = (page.geom.shown().width * dpi as f32 / 72.0)
+            .round()
+            .max(1.0) as u32;
+        let raster = match src.render(page.index, width, page.render) {
             Ok(r) => r,
             Err(e) => {
                 fail(format!("rendering: {e:#}"));
@@ -315,7 +297,11 @@ fn coordinate(
             continue;
         };
         drop(raster);
-        if work_tx.send(Work { page, img }).is_err() {
+        let work = Work {
+            page: page.clone(),
+            img,
+        };
+        if work_tx.send(work).is_err() {
             // Every worker is gone.
             break;
         }
@@ -358,7 +344,7 @@ fn worker(
         let (w, h) = (img.width(), img.height());
         match engine.recognize(img, dpi) {
             Ok(words) => {
-                let layer = layer_from_words(words, page.size, w, h, page.rotation, &engine_name);
+                let layer = layer_from_words(words, &page.geom, w, h, &engine_name);
                 done.fetch_add(1, Ordering::Relaxed);
                 let _ = tx.unbounded_send(OcrEvent::Page { id: page.id, layer });
             }
@@ -379,20 +365,16 @@ mod tests {
     use super::*;
     use crate::engine::{EngineInfo, InputKind, OcrWord};
     use futures::StreamExt;
+    use sheaf_doc::Box2;
+    use sheaf_doc::geom::Rect;
     use std::time::Duration;
 
     struct FakeSource {
         /// Text length per page index.
         text: Vec<usize>,
-        /// What the file says the page size is, if the fake knows.
-        sizes: Option<PageSize>,
     }
 
     impl PageSource for FakeSource {
-        fn page_size(&self, _page: u32) -> Result<PageSize> {
-            self.sizes.context("size unknown")
-        }
-
         fn text_len(&self, page: u32) -> Result<usize> {
             self.text
                 .get(page as usize)
@@ -400,8 +382,12 @@ mod tests {
                 .context("no such page")
         }
 
-        fn render(&self, _page: u32, width_px: u32, _rotation: Rotation) -> Result<Raster> {
-            let height = width_px * 792 / 612;
+        /// A portrait page, turned `rotation`.
+        fn render(&self, _page: u32, width_px: u32, rotation: Rotation) -> Result<Raster> {
+            let height = match rotation {
+                Rotation::R0 | Rotation::R180 => width_px * 792 / 612,
+                Rotation::R90 | Rotation::R270 => width_px * 612 / 792,
+            };
             Ok(Raster {
                 width: width_px,
                 height,
@@ -448,11 +434,8 @@ mod tests {
             id: PageId(i as u64),
             source: SourceId(0),
             index: i,
-            rotation: Rotation::R0,
-            size: PageSize {
-                width,
-                height: 792.0,
-            },
+            geom: Geom::read(Some(Rect::new(0.0, 0.0, width, 792.0)), None, 0),
+            render: Rotation::R0,
         }
     }
 
@@ -472,7 +455,7 @@ mod tests {
             },
         };
         let mut sources: HashMap<SourceId, Arc<dyn PageSource>> = HashMap::new();
-        sources.insert(SourceId(0), Arc::new(FakeSource { text, sizes: None }));
+        sources.insert(SourceId(0), Arc::new(FakeSource { text }));
         let factory: EngineFactory = Arc::new(move || Ok(Box::new(MockEngine { delay }) as _));
         let (handle, rx) = start_with(req, sources, factory, 2);
         let mut events = Vec::new();
@@ -542,9 +525,11 @@ mod tests {
         layers.sort_by_key(|(id, _)| *id);
         assert_eq!(layers.len(), 2);
         assert_eq!(layers[0].0, PageId(0));
-        // 1275 px for 612 pt: the mock's 61.2 px box is 29.376 pt.
+        // 1275 px for 612 pt: the mock's 61.2 px box is 29.376 pt, 38.016
+        // down the page and as tall, so 715.968 up it.
         let r = layers[0].1.words[0].rect;
         assert!((r.x - 29.376).abs() < 1e-2, "{r:?}");
+        assert!((r.y - 715.968).abs() < 1e-2, "{r:?}");
         assert_eq!(layers[0].1.engine, "mock");
         assert!(matches!(
             events.last(),
@@ -581,12 +566,21 @@ mod tests {
         );
     }
 
+    /// A page turned in sheaf is rendered turned and read as it shows:
+    /// the words come back in PageSpace, upright in the page's frame.
     #[test]
-    fn real_page_size_wins_over_the_apps_guess() {
-        // The app guessed Letter; the file says landscape. The raster and
-        // the layer must follow the file.
+    fn a_turned_page_is_read_as_it_shows() {
+        let base = Geom::read(None, None, 0);
+        let geom = Geom {
+            rotate: Rotation::R90,
+            ..base
+        };
         let req = OcrRequest {
-            pages: vec![page(0, 612.0)],
+            pages: vec![OcrPage {
+                geom,
+                render: Rotation::R90,
+                ..page(0, 612.0)
+            }],
             skip_pages_with_text: false,
             engine: EngineKind::Tesseract,
             config: OcrConfig {
@@ -595,16 +589,7 @@ mod tests {
             },
         };
         let mut sources: HashMap<SourceId, Arc<dyn PageSource>> = HashMap::new();
-        sources.insert(
-            SourceId(0),
-            Arc::new(FakeSource {
-                text: vec![0],
-                sizes: Some(PageSize {
-                    width: 792.0,
-                    height: 612.0,
-                }),
-            }),
-        );
+        sources.insert(SourceId(0), Arc::new(FakeSource { text: vec![0] }));
         let factory: EngineFactory = Arc::new(|| {
             Ok(Box::new(MockEngine {
                 delay: Duration::ZERO,
@@ -620,13 +605,20 @@ mod tests {
                 }
             }
         });
-        assert_eq!(layer.page.width, 792.0);
-        // 792 pt at 150 dpi is 1650 px: the mock's 61.2 px box is 29.376 pt.
-        assert!(
-            (layer.words[0].rect.x - 29.376).abs() < 1e-2,
-            "{:?}",
-            layer.words[0].rect
-        );
+        assert_eq!(layer.upright, Rotation::R90);
+        // 792 pt shown at 150 dpi is 1650 px: the mock's box is 29.376 by
+        // 38.016 pt from the top-left as shown, which on a page turned 90°
+        // is PageSpace's bottom-left, x and y swapped.
+        let r = layer.words[0].rect;
+        let want = Box2 {
+            x: 38.016,
+            y: 29.376,
+            w: 38.016,
+            h: 29.376,
+        };
+        for (got, want) in [(r.x, want.x), (r.y, want.y), (r.w, want.w), (r.h, want.h)] {
+            assert!((got - want).abs() < 1e-2, "{r:?}");
+        }
     }
 
     #[test]

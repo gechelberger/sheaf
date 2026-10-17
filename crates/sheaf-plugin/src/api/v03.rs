@@ -272,6 +272,7 @@ pub(crate) fn annot_from_wit(a: w::Annot) -> Annot {
         modified: now.clone(),
         created: now,
         dashed: a.dashed,
+        turn: Rotation::R0,
         name: String::new(),
     }
 }

@@ -104,6 +104,9 @@ impl DocView {
         at: Where,
         cx: &mut Context<Self>,
     ) {
+        if self.still_opening(cx) {
+            return;
+        }
         let fit = match size.map(|s| self.size_of(s)) {
             Some(s) => PageFit::Paper {
                 width: s.width.min(s.height),
@@ -152,49 +155,48 @@ impl DocView {
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
+        if self.still_opening(cx) {
+            return;
+        }
+        let State::Ready(doc) = &self.state else {
+            return;
+        };
+        let store = doc.model.store().clone();
         self.set_notice(format!("Replacing pages from {name}…"), cx);
         cx.spawn(async move |this, cx| {
             let opened = cx
                 .background_executor()
-                .spawn({
-                    let path = path.clone();
-                    async move {
-                        let bytes = std::fs::metadata(&path)
-                            .map(|m| m.len() as usize)
-                            .unwrap_or(0);
-                        let incoming = crate::docview::Incoming::read(&path);
-                        anyhow::Ok((RenderHandle::open(path, None)?, bytes, incoming))
-                    }
+                .spawn(async move {
+                    let info = SourceInfo::read(&store, &path, None)?;
+                    let incoming = crate::docview::Incoming::read(&info);
+                    let handle = RenderHandle::open_bytes(info.src.bytes().clone(), None)?;
+                    anyhow::Ok((info, handle, incoming))
                 })
                 .await;
             this.update(cx, |v, cx| {
-                let (handle, bytes, incoming) = match opened {
+                let (info, handle, incoming) = match opened {
                     Ok(h) => h,
                     Err(e) => {
                         v.set_notice(format!("Replace failed: {e:#}"), cx);
                         return;
                     }
                 };
+                // A recovery may have reopened the view meanwhile: a document
+                // still opening takes nothing in.
+                if v.still_opening(cx) {
+                    return;
+                }
                 let State::Ready(doc) = &mut v.state else {
                     return;
                 };
-                let info = handle.info();
-                let sid = doc.model.add_source(SourceInfo {
-                    path: path.clone(),
-                    page_count: info.page_count,
-                    first_page: info.first_page,
-                    page_sizes: None,
-                    bytes,
-                    password: None,
-                    data: Some(sheaf_doc::SourceData(handle.data())),
-                    derived: None,
-                });
-                let sizes_rx = handle.page_sizes();
+                let sid = doc.model.add_source(info);
                 doc.handles.insert(sid, handle);
                 let n = ids.len();
                 let label = format!("Replace {n} page{}", if n == 1 { "" } else { "s" });
                 let mixed = doc.model.scripts_mixed();
                 doc.model.set_source_form(sid, incoming.form.clone());
+                doc.model.set_source_renamed(sid, &incoming.renamed);
+                doc.model.set_source_assets(sid, &incoming.assets);
                 match doc.model.apply(
                     Edit::ReplacePages {
                         ids,
@@ -215,24 +217,14 @@ impl DocView {
                         if let Some(form) = doc.model.form_notice(&out, false, mixed) {
                             notice = format!("{notice}. {form}");
                         }
+                        if let Some(text) = doc.model.unencodable_notice(&out) {
+                            notice = format!("{notice}. {text}");
+                        }
                         v.after_model_change(label, out, cx);
                         v.set_notice(notice, cx);
                     }
-                    Err(e) => v.set_notice(format!("Replace failed: {e:#}"), cx),
+                    Err(e) => v.set_notice(crate::docview::failed("Replace", &e), cx),
                 }
-                cx.spawn(async move |this, cx| {
-                    if let Ok(Ok(sizes)) = sizes_rx.await {
-                        this.update(cx, |v, cx| {
-                            if let State::Ready(doc) = &mut v.state {
-                                doc.model.set_source_sizes(sid, sizes);
-                                doc.touched();
-                                cx.notify();
-                            }
-                        })
-                        .ok();
-                    }
-                })
-                .detach();
             })
             .ok();
         })
@@ -268,8 +260,9 @@ impl DocView {
 }
 
 impl DocView {
-    /// Document > Crop Pages: plan in the background (cropped copies go to
-    /// the generated cache), then show the pages from them as one step.
+    /// Document > Crop Pages: plan in the background (cropped copies are
+    /// made in memory, into the document's store), then show the pages
+    /// from them as one step.
     pub(crate) fn crop_pages(
         &mut self,
         pages: Vec<usize>,
@@ -284,6 +277,7 @@ impl DocView {
             return;
         }
         let snapshot = doc.model.snapshot();
+        let store = doc.model.store().clone();
         let n = ids.len();
         self.set_notice(
             format!("Cropping {n} page{}…", if n == 1 { "" } else { "s" }),
@@ -293,11 +287,16 @@ impl DocView {
             let planned = cx
                 .background_executor()
                 .spawn(async move {
-                    let plan =
-                        sheaf_ops::crop::plan(&snapshot, &ids, spec, &sheaf_ops::NoProgress)?;
+                    let plan = sheaf_ops::crop::plan(
+                        &store,
+                        &snapshot,
+                        &ids,
+                        spec,
+                        &sheaf_ops::NoProgress,
+                    )?;
                     let mut opened = Vec::new();
                     for c in plan {
-                        let handle = RenderHandle::open(c.info.path.clone(), None)?;
+                        let handle = RenderHandle::open_bytes(c.info.src.bytes().clone(), None)?;
                         opened.push((c, handle));
                     }
                     anyhow::Ok(opened)
@@ -333,7 +332,7 @@ impl DocView {
                             cx,
                         );
                     }
-                    Err(e) => v.set_notice(format!("Crop failed: {e:#}"), cx),
+                    Err(e) => v.set_notice(crate::docview::failed("Crop", &e), cx),
                 }
             })
             .ok();
@@ -390,7 +389,7 @@ impl DocView {
                 doc.touched();
                 self.after_model_change(label, out, cx);
             }
-            Err(e) => self.set_notice(format!("Page labels: {e:#}"), cx),
+            Err(e) => self.set_notice(crate::docview::failed("Page labels", &e), cx),
         }
     }
 }
@@ -415,6 +414,7 @@ impl DocView {
             return;
         };
         let snapshot = doc.model.snapshot();
+        let store = doc.model.store().clone();
         let label = if hf.is_some() {
             "Header & footer"
         } else {
@@ -425,10 +425,11 @@ impl DocView {
             let planned = cx
                 .background_executor()
                 .spawn(async move {
-                    let plan = sheaf_ops::derive::strip_stamps(&snapshot, &sheaf_ops::NoProgress)?;
+                    let plan =
+                        sheaf_ops::derive::strip_stamps(&store, &snapshot, &sheaf_ops::NoProgress)?;
                     let mut opened = Vec::new();
                     for c in plan {
-                        let handle = RenderHandle::open(c.info.path.clone(), None)?;
+                        let handle = RenderHandle::open_bytes(c.info.src.bytes().clone(), None)?;
                         opened.push((c, handle));
                     }
                     anyhow::Ok(opened)
@@ -459,10 +460,14 @@ impl DocView {
                 match doc.model.apply_batch(edits, label) {
                     Ok(out) => {
                         doc.touched();
+                        let mut notice = format!("{label}: shown now, written when you save");
+                        if let Some(text) = doc.model.unencodable_notice(&out) {
+                            notice = format!("{notice}. {text}");
+                        }
                         v.after_model_change(label.to_string(), out, cx);
-                        v.set_notice(format!("{label}: shown now, written when you save"), cx);
+                        v.set_notice(notice, cx);
                     }
-                    Err(e) => v.set_notice(format!("{label} failed: {e:#}"), cx),
+                    Err(e) => v.set_notice(crate::docview::failed(label, &e), cx),
                 }
             })
             .ok();
@@ -512,6 +517,7 @@ impl DocView {
             return;
         };
         let snapshot = doc.model.snapshot();
+        let store = doc.model.store().clone();
         let scope: Vec<PageId> = match pages {
             Some(ix) => self.page_ids_at(&ix),
             None => snapshot.state.pages.iter().map(|p| p.id).collect(),
@@ -522,12 +528,15 @@ impl DocView {
         } else {
             format!("Remove {}", what.to_lowercase())
         };
+        // Its text is drawn into the copies, out of the model's sight.
+        let unencodable = wm.as_ref().is_some_and(|w| w.unencodable());
         self.set_notice(format!("{label}…"), cx);
         cx.spawn(async move |this, cx| {
             let planned = cx
                 .background_executor()
                 .spawn(async move {
                     let plan = sheaf_ops::derive::watermark(
+                        &store,
                         &snapshot,
                         behind,
                         wm.as_ref(),
@@ -536,7 +545,7 @@ impl DocView {
                     )?;
                     let mut opened = Vec::new();
                     for c in plan {
-                        let handle = RenderHandle::open(c.info.path.clone(), None)?;
+                        let handle = RenderHandle::open_bytes(c.info.src.bytes().clone(), None)?;
                         opened.push((c, handle));
                     }
                     anyhow::Ok(opened)
@@ -568,15 +577,18 @@ impl DocView {
                     .model
                     .apply(Edit::RebasePages { pages: rebases }, &label)
                 {
-                    Ok(out) => {
+                    Ok(mut out) => {
                         doc.touched();
+                        out.unencodable |= unencodable;
+                        let mut notice =
+                            format!("{label}: {n} page{}", if n == 1 { "" } else { "s" });
+                        if let Some(text) = doc.model.unencodable_notice(&out) {
+                            notice = format!("{notice}. {text}");
+                        }
                         v.after_model_change(label.clone(), out, cx);
-                        v.set_notice(
-                            format!("{label}: {n} page{}", if n == 1 { "" } else { "s" }),
-                            cx,
-                        );
+                        v.set_notice(notice, cx);
                     }
-                    Err(e) => v.set_notice(format!("{label} failed: {e:#}"), cx),
+                    Err(e) => v.set_notice(crate::docview::failed(&label, &e), cx),
                 }
             })
             .ok();

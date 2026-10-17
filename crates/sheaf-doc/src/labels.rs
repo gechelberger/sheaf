@@ -2,9 +2,12 @@
 //! shows instead of its position. Read from files, kept in the model by
 //! page id ([`LabelSpec`]) so they survive reorders, and written back.
 
-use lopdf::{Dictionary, Document as Pdf, Object};
+use std::collections::HashSet;
+
+use lopdf::{Dictionary, Object, ObjectId};
 use serde::{Deserialize, Serialize};
 
+use crate::attachments::{Objects, once, resolve};
 use crate::model::PageId;
 
 /// How a range numbers its pages (`/S`).
@@ -29,20 +32,15 @@ pub struct LabelRange {
     pub first: u32,
 }
 
-/// The label of every page, or None when the file has no page labels.
-pub fn page_labels(pdf: &Pdf, page_count: u32) -> Option<Vec<String>> {
-    let ranges = label_ranges(pdf)?;
-    Some(labels_for(&ranges, page_count))
-}
-
 /// The label ranges in the catalog's `/PageLabels`, sorted by start page.
-pub fn label_ranges(pdf: &Pdf) -> Option<Vec<LabelRange>> {
+pub fn label_ranges<P: Objects + ?Sized>(pdf: &P) -> Option<Vec<LabelRange>> {
     let catalog = pdf.catalog().ok()?;
-    let tree = resolve(pdf, catalog.get(b"PageLabels").ok()?)?
+    let mut seen = HashSet::new();
+    let tree = once(pdf, &mut seen, catalog.get(b"PageLabels").ok()?)?
         .as_dict()
         .ok()?;
     let mut nums = Vec::new();
-    collect_nums(pdf, tree, &mut nums, 0);
+    collect_nums(pdf, tree, &mut nums, 0, &mut seen);
     let mut ranges: Vec<LabelRange> = nums
         .into_iter()
         .filter_map(|(start, o)| {
@@ -238,7 +236,7 @@ pub fn format_label(r: &LabelRange, offset: u32) -> String {
     format!("{}{number}", r.prefix)
 }
 
-fn range_from(pdf: &Pdf, start: u32, d: &Dictionary) -> LabelRange {
+fn range_from<P: Objects + ?Sized>(pdf: &P, start: u32, d: &Dictionary) -> LabelRange {
     let style = match d.get(b"S").ok().and_then(|o| resolve(pdf, o)) {
         Some(Object::Name(n)) => match n.as_slice() {
             b"D" => Style::Decimal,
@@ -271,17 +269,19 @@ fn range_from(pdf: &Pdf, start: u32, d: &Dictionary) -> LabelRange {
     }
 }
 
-/// Walk a number tree: `/Nums [key value …]` at leaves, `/Kids` above.
-fn collect_nums<'a>(
-    pdf: &'a Pdf,
+/// Walk a number tree: `/Nums [key value …]` at leaves, `/Kids` above,
+/// each node or array reached by reference once.
+fn collect_nums<'a, P: Objects + ?Sized>(
+    pdf: &'a P,
     node: &'a Dictionary,
     out: &mut Vec<(u32, &'a Object)>,
     depth: u8,
+    seen: &mut HashSet<ObjectId>,
 ) {
     if depth > 32 {
         return;
     }
-    if let Some(Object::Array(nums)) = node.get(b"Nums").ok().and_then(|o| resolve(pdf, o)) {
+    if let Some(Object::Array(nums)) = node.get(b"Nums").ok().and_then(|o| once(pdf, seen, o)) {
         for pair in nums.as_chunks::<2>().0 {
             if let Some(k) = resolve(pdf, &pair[0]).and_then(|o| o.as_i64().ok())
                 && (0..=u32::MAX as i64).contains(&k)
@@ -290,19 +290,12 @@ fn collect_nums<'a>(
             }
         }
     }
-    if let Some(Object::Array(kids)) = node.get(b"Kids").ok().and_then(|o| resolve(pdf, o)) {
+    if let Some(Object::Array(kids)) = node.get(b"Kids").ok().and_then(|o| once(pdf, seen, o)) {
         for kid in kids {
-            if let Some(Ok(d)) = resolve(pdf, kid).map(Object::as_dict) {
-                collect_nums(pdf, d, out, depth + 1);
+            if let Some(Ok(d)) = once(pdf, seen, kid).map(Object::as_dict) {
+                collect_nums(pdf, d, out, depth + 1, seen);
             }
         }
-    }
-}
-
-fn resolve<'a>(pdf: &'a Pdf, o: &'a Object) -> Option<&'a Object> {
-    match o {
-        Object::Reference(id) => pdf.get_object(*id).ok(),
-        o => Some(o),
     }
 }
 
@@ -344,7 +337,7 @@ fn letters(n: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lopdf::dictionary;
+    use lopdf::{Document as Pdf, dictionary};
 
     fn range(start: u32, style: Style, prefix: &str, first: u32) -> LabelRange {
         LabelRange {
@@ -403,7 +396,11 @@ mod tests {
             "PageLabels" => tree,
         });
         pdf.trailer.set("Root", catalog);
-        assert_eq!(page_labels(&pdf, 4).unwrap(), ["i", "ii", "Tab 5", "Tab 6"]);
+        let ranges = label_ranges(&pdf).unwrap();
+        assert_eq!(labels_for(&ranges, 4), ["i", "ii", "Tab 5", "Tab 6"]);
+        // Read from a source, as a file opens: the same ranges.
+        let src = crate::open::tests::lazily(&mut pdf);
+        assert_eq!(label_ranges(src.pdf()), label_ranges(&pdf));
     }
 
     #[test]
@@ -411,13 +408,14 @@ mod tests {
         let mut pdf = Pdf::with_version("1.7");
         let catalog = pdf.add_object(dictionary! { "Type" => "Catalog" });
         pdf.trailer.set("Root", catalog);
-        assert!(page_labels(&pdf, 3).is_none());
+        assert!(label_ranges(&pdf).is_none());
     }
 }
 
 #[cfg(test)]
 mod edit_tests {
     use super::*;
+    use lopdf::Document as Pdf;
 
     fn r(start: u32, style: Style, prefix: &str, first: u32) -> LabelRange {
         LabelRange {

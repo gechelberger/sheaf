@@ -7,7 +7,7 @@ license.workspace = true
 [dependencies]
 sheaf-core.workspace = true
 sheaf-doc.workspace = true
-sheaf-progress.workspace = true
+in-progress.workspace = true
 anyhow.workspace = true
 log.workspace = true
 serde.workspace = true
@@ -26,3 +26,7 @@ usvg = { version = "0.46", default-features = false }
 
 [dev-dependencies]
 env_logger.workspace = true
+# Documents of blank pages, for the host tests.
+sheaf-doc = { workspace = true, features = ["fixtures"] }
+# A turned page with its boxes off the origin, for the host tests.
+lopdf.workspace = true

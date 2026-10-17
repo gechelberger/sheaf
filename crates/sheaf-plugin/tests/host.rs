@@ -9,8 +9,12 @@ use std::time::Duration;
 
 use anyhow::Result;
 use futures::executor::block_on;
-use sheaf_core::PageSize;
-use sheaf_doc::{Document, Edit, FixedCount, SourceId, SourceInfo};
+use sheaf_core::Rotation;
+use sheaf_doc::geom::Geom;
+use sheaf_doc::store::BlobKind;
+use sheaf_doc::{
+    AnnotKind, Box2, DestView, Document, Edit, FixedCount, SourceId, SourceInfo, Store,
+};
 use sheaf_plugin::ui::{
     BuiltinPanel, FieldAnswer, FieldKind, FieldValue, Form, PanelRow, ShowPanel, Ui,
 };
@@ -144,23 +148,37 @@ impl TextSource for FakeText {
 }
 
 fn doc(pages: u32) -> Document {
-    Document::new(
-        SourceInfo {
-            path: "return.pdf".into(),
-            page_count: pages,
-            first_page: PageSize {
-                width: 612.0,
-                height: 792.0,
-            },
-            page_sizes: None,
-            bytes: 1000,
-            password: None,
-            data: None,
-            derived: None,
-        },
-        &[],
-        Box::new(FixedCount(50)),
-    )
+    let store = Store::new();
+    let primary = SourceInfo {
+        name: "return.pdf".into(),
+        ..SourceInfo::blank(&store, pages)
+    };
+    Document::new(store, primary, &[], Box::new(FixedCount(50)))
+}
+
+/// Two pages: the first `/Rotate 90` with its CropBox off the origin,
+/// the second plain Letter.
+fn turned_doc() -> Document {
+    let mut f = sheaf_doc::forms::fixture::Form::new(2);
+    let first = f.pages[0];
+    f.dict(first).set("Rotate", 90);
+    let crop: Vec<lopdf::Object> = vec![20.into(), 30.into(), 600.into(), 770.into()];
+    f.dict(first).set("CropBox", crop);
+    let store = Store::new();
+    let kind = BlobKind::file(Path::new("turned.pdf"), None);
+    let primary = SourceInfo {
+        src: store.open(f.bytes().into(), kind).unwrap(),
+        name: "turned.pdf".into(),
+        derived: None,
+    };
+    Document::new(store, primary, &[], Box::new(FixedCount(50)))
+}
+
+/// Page `i`'s frame in the plugin API: its source page as the file shows
+/// it, whatever sheaf has turned since.
+fn frame(d: &Document, i: usize) -> Geom {
+    let p = d.page(i).unwrap();
+    d.source(p.source).unwrap().src.geom(p.index)
 }
 
 fn ctx(d: &Document) -> CallContext {
@@ -211,7 +229,7 @@ fn command_returns_edits_that_apply_as_one_step() {
 
     d.apply_batch(batch.edits.clone(), &batch.label).unwrap();
     assert_eq!(d.state().outline.len(), 3);
-    d.undo();
+    d.undo().unwrap();
     assert!(d.state().outline.is_empty(), "one undo reverts them all");
 }
 
@@ -231,11 +249,7 @@ fn unsaved_ocr_text_wins_over_the_engine() {
             },
             confidence: 0.9,
         }],
-        PageSize {
-            width: 612.0,
-            height: 792.0,
-        },
-        sheaf_core::Rotation::R0,
+        &d.geom(d.page(0).unwrap()),
         "test",
     );
     d.apply(
@@ -850,7 +864,8 @@ impl sheaf_plugin::OcrSource for FakeOcr {
     fn recognize(
         &self,
         page: &sheaf_doc::PageRef,
-        size: PageSize,
+        geom: &sheaf_doc::geom::Geom,
+        _render: sheaf_core::Rotation,
         language: Option<String>,
         _dpi: Option<u32>,
     ) -> Result<sheaf_doc::TextLayer> {
@@ -867,8 +882,7 @@ impl sheaf_plugin::OcrSource for FakeOcr {
                 },
                 confidence: 0.9,
             }],
-            size,
-            page.rotation,
+            geom,
             &format!("fake-{}", language.unwrap_or_default()),
         ))
     }
@@ -979,16 +993,15 @@ fn bookmark_from_pattern_bundled_plugin() {
         .outline_flat()
         .into_iter()
         .map(|(depth, n)| {
-            let top = match &n.view {
-                Some(sheaf_doc::DestView::Xyz { top, .. }) => *top,
+            let index = n.target.and_then(|t| d.index_of(t));
+            // Held in PageSpace: where it lands as the plugin placed it.
+            let top = match (&n.view, index) {
+                (Some(DestView::Xyz { left, top, .. }), Some(i)) => {
+                    frame(&d, i).to_view().apply_axes(*left, *top).1
+                }
                 _ => None,
             };
-            (
-                depth,
-                n.title.clone(),
-                n.target.and_then(|t| d.index_of(t)),
-                top,
-            )
+            (depth, n.title.clone(), index, top)
         })
         .collect();
     assert_eq!(
@@ -1001,7 +1014,7 @@ fn bookmark_from_pattern_bundled_plugin() {
             (1, "Inv #103".to_string(), Some(2), Some(198.0)),
         ]
     );
-    d.undo();
+    d.undo().unwrap();
 
     // A preset, the whole match, top level; then a re-run adds nothing.
     *ui.answer.lock().unwrap() = Some(answer(1, "{0}", 0));
@@ -1064,10 +1077,12 @@ fn subtotal_bundled_plugin() {
         progress: None,
         preferences: String::new(),
     };
+    // Given as the plugin sees it; a region event is PageSpace.
+    let from_view = frame(&d, 0).from_view();
     let region = |x: f32, y: f32, w: f32, h: f32| {
         Call::Event(DocEvent::Region {
             page,
-            rect: sheaf_doc::Box2 { x, y, w, h },
+            rect: from_view.apply_box(Box2 { x, y, w, h }),
         })
     };
     let call = |c| block_on(p.call(c, ctx())).unwrap().unwrap();
@@ -1230,7 +1245,7 @@ fn currency_convert_bundled_plugin() {
         "No amounts to convert to USD"
     );
     // Undone, then again: the rates come from storage, not the network.
-    d.undo();
+    d.undo().unwrap();
     *ui.answer.lock().unwrap() = answer("2026-10-10");
     let out = run(&p, "convert", None, ctx(&d)).unwrap();
     assert_eq!(out.batches[0].edits.len(), 2);
@@ -1421,7 +1436,27 @@ fn progress_reports_and_cancels() {
     // Runs to the end without a tracker.
     run(&p, "count", None, ctx(&d)).unwrap();
 
-    let tracker = sheaf_progress::Tracker::new();
+    // And with one: its tasks are freed, so the step goes back to the
+    // call's own, which counts nothing, and the message stays.
+    let tracker = in_progress::Tracker::new();
+    let mut c = ctx(&d);
+    c.progress = Some(tracker.clone());
+    run(&p, "count", None, c).unwrap();
+    let s = tracker.snapshot();
+    assert_eq!(
+        (s.fraction, s.step.as_str(), s.total, s.message_count),
+        (Some(1.0), "", None, 1)
+    );
+
+    // A task left short of its total, which the host frees, fills its part.
+    let tracker = in_progress::Tracker::new();
+    let mut c = ctx(&d);
+    c.progress = Some(tracker.clone());
+    run(&p, "early", None, c).unwrap();
+    let s = tracker.snapshot();
+    assert_eq!((s.fraction, s.step.as_str()), (Some(1.0), ""));
+
+    let tracker = in_progress::Tracker::new();
     let mut c = ctx(&d);
     c.progress = Some(tracker.clone());
     let rx = p.run_command("count", None, c);
@@ -1432,7 +1467,7 @@ fn progress_reports_and_cancels() {
         if s.done >= 20 {
             assert_eq!(
                 s.message,
-                Some((sheaf_progress::Level::Info, "ten done".into()))
+                Some((in_progress::Level::Info, "ten done".into()))
             );
             assert!(s.fraction.unwrap() > 0.0);
             break;
@@ -1449,7 +1484,41 @@ fn progress_reports_and_cancels() {
         }
         other => panic!("expected a stop, got {other:?}"),
     }
+    // A stopped task keeps its place.
+    let s = tracker.snapshot();
+    assert!(s.cancelled && s.fraction.unwrap() < 1.0, "{s:?}");
     assert_eq!(p.status(), Status::Ready);
+}
+
+/// Tasks past the cap on live ones get trackers nobody sees: none of them
+/// moves the bar, takes the step or shows a message. Stopping the call
+/// still reaches them.
+#[test]
+fn tasks_past_the_cap_leave_the_bar_alone() {
+    let p = load("many-steps", Limits::default());
+    let d = doc(1);
+    let tracker = in_progress::Tracker::new();
+    let mut c = ctx(&d);
+    c.progress = Some(tracker.clone());
+    let rx = p.run_command("many-steps", None, c);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let s = tracker.snapshot();
+        if s.message.as_ref().is_some_and(|(_, m)| m == "made") {
+            assert_eq!(
+                (s.fraction, s.step.as_str(), s.message_count),
+                (Some(0.0), "Many", 1)
+            );
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "no message: {s:?}");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    tracker.cancel();
+    match block_on(rx).expect("reply") {
+        Err(PluginError::Failed(m)) => assert_eq!(m, "Stopped"),
+        other => panic!("expected a stop, got {other:?}"),
+    }
 }
 
 /// The 0.2 build of the test plugin (`fixtures/test-plugin-0.2`, built
@@ -1494,6 +1563,7 @@ fn api_03_sees_every_kind_and_its_preferences() {
         fill: None,
         dashed: true,
         cloudy: false,
+        turn: sheaf_core::Rotation::R0,
         name: String::new(),
     };
     let pts = vec![
@@ -1536,4 +1606,184 @@ fn api_03_sees_every_kind_and_its_preferences() {
         other => panic!("{other:?}"),
     }
     assert_eq!(answer(&p, "prefs", None), "{}");
+}
+
+/// A plugin's page coordinates are the page as the file shows it
+/// (`wit/sheaf.wit`): on a `/Rotate 90` page with its CropBox off the
+/// origin, what it places is stored in PageSpace and reads back as it
+/// placed it.
+#[test]
+fn a_plugin_works_in_the_page_as_the_file_shows_it() {
+    let p = load("frames", Limits::default());
+    let mut d = turned_doc();
+    let page = d.page(0).unwrap().id;
+    let from_view = frame(&d, 0).from_view();
+    assert_eq!(frame(&d, 0).rotate, Rotation::R90);
+
+    let out = run(&p, "place", Some("100,200"), ctx(&d)).unwrap();
+    let edits = &out.batches[0].edits;
+    // Shown (x, y) is PageSpace (20 + y, 30 + x) on this page.
+    let Edit::AnnotAdd { page: on, annot } = &edits[0] else {
+        panic!("{:?}", edits[0])
+    };
+    let rect = Box2 {
+        x: 100.0,
+        y: 200.0,
+        w: 40.0,
+        h: 20.0,
+    };
+    assert_eq!(*on, page);
+    assert_eq!(
+        annot.kind,
+        AnnotKind::Square {
+            rect: from_view.apply_box(rect)
+        }
+    );
+    assert_eq!(
+        from_view.apply_box(rect),
+        Box2 {
+            x: 220.0,
+            y: 130.0,
+            w: 20.0,
+            h: 40.0
+        }
+    );
+    // It reads upright as the plugin placed it.
+    assert_eq!(annot.turn, Rotation::R90);
+    // The bookmarks too, a missing coordinate staying missing: the top
+    // as shown is PageSpace's left on this page.
+    let views: Vec<&DestView> = edits[1..]
+        .iter()
+        .map(|e| match e {
+            Edit::OutlineInsert { view: Some(v), .. } => v,
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        views,
+        [
+            &DestView::Xyz {
+                left: Some(220.0),
+                top: Some(130.0),
+                zoom: None
+            },
+            &DestView::Xyz {
+                left: Some(220.0),
+                top: None,
+                zoom: None
+            },
+        ]
+    );
+
+    // Read back as placed. (Each bookmark went to the outline's start.)
+    d.apply_batch(edits.clone(), "Place").unwrap();
+    let held: Vec<Option<DestView>> = d.state().outline.iter().map(|n| n.view.clone()).collect();
+    assert_eq!(held, [Some(views[1].clone()), Some(views[0].clone())]);
+    let back = run(&p, "where", None, ctx(&d)).unwrap_err();
+    assert_eq!(
+        back,
+        PluginError::Failed(
+            "square 100,200 40x20; top None,Some(200.0); both Some(100.0),Some(200.0)".into()
+        )
+    );
+    // A new position without a new page is on the bookmark's own.
+    let out = run(&p, "reposition", Some("150,250"), ctx(&d)).unwrap();
+    for e in &out.batches[0].edits {
+        let Edit::OutlineEdit { view, .. } = e else {
+            panic!("{e:?}")
+        };
+        let at = DestView::Xyz {
+            left: Some(270.0),
+            top: Some(180.0),
+            zoom: None,
+        };
+        assert_eq!(*view, Some(Some(at)));
+    }
+    d.apply_batch(out.batches[0].edits.clone(), "Reposition")
+        .unwrap();
+    let back = run(&p, "where", None, ctx(&d)).unwrap_err();
+    assert_eq!(
+        back,
+        PluginError::Failed(
+            "square 100,200 40x20; top Some(150.0),Some(250.0); both Some(150.0),Some(250.0)"
+                .into()
+        )
+    );
+
+    // Unsaved OCR text, PageSpace in the model, is found where it shows.
+    let layer = sheaf_doc::TextLayer::from_engine(
+        vec![sheaf_doc::OcrWord {
+            text: "1040".into(),
+            rect: Box2 {
+                x: 50.0,
+                y: 60.0,
+                w: 30.0,
+                h: 10.0,
+            },
+            confidence: 0.9,
+        }],
+        &d.geom(d.page(0).unwrap()),
+        "test",
+    );
+    d.apply(
+        Edit::SetTextLayers {
+            layers: vec![(page, Arc::new(layer))],
+        },
+        "ocr",
+    )
+    .unwrap();
+    let ui = Arc::new(FakeUi::default());
+    run(&p, "panel", Some(r"\d{4}"), with_ui(&d, &ui)).unwrap();
+    let panels = ui.panels.lock().unwrap();
+    let details: Vec<&str> = panels[0].1.iter().map(|r| r.detail.as_str()).collect();
+    // The second page's is the engine's, which is already in the frame.
+    assert_eq!(details, ["50,60", "5,10"]);
+}
+
+/// A region event is PageSpace; a plugin gets it as the file shows the
+/// page.
+#[test]
+fn a_region_arrives_as_the_file_shows_the_page() {
+    let p = load("frame-region", Limits::default());
+    let d = turned_doc();
+    let page = d.page(0).unwrap().id;
+    let event = Call::Event(DocEvent::Region {
+        page,
+        rect: Box2 {
+            x: 220.0,
+            y: 130.0,
+            w: 20.0,
+            h: 40.0,
+        },
+    });
+    block_on(p.call(event, ctx(&d))).unwrap().unwrap();
+    assert_eq!(
+        answer(&p, "events", None),
+        format!("region:{}@100,200 40x20", page.0)
+    );
+}
+
+/// `page-info` says what it said before sheaf held rotation absolute:
+/// the turn sheaf added, and the size as shown with it.
+#[test]
+fn page_info_is_the_turn_sheaf_added_and_the_size_shown() {
+    let p = load("frame-pages", Limits::default());
+    let mut d = turned_doc();
+    assert_eq!(
+        run(&p, "pages", None, ctx(&d)).unwrap_err(),
+        PluginError::Failed("0 740x580; 0 612x792".into())
+    );
+    let ids = vec![d.page(0).unwrap().id, d.page(1).unwrap().id];
+    d.apply(
+        Edit::RotatePages {
+            ids,
+            by: Rotation::R90,
+        },
+        "Rotate",
+    )
+    .unwrap();
+    assert_eq!(
+        run(&p, "pages", None, ctx(&d)).unwrap_err(),
+        PluginError::Failed("90 580x740; 90 792x612".into())
+    );
 }

@@ -9,7 +9,7 @@ description = "sheaf's document operations without a GUI: what both the app and 
 sheaf-core.workspace = true
 sheaf-doc.workspace = true
 sheaf-render.workspace = true
-sheaf-progress.workspace = true
+in-progress.workspace = true
 sheaf-image.workspace = true
 # OCR for scans. Engines are cargo features of sheaf-ocr, picked by the
 # binary (sheaf-app, sheaf-cli); without one it builds and says so.

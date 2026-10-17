@@ -105,7 +105,7 @@ pub fn to_pdf(pages: &[PageImage], fit: PageFit) -> Result<Vec<u8>> {
         let mut dict = dictionary! {
             "Type" => "Page",
             "Parent" => pages_id,
-            "MediaBox" => vec![0.into(), 0.into(), Object::Real(pw), Object::Real(ph)],
+            "MediaBox" => vec![0.into(), 0.into(), Object::from(pw), Object::from(ph)],
             "Contents" => content,
             "Resources" => dictionary! { "XObject" => dictionary! { "Im0" => image } },
         };
@@ -210,7 +210,7 @@ mod tests {
                     .as_array()
                     .unwrap()
                     .iter()
-                    .map(|o| o.as_float().unwrap())
+                    .map(|o| o.as_float().unwrap() as f32)
                     .collect();
                 let rot = page.get(b"Rotate").and_then(|o| o.as_i64()).unwrap_or(0);
                 let xo = page

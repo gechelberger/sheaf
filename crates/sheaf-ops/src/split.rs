@@ -6,9 +6,9 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
+use in_progress::{Level, Progress, Unit};
 use serde::{Deserialize, Serialize};
-use sheaf_doc::{PageId, Snapshot};
-use sheaf_progress::{Level, Progress, Unit};
+use sheaf_doc::{PAGES, PageId, Snapshot};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -160,7 +160,7 @@ pub fn split(
         bail!("{} already exists", p.display());
     }
     let step = progress.child("writing", 1.0);
-    step.set_total(Some(parts.len() as u64), Unit::Items);
+    step.set_total(Some(parts.len() as u64), Unit::ITEMS);
     for (i, (part, path)) in parts.iter().zip(&paths).enumerate() {
         step.check()?;
         sheaf_doc::save::extract_pages(snap, &part.pages, path)?;
@@ -180,7 +180,7 @@ fn by_size(snap: &Snapshot, max: u64, stem: &str, progress: &dyn Progress) -> Re
     if max == 0 {
         bail!("the size limit must be more than zero");
     }
-    progress.set_total(Some(pages.len() as u64), Unit::Pages);
+    progress.set_total(Some(pages.len() as u64), PAGES);
     let fits = |from: usize, to: usize| -> Result<bool> {
         progress.check()?;
         Ok(sheaf_doc::save::extract_bytes(snap, &pages[from..to])?.len() as u64 <= max)
@@ -257,27 +257,15 @@ pub fn parse_size(s: &str) -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sheaf_core::PageSize;
-    use sheaf_doc::{Document, Edit, SourceInfo};
+    use sheaf_doc::{Document, Edit, SourceInfo, Store};
 
     fn doc(n: u32) -> Document {
-        Document::new(
-            SourceInfo {
-                path: "x.pdf".into(),
-                page_count: n,
-                first_page: PageSize {
-                    width: 612.0,
-                    height: 792.0,
-                },
-                page_sizes: None,
-                bytes: 0,
-                password: None,
-                data: None,
-                derived: None,
-            },
-            &[],
-            sheaf_doc::history::default_policy(),
-        )
+        let store = Store::new();
+        let primary = SourceInfo {
+            name: "x.pdf".into(),
+            ..SourceInfo::blank(&store, n)
+        };
+        Document::new(store, primary, &[], sheaf_doc::history::default_policy())
     }
 
     fn sizes(parts: &[Part]) -> Vec<usize> {

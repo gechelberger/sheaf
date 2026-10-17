@@ -16,7 +16,7 @@ use sheaf_ui::text_input::{TextInput, TextInputEvent};
 use sheaf_ui::theme;
 
 use crate::docview::{DocView, State};
-use crate::markup_tools::{Tool, rotate_pt, unrotate_pt};
+use crate::markup_tools::Tool;
 
 /// Where calibrating is up to.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -60,9 +60,9 @@ impl DocView {
         }
     }
 
-    /// `p` on display page `page` where a measurement takes it: at 45°
-    /// from `from` with Shift, else onto a grid line or guide when one is
-    /// shown and near.
+    /// `p` on display page `page` (in its edit frame) where a measurement
+    /// takes it: at 45° from `from` with Shift, else onto a grid line or
+    /// guide when one is shown and near.
     pub(crate) fn measure_point(
         &self,
         page: usize,
@@ -80,18 +80,12 @@ impl DocView {
         if !self.grid && self.guides.is_empty() {
             return p;
         }
-        let Some(pref) = doc.page_ref(page) else {
+        let (Some(edit), Some(pane)) = (doc.edit_geom(page), doc.pane_geom(page)) else {
             return p;
         };
-        let Some(src) = doc
-            .model
-            .source(pref.source)
-            .map(|s| s.page_size(pref.index))
-        else {
-            return p;
-        };
-        // Grid and guides are on the page as shown.
-        let mut q = rotate_pt(p, src, pref.rotation);
+        // Grid and guides are on the page as the pane shows it.
+        let to_pane = edit.from_view().then(pane.to_view());
+        let mut q = to_pane.apply(p);
         let near = SNAP_PX / k.max(0.01);
         let snap = |v: f32, to: f32| if (v - to).abs() <= near { to } else { v };
         if self.grid {
@@ -107,7 +101,7 @@ impl DocView {
                 q.x = snap(q.x, g.at);
             }
         }
-        unrotate_pt(q, src, pref.rotation)
+        to_pane.inverse().apply(q)
     }
 
     /// The running measurement, in the status bar.

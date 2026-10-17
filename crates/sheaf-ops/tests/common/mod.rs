@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use lopdf::{Document as Pdf, Object, ObjectId, Stream, dictionary};
 use sheaf_doc::Document;
 use sheaf_doc::forms::corpus::Corpus;
-use sheaf_doc::forms::fixture::{Form, Rect};
-use sheaf_doc::forms::{Finding, Report, Value, check};
+use sheaf_doc::forms::fixture::{Form, Rect, source};
+use sheaf_doc::forms::{FileForm, Finding, Report, Value, check};
 use sheaf_doc::save::{Strategy, save_to_path};
 use sheaf_image::raster::Raster;
 
@@ -29,6 +29,11 @@ pub fn scratch(name: &str) -> PathBuf {
         )
     };
     dir
+}
+
+/// `path` opened as the app opens it.
+pub fn open(path: &Path) -> Document {
+    sheaf_doc::open::file(path, None).unwrap().doc
 }
 
 pub fn write(dir: &Path, name: &str, form: &mut Form) -> PathBuf {
@@ -102,10 +107,14 @@ pub fn holds(bytes: &[u8], needle: &[u8]) -> bool {
     pdf.objects.values().any(|o| any(o, &found))
 }
 
+/// The form in `bytes`, read as a file's is when it opens.
+pub fn form_in(bytes: &[u8]) -> FileForm {
+    sheaf_doc::forms::read(&source(bytes.to_vec()))
+}
+
 /// The text fields' values, by full name.
 pub fn values(bytes: &[u8]) -> BTreeMap<String, String> {
-    let pdf = Pdf::load_mem(bytes).unwrap();
-    sheaf_doc::forms::read(&pdf)
+    form_in(bytes)
         .fields
         .into_iter()
         .filter_map(|f| match f.value {
@@ -146,7 +155,7 @@ pub fn written_both_ways(doc: &Document) -> Vec<(Strategy, Vec<u8>)> {
         assert!(snap.form_changed, "{e:#}");
         let (len, section) = sheaf_doc::incremental::incremental_section(&snap).unwrap();
         let info = snap.source(snap.primary).unwrap();
-        let mut bytes = sheaf_doc::file::source_bytes(info).unwrap()[..len].to_vec();
+        let mut bytes = info.src.bytes()[..len].to_vec();
         bytes.extend(section);
         bytes
     });
@@ -204,8 +213,7 @@ pub fn corpus_form(path: &str) -> Option<Vec<u8>> {
 /// `bytes` with field `name`'s `/V` set to `value` (its appearance as it
 /// was), as a fill sheaf can't make yet (slice 9) would leave it.
 pub fn filled(bytes: &[u8], name: &str, value: &str) -> Vec<u8> {
-    let pdf = Pdf::load_mem(bytes).unwrap();
-    let field = sheaf_doc::forms::read(&pdf)
+    let field = form_in(bytes)
         .fields
         .into_iter()
         .find(|f| f.name == name)

@@ -16,7 +16,9 @@ use lopdf::{Dictionary, Document as Pdf, Object, Stream, dictionary};
 use serde::{Deserialize, Serialize};
 use sheaf_core::PageSize;
 
-use crate::annot::{PageGeom, Pt};
+use crate::annot::Pt;
+use crate::content::{Font, Std14, write_string};
+use crate::geom::Geom;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -69,8 +71,17 @@ impl Default for Watermark {
 }
 
 impl Watermark {
+    /// Whether some of its text can't be drawn in [`FONT`]: it shows as
+    /// `?` in the file.
+    pub fn unencodable(&self) -> bool {
+        match &self.mark {
+            Mark::Text { text, .. } => FONT.encode(text).1.0 > 0,
+            Mark::Image { .. } => false,
+        }
+    }
+
     /// The artifact subtypes this one's kind is written as.
-    pub fn kinds(&self) -> &'static [&'static [u8]] {
+    pub fn kinds(&self) -> &'static [crate::content::PaginationKind] {
         if self.behind {
             crate::stamps::BACKGROUND
         } else {
@@ -82,18 +93,17 @@ impl Watermark {
 /// Space kept from the edge for a mark placed at a side.
 const EDGE: f32 = 36.0;
 const GS: &str = "SheafWMgs";
-const FONT: &str = "SheafWMf";
+const FONT_NAME: &str = "SheafWMf";
 const IMAGE: &str = "SheafWMim";
+/// What a text watermark is drawn in.
+pub const FONT: Std14 = Std14::HelveticaBold;
 
 /// The mark's size before rotation, in points, on a page `size` wide.
 fn extent(wm: &Watermark, size: PageSize, image: Option<(u32, u32)>) -> (f32, f32) {
     match &wm.mark {
         Mark::Text {
             text, font_size, ..
-        } => (
-            crate::stamps::helvetica_width(text, *font_size),
-            font_size * 0.72,
-        ),
+        } => (FONT.width(text, *font_size), font_size * 0.72),
         Mark::Image { scale, .. } => {
             let w = size.width * scale.clamp(0.01, 2.0);
             let (iw, ih) = image.unwrap_or((1, 1));
@@ -102,32 +112,10 @@ fn extent(wm: &Watermark, size: PageSize, image: Option<(u32, u32)>) -> (f32, f3
     }
 }
 
-/// Draw `wm` on `page` (geometry `geom`, shown with `extra` degrees of
-/// sheaf rotation beyond its own `/Rotate`).
-pub fn install(
-    pdf: &mut Pdf,
-    page: &mut Dictionary,
-    wm: &Watermark,
-    geom: &PageGeom,
-    extra: i32,
-) -> Result<()> {
-    let rotate = (geom.rotate + extra).rem_euclid(360);
-    let g = PageGeom {
-        media: geom.media,
-        rotate,
-    };
-    let [x0, y0, x1, y1] = g.media;
-    let size = if rotate % 180 == 0 {
-        PageSize {
-            width: x1 - x0,
-            height: y1 - y0,
-        }
-    } else {
-        PageSize {
-            width: y1 - y0,
-            height: x1 - x0,
-        }
-    };
+/// Draw `wm` on `page`, laid out on the page as it shows with geometry
+/// `geom`, its rotation the page's, absolute.
+pub fn install(pdf: &mut Pdf, page: &mut Dictionary, wm: &Watermark, geom: &Geom) -> Result<()> {
+    let size = geom.shown();
     let image = match &wm.mark {
         Mark::Image { path, .. } => {
             let img = sheaf_image::io::read(path)?
@@ -159,16 +147,17 @@ pub fn install(
     let ox = cx - ux.0 * w / 2.0 - uy.0 * h / 2.0;
     let oy = cy - ux.1 * w / 2.0 - uy.1 * h / 2.0;
     // Shown space to user space is affine.
-    let o = g.to_user(Pt { x: 0.0, y: 0.0 });
-    let ex = g.to_user(Pt { x: 1.0, y: 0.0 });
-    let ey = g.to_user(Pt { x: 0.0, y: 1.0 });
+    let to_user = geom.from_view();
+    let o = to_user.apply(Pt { x: 0.0, y: 0.0 });
+    let ex = to_user.apply(Pt { x: 1.0, y: 0.0 });
+    let ey = to_user.apply(Pt { x: 0.0, y: 1.0 });
     let map = |(vx, vy): (f32, f32)| {
         (
             (ex.x - o.x) * vx + (ey.x - o.x) * vy,
             (ex.y - o.y) * vx + (ey.y - o.y) * vy,
         )
     };
-    let origin = g.to_user(Pt { x: ox, y: oy });
+    let origin = to_user.apply(Pt { x: ox, y: oy });
     let (xa, xb) = map(ux);
     let (ya, yb) = map(uy);
     let settings = serde_json::to_string(wm).unwrap_or_default();
@@ -180,22 +169,15 @@ pub fn install(
             color,
         } => {
             let [r, gr, b] = color.map(|v| v as f32 / 255.0);
-            let t: String = text
-                .chars()
-                .map(|c| match c as u32 {
-                    0x20..=0x7e | 0xa0..=0xff => c,
-                    _ => '?',
-                })
-                .flat_map(|c| match c {
-                    '(' | ')' | '\\' => vec!['\\', c],
-                    c => vec![c],
-                })
-                .collect();
-            format!(
+            let mut body = format!(
                 "{xa:.4} {xb:.4} {ya:.4} {yb:.4} {:.3} {:.3} cm \
-                 BT {r:.3} {gr:.3} {b:.3} rg /{FONT} {font_size:.2} Tf 0 0 Td ({t}) Tj ET",
+                 BT {r:.3} {gr:.3} {b:.3} rg /{FONT_NAME} {font_size:.2} Tf 0 0 Td ",
                 origin.x, origin.y
             )
+            .into_bytes();
+            write_string(&mut body, &FONT.encode(text).0);
+            body.extend_from_slice(b" Tj ET");
+            body
         }
         Mark::Image { .. } => format!(
             "{:.4} {:.4} {:.4} {:.4} {:.3} {:.3} cm /{IMAGE} Do",
@@ -205,9 +187,11 @@ pub fn install(
             yb * h,
             origin.x,
             origin.y
-        ),
+        )
+        .into_bytes(),
     };
-    let mark = format!("/{GS} gs {body}");
+    let mut mark = format!("/{GS} gs ").into_bytes();
+    mark.extend(body);
     // The settings go in as a string object in the property list.
     let props = dictionary! {
         "Type" => "Pagination",
@@ -228,7 +212,7 @@ pub fn install(
         ],
     };
     let mut bytes = ops.encode()?;
-    bytes.extend_from_slice(mark.as_bytes());
+    bytes.extend(mark);
     bytes.extend_from_slice(b"\nQ\nEMC\n");
 
     // Resources: transparency, font or image.
@@ -240,7 +224,7 @@ pub fn install(
     let mut resources = deref(pdf, page.get(b"Resources").ok());
     let opacity = wm.opacity.clamp(0.0, 1.0);
     let gs = pdf.add_object(dictionary! {
-        "Type" => "ExtGState", "CA" => Object::Real(opacity), "ca" => Object::Real(opacity),
+        "Type" => "ExtGState", "CA" => Object::from(opacity), "ca" => Object::from(opacity),
     });
     let mut gstates = deref(pdf, resources.get(b"ExtGState").ok());
     gstates.set(GS, gs);
@@ -253,12 +237,10 @@ pub fn install(
             resources.set("XObject", Object::Dictionary(xo));
         }
         None => {
-            let font = pdf.add_object(dictionary! {
-                "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica-Bold",
-                "Encoding" => "WinAnsiEncoding",
-            });
+            // The dictionary the text was encoded for.
+            let font = pdf.add_object(FONT.resource().objects[0].clone());
             let mut fonts = deref(pdf, resources.get(b"Font").ok());
-            fonts.set(FONT, font);
+            fonts.set(FONT_NAME, font);
             resources.set("Font", Object::Dictionary(fonts));
         }
     }
@@ -338,6 +320,7 @@ pub fn read(pdf: &Pdf, page: &Dictionary, behind: bool) -> Option<Watermark> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::content::{PagOrigin, PageBlocks, PaginationKind};
 
     fn page(pdf: &mut Pdf) -> Dictionary {
         let c = pdf.add_object(Stream::new(
@@ -351,8 +334,17 @@ mod tests {
         }
     }
 
-    fn all_content(pdf: &Pdf, page: &Dictionary) -> String {
-        page.get(b"Contents")
+    fn blocks(pdf: &Pdf, page: &Dictionary) -> PageBlocks {
+        let contents = crate::content::contents(page);
+        let resources = page.get(b"Resources").ok();
+        let (lim, known) = (&crate::source::Limits::DEFAULT, Default::default());
+        PageBlocks::read(pdf, &contents, resources, lim, &known).unwrap()
+    }
+
+    /// The page's streams, decoded, joined by `|`.
+    fn content_bytes(pdf: &Pdf, page: &Dictionary) -> Vec<u8> {
+        let streams: Vec<Vec<u8>> = page
+            .get(b"Contents")
             .unwrap()
             .as_array()
             .unwrap()
@@ -363,11 +355,36 @@ mod tests {
                     .unwrap()
                     .as_stream()
                     .unwrap();
-                String::from_utf8_lossy(&s.decompressed_content().unwrap_or(s.content.clone()))
-                    .to_string()
+                s.decompressed_content().unwrap_or(s.content.clone())
             })
-            .collect::<Vec<_>>()
-            .join("|")
+            .collect();
+        streams.join(&b'|')
+    }
+
+    fn all_content(pdf: &Pdf, page: &Dictionary) -> String {
+        String::from_utf8_lossy(&content_bytes(pdf, page)).into_owned()
+    }
+
+    /// The text is in the WinAnsi of the Helvetica-Bold it names, one byte
+    /// a character, escaped: "é" is 0xE9, not UTF-8's two bytes.
+    #[test]
+    fn text_is_encoded_for_its_font() {
+        let mut pdf = Pdf::with_version("1.7");
+        let mut p = page(&mut pdf);
+        let wm = Watermark {
+            mark: Mark::Text {
+                text: "Café (é)".into(),
+                font_size: 40.0,
+                color: [0; 3],
+            },
+            ..Default::default()
+        };
+        install(&mut pdf, &mut p, &wm, &Geom::read(None, None, 0)).unwrap();
+        let bytes = content_bytes(&pdf, &p);
+        let drawn = b"(Caf\xe9 \\(\xe9\\)) Tj";
+        assert!(bytes.windows(drawn.len()).any(|w| w == drawn), "{bytes:?}");
+        // The settings keep the text as it was typed.
+        assert_eq!(read(&pdf, &p, false), Some(wm));
     }
 
     #[test]
@@ -375,17 +392,7 @@ mod tests {
         let mut pdf = Pdf::with_version("1.7");
         let mut p = page(&mut pdf);
         let wm = Watermark::default();
-        install(
-            &mut pdf,
-            &mut p,
-            &wm,
-            &PageGeom {
-                media: [0.0, 0.0, 612.0, 792.0],
-                rotate: 0,
-            },
-            0,
-        )
-        .unwrap();
+        install(&mut pdf, &mut p, &wm, &Geom::read(None, None, 0)).unwrap();
         let text = all_content(&pdf, &p);
         // Page content first, the mark after.
         let at_page = text.find("re f").unwrap();
@@ -394,13 +401,16 @@ mod tests {
         assert!(text.contains("/Watermark"));
         assert_eq!(read(&pdf, &p, false), Some(wm));
         assert_eq!(read(&pdf, &p, true), None);
-        assert!(crate::stamps::has_artifacts(
-            &pdf,
-            &p,
-            crate::stamps::WATERMARK
-        ));
-        assert!(crate::stamps::strip(&mut pdf, &p, crate::stamps::WATERMARK));
+        // A watermark of sheaf's before M10.5.
+        let found: Vec<_> = blocks(&pdf, &p)
+            .pagination
+            .iter()
+            .map(|p| (p.kind, p.origin))
+            .collect();
+        assert_eq!(found, [(PaginationKind::Watermark, PagOrigin::SheafLegacy)]);
+        assert!(crate::stamps::strip(&mut pdf, &mut p, 0, crate::stamps::WATERMARK).unwrap());
         assert_eq!(read(&pdf, &p, false), None);
+        assert!(blocks(&pdf, &p).pagination.is_empty());
     }
 
     #[test]
@@ -411,17 +421,7 @@ mod tests {
             behind: true,
             ..Default::default()
         };
-        install(
-            &mut pdf,
-            &mut p,
-            &wm,
-            &PageGeom {
-                media: [0.0, 0.0, 612.0, 792.0],
-                rotate: 0,
-            },
-            0,
-        )
-        .unwrap();
+        install(&mut pdf, &mut p, &wm, &Geom::read(None, None, 0)).unwrap();
         let text = all_content(&pdf, &p);
         assert!(
             text.find("(DRAFT)").unwrap() < text.find("re f").unwrap(),
@@ -429,5 +429,14 @@ mod tests {
         );
         assert!(text.contains("/Background"));
         assert!(read(&pdf, &p, true).is_some());
+        let found: Vec<_> = blocks(&pdf, &p)
+            .pagination
+            .iter()
+            .map(|p| (p.kind, p.origin))
+            .collect();
+        assert_eq!(
+            found,
+            [(PaginationKind::Background, PagOrigin::SheafLegacy)]
+        );
     }
 }

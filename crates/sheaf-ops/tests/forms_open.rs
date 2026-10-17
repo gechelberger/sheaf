@@ -10,10 +10,10 @@ use std::path::{Path, PathBuf};
 
 use lopdf::{Object, dictionary};
 use sheaf_core::Rotation;
-use sheaf_doc::Edit;
 use sheaf_doc::forms::FormClass;
 use sheaf_doc::forms::fixture::{Form, every_kind, hybrid_reference, hybrid_update, row};
 use sheaf_doc::save::{Strategy, save_to_path};
+use sheaf_doc::{Document, Edit, SourceInfo, Store};
 use sheaf_render::pdfium::PdfiumEngine;
 use sheaf_render::{FormType, Renderer};
 
@@ -28,6 +28,17 @@ fn write(dir: &Path, name: &str, form: &mut Form) -> PathBuf {
     let path = dir.join(name);
     std::fs::write(&path, form.bytes()).unwrap();
     path
+}
+
+/// `path` opened as the app opens it.
+fn open(path: &Path) -> Document {
+    sheaf_doc::open::file(path, None).unwrap().doc
+}
+
+/// What `path` says about itself when it opens, read from its source.
+fn facts_of(path: &Path) -> sheaf_doc::open::Facts {
+    let info = SourceInfo::read(&Store::new(), path, None).unwrap();
+    sheaf_doc::open::finish(&info.src, &sheaf_ops::NoProgress)
 }
 
 /// A field tree that loops: `a`'s kid is `b`, whose kid is `a`.
@@ -78,7 +89,7 @@ fn deep() -> Form {
 fn forms_open_into_the_model() {
     let dir = scratch("open");
     let path = write(&dir, "every-kind.pdf", &mut every_kind());
-    let doc = sheaf_ops::open(&path, None).unwrap();
+    let doc = open(&path);
     let st = doc.state();
     assert_eq!(st.fields.len(), 9);
     let on_page: Vec<usize> = st
@@ -87,7 +98,7 @@ fn forms_open_into_the_model() {
         .map(|p| st.widgets_on(p.id).map_or(0, |w| w.len()))
         .collect();
     assert_eq!(on_page, [6, 4]);
-    let (_, facts) = sheaf_doc::file::read_open(&path, None).unwrap();
+    let facts = facts_of(&path);
     assert_eq!(facts.form.facts.class, FormClass::AcroForm);
     let engine = PdfiumEngine::open(&path, None).unwrap();
     assert_eq!(engine.form_type(), FormType::AcroForm);
@@ -110,7 +121,7 @@ fn forms_open_into_the_model() {
         ("none.pdf", none, FormClass::None, FormType::None),
     ] {
         let path = write(&dir, name, &mut { form });
-        let (_, facts) = sheaf_doc::file::read_open(&path, None).unwrap();
+        let facts = facts_of(&path);
         assert_eq!(facts.form.facts.class, class, "{name}");
         let engine = PdfiumEngine::open(&path, None).unwrap();
         assert_eq!(engine.form_type(), form_type, "{name}");
@@ -123,12 +134,11 @@ fn forms_open_into_the_model() {
         ("deep.pdf", deep(), "more than 32 deep"),
     ] {
         let path = write(&dir, name, &mut form);
-        let doc = sheaf_ops::open(&path, None).unwrap();
+        let doc = open(&path);
         assert_eq!(doc.page_count(), 1, "{name}");
         assert!(doc.state().fields.is_empty(), "{name}");
         assert!(doc.state().widgets.is_empty(), "{name}");
-        let (_, facts) = sheaf_doc::file::read_open(&path, None).unwrap();
-        let facts = facts.form.facts;
+        let facts = facts_of(&path).form.facts;
         let damaged = facts.damaged.clone().unwrap_or_default();
         assert!(damaged.contains(why), "{name}: {damaged:?}");
         assert!(!facts.is_fillable());
@@ -146,7 +156,7 @@ fn a_hybrid_reference_update_opens_and_saves_whole() {
     let path = dir.join("hybrid.pdf");
     std::fs::write(&path, hybrid_update(&hybrid_reference())).unwrap();
     let names = |path: &Path| -> Vec<String> {
-        let doc = sheaf_ops::open(path, None).unwrap();
+        let doc = open(path);
         doc.state()
             .fields
             .values()
@@ -155,7 +165,7 @@ fn a_hybrid_reference_update_opens_and_saves_whole() {
     };
     assert_eq!(names(&path), ["name", "city", "sig"]);
 
-    let mut doc = sheaf_ops::open(&path, None).unwrap();
+    let mut doc = open(&path);
     let page = doc.state().pages[0].id;
     let rotate = Edit::RotatePages {
         ids: vec![page],

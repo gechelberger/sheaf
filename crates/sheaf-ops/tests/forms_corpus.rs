@@ -7,11 +7,12 @@
 //! Needs libpdfium (`scripts/fetch-pdfium.sh`), like the app itself.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use sheaf_core::PageIndex;
 use sheaf_doc::forms::corpus::{Corpus, Entry};
 use sheaf_doc::forms::{FieldKind, FormFacts, Report, check};
+use sheaf_doc::{SourceInfo, Store};
 use sheaf_render::pdfium::{PdfiumEngine, render_appearances};
 use sheaf_render::{FormType, Renderer};
 
@@ -29,10 +30,12 @@ struct Outcome {
 /// holds one lock across every use of it (slice 1's note in
 /// `todos/m10.md`), so more threads wouldn't open files faster.
 fn open(bytes: &[u8], draw: bool) -> Result<(u32, FormType), String> {
-    let engine = PdfiumEngine::open_bytes(Arc::new(bytes.to_vec()), None);
+    let engine = PdfiumEngine::open_bytes(bytes.into(), None);
     engine
         .and_then(|e| {
-            e.page_sizes()?;
+            for i in 0..e.page_count() {
+                e.page_size(PageIndex(i))?;
+            }
             if draw {
                 render_appearances(bytes, None, PageIndex(0), 100)?;
             }
@@ -59,11 +62,13 @@ fn every_form_opens_and_is_checked() {
                     let Some((i, entry)) = queue.lock().unwrap().next() else {
                         break;
                     };
-                    let result = std::fs::read(corpus.path(entry))
+                    let path = corpus.path(entry);
+                    let result = std::fs::read(&path)
                         .map_err(anyhow::Error::from)
                         .and_then(|bytes| {
-                            let pdf = sheaf_doc::file::load_pdf_mem(&bytes, None)?;
-                            Ok((check(&bytes, None)?, sheaf_doc::forms::read(&pdf).facts))
+                            let report = check(&bytes, None)?;
+                            let info = SourceInfo::read(&Store::new(), &path, None)?;
+                            Ok((report, sheaf_doc::forms::read(&info.src).facts))
                         })
                         .map_err(|e| format!("{e:#}"));
                     checked.lock().unwrap().insert(i, result);
@@ -249,11 +254,9 @@ fn every_form_reads_as_its_manifest_row() {
                     let Some(entry) = queue.lock().unwrap().next() else {
                         break;
                     };
-                    let pdf = std::fs::read(corpus.path(entry))
-                        .map_err(anyhow::Error::from)
-                        .and_then(|b| sheaf_doc::file::load_pdf_mem(&b, None));
-                    let pdf = match pdf {
-                        Ok(pdf) => pdf,
+                    let info = SourceInfo::read(&Store::new(), &corpus.path(entry), None);
+                    let info = match info {
+                        Ok(info) => info,
                         Err(e) => {
                             unread
                                 .lock()
@@ -262,7 +265,7 @@ fn every_form_reads_as_its_manifest_row() {
                             continue;
                         }
                     };
-                    let facts = sheaf_doc::forms::read(&pdf).facts;
+                    let facts = sheaf_doc::forms::read(&info.src).facts;
                     *classes
                         .lock()
                         .unwrap()

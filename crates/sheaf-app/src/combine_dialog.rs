@@ -13,7 +13,7 @@ use gpui::{
 };
 use sheaf_ops::combine::{CombineItem, CombineParams};
 use sheaf_ops::images::Paper;
-use sheaf_ops::{Cancelled, Tracker};
+use sheaf_ops::{Tracker, was_cancelled};
 use sheaf_ui::button::{Button, Chip};
 use sheaf_ui::text_input::{TextInput, TextInputEvent};
 use sheaf_ui::{dialog, theme};
@@ -88,9 +88,9 @@ fn accepted(p: &Path) -> bool {
 /// Look at a file: a PDF's page count, or how many pages an image makes.
 fn inspect(path: &Path) -> Kind {
     if sheaf_ops::combine::is_pdf(path) {
-        match sheaf_ops::open::describe(path, None) {
-            Ok((info, _)) => Kind::Pdf(info.page_count as usize),
-            Err(e) if sheaf_render::OpenError::is_password(&e) => {
+        match sheaf_doc::SourceInfo::read(&sheaf_doc::Store::new(), path, None) {
+            Ok(info) => Kind::Pdf(info.src.page_count() as usize),
+            Err(e) if crate::docview::needs_password(&e) => {
                 Kind::Unreadable("needs a password".into())
             }
             Err(e) => Kind::Unreadable(format!("{e:#}")),
@@ -334,7 +334,7 @@ impl CombineDialog {
                         path: out,
                         params: d.params.clone(),
                     }),
-                    Err(e) if e.is::<Cancelled>() => d.error = Some("Stopped".into()),
+                    Err(e) if was_cancelled(&e) => d.error = Some("Stopped".into()),
                     Err(e) => d.error = Some(format!("{e:#}")),
                 }
                 cx.notify();

@@ -6,7 +6,7 @@ license.workspace = true
 description = "Image in, image out: scan cleanup, blank pages and other pixel work for sheaf, with no PDFs"
 
 [dependencies]
-sheaf-progress.workspace = true
+in-progress.workspace = true
 anyhow.workspace = true
 log.workspace = true
 serde.workspace = true

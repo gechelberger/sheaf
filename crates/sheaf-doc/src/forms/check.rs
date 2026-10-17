@@ -13,9 +13,10 @@
 //! - values an earlier revision holds that the current one doesn't;
 //! - `/XFA`, `/Perms` and `/SigFlags`, and whether they still fit the file.
 //!
-//! The tree comes from untrusted files: it's read with a visited set, at
-//! most 32 deep and 100,000 nodes, with full names of at most 64 KiB and
-//! 64 MiB in all, and what can't be read is reported, not followed.
+//! The tree comes from untrusted files: it's read with a visited set,
+//! within the form reader's caps (`FormLimits`): at most 32 deep and
+//! 100,000 nodes, with full names of at most 64 KiB and 64 MiB in all, and
+//! what can't be read is reported, not followed.
 //! Nothing else is copied per field: values are compared by a hash of
 //! their text, and an object many fields share is read once.
 
@@ -29,20 +30,20 @@ use anyhow::{Context, Result};
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId};
 use quick_xml::events::{BytesStart, Event};
 
-use super::read::{FormClass, MAX_DEPTH, MAX_NAME, MAX_NAMES, MAX_NODES};
+use super::read::FormClass;
 use crate::attachments::resolve;
+use crate::content::{self, ResCx, Tok};
 use crate::file::pdf_text;
+use crate::source::{FormLimits, Limits};
 
 /// How much of a widget's name, read up its `/Parent` chain, a finding
 /// keeps.
 const SHOWN_NAME: usize = 256;
-/// The longest `/DA` read. Real ones are a few dozen bytes.
-const MAX_DA: usize = 1024;
+/// The caps the check reads within: the form reader's.
+const LIMITS: FormLimits = Limits::DEFAULT.forms;
 /// Earlier revisions read, the latest ones: each is a parse of the file
 /// up to it.
 const MAX_REVISIONS: usize = 256;
-/// The most of an XFA template read.
-const MAX_XFA: usize = 64 << 20;
 /// Names shown as examples in a finding, and the characters shown of each.
 const EXAMPLES: usize = 3;
 const EXAMPLE_CHARS: usize = 80;
@@ -453,19 +454,21 @@ fn read_tree<'a>(pdf: &'a Pdf, form: Option<&'a Dictionary>) -> Tree<'a> {
 impl<'a> Tree<'a> {
     /// Read field `id`, a kid of the field with full name `up_name`.
     fn node(&mut self, pdf: &'a Pdf, id: ObjectId, up: Inherited<'a>, up_name: &str, depth: usize) {
-        if depth > MAX_DEPTH {
+        if depth > LIMITS.depth {
+            let depth = LIMITS.depth;
             self.damaged
-                .insert(format!("the field tree is more than {MAX_DEPTH} deep"));
+                .insert(format!("the field tree is more than {depth} deep"));
             return;
         }
         self.nodes += 1;
-        if self.nodes > MAX_NODES {
+        if self.nodes > LIMITS.nodes {
+            let nodes = LIMITS.nodes;
             self.damaged
-                .insert(format!("the field tree has more than {MAX_NODES} nodes"));
+                .insert(format!("the field tree has more than {nodes} nodes"));
             return;
         }
-        if self.names > MAX_NAMES {
-            let mib = MAX_NAMES >> 20;
+        if self.names > LIMITS.names {
+            let mib = LIMITS.names >> 20;
             self.damaged
                 .insert(format!("the full names come to more than {mib} MiB"));
             return;
@@ -478,13 +481,13 @@ impl<'a> Tree<'a> {
             return;
         };
         let name = match dict.get(b"T").ok().and_then(|t| resolve(pdf, t)) {
-            Some(t) if t.as_str().is_ok_and(|s| s.len() > MAX_NAME) => None,
+            Some(t) if t.as_str().is_ok_and(|s| s.len() > LIMITS.name) => None,
             Some(t) if up_name.is_empty() => Some(pdf_text(t)),
             Some(t) => Some(format!("{up_name}.{}", pdf_text(t))),
             None => Some(up_name.to_string()),
         };
-        let Some(name) = name.filter(|n| n.len() <= MAX_NAME) else {
-            let kib = MAX_NAME >> 10;
+        let Some(name) = name.filter(|n| n.len() <= LIMITS.name) else {
+            let kib = LIMITS.name >> 10;
             self.damaged
                 .insert(format!("a full name is longer than {kib} KiB"));
             return;
@@ -673,7 +676,7 @@ fn on_templates(pdf: &Pdf, pages: &OnPages) -> HashSet<ObjectId> {
     let mut out = HashSet::new();
     while let Some(node) = todo.pop() {
         if let Ok(id) = node.as_reference()
-            && (!seen.insert(id) || seen.len() > MAX_NODES)
+            && (!seen.insert(id) || seen.len() > LIMITS.nodes)
         {
             continue;
         }
@@ -721,7 +724,7 @@ fn name_up(pdf: &Pdf, id: ObjectId) -> String {
     let mut len = 0;
     let mut seen = HashSet::new();
     let mut at = Some(id);
-    while let Some(id) = at.filter(|&id| seen.insert(id) && seen.len() <= MAX_DEPTH) {
+    while let Some(id) = at.filter(|&id| seen.insert(id) && seen.len() <= LIMITS.depth) {
         let Ok(d) = pdf.get_dictionary(id) else { break };
         if let Some(t) = d.get(b"T").ok().and_then(|t| resolve(pdf, t)) {
             let part = match t.as_str() {
@@ -750,21 +753,31 @@ fn resolve_once<'a>(pdf: &'a Pdf, o: &'a Object) -> Option<&'a Object> {
     }
 }
 
-/// A dictionary's `/DA`, unless it's longer than [`MAX_DA`].
+/// A dictionary's `/DA`, unless it's longer than [`FormLimits::da`].
 fn da_of<'a>(pdf: &'a Pdf, d: &'a Dictionary) -> Option<&'a [u8]> {
     let da = resolve(pdf, d.get(b"DA").ok()?)?.as_str().ok()?;
-    (da.len() <= MAX_DA).then_some(da)
+    (da.len() <= LIMITS.da).then_some(da)
 }
 
-/// The font a `/DA` sets.
+/// The font a `/DA` sets: its last `Tf`'s first operand, when that's a
+/// name, up to what can't be lexed.
 fn da_font(da: &[u8]) -> Option<Vec<u8>> {
-    let content = lopdf::content::Content::decode(da).ok()?;
-    let tf = content
-        .operations
-        .iter()
-        .rev()
-        .find(|op| op.operator == "Tf")?;
-    Some(tf.operands.first()?.as_name().ok()?.to_vec())
+    let mut operands = Vec::new();
+    let mut font = None;
+    for token in content::lex(da, &ResCx::none(), &Limits::DEFAULT) {
+        let Ok((_, token)) = token else { break };
+        match token {
+            Tok::Operand(operand) => operands.push(operand),
+            Tok::Op(op) => {
+                if op == b"Tf" {
+                    font = operands.first().and_then(|&o| content::name(o));
+                }
+                operands.clear();
+            }
+            Tok::InlineImage(_) => operands.clear(),
+        }
+    }
+    Some(font?.into_owned())
 }
 
 /// Fonts named by the `/DA` each widget uses (its own, its field's, or
@@ -930,7 +943,7 @@ fn byte_range_fits(sig: &Dictionary, bytes: &[u8], ends: &HashSet<usize>) -> Res
 fn xfa_of(pdf: &Pdf, form: &Dictionary) -> Option<(Vec<String>, Option<Vec<u8>>)> {
     let content = |o: &Object| {
         let s = resolve(pdf, o)?.as_stream().ok()?;
-        s.decompressed_content_with_limit(MAX_XFA).ok()
+        s.decompressed_content_with_limit(LIMITS.xfa).ok()
     };
     match resolve(pdf, form.get(b"XFA").ok()?)? {
         Object::Array(items) => {
@@ -1010,7 +1023,10 @@ fn xfa_paths(xml: &[u8]) -> Option<BTreeSet<String>> {
                         if !gone(e) {
                             let len = path.len() + 1 + name.len();
                             bytes += len;
-                            if len > MAX_NAME || bytes > MAX_NAMES || out.len() >= MAX_NODES {
+                            if len > LIMITS.name
+                                || bytes > LIMITS.names
+                                || out.len() >= LIMITS.nodes
+                            {
                                 return None;
                             }
                             out.insert(if path.is_empty() {
@@ -1228,4 +1244,99 @@ fn examples(names: &[String]) -> String {
         })
         .collect();
     format!(" (e.g. {})", shown.join(", "))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use super::*;
+    use crate::forms::corpus::{Corpus, each_entry};
+
+    /// The font a `/DA` sets, as `da_font` read it through lopdf's
+    /// `Content::decode` before it lexed: what it must still find.
+    fn decoded_font(da: &[u8]) -> Option<Vec<u8>> {
+        let content = lopdf::content::Content::decode(da).ok()?;
+        let tf = content
+            .operations
+            .iter()
+            .rev()
+            .find(|op| op.operator == "Tf")?;
+        Some(tf.operands.first()?.as_name().ok()?.to_vec())
+    }
+
+    /// Every `/DA` in `pdf` the check would read: a widget's, a field's
+    /// and the form's among them.
+    fn every_da(pdf: &Pdf) -> Vec<&[u8]> {
+        let mut out = Vec::new();
+        let mut todo: Vec<&Object> = pdf.objects.values().collect();
+        while let Some(object) = todo.pop() {
+            let dict = match object {
+                Object::Dictionary(d) => d,
+                Object::Stream(s) => &s.dict,
+                Object::Array(items) => {
+                    todo.extend(items);
+                    continue;
+                }
+                _ => continue,
+            };
+            out.extend(da_of(pdf, dict));
+            todo.extend(dict.iter().map(|(_, v)| v));
+        }
+        out
+    }
+
+    #[test]
+    fn da_fonts_are_the_last_tf_names() {
+        for (da, font) in [
+            (&b"/Helv 12 Tf 0 g"[..], Some(&b"Helv"[..])),
+            (b"0 g /F1 9 Tf /F#202 10 Tf", Some(b"F 2")),
+            (b"/F1 0 Tf 12 Tf", None),
+            (b"0 0 1 rg", None),
+            (b"/Helv 12 Tf (open", Some(b"Helv")),
+        ] {
+            assert_eq!(
+                da_font(da).as_deref(),
+                font,
+                "{}",
+                String::from_utf8_lossy(da)
+            );
+            assert_eq!(da_font(da), decoded_font(da));
+        }
+    }
+
+    /// The lexer finds the font lopdf's `Content::decode` found in every
+    /// `/DA` the corpus's forms hold.
+    #[test]
+    fn corpus_da_fonts_are_as_decoded() {
+        let Some(corpus) = Corpus::or_skip() else {
+            return;
+        };
+        let entries = corpus.manifest().unwrap();
+        let started = Instant::now();
+        let outcomes = each_entry(&entries, |entry| {
+            let Ok(bytes) = std::fs::read(corpus.path(entry)) else {
+                return (0, Vec::new());
+            };
+            let Ok(pdf) = crate::file::load_pdf_mem(&bytes, None) else {
+                return (0, Vec::new());
+            };
+            let das = every_da(&pdf);
+            let differ: Vec<String> = das
+                .iter()
+                .filter(|da| da_font(da) != decoded_font(da))
+                .map(|da| format!("{}: {:?}", entry.path, String::from_utf8_lossy(da)))
+                .collect();
+            (das.len(), differ)
+        });
+        let read: usize = outcomes.iter().map(|(n, _)| n).sum();
+        let differ: Vec<&String> = outcomes.iter().flat_map(|(_, d)| d).collect();
+        eprintln!(
+            "{read} /DA strings in {} forms, {} differ, in {:?}",
+            entries.len(),
+            differ.len(),
+            started.elapsed()
+        );
+        assert!(differ.is_empty(), "{differ:#?}");
+    }
 }

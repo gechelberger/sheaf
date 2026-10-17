@@ -5,13 +5,23 @@
 //! A [`Form`] is a plain lopdf document plus the ids a test needs to
 //! break it on purpose. [`Form::bytes`] writes it, filling in each
 //! signature's `/ByteRange` around its `/Contents` as signing would (the
-//! contents are zeros: nothing is really signed). lopdf can't write a
+//! contents are zeros: nothing is really signed), and [`Form::source`]
+//! reads what it writes as `forms::read` reads a file. lopdf can't write a
 //! hybrid-reference file, so [`hybrid_reference`] writes one by hand.
+//! [`every_fact`] is a file with one of each fact a file opens with, and
+//! [`outline_tree`] gives a form bookmarks.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, StringFormat, dictionary};
+use sheaf_core::Rotation;
+
+use crate::annot::{Annot, AnnotId, AnnotKind, Pt};
+use crate::model::PageId;
+use crate::stamps::HeaderFooter;
+use crate::store::{BlobKind, Src, Store};
 
 /// A rectangle in page space: left, bottom, right, top.
 pub type Rect = [f32; 4];
@@ -437,8 +447,13 @@ impl Form {
         out
     }
 
+    /// The file, as a source in a store of its own.
+    pub fn source(&mut self) -> Src {
+        source(self.bytes())
+    }
+
     fn widget(&mut self, page: usize, rect: Rect) -> ObjectId {
-        let r: Vec<Object> = rect.iter().map(|&v| Object::Real(v)).collect();
+        let r: Vec<Object> = rect.iter().map(|&v| Object::from(v)).collect();
         let id = self.pdf.add_object(dictionary! {
             "Type" => "Annot", "Subtype" => "Widget", "Rect" => r, "F" => 4,
             "P" => self.pages[page],
@@ -462,7 +477,12 @@ impl Form {
             .ok()
             .and_then(|d| d.get(b"Rect").ok())
             .and_then(|r| r.as_array().ok())
-            .map(|r| r.iter().filter_map(|v| v.as_float().ok()).collect())
+            .map(|r| {
+                r.iter()
+                    .filter_map(|v| v.as_float().ok())
+                    .map(|v| v as f32)
+                    .collect()
+            })
             .unwrap_or_default();
         [r[0], r[1], r[2], r[3]]
     }
@@ -474,7 +494,7 @@ impl Form {
         self.pdf.add_object(Stream::new(
             dictionary! {
                 "Type" => "XObject", "Subtype" => "Form",
-                "BBox" => vec![0.into(), 0.into(), Object::Real(w), Object::Real(h)],
+                "BBox" => vec![0.into(), 0.into(), Object::from(w), Object::from(h)],
                 "Resources" => dictionary! { "Font" => dictionary! { "Helv" => self.helv } },
             },
             content,
@@ -491,7 +511,7 @@ impl Form {
                 Operation::new("BT", vec![]),
                 Operation::new("Tf", vec!["Helv".into(), 10.into()]),
                 Operation::new("g", vec![0.into()]),
-                Operation::new("Td", vec![2.into(), Object::Real((h - 7.0) / 2.0)]),
+                Operation::new("Td", vec![2.into(), Object::from((h - 7.0) / 2.0)]),
                 Operation::new("Tj", vec![Object::string_literal(text)]),
                 Operation::new("ET", vec![]),
                 Operation::new("EMC", vec![]),
@@ -582,6 +602,14 @@ impl Form {
     }
 }
 
+/// A file's `bytes` as a source in a store of its own, named `form.pdf`.
+pub fn source(bytes: Vec<u8>) -> Src {
+    let kind = BlobKind::file(Path::new("form.pdf"), None);
+    Store::new()
+        .open(bytes.into(), kind)
+        .expect("the file opens as a source")
+}
+
 /// Rows down a page, 30 pt apart.
 pub fn row(i: usize) -> Rect {
     let top = 700.0 - 30.0 * i as f32;
@@ -613,6 +641,359 @@ pub fn every_kind() -> Form {
         &[name, empty, on, off, radio, combo, list, button, sig],
     );
     f
+}
+
+/// A file that says one of each thing the opened version holds, on three
+/// pages: a field on the first, a mark on the second, roman page labels,
+/// a header/footer on the third alone, and a closed bookmark to the first
+/// with one under it to the third.
+pub fn every_fact() -> Form {
+    let mut f = Form::new(3);
+    f.text("name", 0, row(0));
+    let main = crate::annot::to_pdf(&note(), &mut f.pdf).main;
+    let main = f.pdf.add_object(main);
+    f.set_annots(1, &[main]);
+    let catalog = f.catalog;
+    f.dict(catalog).set(
+        "PageLabels",
+        dictionary! { "Nums" => vec![0.into(), dictionary! { "S" => "r" }.into()] },
+    );
+    let mut texts: [String; 6] = Default::default();
+    texts[0] = "Draft".into();
+    let hf = HeaderFooter {
+        texts,
+        pages: Some(vec![PageId(2)]),
+        ..Default::default()
+    };
+    let scope = crate::stamps::to_catalog(&hf, &[PageId(0), PageId(1), PageId(2)]);
+    f.dict(catalog).set(crate::stamps::CATALOG_KEY, scope);
+    let pages = f.pages.clone();
+    let item = |title: &str, page: ObjectId| {
+        dictionary! {
+            "Title" => Object::string_literal(title),
+            "Dest" => vec![page.into(), "Fit".into()],
+        }
+    };
+    let mut closed = item("A", pages[0]);
+    closed.set("Count", -1);
+    outline_tree(&mut f, vec![(0, closed), (1, item("A1", pages[2]))]);
+    f
+}
+
+/// `items` as `f`'s outline: each (depth, item) in pre-order, a depth at
+/// most one below the item before's. The links between them are filled
+/// in, and `/Count` where an item has none: how many items are below it.
+/// The items' ids, in order.
+pub fn outline_tree(f: &mut Form, items: Vec<(u16, Dictionary)>) -> Vec<ObjectId> {
+    let root = f.pdf.new_object_id();
+    let ids: Vec<ObjectId> = items.iter().map(|_| f.pdf.new_object_id()).collect();
+    let depths: Vec<u16> = items.iter().map(|(depth, _)| *depth).collect();
+    let mut dicts: Vec<Dictionary> = items.into_iter().map(|(_, item)| item).collect();
+    // The items below `at` (None: the root), and those of them a level down.
+    let below = |at: Option<usize>| {
+        let (from, depth) = at.map_or((0, 0), |i| (i + 1, depths[i] + 1));
+        let all: Vec<usize> = (from..depths.len())
+            .take_while(|&j| depths[j] >= depth)
+            .collect();
+        let kids: Vec<usize> = all
+            .iter()
+            .copied()
+            .filter(|&j| depths[j] == depth)
+            .collect();
+        (all.len(), kids)
+    };
+    let link = |dicts: &mut [Dictionary], parent: Option<usize>, root_dict: &mut Dictionary| {
+        let (count, kids) = below(parent);
+        for pair in kids.windows(2) {
+            dicts[pair[0]].set("Next", ids[pair[1]]);
+            dicts[pair[1]].set("Prev", ids[pair[0]]);
+        }
+        let parent_id = parent.map_or(root, |i| ids[i]);
+        for &k in &kids {
+            dicts[k].set("Parent", parent_id);
+        }
+        let (Some(&first), Some(&last)) = (kids.first(), kids.last()) else {
+            return;
+        };
+        let at = match parent {
+            Some(i) => &mut dicts[i],
+            None => root_dict,
+        };
+        at.set("First", ids[first]);
+        at.set("Last", ids[last]);
+        if !at.has(b"Count") {
+            at.set("Count", count as i64);
+        }
+    };
+    let mut outlines = dictionary! { "Type" => "Outlines" };
+    link(&mut dicts, None, &mut outlines);
+    for i in 0..ids.len() {
+        link(&mut dicts, Some(i), &mut outlines);
+    }
+    f.pdf.objects.insert(root, outlines.into());
+    for (&id, item) in ids.iter().zip(dicts) {
+        f.pdf.objects.insert(id, item.into());
+    }
+    let catalog = f.catalog;
+    f.dict(catalog).set("Outlines", root);
+    ids
+}
+
+/// The note [`every_fact`] puts on its second page, as sheaf reads it.
+pub fn note() -> Annot {
+    Annot {
+        id: AnnotId(4),
+        kind: AnnotKind::Note {
+            pos: Pt { x: 1.0, y: 2.0 },
+        },
+        color: [1, 2, 3],
+        opacity: 1.0,
+        stroke: 1.0,
+        author: "me".into(),
+        contents: "mine".into(),
+        modified: String::new(),
+        created: String::new(),
+        fill: None,
+        dashed: false,
+        cloudy: false,
+        turn: Rotation::R0,
+        name: String::new(),
+    }
+}
+
+/// The stem [`every_mark_kind`]'s page stamp names its page by: no name
+/// the generated cache gives, so writing and reading it never touches the
+/// cache. [`mark_assets`] holds it.
+pub const MARK_STAMP: &str = "fixture-stamp";
+
+/// The stem [`every_mark_kind`]'s attachment names its file by, as
+/// [`MARK_STAMP`] is.
+pub const MARK_FILE: &str = "fixture-file";
+
+/// The bytes of [`every_mark_kind`]'s attachment.
+pub const MARK_FILE_BYTES: &[u8] = b"fixture notes\n";
+
+/// What [`every_mark_kind`]'s stamp and attachment name, as a document
+/// holds them: a page 100 by 50 points with a blue square in its corner
+/// and [`MARK_FILE_BYTES`].
+pub fn mark_assets() -> std::sync::Arc<crate::assets::MarkAssets> {
+    let mut pdf = Pdf::with_version("1.7");
+    let pages_id = pdf.new_object_id();
+    let content = pdf.add_object(Stream::new(
+        dictionary! {},
+        b"0 0 1 rg 0 0 20 20 re f".to_vec(),
+    ));
+    let page = pdf.add_object(dictionary! {
+        "Type" => "Page", "Parent" => pages_id, "Contents" => content,
+        "MediaBox" => vec![0.into(), 0.into(), 100.into(), 50.into()],
+    });
+    pdf.objects.insert(
+        pages_id,
+        dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 }.into(),
+    );
+    let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    pdf.trailer.set("Root", catalog);
+    let mut bytes = Vec::new();
+    pdf.save_to(&mut bytes).unwrap();
+    let assets = crate::assets::MarkAssets::new(Store::new());
+    assets.intern_stamp(MARK_STAMP, bytes.into());
+    assets.intern_file(MARK_FILE, MARK_FILE_BYTES.into());
+    std::sync::Arc::new(assets)
+}
+
+/// One mark of every kind, not turned, in PageSpace within a visible box
+/// of (−17, 62)–(555, 824), and after them the measurements of a
+/// perimeter and an area, which a file holds as `/Vertices` where a
+/// distance is `/L`: ids from 1, the reply and the status in the note's
+/// thread, and the stamp and the attachment naming [`MARK_STAMP`] and
+/// [`MARK_FILE`], which [`mark_assets`] holds.
+pub fn every_mark_kind() -> Vec<Annot> {
+    use crate::annot::{Box2, REVIEW};
+    use crate::measure::{Measured, Scale};
+    use crate::tape::{Tape, TapeLook};
+    let b = |x: f32, y: f32, w: f32, h: f32| Box2 { x, y, w, h };
+    let p = |x: f32, y: f32| Pt { x, y };
+    let lines = vec![b(60.0, 700.0, 200.0, 14.0), b(60.0, 684.0, 120.0, 14.0)];
+    let scale = || {
+        Box::new(Scale {
+            page: 1.0,
+            page_unit: "in".into(),
+            real: 10.0,
+            unit: "ft".into(),
+            precision: 2,
+        })
+    };
+    let mut kinds = vec![
+        AnnotKind::Highlight { rects: lines },
+        AnnotKind::Note {
+            pos: p(400.0, 700.0),
+        },
+        AnnotKind::FreeText {
+            rect: b(60.0, 600.0, 180.0, 40.0),
+            size: 11.0,
+        },
+        AnnotKind::Square {
+            rect: b(300.0, 600.0, 80.0, 50.0),
+        },
+        AnnotKind::Ellipse {
+            rect: b(400.0, 600.0, 60.0, 40.0),
+        },
+        AnnotKind::Line {
+            a: p(60.0, 560.0),
+            b: p(200.0, 520.0),
+            arrow: true,
+            arrow_start: true,
+        },
+        AnnotKind::Ink {
+            paths: vec![vec![p(250.0, 560.0), p(270.0, 540.0), p(300.0, 555.0)]],
+        },
+        AnnotKind::Stamp {
+            rect: b(320.0, 530.0, 24.0, 24.0),
+            glyph: "✓".into(),
+        },
+        AnnotKind::Connector {
+            rect: b(380.0, 530.0, 22.0, 22.0),
+            label: "1".into(),
+            partner: None,
+        },
+        AnnotKind::Tape {
+            rect: b(450.0, 420.0, 70.0, 100.0),
+            size: 10.0,
+            tape: Tape::from_text("1.00 +\n2.00 +\n3.00 T"),
+            look: TapeLook {
+                rotation: 90,
+                ..TapeLook::default()
+            },
+        },
+        AnnotKind::Underline {
+            rects: vec![b(60.0, 480.0, 150.0, 12.0)],
+        },
+        AnnotKind::StrikeOut {
+            rects: vec![b(60.0, 460.0, 150.0, 12.0)],
+        },
+        AnnotKind::Squiggly {
+            rects: vec![b(60.0, 440.0, 150.0, 12.0)],
+        },
+        AnnotKind::Replace {
+            rects: vec![b(60.0, 420.0, 60.0, 12.0)],
+            struck: "teh".into(),
+            at: b(117.0, 416.0, 7.0, 7.0),
+        },
+        AnnotKind::Insert {
+            at: b(200.0, 416.0, 7.0, 7.0),
+        },
+        AnnotKind::Reply {
+            parent: "sheaf:2".into(),
+        },
+        AnnotKind::Status {
+            parent: "sheaf:2".into(),
+            model: REVIEW.into(),
+            state: "Accepted".into(),
+        },
+        AnnotKind::PageStamp {
+            rect: b(60.0, 300.0, 100.0, 50.0),
+            stamp: MARK_STAMP.into(),
+            name: "Approved".into(),
+            text: Some("GE".into()),
+        },
+        AnnotKind::TextStamp {
+            rect: b(200.0, 300.0, 120.0, 50.0),
+            text: "APPROVED\nGE 10/16/2026".into(),
+            status: false,
+        },
+        AnnotKind::PageBorder {
+            rect: b(-12.0, 67.0, 562.0, 752.0),
+            status: "Reviewed".into(),
+        },
+        AnnotKind::Polygon {
+            points: vec![p(350.0, 300.0), p(420.0, 310.0), p(380.0, 370.0)],
+        },
+        AnnotKind::Polyline {
+            points: vec![p(430.0, 300.0), p(470.0, 330.0), p(520.0, 300.0)],
+        },
+        AnnotKind::Callout {
+            rect: b(60.0, 200.0, 150.0, 36.0),
+            knee: p(240.0, 210.0),
+            point: p(300.0, 180.0),
+            size: 12.0,
+        },
+        AnnotKind::FileAttachment {
+            pos: p(500.0, 700.0),
+            icon: "Paperclip".into(),
+            file: MARK_FILE.into(),
+            name: "notes.txt".into(),
+            size: MARK_FILE_BYTES.len() as u64,
+        },
+        AnnotKind::Measure {
+            what: Measured::Distance,
+            points: vec![p(250.0, 200.0), p(400.0, 250.0)],
+            scale: scale(),
+        },
+    ];
+    for (i, kind) in kinds.iter().enumerate() {
+        // Every kind, in this order: a new one doesn't compile until it's
+        // here too.
+        let at = match kind {
+            AnnotKind::Highlight { .. } => 0,
+            AnnotKind::Note { .. } => 1,
+            AnnotKind::FreeText { .. } => 2,
+            AnnotKind::Square { .. } => 3,
+            AnnotKind::Ellipse { .. } => 4,
+            AnnotKind::Line { .. } => 5,
+            AnnotKind::Ink { .. } => 6,
+            AnnotKind::Stamp { .. } => 7,
+            AnnotKind::Connector { .. } => 8,
+            AnnotKind::Tape { .. } => 9,
+            AnnotKind::Underline { .. } => 10,
+            AnnotKind::StrikeOut { .. } => 11,
+            AnnotKind::Squiggly { .. } => 12,
+            AnnotKind::Replace { .. } => 13,
+            AnnotKind::Insert { .. } => 14,
+            AnnotKind::Reply { .. } => 15,
+            AnnotKind::Status { .. } => 16,
+            AnnotKind::PageStamp { .. } => 17,
+            AnnotKind::TextStamp { .. } => 18,
+            AnnotKind::PageBorder { .. } => 19,
+            AnnotKind::Polygon { .. } => 20,
+            AnnotKind::Polyline { .. } => 21,
+            AnnotKind::Callout { .. } => 22,
+            AnnotKind::FileAttachment { .. } => 23,
+            AnnotKind::Measure { .. } => 24,
+        };
+        assert_eq!(at, i, "{kind:?} is out of place");
+    }
+    kinds.extend([
+        AnnotKind::Measure {
+            what: Measured::Perimeter,
+            points: vec![p(250.0, 120.0), p(330.0, 160.0), p(400.0, 110.0)],
+            scale: scale(),
+        },
+        AnnotKind::Measure {
+            what: Measured::Area,
+            points: vec![p(420.0, 120.0), p(520.0, 120.0), p(500.0, 180.0)],
+            scale: scale(),
+        },
+    ]);
+    kinds
+        .into_iter()
+        .enumerate()
+        .map(|(i, kind)| Annot {
+            id: AnnotId(i as u64 + 1),
+            fill: kind.fillable().then_some([255, 255, 0]),
+            dashed: matches!(kind, AnnotKind::Square { .. }),
+            cloudy: matches!(kind, AnnotKind::Ellipse { .. } | AnnotKind::Polygon { .. }),
+            kind,
+            color: [220, 40, 40],
+            opacity: 0.8,
+            stroke: 1.5,
+            author: "Ann".into(),
+            contents: "About this".into(),
+            modified: "D:20261016120000".into(),
+            created: "D:20261015120000".into(),
+            turn: Rotation::R0,
+            name: String::new(),
+        })
+        .collect()
 }
 
 /// `bytes` with an incremental update appended: `change` edits a copy of

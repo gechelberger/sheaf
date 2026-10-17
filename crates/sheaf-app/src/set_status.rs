@@ -11,7 +11,8 @@ use gpui::{
     Subscription, Window, div, prelude::*, px,
 };
 use serde::{Deserialize, Serialize};
-use sheaf_doc::{AnnotKind, Box2, Edit, OutlineId, TextStyle};
+use sheaf_doc::geom::Geom;
+use sheaf_doc::{Annot, AnnotKind, Box2, Edit, OutlineId, TextStyle};
 use sheaf_ui::button::{Button, Chip};
 use sheaf_ui::text_input::{TextInput, TextInputEvent};
 use sheaf_ui::{dialog, theme};
@@ -318,23 +319,20 @@ impl DocView {
         let State::Ready(doc) = &self.state else {
             return;
         };
-        let (mut edits, marks) = status_edits(
+        let app: &App = cx;
+        let edits = status_edits(
             doc.model.state(),
-            &|pref| {
-                doc.model
-                    .source(pref.source)
-                    .map(|s| s.page_size(pref.index))
-            },
+            &|pref| doc.model.geom(pref),
             id,
             &spec,
             &stamp_text,
             height,
+            &|kind| {
+                let mut a = self.new_annot(kind, spec.color, app);
+                a.stroke = spec.width;
+                a
+            },
         );
-        for (page, kind) in marks {
-            let mut a = self.new_annot(kind, spec.color, cx);
-            a.stroke = spec.width;
-            edits.push(Edit::AnnotAdd { page, annot: a });
-        }
         self.apply_batch(edits, &format!("Set status {} on “{title}”", spec.name), cx);
         crate::state::update(cx, |s| s.set_status = Some(spec));
         self.wanted_panel = Some("bookmarks");
@@ -367,17 +365,18 @@ impl DocView {
 }
 
 /// What Set Status does to bookmark `id` and its pages: the bookmark's
-/// edit and the old borders' deletions, then the marks to add (each page's
-/// border and stamp), for the caller to sign. `page_size` gives a page's
-/// size as its source shows it.
+/// edit, the old borders' deletions, then each page's border and stamp,
+/// laid out on the page as it shows (`geom` gives its boxes and turn) and
+/// signed by `sign`.
 fn status_edits(
     st: &sheaf_doc::DocState,
-    page_size: &dyn Fn(&sheaf_doc::PageRef) -> Option<sheaf_core::PageSize>,
+    geom: &dyn Fn(&sheaf_doc::PageRef) -> Geom,
     id: OutlineId,
     spec: &StatusSpec,
     stamp_text: &str,
     height: f32,
-) -> (Vec<Edit>, Vec<(sheaf_doc::PageId, AnnotKind)>) {
+    sign: &dyn Fn(AnnotKind) -> Annot,
+) -> Vec<Edit> {
     let mut edits = vec![Edit::OutlineEdit {
         id,
         title: None,
@@ -391,9 +390,10 @@ fn status_edits(
     }];
     let mut marks = Vec::new();
     for page in st.bookmark_pages(id).unwrap_or_default() {
-        let Some(size) = st.pages.iter().find(|p| p.id == page).and_then(page_size) else {
+        let Some(edit) = st.pages.iter().find(|p| p.id == page).map(geom) else {
             continue;
         };
+        let size = edit.shown();
         // A page's border is replaced, not doubled.
         for a in st.annots_on(page).into_iter().flatten() {
             if matches!(a.kind, AnnotKind::PageBorder { .. }) {
@@ -403,6 +403,7 @@ fn status_edits(
         if spec.border {
             marks.push((
                 page,
+                edit,
                 AnnotKind::PageBorder {
                     rect: Box2 {
                         x: INSET,
@@ -418,6 +419,7 @@ fn status_edits(
             let (w, h) = sheaf_doc::annot::text_stamp_size(stamp_text, height);
             marks.push((
                 page,
+                edit,
                 AnnotKind::TextStamp {
                     rect: Box2 {
                         x: STAMP_AT,
@@ -431,7 +433,11 @@ fn status_edits(
             ));
         }
     }
-    (edits, marks)
+    edits.extend(marks.into_iter().map(|(page, edit, kind)| Edit::AnnotAdd {
+        page,
+        annot: sign(kind).to_page(&edit),
+    }));
+    edits
 }
 
 /// What Reset Status does to bookmark `id`: no color or style, no borders
@@ -463,15 +469,7 @@ fn reset_edits(st: &sheaf_doc::DocState, id: OutlineId, stamps: bool) -> Vec<Edi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sheaf_core::PageSize;
-    use sheaf_doc::{Annot, AnnotId, Document, FixedCount, FlatOutlineItem, SourceInfo};
-
-    fn letter(_: &sheaf_doc::PageRef) -> Option<PageSize> {
-        Some(PageSize {
-            width: 612.0,
-            height: 792.0,
-        })
-    }
+    use sheaf_doc::{AnnotId, Document, FixedCount, FlatOutlineItem, SourceInfo, Store};
 
     fn signed(kind: AnnotKind) -> Annot {
         Annot {
@@ -487,26 +485,21 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            turn: sheaf_core::Rotation::R0,
             name: String::new(),
         }
     }
 
-    #[test]
-    fn set_status_borders_and_stamps_a_bookmarks_pages_then_resets() {
-        let mut d = Document::new(
-            SourceInfo {
-                path: "binder.pdf".into(),
-                page_count: 5,
-                first_page: PageSize {
-                    width: 612.0,
-                    height: 792.0,
-                },
-                page_sizes: None,
-                bytes: 0,
-                password: None,
-                data: None,
-                derived: None,
-            },
+    /// Five blank pages; "Cash" owns the first three.
+    fn binder() -> (Document, OutlineId) {
+        let store = Store::new();
+        let primary = SourceInfo {
+            name: "binder.pdf".into(),
+            ..SourceInfo::blank(&store, 5)
+        };
+        let d = Document::new(
+            store,
+            primary,
             &[
                 FlatOutlineItem {
                     title: "Cash".into(),
@@ -515,6 +508,7 @@ mod tests {
                     view: None,
                     color: None,
                     style: Default::default(),
+                    open: true,
                 },
                 FlatOutlineItem {
                     title: "Receivables".into(),
@@ -523,25 +517,29 @@ mod tests {
                     view: None,
                     color: None,
                     style: Default::default(),
+                    open: true,
                 },
             ],
             Box::new(FixedCount(10)),
         );
         let cash = d.state().outline[0].id;
+        (d, cash)
+    }
+
+    #[test]
+    fn set_status_borders_and_stamps_a_bookmarks_pages_then_resets() {
+        let (mut d, cash) = binder();
         let spec = StatusSpec::default();
         let set = |d: &mut Document| {
-            let (mut edits, marks) = status_edits(
+            let edits = status_edits(
                 d.state(),
-                &letter,
+                &|p| d.geom(p),
                 cash,
                 &spec,
                 "REVIEWED\nPS 10/14/2026",
                 40.0,
+                &signed,
             );
-            edits.extend(marks.into_iter().map(|(page, kind)| Edit::AnnotAdd {
-                page,
-                annot: signed(kind),
-            }));
             d.apply_batch(edits, "status").unwrap();
         };
         set(&mut d);
@@ -569,5 +567,58 @@ mod tests {
         d.apply_batch(reset_edits(d.state(), cash, true), "reset")
             .unwrap();
         assert_eq!(count(&d, 0), 0);
+    }
+
+    /// On a turned page the border goes round the page and the stamp sits
+    /// at its top left as it shows, both reading as it does.
+    #[test]
+    fn a_status_is_laid_out_on_the_page_as_it_shows() {
+        let (mut d, cash) = binder();
+        let first = d.page(0).unwrap().id;
+        d.apply(
+            Edit::RotatePages {
+                ids: vec![first],
+                by: sheaf_core::Rotation::R90,
+            },
+            "turn",
+        )
+        .unwrap();
+        let edits = status_edits(
+            d.state(),
+            &|p| d.geom(p),
+            cash,
+            &StatusSpec::default(),
+            "REVIEWED",
+            40.0,
+            &signed,
+        );
+        d.apply_batch(edits, "status").unwrap();
+        let geom = d.geom(d.page(0).unwrap());
+        let size = geom.shown();
+        let marks: Vec<Annot> = d
+            .state()
+            .annots_on(first)
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect();
+        let [border, stamp] = marks.as_slice() else {
+            panic!()
+        };
+        let shown = |a: &Annot| geom.to_view().apply_box(a.page_bounds());
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-3;
+        let b = shown(border);
+        assert!(
+            near(b.x, INSET)
+                && near(b.y, INSET)
+                && near(b.w, size.width - 2.0 * INSET)
+                && near(b.h, size.height - 2.0 * INSET),
+            "{b:?}"
+        );
+        let s = shown(stamp);
+        assert!(near(s.x, STAMP_AT) && near(s.y, STAMP_AT), "{s:?}");
+        assert!(s.w > s.h, "{s:?}");
+        assert_eq!((border.turn, stamp.turn), (geom.rotate, geom.rotate));
+        assert_eq!(geom.rotate, sheaf_core::Rotation::R90);
     }
 }

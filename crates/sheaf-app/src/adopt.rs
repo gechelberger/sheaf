@@ -6,14 +6,14 @@
 //! the comment was.
 
 use gpui::{Context, Window};
-use sheaf_doc::{Annot, AnnotId, AnnotKind, Edit, PageId, Pt};
+use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, Edit, PageId, Pt};
 
 use crate::docview::{DocView, State};
 
 impl DocView {
-    /// The other tool's comment under `p` on `page_id` that sheaf can make
-    /// its own, topmost first: shown, and not a reply or status (those
-    /// are edited from the panel).
+    /// The other tool's comment under `p` (in the page's edit frame) on
+    /// `page_id` that sheaf can make its own, topmost first: shown, and not
+    /// a reply or status (those are edited from the panel).
     pub(crate) fn foreign_at(&self, page_id: PageId, p: Pt, tolerance: f32) -> Option<usize> {
         let State::Ready(doc) = &self.state else {
             return None;
@@ -22,6 +22,14 @@ impl DocView {
             return None;
         }
         let pref = doc.model.state().pages.iter().find(|r| r.id == page_id)?;
+        let to_edit = doc.model.geom(pref).to_view();
+        let under = |rect: Box2| {
+            let r = to_edit.apply_box(rect);
+            p.x >= r.x - tolerance
+                && p.x <= r.right() + tolerance
+                && p.y >= r.y - tolerance
+                && p.y <= r.bottom() + tolerance
+        };
         let hidden = doc.comment_view.as_ref().map(|(_, v)| &v.hidden_foreign);
         doc.foreign_annots
             .iter()
@@ -35,10 +43,7 @@ impl DocView {
                     && f.mark.as_ref().is_some_and(|m| {
                         !matches!(m.kind, AnnotKind::Reply { .. } | AnnotKind::Status { .. })
                     })
-                    && p.x >= f.rect.x - tolerance
-                    && p.x <= f.rect.x + f.rect.w + tolerance
-                    && p.y >= f.rect.y - tolerance
-                    && p.y <= f.rect.y + f.rect.h + tolerance
+                    && under(f.rect)
             })
             .map(|(i, _)| i)
     }

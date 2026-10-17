@@ -30,7 +30,7 @@ const ROUNDS: usize = 4;
 /// threads take turns in PDFium.
 const FROM_CORPUS: usize = 16;
 
-type Docs = Vec<(String, Arc<Vec<u8>>)>;
+type Docs = Vec<(String, Arc<[u8]>)>;
 
 /// Forms of a few sizes and kinds.
 fn fixtures() -> Docs {
@@ -53,9 +53,7 @@ fn fixtures() -> Docs {
         }
         out.push((format!("{pages} pages"), form.bytes()));
     }
-    out.into_iter()
-        .map(|(name, b)| (name, Arc::new(b)))
-        .collect()
+    out.into_iter().map(|(name, b)| (name, b.into())).collect()
 }
 
 /// Up to [`FROM_CORPUS`] of the corpus's forms, from across it, but none
@@ -77,20 +75,21 @@ fn corpus() -> Docs {
         .filter_map(|e| {
             Some((
                 e.path.clone(),
-                Arc::new(std::fs::read(corpus.path(e)).ok()?),
+                Arc::from(std::fs::read(corpus.path(e)).ok()?),
             ))
         })
         .filter(|(_, bytes)| use_document(bytes, true).is_ok())
         .collect()
 }
 
-/// What the app does with a document: open it, size its pages, read its
-/// bookmarks and the first page's text; and if `draw`, draw that page, as
-/// the page view does and as a viewer of appearances only does.
-fn use_document(bytes: &Arc<Vec<u8>>, draw: bool) -> anyhow::Result<()> {
+/// What the app does with a document: open it, size its pages and read
+/// the first page's text; and if `draw`, draw that page, as the page view
+/// does and as a viewer of appearances only does.
+fn use_document(bytes: &Arc<[u8]>, draw: bool) -> anyhow::Result<()> {
     let engine = PdfiumEngine::open_bytes(bytes.clone(), None)?;
-    engine.page_sizes()?;
-    engine.outline()?;
+    for i in 0..engine.page_count() {
+        engine.page_size(PageIndex(i))?;
+    }
     engine.page_text(PageIndex(0))?;
     if draw {
         engine.render_page(PageIndex(0), 40, PixelFormat::Bgra)?;

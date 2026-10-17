@@ -49,6 +49,7 @@ pub(crate) mod v02 {
 
 #[cfg(test)]
 mod tests {
+    use sheaf_core::Rotation;
     use sheaf_doc::measure::{Measured, Scale};
     use sheaf_doc::{Annot, AnnotId, AnnotKind, Edit, OutlineId, Pt};
 
@@ -66,6 +67,7 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            turn: Rotation::R0,
             name: String::new(),
         }
     }
@@ -125,16 +127,33 @@ mod tests {
         same(&poly, super::v03::annot_from_wit(wit));
     }
 
+    /// A plugin's units are sheaf's, with the nouns the status bar shows.
+    #[test]
+    fn units_cross_both_apis() {
+        use super::bindings_v02::sheaf::plugin::progress::Unit as V02;
+        use super::bindings_v03::sheaf::plugin::progress::Unit as V03;
+        use in_progress::Unit;
+        let v02 = [V02::Items, V02::Pages, V02::Bytes].map(super::v02::unit);
+        let v03 = [V03::Items, V03::Pages, V03::Bytes].map(super::v03::unit);
+        for units in [v02, v03] {
+            assert_eq!(units, [Unit::ITEMS, sheaf_doc::PAGES, Unit::Bytes]);
+            assert_eq!(units.map(Unit::noun), ["items", "pages", "bytes"]);
+        }
+    }
+
     #[test]
     fn outline_edit_keeps_clear_vs_unchanged() {
         use super::bindings_v03::sheaf::plugin::types as w;
-        let e = super::v03::edit_from_wit(w::Edit::OutlineEdit(w::OutlineEdit {
-            id: 3,
-            title: None,
-            target: Some(None),
-            color: None,
-            view: None,
-        }));
+        let e = super::v03::edit_from_wit(
+            None,
+            w::Edit::OutlineEdit(w::OutlineEdit {
+                id: 3,
+                title: None,
+                target: Some(None),
+                color: None,
+                view: None,
+            }),
+        );
         assert_eq!(
             e,
             Edit::OutlineEdit {

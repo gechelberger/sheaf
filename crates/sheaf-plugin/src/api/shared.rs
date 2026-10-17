@@ -2,16 +2,20 @@
 // types and sheaf's, and the host side of their interfaces. Included in
 // each version's module (`mod.rs`), where `api` is that version's
 // bindings; a change here changes both.
+//
+// Their page coordinates are a page's frame (`page_frame`): sheaf's
+// PageSpace converts to it on the way out and from it on the way in.
 
 use std::sync::Arc;
 use std::time::Instant;
 
 use sheaf_core::{PageSize, Rotation};
+use sheaf_doc::geom::{Affine, Geom};
 use sheaf_doc::{
     Annot, AnnotId, AnnotKind, Box2, DestView, Edit, NewOutlineItem, OutlineId, OutlineNode,
-    PageId, PageRef, Pt, Snapshot, SourceId,
+    PageId, PageRef, Pt, Snapshot, SourceId, TextHit,
 };
-use sheaf_progress::{Level, Progress, Tracker, Unit};
+use in_progress::{Level, Progress, Tracker, Unit};
 use wasmtime::component::Resource;
 
 use crate::progress::Task;
@@ -79,18 +83,38 @@ pub(crate) fn box_from_wit(b: w::Box2) -> Box2 {
     }
 }
 
-/// A page's size as displayed: its source size turned by its rotation.
+/// A page's size as displayed.
 pub(crate) fn page_size(snap: &Snapshot, p: &PageRef) -> PageSize {
-    snap.source(p.source)
-        .map(|s| s.page_size(p.index))
-        .unwrap_or(PageSize {
-            width: 612.0,
-            height: 792.0,
-        })
-        .rotated(p.rotation)
+    snap.geom(p).shown()
 }
 
-pub(crate) fn layer_to_wit(l: &sheaf_doc::TextLayer) -> api::ocr::TextLayer {
+/// A page's frame, what the API's page coordinates are in: its source
+/// page as the file displays it, after the file's own `/Rotate` and before
+/// any sheaf adds (`wit/sheaf.wit`). None for a page that isn't in the
+/// document, whose geometry passes as it is.
+fn page_frame(snap: &Snapshot, page: PageId) -> Option<Geom> {
+    let p = snap.state.pages.iter().find(|p| p.id == page)?;
+    snap.source(p.source).map(|s| s.src.geom(p.index))
+}
+
+/// PageSpace into `page`'s frame, for geometry going out.
+fn to_frame(snap: &Snapshot, page: PageId) -> Affine {
+    page_frame(snap, page).map_or(Affine::IDENTITY, |g| g.to_view())
+}
+
+/// An OCR layer's hits as matches in its page's frame (`to_view`).
+fn layer_matches(hits: Vec<TextHit>, to_view: Affine) -> Vec<TextMatch> {
+    hits.into_iter()
+        .map(|h| TextMatch {
+            text: h.text,
+            rects: h.rects.into_iter().map(|r| to_view.apply_box(r)).collect(),
+            groups: h.groups,
+        })
+        .collect()
+}
+
+/// An OCR layer, its words in their page's frame (`to_view`).
+pub(crate) fn layer_to_wit(l: &sheaf_doc::TextLayer, to_view: Affine) -> api::ocr::TextLayer {
     use api::ocr as wo;
     wo::TextLayer {
         words: l
@@ -98,7 +122,7 @@ pub(crate) fn layer_to_wit(l: &sheaf_doc::TextLayer) -> api::ocr::TextLayer {
             .iter()
             .map(|w| wo::OcrWord {
                 text: w.text.clone(),
-                rect: box_to_wit(w.rect),
+                rect: box_to_wit(to_view.apply_box(w.rect)),
                 confidence: w.confidence,
             })
             .collect(),
@@ -115,19 +139,25 @@ pub(crate) fn page_info(snap: &Snapshot, p: &PageRef) -> w::PageInfo {
     let size = page_size(snap, p);
     w::PageInfo {
         id: p.id.0,
-        rotation: rotation_to_wit(p.rotation),
+        rotation: rotation_to_wit(snap.render_delta(p)),
         width: size.width,
         height: size.height,
     }
 }
 
-pub(crate) fn dest_to_wit(v: &DestView) -> w::DestView {
+/// A bookmark's position, `/XYZ` mapped by `to_view` one axis at a time,
+/// so a missing coordinate stays missing. Other kinds are user space, as
+/// the file has them.
+pub(crate) fn dest_to_wit(v: &DestView, to_view: Affine) -> w::DestView {
     match v {
-        DestView::Xyz { left, top, zoom } => w::DestView::Xyz(w::DestXyz {
-            left: *left,
-            top: *top,
-            zoom: *zoom,
-        }),
+        DestView::Xyz { left, top, zoom } => {
+            let (left, top) = to_view.apply_axes(*left, *top);
+            w::DestView::Xyz(w::DestXyz {
+                left,
+                top,
+                zoom: *zoom,
+            })
+        }
         DestView::Other { kind, params } => w::DestView::Other(w::DestOther {
             kind: kind.clone(),
             params: params.clone(),
@@ -135,13 +165,18 @@ pub(crate) fn dest_to_wit(v: &DestView) -> w::DestView {
     }
 }
 
-pub(crate) fn dest_from_wit(v: w::DestView) -> DestView {
+/// A plugin's bookmark position, `/XYZ` mapped by `from_view` (see
+/// [`dest_to_wit`]).
+pub(crate) fn dest_from_wit(v: w::DestView, from_view: Affine) -> DestView {
     match v {
-        w::DestView::Xyz(x) => DestView::Xyz {
-            left: x.left,
-            top: x.top,
-            zoom: x.zoom.filter(|z| *z > 0.0),
-        },
+        w::DestView::Xyz(x) => {
+            let (left, top) = from_view.apply_axes(x.left, x.top);
+            DestView::Xyz {
+                left,
+                top,
+                zoom: x.zoom.filter(|z| *z > 0.0),
+            }
+        }
         w::DestView::Other(o) => DestView::Other {
             kind: o.kind,
             params: o.params,
@@ -149,23 +184,40 @@ pub(crate) fn dest_from_wit(v: w::DestView) -> DestView {
     }
 }
 
-pub(crate) fn outline_item(depth: u16, n: &OutlineNode) -> w::OutlineItem {
+pub(crate) fn outline_item(snap: &Snapshot, depth: u16, n: &OutlineNode) -> w::OutlineItem {
     w::OutlineItem {
         id: n.id.0,
         title: n.title.clone(),
         target: n.target.map(|p| p.0),
-        view: n.view.as_ref().map(dest_to_wit),
+        view: n.view.as_ref().map(|v| {
+            let to_view = n.target.map_or(Affine::IDENTITY, |t| to_frame(snap, t));
+            dest_to_wit(v, to_view)
+        }),
         color: n.color.map(rgb_to_wit),
         depth,
     }
 }
 
-fn page_annot(pa: w::PageAnnot) -> (PageId, Annot) {
-    (PageId(pa.page), annot_from_wit(pa.annot))
-}
-
-pub(crate) fn edit_from_wit(e: w::Edit) -> Edit {
+/// A plugin's edit, its geometry from its pages' frames into PageSpace.
+/// `snap` is the document the call started with; with none, nothing is
+/// mapped.
+pub(crate) fn edit_from_wit(snap: Option<&Snapshot>, e: w::Edit) -> Edit {
     let pages = |ids: Vec<u64>| ids.into_iter().map(PageId).collect::<Vec<_>>();
+    let frame = |page: PageId| snap.and_then(|s| page_frame(s, page));
+    let from_view = |page: Option<PageId>| {
+        page.and_then(frame)
+            .map_or(Affine::IDENTITY, |g| g.from_view())
+    };
+    // A mark reads upright in the frame it was given in.
+    let page_annot = |pa: w::PageAnnot| {
+        let page = PageId(pa.page);
+        let annot = annot_from_wit(pa.annot);
+        let annot = match frame(page) {
+            Some(g) => annot.to_page(&g),
+            None => annot,
+        };
+        (page, annot)
+    };
     match e {
         w::Edit::MovePages(m) => Edit::MovePages {
             ids: pages(m.ids),
@@ -177,24 +229,30 @@ pub(crate) fn edit_from_wit(e: w::Edit) -> Edit {
         },
         w::Edit::DeletePages(ids) => Edit::DeletePages { ids: pages(ids) },
         w::Edit::DuplicatePages(ids) => Edit::DuplicatePages { ids: pages(ids) },
-        w::Edit::OutlineInsert(o) => Edit::OutlineInsert {
-            parent: o.parent.map(OutlineId),
-            after: o.after.map(OutlineId),
-            title: o.title,
-            target: o.target.map(PageId),
-            view: o.view.map(dest_from_wit),
-        },
+        w::Edit::OutlineInsert(o) => {
+            let target = o.target.map(PageId);
+            Edit::OutlineInsert {
+                parent: o.parent.map(OutlineId),
+                after: o.after.map(OutlineId),
+                title: o.title,
+                target,
+                view: o.view.map(|v| dest_from_wit(v, from_view(target))),
+            }
+        }
         w::Edit::OutlineInsertTree(t) => Edit::OutlineInsertTree {
             parent: t.parent.map(OutlineId),
             after: t.after.map(OutlineId),
             items: t
                 .items
                 .into_iter()
-                .map(|i| NewOutlineItem {
-                    title: i.title,
-                    target: i.target.map(PageId),
-                    view: i.view.map(dest_from_wit),
-                    depth: i.depth,
+                .map(|i| {
+                    let target = i.target.map(PageId);
+                    NewOutlineItem {
+                        title: i.title,
+                        target,
+                        view: i.view.map(|v| dest_from_wit(v, from_view(target))),
+                        depth: i.depth,
+                    }
                 })
                 .collect(),
         },
@@ -204,14 +262,28 @@ pub(crate) fn edit_from_wit(e: w::Edit) -> Edit {
             after: o.after.map(OutlineId),
             with_pages: o.with_pages,
         },
-        w::Edit::OutlineEdit(o) => Edit::OutlineEdit {
-            id: OutlineId(o.id),
-            title: o.title,
-            target: o.target.map(|t| t.map(PageId)),
-            color: o.color.map(|c| c.map(rgb_from_wit)),
-            view: o.view.map(|v| v.map(dest_from_wit)),
-            style: None,
-        },
+        w::Edit::OutlineEdit(o) => {
+            let id = OutlineId(o.id);
+            let target = o.target.map(|t| t.map(PageId));
+            // A position is on the bookmark's new page, or else its own.
+            let page = || match target {
+                Some(t) => t,
+                None => snap.and_then(|s| {
+                    let flat = s.state.outline_flat();
+                    flat.into_iter().find(|(_, n)| n.id == id)?.1.target
+                }),
+            };
+            Edit::OutlineEdit {
+                id,
+                title: o.title,
+                target,
+                color: o.color.map(|c| c.map(rgb_from_wit)),
+                view: o
+                    .view
+                    .map(|v| v.map(|v| dest_from_wit(v, from_view(page())))),
+                style: None,
+            }
+        }
         w::Edit::OutlineDelete(id) => Edit::OutlineDelete { id: OutlineId(id) },
         w::Edit::AnnotAdd(pa) => {
             let (page, annot) = page_annot(pa);
@@ -232,17 +304,22 @@ pub(crate) fn edit_from_wit(e: w::Edit) -> Edit {
     }
 }
 
-pub(crate) fn event_to_wit(e: &DocEvent) -> w::DocEvent {
+/// An event as a plugin sees it, a region in its page's frame. `snap` is
+/// the document the call started with; with none, nothing is mapped.
+pub(crate) fn event_to_wit(snap: Option<&Snapshot>, e: &DocEvent) -> w::DocEvent {
     match e {
         DocEvent::Opened => w::DocEvent::Opened,
         DocEvent::Edited(l) => w::DocEvent::Edited(l.clone()),
         DocEvent::Saved(p) => w::DocEvent::Saved(p.clone()),
         DocEvent::SelectionChanged => w::DocEvent::SelectionChanged,
         DocEvent::Closed => w::DocEvent::Closed,
-        DocEvent::Region { page, rect } => w::DocEvent::Region(w::Region {
-            page: page.0,
-            rect: box_to_wit(*rect),
-        }),
+        DocEvent::Region { page, rect } => {
+            let to_view = snap.map_or(Affine::IDENTITY, |s| to_frame(s, *page));
+            w::DocEvent::Region(w::Region {
+                page: page.0,
+                rect: box_to_wit(to_view.apply_box(*rect)),
+            })
+        }
         DocEvent::RegionCleared => w::DocEvent::RegionCleared,
     }
 }
@@ -367,7 +444,7 @@ impl api::document::Host for HostState {
             .state
             .outline_flat()
             .into_iter()
-            .map(|(depth, n)| outline_item(depth, n))
+            .map(|(depth, n)| outline_item(&d.snapshot, depth, n))
             .collect()
     }
 
@@ -375,10 +452,16 @@ impl api::document::Host for HostState {
         let Some(d) = self.doc() else {
             return Vec::new();
         };
+        let page = PageId(page);
+        let to_view = to_frame(&d.snapshot, page);
         d.snapshot
             .state
-            .annots_on(PageId(page))
-            .map(|l| l.iter().filter_map(annot_to_wit).collect())
+            .annots_on(page)
+            .map(|l| {
+                l.iter()
+                    .filter_map(|a| annot_to_wit(&a.mapped(&to_view)))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -424,14 +507,10 @@ impl api::text::Host for HostState {
             .map_err(|e| e.to_string())?;
         let id = PageId(page);
         let found: Vec<TextMatch> = match d.snapshot.state.text_layer(id) {
-            Some(layer) => sheaf_doc::text_layer::pattern_search(layer, &re)
-                .into_iter()
-                .map(|h| TextMatch {
-                    text: h.text,
-                    rects: h.rects,
-                    groups: h.groups,
-                })
-                .collect(),
+            Some(layer) => layer_matches(
+                sheaf_doc::text_layer::pattern_search(layer, &re),
+                to_frame(&d.snapshot, id),
+            ),
             None => {
                 let p = d
                     .snapshot
@@ -456,14 +535,10 @@ impl api::text::Host for HostState {
     ) -> Result<Vec<api::types::TextMatch>, String> {
         let (d, p) = self.page_ref(page)?;
         let found: Vec<TextMatch> = match d.snapshot.state.text_layer(p.id) {
-            Some(layer) => sheaf_doc::text_layer::search(layer, &query, match_case)
-                .into_iter()
-                .map(|h| TextMatch {
-                    text: h.text,
-                    rects: h.rects,
-                    groups: h.groups,
-                })
-                .collect(),
+            Some(layer) => layer_matches(
+                sheaf_doc::text_layer::search(layer, &query, match_case),
+                to_frame(&d.snapshot, p.id),
+            ),
             None => d
                 .text
                 .search(p.source, p.index, &query, match_case)
@@ -481,14 +556,10 @@ impl api::text::Host for HostState {
             std::sync::LazyLock::new(|| Arc::new(regex::Regex::new(r"\S+").unwrap()));
         let (d, p) = self.page_ref(page)?;
         let words: Vec<TextMatch> = match d.snapshot.state.text_layer(p.id) {
-            Some(layer) => sheaf_doc::text_layer::pattern_search(layer, &WORD)
-                .into_iter()
-                .map(|h| TextMatch {
-                    text: h.text,
-                    rects: h.rects,
-                    groups: Vec::new(),
-                })
-                .collect(),
+            Some(layer) => layer_matches(
+                sheaf_doc::text_layer::pattern_search(layer, &WORD),
+                to_frame(&d.snapshot, p.id),
+            ),
             None => d
                 .text
                 .pattern_search(p.source, p.index, &WORD)
@@ -519,7 +590,15 @@ impl api::text::Host for HostState {
         let (d, p) = self.page_ref(page)?;
         let rect = box_from_wit(rect);
         let boxes = match d.snapshot.state.text_layer(p.id) {
-            Some(layer) => layer.boxes_in_rect(rect),
+            // `rect` is in the page's frame, the layer in PageSpace.
+            Some(layer) => {
+                let to_view = to_frame(&d.snapshot, p.id);
+                layer
+                    .boxes_in_rect(to_view.inverse().apply_box(rect))
+                    .into_iter()
+                    .map(|b| to_view.apply_box(b))
+                    .collect()
+            }
             None => d
                 .text
                 .text_boxes(p.source, p.index, rect)
@@ -554,22 +633,25 @@ impl api::ocr::Host for HostState {
     ) -> Result<api::ocr::TextLayer, String> {
         let (d, p) = self.page_ref(page)?;
         let ocr = d.ocr.clone().ok_or("OCR isn't available")?;
-        let size = page_size(&d.snapshot, &p);
+        let geom = d.snapshot.geom(&p);
+        let render = d.snapshot.render_delta(&p);
+        let to_view = to_frame(&d.snapshot, p.id);
         let started = Instant::now();
-        let layer = ocr.recognize(&p, size, options.language, options.dpi);
+        let layer = ocr.recognize(&p, &geom, render, options.language, options.dpi);
         // The engine's time isn't the plugin's.
         self.deadline += started.elapsed();
         layer
-            .map(|l| layer_to_wit(&l))
+            .map(|l| layer_to_wit(&l, to_view))
             .map_err(|e| format!("{e:#}"))
     }
 
     fn page_text_layer(&mut self, page: u64) -> Option<api::ocr::TextLayer> {
         let d = self.doc()?;
+        let page = PageId(page);
         d.snapshot
             .state
-            .text_layer(PageId(page))
-            .map(|l| layer_to_wit(l))
+            .text_layer(page)
+            .map(|l| layer_to_wit(l, to_frame(&d.snapshot, page)))
     }
 }
 
@@ -627,7 +709,8 @@ impl api::ui::Host for HostState {
 
 impl api::edits::Host for HostState {
     fn submit(&mut self, label: String, edits: Vec<api::types::Edit>) {
-        let edits = edits.into_iter().map(edit_from_wit).collect();
+        let snap = self.doc().map(|d| &d.snapshot);
+        let edits = edits.into_iter().map(|e| edit_from_wit(snap, e)).collect();
         self.batches.push(EditBatch { label, edits });
     }
 }
@@ -659,7 +742,7 @@ impl api::render::HostPageRenderer for HostState {
                 .iter()
                 .find(|p| p.id == PageId(page))
                 .copied()?;
-            let s = d.snapshot.source(p.source).map(|s| s.page_size(p.index))?;
+            let s = d.snapshot.source(p.source).map(|s| s.src.page_size(p.index))?;
             Some((p, (s.width, s.height)))
         });
         let (page, size) = found.unwrap_or((
@@ -840,10 +923,10 @@ impl api::render::HostImage for HostState {
     }
 }
 
-fn unit(u: api::progress::Unit) -> Unit {
+pub(crate) fn unit(u: api::progress::Unit) -> Unit {
     match u {
-        api::progress::Unit::Items => Unit::Items,
-        api::progress::Unit::Pages => Unit::Pages,
+        api::progress::Unit::Items => Unit::ITEMS,
+        api::progress::Unit::Pages => sheaf_doc::PAGES,
         api::progress::Unit::Bytes => Unit::Bytes,
     }
 }
@@ -853,8 +936,8 @@ impl api::progress::Host for HostState {}
 impl api::progress::HostTask for HostState {
     fn new(&mut self, label: String, total: Option<u64>, u: api::progress::Unit) -> Resource<Task> {
         let t = match self.progress() {
-            Some(root) => root.child_tracker(&label, 1.0),
-            None => Tracker::new(),
+            Some(root) if self.has_task_room() => root.child_tracker(&label, 1.0),
+            _ => Tracker::new(),
         };
         t.set_total(total, unit(u));
         self.push_task(t)
@@ -891,14 +974,18 @@ impl api::progress::HostTask for HostState {
         }
     }
 
-    fn is_cancelled(&mut self, this: Resource<Task>) -> bool {
-        self.task(&this).is_some_and(|t| t.is_cancelled())
+    /// Only the call is ever cancelled, so ask it: a task past the cap
+    /// isn't under it.
+    fn is_cancelled(&mut self, _this: Resource<Task>) -> bool {
+        self.progress().is_some_and(|t| t.is_cancelled())
     }
 
     fn child(&mut self, this: Resource<Task>, label: String, weight: f32) -> Resource<Task> {
         let child = match self.task(&this) {
-            Some(t) => t.child_tracker(&label, if weight.is_finite() { weight } else { 0.0 }),
-            None => Tracker::new(),
+            Some(t) if self.has_task_room() => {
+                t.child_tracker(&label, if weight.is_finite() { f64::from(weight) } else { 0.0 })
+            }
+            _ => Tracker::new(),
         };
         self.push_task(child)
     }

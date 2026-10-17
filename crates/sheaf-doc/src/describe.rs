@@ -1,13 +1,14 @@
 //! Edits in words, for the History panel: "Delete pages 4–6", "Add
 //! highlight on page 3". Page numbers come from the document as it was
-//! before the edit, when that's at hand; without it, counts.
+//! just before the edit: a step's line is made when it's applied, so a
+//! batch's later edits count pages after its earlier ones.
 
 use crate::annot::AnnotKind;
 use crate::model::{DocState, Edit, PageId};
 
-/// What `edit` did, in a short line. `before` is the document it was
-/// applied to, if known.
-pub fn describe(edit: &Edit, before: Option<&DocState>) -> String {
+/// What `edit` does to `before`, the document it's applied to, in a short
+/// line.
+pub fn describe(edit: &Edit, before: &DocState) -> String {
     let pages = |ids: &[PageId]| pages_text(ids, before);
     match edit {
         Edit::MovePages { ids, .. } => format!("Move {}", pages(ids)),
@@ -86,7 +87,8 @@ pub fn describe(edit: &Edit, before: Option<&DocState>) -> String {
         }
         Edit::AnnotDelete { page, id } => {
             let kind = before
-                .and_then(|st| st.annots_on(*page)?.iter().find(|a| a.id == *id).cloned())
+                .annots_on(*page)
+                .and_then(|list| list.iter().find(|a| a.id == *id))
                 .map(|a| noun(&a.kind))
                 .unwrap_or_else(|| "a mark".into());
             format!("Delete {kind}{}", on_page(*page, before))
@@ -162,30 +164,32 @@ fn count(n: usize, what: &str) -> String {
     }
 }
 
-/// " on page 3", or nothing when the page's number isn't known.
-fn on_page(page: PageId, before: Option<&DocState>) -> String {
-    before
-        .and_then(|st| st.index_of(page))
+/// " on page 3", or nothing when the page isn't in the document.
+fn on_page(page: PageId, st: &DocState) -> String {
+    st.index_of(page)
         .map(|i| format!(" on page {}", i + 1))
         .unwrap_or_default()
 }
 
-/// "page 3", "pages 2, 5", "pages 4–6", or a count when the numbers aren't
-/// known.
-fn pages_text(ids: &[PageId], before: Option<&DocState>) -> String {
-    let Some(st) = before else {
-        return count(ids.len(), "page");
-    };
-    let mut numbers: Vec<usize> = ids
+/// "page 3", "pages 2, 5", "pages 4–6", or a count when one of them isn't
+/// in the document.
+fn pages_text(ids: &[PageId], st: &DocState) -> String {
+    // One walk of the pages, not a search for each id: their numbers come
+    // out sorted, each once. A sorted list finds the ids faster than a hash
+    // set does, from one id to thousands.
+    let mut wanted = ids.to_vec();
+    wanted.sort_unstable();
+    wanted.dedup();
+    let numbers: Vec<usize> = st
+        .pages
         .iter()
-        .filter_map(|id| st.index_of(*id))
-        .map(|i| i + 1)
+        .enumerate()
+        .filter(|(_, p)| wanted.binary_search(&p.id).is_ok())
+        .map(|(i, _)| i + 1)
         .collect();
-    if numbers.len() != ids.len() || numbers.is_empty() {
-        return count(ids.len(), "page");
+    if numbers.len() != wanted.len() || numbers.is_empty() {
+        return count(wanted.len(), "page");
     }
-    numbers.sort_unstable();
-    numbers.dedup();
     // Runs: 4–6, 9.
     let mut runs: Vec<String> = Vec::new();
     let mut i = 0;
@@ -214,45 +218,44 @@ mod tests {
     use super::*;
     use crate::history::FixedCount;
     use crate::model::{Document, SourceInfo};
-    use sheaf_core::{PageSize, Rotation};
+    use crate::store::Store;
+    use sheaf_core::Rotation;
 
     fn doc(n: u32) -> Document {
-        Document::new(
-            SourceInfo {
-                path: "a.pdf".into(),
-                page_count: n,
-                first_page: PageSize {
-                    width: 612.0,
-                    height: 792.0,
-                },
-                page_sizes: None,
-                bytes: 0,
-                password: None,
-                data: None,
-                derived: None,
-            },
-            &[],
-            Box::new(FixedCount(10)),
-        )
+        let store = Store::new();
+        let primary = SourceInfo::blank(&store, n);
+        Document::new(store, primary, &[], Box::new(FixedCount(10)))
     }
 
     #[test]
     fn pages_read_as_numbers_and_runs() {
         let d = doc(10);
         let id = |i: usize| d.page(i).unwrap().id;
-        let st = Some(d.state());
+        let st = d.state();
         assert_eq!(pages_text(&[id(2)], st), "page 3");
-        assert_eq!(pages_text(&[id(3), id(4), id(5)], st), "pages 4–6");
+        assert_eq!(pages_text(&[id(5), id(4), id(3)], st), "pages 4–6");
         assert_eq!(pages_text(&[id(1), id(4)], st), "pages 2, 5");
         assert_eq!(pages_text(&[id(0), id(1), id(8)], st), "pages 1, 2, 9");
-        assert_eq!(pages_text(&[id(3), id(4), id(5)], None), "3 pages");
+        let every_other: Vec<PageId> = (0..10).step_by(2).map(id).collect();
+        assert_eq!(pages_text(&every_other, st), "5 pages", "a long list");
+        assert_eq!(
+            pages_text(&[id(3), PageId(999)], st),
+            "2 pages",
+            "one isn't there"
+        );
+        assert_eq!(pages_text(&[id(2), id(2)], st), "page 3", "named twice");
+        assert_eq!(
+            pages_text(&[id(3), id(3), PageId(999)], st),
+            "2 pages",
+            "named twice, and one isn't there"
+        );
     }
 
     #[test]
     fn edits_read_plainly() {
         let d = doc(6);
         let id = |i: usize| d.page(i).unwrap().id;
-        let st = Some(d.state());
+        let st = d.state();
         assert_eq!(
             describe(
                 &Edit::DeletePages {

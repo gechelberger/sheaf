@@ -57,6 +57,30 @@ impl Guest for TestPlugin {
                 }
                 Ok(())
             }
+            // Counts 3 of 10 and returns, leaving its task for the host
+            // to free.
+            "early" => {
+                let task = sheaf_plugin_api::progress::items("Early", 10);
+                task.set(3);
+                std::mem::forget(task);
+                Ok(())
+            }
+            // Holds 300 steps, past the host's cap on live tasks, and a
+            // second task past it with a message, says "made", then waits
+            // on its last step to be stopped: "Stopped".
+            "many-steps" => {
+                let task = sheaf_plugin_api::progress::items("Many", 1);
+                let steps: Vec<_> = (0..300)
+                    .map(|i| task.child(&format!("step {i}"), 0.002))
+                    .collect();
+                let late = sheaf_plugin_api::progress::items("Late", 1);
+                late.message(sheaf_plugin_api::progress::Level::Info, "hidden");
+                task.message(sheaf_plugin_api::progress::Level::Info, "made");
+                loop {
+                    sheaf_plugin_api::progress::check(&steps[299])?;
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
             // Two submits: two undo steps.
             "two-batches" => {
                 for title in ["one", "two"] {
@@ -205,6 +229,97 @@ impl Guest for TestPlugin {
                 storage::set("kinds", &kinds.join(","))
             }
             "events" => Err(storage::get("events").unwrap_or_default()),
+            // Each page's rotation and size: "90 580x740; 0 612x792".
+            "pages" => {
+                use sheaf_plugin_api::types::Rotation;
+                let pages: Vec<String> = document::pages()
+                    .iter()
+                    .map(|p| {
+                        let degrees = match p.rotation {
+                            Rotation::R0 => 0,
+                            Rotation::R90 => 90,
+                            Rotation::R180 => 180,
+                            Rotation::R270 => 270,
+                        };
+                        format!("{degrees} {}x{}", p.width, p.height)
+                    })
+                    .collect();
+                Err(pages.join("; "))
+            }
+            // At "x,y" on page 1: a 40×20 square, a bookmark landing there
+            // and one landing at its top only.
+            "place" => {
+                use sheaf_plugin_api::types::{AnnotKind, Box2, DestView, DestXyz, PageAnnot};
+                use sheaf_plugin_api::{Batch, annot, at};
+                let p = document::pages().first().map(|p| p.id).ok_or("no pages")?;
+                let arg = args_json.unwrap_or_default();
+                let (x, y) = arg
+                    .split_once(',')
+                    .and_then(|(x, y)| Some((x.parse::<f32>().ok()?, y.parse::<f32>().ok()?)))
+                    .ok_or("expected x,y")?;
+                let square = annot(AnnotKind::Square(Box2 {
+                    x,
+                    y,
+                    w: 40.0,
+                    h: 20.0,
+                }));
+                let top = DestView::Xyz(DestXyz {
+                    left: None,
+                    top: Some(y),
+                    zoom: None,
+                });
+                Batch::new("Place")
+                    .push(Edit::AnnotAdd(PageAnnot {
+                        page: p,
+                        annot: square,
+                    }))
+                    .bookmark_at("both", Some(p), Some(at(x, y)))
+                    .bookmark_at("top", Some(p), Some(top))
+                    .submit();
+                Ok(())
+            }
+            // Every bookmark lands at "x,y" on its own page.
+            "reposition" => {
+                use sheaf_plugin_api::types::OutlineEdit;
+                use sheaf_plugin_api::{Batch, at};
+                let arg = args_json.unwrap_or_default();
+                let (x, y) = arg
+                    .split_once(',')
+                    .and_then(|(x, y)| Some((x.parse::<f32>().ok()?, y.parse::<f32>().ok()?)))
+                    .ok_or("expected x,y")?;
+                let mut batch = Batch::new("Reposition");
+                for o in document::outline() {
+                    batch = batch.push(Edit::OutlineEdit(OutlineEdit {
+                        id: o.id,
+                        title: None,
+                        target: None,
+                        color: None,
+                        view: Some(Some(at(x, y))),
+                    }));
+                }
+                batch.submit();
+                Ok(())
+            }
+            // Page 1's squares and where each bookmark lands:
+            // "square 100,200 40x20; top None,Some(200.0)".
+            "where" => {
+                use sheaf_plugin_api::types::{AnnotKind, DestView};
+                let p = document::pages().first().map(|p| p.id).ok_or("no pages")?;
+                let mut found: Vec<String> = document::annotations(p)
+                    .iter()
+                    .filter_map(|a| match &a.kind {
+                        AnnotKind::Square(r) => {
+                            Some(format!("square {},{} {}x{}", r.x, r.y, r.w, r.h))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                found.extend(document::outline().iter().filter_map(|o| match &o.view {
+                    Some(DestView::Xyz(v)) => Some(format!("{} {:?},{:?}", o.title, v.left, v.top)),
+                    _ => None,
+                }));
+                Err(found.join("; "))
+            }
             "write-file" => {
                 let path = args_json.unwrap_or_default();
                 match std::fs::write(&path, "x") {
@@ -332,7 +447,10 @@ impl Guest for TestPlugin {
             DocEvent::Saved(p) => format!("saved:{p}"),
             DocEvent::SelectionChanged => "selection".to_string(),
             DocEvent::Closed => "closed".to_string(),
-            DocEvent::Region(r) => format!("region:{}", r.page),
+            DocEvent::Region(r) => {
+                let b = r.rect;
+                format!("region:{}@{},{} {}x{}", r.page, b.x, b.y, b.w, b.h)
+            }
             DocEvent::RegionCleared => "cleared".to_string(),
         };
         let mut all = storage::get("events").unwrap_or_default();

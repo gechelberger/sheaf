@@ -10,11 +10,12 @@ use std::io::Write;
 use anyhow::{Context, Result, bail};
 use lopdf::xref::{XrefEntry, XrefType};
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, StringFormat, dictionary};
+use sheaf_core::Rotation;
 
 use crate::model::Snapshot;
 use crate::save::{
-    LoadedSource, copy_page_dict, geom_of, is_identity, link_connectors, strip_sheaf_annots,
-    write_outline, write_page_annots,
+    LoadedSource, copy_page_dict, is_identity, link_connectors, strip_sheaf_annots, write_outline,
+    write_page_annots,
 };
 use crate::text_layer;
 
@@ -62,10 +63,10 @@ enum Mode {
 fn build(snap: &Snapshot, mode: Mode) -> Result<(usize, Vec<u8>)> {
     let primary_id = snap.primary;
     let info = snap.source(primary_id).context("primary source missing")?;
-    let original = crate::file::source_bytes(info)?;
+    let original = info.src.bytes();
     let original_len = original.len();
     let mut pdf =
-        Pdf::load_mem(&original).with_context(|| format!("parsing {}", info.path.display()))?;
+        Pdf::load_mem(original).with_context(|| format!("parsing {}", info.name.display()))?;
     if snap.header_footer_dirty {
         // Drawing it touches every page's content: a rewrite does that.
         bail!("a new header/footer is written by a full save");
@@ -107,8 +108,9 @@ fn build(snap: &Snapshot, mode: Mode) -> Result<(usize, Vec<u8>)> {
     let mut pristine = None;
 
     let mut connectors = Vec::new();
-    let mut stamp_forms = crate::save::StampForms::new();
-    let mut ocr_objects = None;
+    // OCR's font and its isolating `q`, and what the marks draw with and
+    // embed, once a save; the original's where it has them.
+    let mut cx = crate::annot::WriteCx::new(snap.assets.clone()).owning(info.src.id());
     if tree_changed {
         let pages_id = pdf.new_object_id();
         let mut kids = Vec::with_capacity(snap.state.pages.len());
@@ -236,27 +238,17 @@ fn build(snap: &Snapshot, mode: Mode) -> Result<(usize, Vec<u8>)> {
                     dict.set(k.clone(), v.clone());
                 }
             }
-            let original_rot = dict
-                .get(b"Rotate")
-                .ok()
-                .and_then(|o| o.as_i64().ok())
-                .unwrap_or(0) as i32;
             match (
                 snap.state.annots.get(&pref.id),
                 snap.state.removed_comments.get(&pref.id),
             ) {
                 (None, None) => strip_sheaf_annots(&pdf, &mut dict),
                 (list, removed) => {
-                    let geom = geom_of(&dict, original_rot);
                     let marks = list.into_iter().flatten();
-                    let w = write_page_annots(
-                        &mut pdf,
-                        &mut dict,
-                        marks,
-                        removed,
-                        &geom,
-                        &mut stamp_forms,
-                    );
+                    let index = origin.map_or(pref.index, |(_, i)| i);
+                    let renamed = snap.renamed_on(source, index);
+                    let w =
+                        write_page_annots(&mut pdf, &mut dict, marks, removed, renamed, &mut cx);
                     connectors.extend(w.connectors);
                     for id in w.touched {
                         changed.insert(id, pdf.get_object(id)?.clone());
@@ -269,10 +261,14 @@ fn build(snap: &Snapshot, mode: Mode) -> Result<(usize, Vec<u8>)> {
                         "a page's OCR text is replaced: a full save takes the old out of the file"
                     );
                 }
-                let geom = geom_of(&dict, original_rot);
-                text_layer::install(&mut pdf, &mut dict, layer, &geom, &mut ocr_objects);
+                text_layer::install(&mut pdf, &mut dict, layer, &mut cx.res);
             }
-            apply_rotation(&mut dict, pref.rotation.degrees());
+            // The new tree's root has no /Rotate for it to inherit.
+            if pref.rotation == Rotation::R0 {
+                dict.remove(b"Rotate");
+            } else {
+                dict.set("Rotate", pref.rotation.degrees());
+            }
             dict.set("Parent", pages_id);
             dict.set("Type", Object::Name(b"Page".to_vec()));
             let first = !own_objects.contains_key(&pref.id) && used.insert((source, src_page));
@@ -302,10 +298,8 @@ fn build(snap: &Snapshot, mode: Mode) -> Result<(usize, Vec<u8>)> {
             let id = primary.pages[pref.index as usize];
             page_obj.insert(pref.id, id);
             let layer = snap.state.text_layers.get(&pref.id);
-            if pref.rotation.degrees() != 0
-                || snap.annots_dirty.contains(&pref.id)
-                || layer.is_some()
-            {
+            let turned = snap.render_delta(pref) != Rotation::R0;
+            if turned || snap.annots_dirty.contains(&pref.id) || layer.is_some() {
                 let mut dict = pdf.get_dictionary(id)?.clone();
                 // The rewritten dict stands alone: pull down what it
                 // inherited (a layer inlines Resources, which would
@@ -323,11 +317,9 @@ fn build(snap: &Snapshot, mode: Mode) -> Result<(usize, Vec<u8>)> {
                             "a page's OCR text is replaced: a full save takes the old out of the file"
                         );
                     }
-                    let geom = crate::file::page_geom(&pdf, id);
-                    text_layer::install(&mut pdf, &mut dict, layer, &geom, &mut ocr_objects);
+                    text_layer::install(&mut pdf, &mut dict, layer, &mut cx.res);
                 }
                 if snap.annots_dirty.contains(&pref.id) {
-                    let geom = crate::file::page_geom(&pdf, id);
                     match (
                         snap.state.annots.get(&pref.id),
                         snap.state.removed_comments.get(&pref.id),
@@ -340,8 +332,8 @@ fn build(snap: &Snapshot, mode: Mode) -> Result<(usize, Vec<u8>)> {
                                 &mut dict,
                                 marks,
                                 removed,
-                                &geom,
-                                &mut stamp_forms,
+                                snap.renamed_on(primary_id, pref.index),
+                                &mut cx,
                             );
                             connectors.extend(w.connectors);
                             for id in w.touched {
@@ -350,7 +342,12 @@ fn build(snap: &Snapshot, mode: Mode) -> Result<(usize, Vec<u8>)> {
                         }
                     }
                 }
-                apply_rotation(&mut dict, pref.rotation.degrees());
+                // A turned page says its rotation, 0 too: it stays under
+                // its parents, any of which may have a /Rotate. Any other
+                // keeps the one it has, its own or the one pulled down.
+                if turned {
+                    dict.set("Rotate", pref.rotation.degrees());
+                }
                 changed.insert(id, Object::Dictionary(dict));
             }
         }
@@ -374,25 +371,7 @@ fn build(snap: &Snapshot, mode: Mode) -> Result<(usize, Vec<u8>)> {
     if snap.outline_dirty {
         catalog.remove(b"Outlines");
         if !snap.state.outline.is_empty() {
-            // Page dicts in `pdf` are still the originals here (rewrites
-            // go to `changed`), so their geometry is before our rotation.
-            let frames: std::collections::HashMap<crate::model::PageId, sheaf_core::PageFrame> =
-                page_obj
-                    .iter()
-                    .map(|(pid, oid)| {
-                        let g = crate::file::page_geom(&pdf, *oid);
-                        (
-                            *pid,
-                            sheaf_core::PageFrame {
-                                media: g.media,
-                                rotate: g.rotate,
-                            },
-                        )
-                    })
-                    .collect();
-            let outlines_id = write_outline(&mut pdf, &snap.state.outline, &page_obj, &|id| {
-                frames.get(&id).copied()
-            });
+            let outlines_id = write_outline(&mut pdf, &snap.state.outline, &page_obj);
             catalog.set("Outlines", outlines_id);
         }
         catalog_changed = true;
@@ -445,7 +424,7 @@ fn build(snap: &Snapshot, mode: Mode) -> Result<(usize, Vec<u8>)> {
     if catalog_changed {
         changed.insert(catalog_id, Object::Dictionary(catalog));
     }
-    link_connectors(&mut pdf, &connectors, &snap.state, &page_obj);
+    link_connectors(&mut pdf, &connectors, snap, &page_obj);
     // What's new and reachable from what's written is written too: objects
     // a copy brought that nothing keeps (a widget of a page left behind)
     // stay out.
@@ -467,7 +446,7 @@ fn build(snap: &Snapshot, mode: Mode) -> Result<(usize, Vec<u8>)> {
         }
     }
     if changed.is_empty() {
-        return Ok((original_len, std::sync::Arc::unwrap_or_clone(original)));
+        return Ok((original_len, original.to_vec()));
     }
 
     // ----- serialize the update section ---------------------------------------
@@ -477,7 +456,7 @@ fn build(snap: &Snapshot, mode: Mode) -> Result<(usize, Vec<u8>)> {
             _ => id.1,
         }
     };
-    let mut out = std::sync::Arc::unwrap_or_clone(original);
+    let mut out = original.to_vec();
     if !out.ends_with(b"\n") {
         out.push(b'\n');
     }
@@ -547,20 +526,6 @@ fn build(snap: &Snapshot, mode: Mode) -> Result<(usize, Vec<u8>)> {
         }
     }
     Ok((original_len, out))
-}
-
-fn apply_rotation(dict: &mut Dictionary, delta: i32) {
-    let original = dict
-        .get(b"Rotate")
-        .ok()
-        .and_then(|o| o.as_i64().ok())
-        .unwrap_or(0);
-    let rotate = (original + delta as i64).rem_euclid(360);
-    if rotate == 0 {
-        dict.remove(b"Rotate");
-    } else {
-        dict.set("Rotate", rotate);
-    }
 }
 
 /// Each reference in `o`.

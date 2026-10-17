@@ -1,0 +1,61 @@
+# The fuzz targets (M10.5's "Tests, fixtures and gates"), in cargo-fuzz's
+# layout, outside the workspace: they build on nightly with libFuzzer.
+# `.github/workflows/fuzz.yml` runs each nightly; locally:
+#
+#   cargo +nightly fuzz run lazy_reader -- -dict=fuzz/pdf.dict
+#
+# Each target calls a body in `sheaf_doc::source::fuzz`, which a stable
+# test (`fuzz_bodies_survive_mutated_fixtures`) runs too.
+[package]
+name = "sheaf-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+sheaf-doc = { path = "../crates/sheaf-doc" }
+
+# sheaf-doc's lopdf is the workspace's patched one (vendor/lopdf/SHEAF.md);
+# a workspace's patches don't reach a crate outside it.
+[patch.crates-io]
+lopdf = { path = "../vendor/lopdf" }
+
+[[bin]]
+name = "lazy_reader"
+path = "fuzz_targets/lazy_reader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "page_tree"
+path = "fuzz_targets/page_tree.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sheaf_annot"
+path = "fuzz_targets/sheaf_annot.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lexer"
+path = "fuzz_targets/lexer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "splice"
+path = "fuzz_targets/splice.rs"
+test = false
+doc = false
+bench = false

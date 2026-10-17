@@ -21,6 +21,8 @@ use gpui::{
     img, point, prelude::*, px, relative, rgb, rgba,
 };
 use sheaf_core::{PageIndex, PageSize, Rotation};
+use sheaf_doc::assets::MarkAssets;
+use sheaf_doc::geom::{Affine, Geom};
 use sheaf_doc::save;
 use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, Pt};
 use sheaf_ui::button::Button;
@@ -29,17 +31,15 @@ use sheaf_ui::text_area::{TextArea, TextAreaEvent};
 use sheaf_ui::text_input::{TextInput, TextInputEvent};
 use sheaf_ui::theme;
 
-use crate::markup_tools::{Drag, Tool, arrow_head, rotate_pt, stroke_canvas, stroke_canvas_dashed};
+use crate::markup_tools::{Drag, Tool, arrow_head, stroke_canvas, stroke_canvas_dashed};
 pub(crate) use crate::pane::Zoom;
 use crate::pane::{Layout, LayoutSpec, MARGIN, PageMode, Pane, Spread};
 use crate::{ClearGuides, FullScreen, GoToPage, ReadMode, ToggleGrid, ToggleRulers};
 use sheaf_doc::{
-    Document, Edit, EditOutcome, FlatOutlineItem, OutlineId, PageId, PageRef, SourceId, SourceInfo,
+    Document, Edit, EditOutcome, OutlineId, PageId, PageRef, SourceId, SourceInfo, Store,
 };
 use sheaf_image::raster::PixelFormat;
-use sheaf_render::{
-    Job, OutlineItem, Rect, RenderHandle, RenderRequest, Rendered, SearchEvent, SearchHit,
-};
+use sheaf_render::{Job, RenderHandle, RenderRequest, Rendered, SearchEvent, SearchHit};
 
 use crate::comments_panel::ExportKind;
 use crate::{
@@ -55,6 +55,10 @@ use crate::{
 };
 
 pub const KEY_CONTEXT: &str = "DocView";
+
+/// The notice when an edit, or something that writes the document out,
+/// comes while the file is still opening (M10.5 proposal 28).
+pub(crate) const STILL_OPENING: &str = "Still opening the file — try again in a moment";
 
 const STATUS_H: f32 = 24.0;
 /// Height of the divider between split panes, logical px.
@@ -122,6 +126,8 @@ pub(crate) struct Doc {
     pub(crate) first_paint: Option<Instant>,
     /// Last edit notice, shown in the status bar.
     pub(crate) notice: Option<String>,
+    /// How far the file's facts are read, until it's ready.
+    pub(crate) reading: Option<sheaf_ops::Tracker>,
     // Sidebar state.
     pub(crate) thumb_scroll: ScrollHandle,
     /// Pages whose previews the thumbnail panel is showing; kept cached.
@@ -130,7 +136,6 @@ pub(crate) struct Doc {
     pub(crate) review_keep: HashSet<(PageId, Rotation)>,
     /// Last page the thumbnail panel auto-scrolled to follow.
     pub(crate) thumb_followed: Option<PageId>,
-    pub(crate) outline_loaded: bool,
     pub(crate) outline_expanded: HashSet<OutlineId>,
     pub(crate) outline_scroll: ScrollHandle,
     // Selection and drag state for the thumbnail panel.
@@ -196,11 +201,10 @@ pub(crate) struct Doc {
     /// Another tool's comment being dragged, made ours when it's let go.
     pub(crate) adopting: Option<usize>,
     /// Files embedded in the primary file, and its portfolio schema if it
-    /// is one (see attachments_panel.rs). `facts_loaded` once read.
+    /// is one (see attachments_panel.rs), once the file has opened.
     pub(crate) attachments: Vec<sheaf_doc::attachments::Attachment>,
     pub(crate) collection: Option<sheaf_doc::portfolio::Collection>,
     pub(crate) attachment_selected: Option<usize>,
-    pub(crate) facts_loaded: bool,
     /// The forms in the document's files (see form_bar.rs).
     pub(crate) forms: crate::form_bar::Forms,
     /// Optional content groups and which are hidden (see layers_panel.rs).
@@ -212,9 +216,6 @@ pub(crate) struct Doc {
     /// index: PDFium is told not to draw them, again whenever its renderer
     /// is reopened.
     pub(crate) drawn_marks: Vec<(u32, Vec<String>)>,
-    /// Bookmark colors and styles from the file, when they arrived before
-    /// the outline did.
-    pub(crate) pending_outline_styles: Option<Vec<sheaf_doc::file::OutlineStyle>>,
     /// Every page's label (from the model), and the version it's for.
     pub(crate) labels: std::cell::RefCell<(u64, Option<std::sync::Arc<Vec<String>>>)>,
     /// With two panes: the top pane's share of the height.
@@ -224,29 +225,32 @@ pub(crate) struct Doc {
 }
 
 /// What an inserted or replacing file brings besides its pages, read on
-/// a background thread: sheaf's own marks (which the edit carries in),
-/// other tools' comments, its bookmarks' colors and styles, and its form.
+/// a background thread: sheaf's own marks (which the edit carries in) and
+/// what they hold, other tools' comments, its bookmarks, and its form.
 #[derive(Default)]
 pub(crate) struct Incoming {
     pub marks: HashMap<u32, Vec<sheaf_doc::Annot>>,
+    /// The marks given new ids as the file was read, with the ids their
+    /// `/NM`s still say.
+    pub renamed: Vec<sheaf_doc::open::Renamed>,
+    /// The marks' stamps' pages and attachments' files.
+    pub assets: sheaf_doc::assets::SourceAssets,
     pub foreign: Vec<sheaf_doc::file::ForeignAnnot>,
-    pub outline_styles: Vec<sheaf_doc::file::OutlineStyle>,
+    pub outline: Vec<sheaf_doc::FlatOutlineItem>,
     pub form: sheaf_doc::forms::FileForm,
 }
 
 impl Incoming {
-    pub(crate) fn read(path: &std::path::Path) -> Incoming {
-        match sheaf_doc::file::read_open(path, None) {
-            Ok((annots, facts)) => Incoming {
-                marks: annots.sheaf,
-                foreign: annots.foreign,
-                outline_styles: facts.outline_styles,
-                form: facts.form,
-            },
-            Err(e) => {
-                log::warn!("reading marks in {}: {e:#}", path.display());
-                Incoming::default()
-            }
+    /// What `info`'s source brings.
+    pub(crate) fn read(info: &SourceInfo) -> Incoming {
+        let facts = sheaf_doc::open::finish(&info.src, &sheaf_ops::NoProgress);
+        Incoming {
+            marks: facts.marks,
+            renamed: facts.renamed,
+            assets: facts.assets,
+            foreign: facts.foreign,
+            outline: facts.outline,
+            form: facts.form,
         }
     }
 
@@ -295,7 +299,8 @@ impl Doc {
         if !incoming.marks.is_empty()
             && let Some(handle) = self.handles.get(&source)
         {
-            drop(handle.hide_annots(marks_by_page(&incoming.marks)));
+            let renamed = incoming.renamed.iter().map(|r| (r.page, r.was));
+            drop(handle.hide_annots(marks_by_page(&incoming.marks, renamed)));
         }
         self.foreign_annots
             .extend(incoming.foreign.into_iter().map(|f| (source, f)));
@@ -329,6 +334,36 @@ impl Doc {
     /// mapping between page and screen, never for edits.
     pub(crate) fn shown_ref(&self, index: usize) -> Option<PageRef> {
         self.page_ref(index).map(|p| self.pane().shown(p))
+    }
+
+    /// Page `index` as the active pane draws it (M10.5 §5): its boxes,
+    /// turned by its rotation and the pane's rotate view. Its `to_view`
+    /// takes PageSpace to the page as drawn, in points from its top-left
+    /// (times the zoom's px per point), and `shown` is the size drawn.
+    pub(crate) fn pane_geom(&self, index: usize) -> Option<Geom> {
+        self.shown_ref(index).map(|p| self.model.geom(&p))
+    }
+
+    /// Page `index`'s edit frame: the page as it shows without rotate
+    /// view, in points from its top-left, y down, which is where gestures
+    /// build and edit marks. Its `from_view` takes them to PageSpace.
+    pub(crate) fn edit_geom(&self, index: usize) -> Option<Geom> {
+        self.page_ref(index).map(|p| self.model.geom(&p))
+    }
+
+    /// Bring `b`, a box in PageSpace on page `index`, into the active
+    /// pane's view.
+    pub(crate) fn reveal(&mut self, index: usize, b: Box2) {
+        let Some(geom) = self.pane_geom(index) else {
+            return;
+        };
+        let r = geom.to_view().apply_box(b);
+        let shown = geom.shown();
+        self.scroll_to(ScrollTo::Reveal {
+            page: index,
+            fx: (r.x + r.w / 2.0) / shown.width.max(1.0),
+            fy: (r.y + r.h / 2.0) / shown.height.max(1.0),
+        });
     }
 
     /// Scroll the active pane.
@@ -372,16 +407,7 @@ impl Doc {
                 out.push(Hit {
                     page: p.id,
                     order,
-                    rects: h
-                        .rects
-                        .into_iter()
-                        .map(|b| Rect {
-                            x: b.x,
-                            y: b.y,
-                            w: b.w,
-                            h: b.h,
-                        })
-                        .collect(),
+                    rects: h.rects,
                     text: h.text,
                 });
             }
@@ -392,9 +418,14 @@ impl Doc {
     /// Merge hits from the primary file's own text into `hits`, keeping
     /// document order. A page with an unsaved OCR layer is skipped: the
     /// layer's hits stand in for it (after a save the layer is in the file
-    /// and gone from the model, so nothing is counted twice).
+    /// and gone from the model, so nothing is counted twice). The engine's
+    /// boxes are on its page as the file shows it; they're kept in
+    /// PageSpace.
     pub(crate) fn merge_source_hits(&self, hits: &mut Vec<Hit>, incoming: Vec<SearchHit>) {
         let state = self.model.state();
+        let Some(primary) = self.model.source(self.model.primary()) else {
+            return;
+        };
         for h in incoming {
             let Some(order) = self.index_of_source_page(h.page) else {
                 continue;
@@ -403,13 +434,25 @@ impl Doc {
             if state.has_text_layer(page) {
                 continue;
             }
+            let from_view = primary.src.geom(h.page).from_view();
             let at = hits.partition_point(|x| x.order <= order);
             hits.insert(
                 at,
                 Hit {
                     page,
                     order,
-                    rects: h.rects,
+                    rects: h
+                        .rects
+                        .into_iter()
+                        .map(|r| {
+                            from_view.apply_box(Box2 {
+                                x: r.x,
+                                y: r.y,
+                                w: r.w,
+                                h: r.h,
+                            })
+                        })
+                        .collect(),
                     text: h.text,
                 },
             );
@@ -530,7 +573,8 @@ pub(crate) struct AnnotEditor {
 /// see `todos/plugins.md`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum DocEvent {
-    /// The file is open and its model exists.
+    /// The file has opened: what it says besides its pages is read into
+    /// the opened version, and edits are taken from now on.
     Opened,
     /// The model changed: an edit, a batch, an undo or a redo. `label` is
     /// the undo label ("Undo: …"/"Redo: …" for those two).
@@ -548,7 +592,7 @@ pub enum DocEvent {
     /// The selected region (Shift+drag) changed: live while dragging.
     Region {
         page: PageId,
-        /// Source-displayed space, like annotations.
+        /// PageSpace.
         rect: Box2,
     },
     /// The region was cleared.
@@ -629,8 +673,8 @@ pub struct DocView {
     pub(crate) tick_glyph: String,
     /// The Select tool is over text (the pointer is an I-beam).
     pub(crate) text_hover: bool,
-    /// Where the pointer last was over a page: page, point, and how near
-    /// counts as on text.
+    /// Where the pointer last was over a page: page, point (in PageSpace),
+    /// and how near counts as on text.
     pub(crate) last_hover: Option<(PageId, sheaf_doc::Pt, f32)>,
     /// Set while a plugin's edits are applied, so its own edits aren't
     /// reported back to it.
@@ -653,6 +697,9 @@ pub struct DocView {
     /// Rows of plugin panels for this document, by `<plugin>.<panel>`.
     #[cfg(feature = "plugins")]
     pub(crate) plugin_panels: HashMap<String, crate::plugin_panel::PluginPanelState>,
+    /// Plugin calls given while the file opens, until it's ready.
+    #[cfg(feature = "plugins")]
+    pub(crate) plugin_calls: crate::plugins::Waiting,
 }
 
 /// A search match, addressed by page id so it survives reordering and so
@@ -662,7 +709,8 @@ pub(crate) struct Hit {
     pub page: PageId,
     /// Display index when the hit was recorded; keeps hits in document order.
     pub order: usize,
-    pub rects: Vec<Rect>,
+    /// In PageSpace.
+    pub rects: Vec<Box2>,
     pub text: String,
 }
 
@@ -749,6 +797,8 @@ impl DocView {
             guide_drag: None,
             #[cfg(feature = "plugins")]
             plugin_panels: HashMap::new(),
+            #[cfg(feature = "plugins")]
+            plugin_calls: Default::default(),
         };
         this.open(cx);
         this
@@ -787,29 +837,32 @@ impl DocView {
             let opened = cx
                 .background_executor()
                 .spawn(async move {
-                    let bytes = std::fs::metadata(&path)
-                        .map(|m| m.len() as usize)
-                        .unwrap_or(0);
                     let recovery = sheaf_doc::recovery::find(&path);
-                    RenderHandle::open(path.clone(), password).map(|h| (h, path, bytes, recovery))
+                    let store = Store::new();
+                    // The bytes, read once, and the geometry walk: the
+                    // layout's sizes, before the first paint.
+                    let t = Instant::now();
+                    let primary = SourceInfo::read(&store, &path, password.as_deref())?;
+                    let walk = t.elapsed();
+                    let handle = RenderHandle::open_bytes(primary.src.bytes().clone(), password)?;
+                    anyhow::Ok((store, primary, handle, walk, recovery))
                 })
                 .await;
             this.update(cx, |viewer, cx| {
                 match opened {
-                    Ok((handle, path, bytes, recovery)) => {
-                        let info = handle.info();
+                    Ok((store, primary, handle, walk, recovery)) => {
                         if timing {
                             eprintln!(
-                                "[timing] open: {:?} engine, {:?} since launch, {} pages",
-                                info.open_time,
+                                "[timing] open: {walk:?} source, {:?} engine, {:?} since launch, {} pages",
+                                handle.info().open_time,
                                 launched.elapsed(),
-                                info.page_count
+                                primary.src.page_count()
                             );
                         }
                         viewer.pending_recovery = recovery;
-                        viewer.install(handle, path, bytes, cx);
+                        viewer.install(store, primary, handle, false, cx);
                     }
-                    Err(e) if sheaf_render::OpenError::is_password(&e) => viewer.lock(cx),
+                    Err(e) if needs_password(&e) => viewer.lock(cx),
                     Err(e) => viewer.state = State::Failed(format!("{e:#}")),
                 }
                 cx.notify();
@@ -841,29 +894,21 @@ impl DocView {
         cx.notify();
     }
 
-    /// Make an opened file the primary source and start the background
-    /// loads. `path` is what the engine opened: the document's own path,
-    /// except while showing recovered changes from a temporary file.
+    /// Show a file as it opens, a source in `store` with `handle` rendering
+    /// it, as the primary source, and read the rest of it on a background
+    /// thread (see [`Self::finish_open`]). Its name is what was read: the
+    /// document's own path, or when `recovered`, the temporary file that
+    /// holds the recovered changes.
     fn install(
         &mut self,
+        store: Arc<Store>,
+        primary: SourceInfo,
         handle: RenderHandle,
-        path: PathBuf,
-        bytes: usize,
+        recovered: bool,
         cx: &mut Context<Self>,
     ) {
-        let info = handle.info();
-        let source = SourceInfo {
-            path,
-            page_count: info.page_count,
-            first_page: info.first_page,
-            page_sizes: None,
-            bytes,
-            password: self.password.clone(),
-            data: Some(sheaf_doc::SourceData(handle.data())),
-            derived: None,
-        };
-        let mut model = Document::new(source, &[], sheaf_doc::history::default_policy());
-        model.set_author(crate::prefs::get(cx).identity.name());
+        let src = primary.src.clone();
+        let model = opening_model(store, primary, crate::prefs::get(cx).identity.name());
         let opened = self.path.clone();
         cx.defer(move |cx| crate::recent::add(&opened, cx));
         let mut handles = HashMap::new();
@@ -881,11 +926,11 @@ impl DocView {
             retired: Vec::new(),
             first_paint: None,
             notice: None,
+            reading: None,
             thumb_scroll: ScrollHandle::new(),
             thumb_keep: HashSet::new(),
             review_keep: HashSet::new(),
             thumb_followed: None,
-            outline_loaded: false,
             outline_expanded: HashSet::new(),
             outline_scroll: ScrollHandle::new(),
             selection: HashSet::new(),
@@ -926,43 +971,16 @@ impl DocView {
             attachments: Vec::new(),
             collection: None,
             attachment_selected: None,
-            facts_loaded: false,
             forms: Default::default(),
             layers: Vec::new(),
             layers_hidden: HashSet::new(),
             layers_default: HashSet::new(),
             layers_generation: 0,
             drawn_marks: Vec::new(),
-            pending_outline_styles: None,
             split: 0.5,
             split_drag: false,
         }));
-        self.fetch_page_sizes(cx);
-        self.fetch_outline(cx);
-        self.load_sheaf_annots(cx);
-        cx.emit(DocEvent::Opened);
-        if let Some(p) = self.selftest_save.take() {
-            self.selftest_save(p, cx);
-        }
-        if let Some(p) = self.selftest_insert.take() {
-            self.insert_pdf(p, cx);
-        }
-        if let Some(p) = self.selftest_annot.take() {
-            self.selftest_annot(p, cx);
-        }
-        if let Some(p) = self.selftest_clean.take() {
-            self.selftest_clean(p, cx);
-        }
-        if let Some(p) = self.selftest_extract.take() {
-            let ids: Vec<PageId> = (0..2).filter_map(|i| self.doc_page_id(i)).collect();
-            self.extract_to(ids, p, cx);
-        }
-        if let Some(p) = self.selftest_flatten.take() {
-            self.selftest_flatten(p, cx);
-        }
-        if let Some(p) = self.selftest_ocr.take() {
-            self.selftest_ocr(p, cx);
-        }
+        self.finish_open(src, recovered, cx);
         if let Some(src) = self.initial_pattern.take() {
             self.run_initial_pattern(src, cx);
         }
@@ -1026,23 +1044,17 @@ impl DocView {
                             std::process::id()
                         ));
                         sheaf_doc::recovery::materialize(&path, &rec, &tmp)?;
-                        let bytes = std::fs::metadata(&tmp)
-                            .map(|m| m.len() as usize)
-                            .unwrap_or(0);
-                        let handle = RenderHandle::open(tmp.clone(), None)?;
-                        anyhow::Ok((handle, tmp, bytes))
+                        let store = Store::new();
+                        let primary = SourceInfo::read(&store, &tmp, None)?;
+                        let handle = RenderHandle::open_bytes(primary.src.bytes().clone(), None)?;
+                        anyhow::Ok((store, primary, handle))
                     }
                 })
                 .await;
             this.update(cx, |viewer, cx| {
                 match opened {
-                    Ok((handle, tmp, bytes)) => {
-                        viewer.install(handle, tmp, bytes, cx);
-                        if let State::Ready(doc) = &mut viewer.state {
-                            doc.model.mark_unsaved();
-                            doc.notice =
-                                Some("Recovered unsaved changes — Ctrl+S to keep them".into());
-                        }
+                    Ok((store, primary, handle)) => {
+                        viewer.install(store, primary, handle, true, cx);
                         if timing {
                             eprintln!("[timing] recovered unsaved changes in {:?}", t.elapsed());
                         }
@@ -1090,7 +1102,7 @@ impl DocView {
         let primary_is_file = doc
             .model
             .source(doc.model.primary())
-            .is_some_and(|s| s.path == path);
+            .is_some_and(|s| s.name == path);
         if !dirty {
             sheaf_doc::recovery::discard(&path);
             return;
@@ -1125,100 +1137,183 @@ impl DocView {
         sheaf_doc::recovery::discard(&self.path);
     }
 
-    fn fetch_page_sizes(&mut self, cx: &mut Context<Self>) {
-        let primary = match &self.state {
-            State::Ready(doc) => doc.model.primary(),
-            _ => return,
-        };
-        self.fetch_source_sizes(primary, cx);
-    }
-
-    /// Enumerate a source's page sizes on its worker and feed them to the model.
-    fn fetch_source_sizes(&mut self, sid: SourceId, cx: &mut Context<Self>) {
-        let State::Ready(doc) = &self.state else {
-            return;
-        };
-        let Some(handle) = doc.handles.get(&sid) else {
-            return;
-        };
-        let rx = handle.page_sizes();
-        let timing = self.timing;
-        let t = Instant::now();
+    /// Read what `src`, the primary file, says besides its pages on a
+    /// background thread, and make that the opened version
+    /// ([`Self::ready`]). Until then the view shows the pages alone, with
+    /// how many have been read, and edits are refused.
+    fn finish_open(&mut self, src: sheaf_doc::Src, recovered: bool, cx: &mut Context<Self>) {
+        use futures::FutureExt;
+        let tracker = sheaf_ops::Tracker::new();
+        if let State::Ready(doc) = &mut self.state {
+            doc.reading = Some(tracker.clone());
+        }
         cx.spawn(async move |this, cx| {
-            let Ok(result) = rx.await else { return };
-            this.update(cx, |viewer, cx| {
-                let State::Ready(doc) = &mut viewer.state else {
-                    return;
-                };
-                match result {
-                    Ok(sizes) => {
-                        if timing {
-                            eprintln!(
-                                "[timing] page sizes for {} pages in {:?}",
-                                sizes.len(),
-                                t.elapsed()
-                            );
-                        }
-                        doc.model.set_source_sizes(sid, sizes);
-                        doc.touched();
-                        cx.notify();
-                    }
-                    Err(e) => log::error!("page sizes: {e:#}"),
+            let t = Instant::now();
+            let blob = src.id();
+            let reading = cx
+                .background_executor()
+                .spawn(async move { sheaf_doc::open::finish(&src, &tracker) });
+            let mut reading = Box::pin(reading.fuse());
+            let facts = loop {
+                let mut tick = cx
+                    .background_executor()
+                    .timer(std::time::Duration::from_millis(100))
+                    .fuse();
+                futures::select_biased! {
+                    facts = reading => break facts,
+                    _ = tick => {}
                 }
-            })
-            .ok();
+                // The status bar's count of the pages read.
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    return;
+                }
+            };
+            this.update(cx, |view, cx| view.ready(blob, facts, t, recovered, cx))
+                .ok();
         })
         .detach();
     }
 
-    fn fetch_outline(&mut self, cx: &mut Context<Self>) {
-        let State::Ready(doc) = &self.state else {
+    /// `facts`, read from the file `blob` since `started`, are in. If the
+    /// view still shows that file as it opens (a recovery, a reopen or a
+    /// close can come between), they make its opened version, and the
+    /// view takes what it shows beside the model; then listeners hear the
+    /// file opened, and the dev hooks that edit or save run. A
+    /// `recovered` file stays unsaved until it's saved.
+    fn ready(
+        &mut self,
+        blob: sheaf_doc::BlobId,
+        facts: sheaf_doc::open::Facts,
+        started: Instant,
+        recovered: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let State::Ready(doc) = &mut self.state else {
             return;
         };
-        let rx = doc.primary().outline();
-        let timing = self.timing;
-        let t = Instant::now();
-        cx.spawn(async move |this, cx| {
-            let Ok(result) = rx.await else { return };
-            this.update(cx, |viewer, cx| {
-                let State::Ready(doc) = &mut viewer.state else {
-                    return;
-                };
-                match result {
-                    Ok(items) => {
-                        if timing {
-                            eprintln!(
-                                "[timing] outline: {} items in {:?}",
-                                items.len(),
-                                t.elapsed()
-                            );
-                        }
-                        let mut flat: Vec<FlatOutlineItem> = items.iter().map(flat_item).collect();
-                        if let Some(styles) = doc.pending_outline_styles.take() {
-                            sheaf_doc::file::style_flat_items(&mut flat, &styles);
-                        }
-                        match doc.model.set_initial_outline(&flat) {
-                            Ok(()) => {
-                                // Start with the top level expanded.
-                                doc.outline_expanded =
-                                    doc.model.state().outline.iter().map(|n| n.id).collect();
-                                doc.outline_loaded = true;
-                                doc.touched();
-                            }
-                            Err(e) => log::warn!("outline arrived after edits; ignored: {e:#}"),
-                        }
-                        cx.notify();
+        let Some(view) = take_facts(&mut doc.model, blob, facts, recovered) else {
+            return;
+        };
+        let primary = doc.model.primary();
+        doc.reading = None;
+        if doc.notice.as_deref() == Some(STILL_OPENING) {
+            doc.notice = None;
+        }
+        doc.foreign_annots = view.foreign.into_iter().map(|f| (primary, f)).collect();
+        doc.foreign_generation += 1;
+        doc.attachments = view.attachments;
+        doc.collection = view.collection;
+        doc.set_layers(view.layers);
+        if let Some(notice) = crate::form_bar::damaged_notice(&view.form) {
+            doc.notice = Some(notice);
+        }
+        doc.forms.primary = Some(Arc::new(view.form));
+        if doc.collection.is_some() {
+            doc.open_portfolio();
+            self.wanted_panel = Some("attachments");
+        }
+        let st = doc.model.state();
+        // Start with the top level expanded where the file leaves it open.
+        doc.outline_expanded = st.outline.iter().filter(|n| n.open).map(|n| n.id).collect();
+        if self.timing {
+            eprintln!(
+                "[timing] ready: {} sheaf annotations, {} third-party, {} bookmarks, {} fields \
+                 in {:?}, {:?} since launch",
+                st.annots.values().map(|l| l.len()).sum::<usize>(),
+                doc.foreign_annots.len(),
+                st.outline_flat().len(),
+                st.fields.len(),
+                started.elapsed(),
+                self.launched.elapsed()
+            );
+        }
+        let mut drawn = drawn_marks(st);
+        if !view.renamed.is_empty() {
+            let index: HashMap<PageId, u32> = st
+                .pages
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (p.id, i as u32))
+                .collect();
+            let at = |&(page, id): &(PageId, AnnotId)| Some((*index.get(&page)?, id));
+            hide_renamed(&mut drawn, view.renamed.iter().filter_map(at));
+        }
+        if doc.notice.is_none() {
+            doc.notice = renamed_notice(view.renamed.len());
+        }
+        if !drawn.is_empty() {
+            doc.drawn_marks = drawn.clone();
+            let rx = doc.primary().hide_annots(drawn);
+            cx.spawn(async move |this, cx| {
+                let _ = rx.await;
+                this.update(cx, |view, cx| {
+                    if let State::Ready(doc) = &mut view.state {
+                        doc.invalidate_tiles();
                     }
-                    Err(e) => log::error!("outline: {e:#}"),
-                }
+                    cx.notify();
+                })
+                .ok();
             })
-            .ok();
-        })
-        .detach();
+            .detach();
+        }
+        if recovered {
+            doc.notice = Some("Recovered unsaved changes — Ctrl+S to keep them".into());
+        }
+        doc.touched();
+        self.refresh_history();
+        cx.emit(DocEvent::Opened);
+        if let Some(p) = self.selftest_save.take() {
+            self.selftest_save(p, cx);
+        }
+        if let Some(p) = self.selftest_insert.take() {
+            self.insert_pdf(p, cx);
+        }
+        if let Some(p) = self.selftest_annot.take() {
+            self.selftest_annot(p, cx);
+        }
+        if let Some(p) = self.selftest_clean.take() {
+            self.selftest_clean(p, cx);
+        }
+        if let Some(p) = self.selftest_extract.take() {
+            let ids: Vec<PageId> = (0..2).filter_map(|i| self.doc_page_id(i)).collect();
+            self.extract_to(ids, p, cx);
+        }
+        if let Some(p) = self.selftest_flatten.take() {
+            self.selftest_flatten(p, cx);
+        }
+        if let Some(p) = self.selftest_ocr.take() {
+            self.selftest_ocr(p, cx);
+        }
+        cx.notify();
     }
 
     pub fn go_to_page(&mut self, page: usize, cx: &mut Context<Self>) {
         self.scroll(ScrollTo::Page(page), cx);
+    }
+
+    /// Whether the file is still opening: being read, or shown while its
+    /// facts are read. Edits, and what writes the document out, wait.
+    pub(crate) fn is_opening(&self) -> bool {
+        match &self.state {
+            State::Loading => true,
+            State::Ready(doc) => !doc.model.is_ready(),
+            State::Locked(_) | State::Failed(_) => false,
+        }
+    }
+
+    /// Whether something that reads the whole document (a save, an export,
+    /// a print, a dialog over it) has to wait for the file to open, saying
+    /// so if it does: keys run it even while the menus have it greyed out.
+    pub(crate) fn still_opening(&mut self, cx: &mut Context<Self>) -> bool {
+        let State::Ready(doc) = &mut self.state else {
+            return false;
+        };
+        if doc.model.is_ready() {
+            return false;
+        }
+        doc.notice = Some(STILL_OPENING.into());
+        cx.notify();
+        true
     }
 
     // ----- edits ------------------------------------------------------------
@@ -1292,11 +1387,15 @@ impl DocView {
                     let n = doc.notice.take().unwrap_or_default();
                     doc.notice = Some(format!("{n}. {form}"));
                 }
+                if let Some(text) = doc.model.unencodable_notice(&out) {
+                    let n = doc.notice.take().unwrap_or_default();
+                    doc.notice = Some(format!("{n}. {text}"));
+                }
                 doc.touched();
                 self.after_model_change(label.to_string(), out, cx);
             }
             Err(e) => {
-                doc.notice = Some(format!("{label} failed: {e:#}"));
+                doc.notice = Some(failed(label, &e));
                 cx.notify();
             }
         }
@@ -1321,6 +1420,19 @@ impl DocView {
             plugin,
         });
         cx.notify();
+    }
+
+    /// The plugin calls to make now the file has opened: `opened` to each
+    /// of `subscribers`, then the calls that waited for it.
+    #[cfg(feature = "plugins")]
+    pub(crate) fn release_plugin_calls(
+        &mut self,
+        subscribers: Vec<String>,
+    ) -> Vec<(String, sheaf_plugin::Call)> {
+        let State::Ready(doc) = &self.state else {
+            return Vec::new();
+        };
+        self.plugin_calls.release(&doc.model, subscribers)
     }
 
     /// What a plugin command sees of this document; `ocr` is the OCR
@@ -1520,10 +1632,19 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        let Some(label) = doc.model.undo().map(str::to_string) else {
-            doc.notice = Some("Nothing to undo".into());
-            cx.notify();
-            return;
+        let label = match doc.model.undo() {
+            Ok(Some(label)) => label.to_string(),
+            Ok(None) => {
+                doc.notice = Some("Nothing to undo".into());
+                cx.notify();
+                return;
+            }
+            Err(e) => {
+                doc.notice = Some(e.to_string());
+                self.refresh_history();
+                cx.notify();
+                return;
+            }
         };
         doc.notice = Some(format!("Undid: {label}"));
         doc.touched();
@@ -1534,10 +1655,19 @@ impl DocView {
         let State::Ready(doc) = &mut self.state else {
             return;
         };
-        let Some(label) = doc.model.redo().map(str::to_string) else {
-            doc.notice = Some("Nothing to redo".into());
-            cx.notify();
-            return;
+        let label = match doc.model.redo() {
+            Ok(Some(label)) => label.to_string(),
+            Ok(None) => {
+                doc.notice = Some("Nothing to redo".into());
+                cx.notify();
+                return;
+            }
+            Err(e) => {
+                doc.notice = Some(e.to_string());
+                self.refresh_history();
+                cx.notify();
+                return;
+            }
         };
         doc.notice = Some(format!("Redid: {label}"));
         doc.touched();
@@ -1584,6 +1714,9 @@ impl DocView {
     /// file as the new primary source without disturbing undo history.
     /// Resolves to whether the save succeeded.
     pub fn save_to(&mut self, path: PathBuf, cx: &mut Context<Self>) -> Task<bool> {
+        if self.still_opening(cx) {
+            return Task::ready(false);
+        }
         if self.would_drop_xfa_values() {
             // Asked next frame.
             self.pending_xfa = Some(path);
@@ -1660,6 +1793,7 @@ impl DocView {
         doc.saving = true;
         doc.notice = Some(format!("Saving {}…", path.display()));
         let snapshot = doc.model.snapshot();
+        let store = doc.model.store().clone();
         let timing = self.timing;
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -1671,11 +1805,11 @@ impl DocView {
                     async move {
                         let (strategy, notes) =
                             save::save_to_path_noting(&snapshot, &path, signed)?;
-                        let bytes = std::fs::metadata(&path)
-                            .map(|m| m.len() as usize)
-                            .unwrap_or(0);
-                        let handle = RenderHandle::open(path.clone(), None)?;
-                        anyhow::Ok((handle, bytes, strategy, notes))
+                        // What was written, read back: the source the
+                        // document shows from now on.
+                        let saved = SourceInfo::read(&store, &path, None)?;
+                        let handle = RenderHandle::open_bytes(saved.src.bytes().clone(), None)?;
+                        anyhow::Ok((saved, handle, strategy, notes))
                     }
                 })
                 .await;
@@ -1685,31 +1819,12 @@ impl DocView {
                 };
                 doc.saving = false;
                 let ok = match result {
-                    Ok((handle, bytes, strategy, notes)) => {
-                        let (page_count, first_page) =
-                            (handle.info().page_count, handle.info().first_page);
-                        let saved = SourceInfo {
-                            path: path.clone(),
-                            page_count,
-                            first_page,
-                            page_sizes: None,
-                            bytes,
-                            password: None,
-                            data: Some(sheaf_doc::SourceData(handle.data())),
-                            derived: None,
-                        };
+                    Ok((saved, handle, strategy, notes)) => {
+                        let page_count = saved.src.page_count();
+                        let saved_src = saved.src.clone();
                         let sid = doc.model.rebase_to_saved(saved);
                         // Our marks are now in the file; keep PDFium from drawing them.
-                        let st = doc.model.state();
-                        let pages: Vec<(u32, Vec<String>)> = st
-                            .pages
-                            .iter()
-                            .enumerate()
-                            .filter_map(|(i, p)| {
-                                let list = st.annots.get(&p.id)?;
-                                Some((i as u32, list.iter().flat_map(|a| a.pdf_names()).collect()))
-                            })
-                            .collect();
+                        let pages = drawn_marks(doc.model.state());
                         doc.drawn_marks = pages.clone();
                         // The saved file's third-party comments, at their
                         // new page numbers.
@@ -1717,7 +1832,7 @@ impl DocView {
                         doc.foreign_generation += 1;
                         // A new engine: nothing of theirs is hidden in it.
                         doc.foreign_hidden.retain(|(s, _, _)| *s != sid);
-                        reread_foreign(sid, path.clone(), cx);
+                        reread_foreign(sid, saved_src, cx);
                         if !pages.is_empty() {
                             let rx = handle.hide_annots(pages);
                             cx.spawn(async move |this, cx| {
@@ -1761,7 +1876,6 @@ impl DocView {
                             );
                         }
                         doc.touched();
-                        view.fetch_page_sizes(cx);
                         view.refresh_facts(cx);
                         if let State::Ready(doc) = &view.state
                             && doc.layers_changed()
@@ -1818,111 +1932,9 @@ impl DocView {
 
     // ----- markup -------------------------------------------------------------
 
-    /// Read back annotations sheaf wrote into the primary file earlier and
-    /// take over their rendering.
-    fn load_sheaf_annots(&mut self, cx: &mut Context<Self>) {
-        let path = self.path.clone();
-        let password = self.password.clone();
-        let timing = self.timing;
-        cx.spawn(async move |this, cx| {
-            let t = Instant::now();
-            let found = cx
-                .background_executor()
-                .spawn(async move { sheaf_doc::file::read_open(&path, password.as_deref()) })
-                .await;
-            let (by_index, foreign, facts) = match found {
-                Ok((a, facts)) => (a.sheaf, a.foreign, facts),
-                Err(e) => {
-                    log::warn!("reading annotations: {e:#}");
-                    return;
-                }
-            };
-            this.update(cx, |view, cx| {
-                let State::Ready(doc) = &mut view.state else {
-                    return;
-                };
-                if timing && !foreign.is_empty() {
-                    eprintln!(
-                        "[timing] found {} third-party annotations in {:?}",
-                        foreign.len(),
-                        t.elapsed()
-                    );
-                }
-                let primary = doc.model.primary();
-                doc.foreign_annots = foreign.into_iter().map(|f| (primary, f)).collect();
-                doc.foreign_generation += 1;
-                if !facts.outline_styles.is_empty() {
-                    if doc.outline_loaded {
-                        if let Err(e) = doc.model.set_initial_outline_styles(&facts.outline_styles)
-                        {
-                            log::warn!("bookmark colors arrived after edits; ignored: {e:#}");
-                        }
-                    } else {
-                        doc.pending_outline_styles = Some(facts.outline_styles.clone());
-                    }
-                }
-                if let Some(ranges) = &facts.label_ranges
-                    && let Err(e) = doc.model.set_initial_labels(ranges)
-                {
-                    log::warn!("page labels arrived after edits; ignored: {e:#}");
-                }
-                if let Some((hf, scope)) = facts.header_footer.clone()
-                    && let Err(e) = doc.model.set_initial_header_footer(hf, scope)
-                {
-                    log::warn!("header/footer settings arrived after edits; ignored: {e:#}");
-                }
-                // The labels changed under the same version.
-                doc.labels.borrow_mut().0 = u64::MAX;
-                doc.attachments = facts.attachments;
-                doc.collection = facts.collection;
-                doc.set_layers(facts.layers);
-                doc.take_form(&facts.form);
-                doc.facts_loaded = true;
-                if doc.collection.is_some() {
-                    doc.open_portfolio();
-                    view.wanted_panel = Some("attachments");
-                }
-                if by_index.is_empty() {
-                    cx.notify();
-                    return;
-                }
-                let drawn = marks_by_page(&by_index);
-                let n: usize = by_index.values().map(|v| v.len()).sum();
-                match doc.model.set_initial_annots(by_index) {
-                    Ok(()) => {
-                        if timing {
-                            eprintln!(
-                                "[timing] loaded {n} sheaf annotations on {} pages in {:?}",
-                                drawn.len(),
-                                t.elapsed()
-                            );
-                        }
-                        doc.drawn_marks = drawn.clone();
-                        let rx = doc.primary().hide_annots(drawn);
-                        doc.touched();
-                        cx.spawn(async move |this, cx| {
-                            let _ = rx.await;
-                            this.update(cx, |view, cx| {
-                                if let State::Ready(doc) = &mut view.state {
-                                    doc.invalidate_tiles();
-                                }
-                                cx.notify();
-                            })
-                            .ok();
-                        })
-                        .detach();
-                    }
-                    Err(e) => log::warn!("annotations arrived after edits; ignored: {e:#}"),
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// A new annotation with the document's defaults filled in.
-    /// A new mark by whoever `settings.toml` names (the OS user otherwise).
+    /// A new mark by whoever `settings.toml` names (the OS user otherwise),
+    /// with the document's defaults filled in. Its turn is R0: built in a
+    /// page's edit frame, it reads as it was drawn there.
     pub(crate) fn new_annot(&self, kind: AnnotKind, color: [u8; 3], cx: &App) -> Annot {
         Annot {
             id: sheaf_doc::AnnotId(0),
@@ -1937,11 +1949,32 @@ impl DocView {
             fill: None,
             dashed: false,
             cloudy: false,
+            turn: Rotation::R0,
             name: String::new(),
         }
     }
 
+    /// Add `annot`, a mark built in page `page`'s edit frame, as one undo
+    /// step called `label`; it lands in PageSpace through
+    /// [`Annot::to_page`](sheaf_doc::Annot::to_page).
     pub(crate) fn add_annot(
+        &mut self,
+        page: PageId,
+        annot: Annot,
+        label: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(edit) = self.edit_geom_of(page) else {
+            return;
+        };
+        let annot = annot.to_page(&edit);
+        self.add_page_annot(page, annot, label, cx);
+    }
+
+    /// Add `annot`, a mark already in PageSpace (text markups, which the
+    /// page's text places, and replies and statuses, which have no place),
+    /// as one undo step called `label`.
+    pub(crate) fn add_page_annot(
         &mut self,
         page: PageId,
         annot: Annot,
@@ -2109,6 +2142,10 @@ impl DocView {
             w: 22.0,
             h: 22.0,
         });
+        let (Some(at_a), Some(at_b)) = (self.edit_geom_of(p0), self.edit_geom_of(p1)) else {
+            return;
+        };
+        let (a, b) = (a.to_page(&at_a), b.to_page(&at_b));
         self.apply(
             Edit::ConnectorAdd {
                 a: (p0, a),
@@ -2277,6 +2314,9 @@ impl DocView {
     }
 
     pub fn extract_to(&mut self, ids: Vec<PageId>, path: PathBuf, cx: &mut Context<Self>) {
+        if self.still_opening(cx) {
+            return;
+        }
         let State::Ready(doc) = &mut self.state else {
             return;
         };
@@ -2333,6 +2373,9 @@ impl DocView {
     }
 
     pub fn export_flattened_to(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if self.still_opening(cx) {
+            return;
+        }
         let State::Ready(doc) = &mut self.state else {
             return;
         };
@@ -2421,6 +2464,9 @@ impl DocView {
     }
 
     pub fn export_clean_to(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if self.still_opening(cx) {
+            return;
+        }
         let State::Ready(doc) = &mut self.state else {
             return;
         };
@@ -2648,34 +2694,33 @@ impl DocView {
         bookmarks: bool,
         cx: &mut Context<Self>,
     ) {
+        if self.still_opening(cx) {
+            return;
+        }
         let State::Ready(doc) = &mut self.state else {
             return;
         };
         doc.notice = Some(format!("Inserting {name}…"));
+        let store = doc.model.store().clone();
         cx.notify();
         let timing = self.timing;
         cx.spawn(async move |this, cx| {
             let t = Instant::now();
             let opened = cx
                 .background_executor()
-                .spawn({
-                    let path = path.clone();
-                    async move {
-                        let bytes = std::fs::metadata(&path)
-                            .map(|m| m.len() as usize)
-                            .unwrap_or(0);
-                        // Pages sheaf made (blank, images) carry nothing more.
-                        let incoming = if bookmarks {
-                            Incoming::read(&path)
-                        } else {
-                            Incoming::default()
-                        };
-                        let handle = RenderHandle::open(path, None)?;
-                        anyhow::Ok((handle, bytes, incoming))
-                    }
+                .spawn(async move {
+                    let info = SourceInfo::read(&store, &path, None)?;
+                    // Pages sheaf made (blank, images) carry nothing more.
+                    let incoming = if bookmarks {
+                        Incoming::read(&info)
+                    } else {
+                        Incoming::default()
+                    };
+                    let handle = RenderHandle::open_bytes(info.src.bytes().clone(), None)?;
+                    anyhow::Ok((info, handle, incoming))
                 })
                 .await;
-            let (handle, bytes, incoming) = match opened {
+            let (info, handle, mut incoming) = match opened {
                 Ok(v) => v,
                 Err(e) => {
                     this.update(cx, |view, cx| {
@@ -2688,47 +2733,30 @@ impl DocView {
                     return;
                 }
             };
-            // Bookmarks come from the worker before we apply the edit, so the
-            // insert and its merge are one undo step.
-            let outline = handle
-                .outline()
-                .await
-                .ok()
-                .and_then(|r| r.ok())
-                .unwrap_or_default();
-            let sizes_rx = handle.page_sizes();
             this.update(cx, |view, cx| {
+                // A recovery may have reopened the view meanwhile: a document
+                // still opening takes nothing in.
+                if view.still_opening(cx) {
+                    return;
+                }
                 let State::Ready(doc) = &mut view.state else {
                     return;
                 };
-                let (page_count, first_page) = (handle.info().page_count, handle.info().first_page);
-                let sid = doc.model.add_source(SourceInfo {
-                    path: path.clone(),
-                    page_count,
-                    first_page,
-                    page_sizes: None,
-                    bytes,
-                    password: None,
-                    data: Some(sheaf_doc::SourceData(handle.data())),
-                    derived: None,
-                });
+                let page_count = info.src.page_count();
+                let sid = doc.model.add_source(info);
                 doc.handles.insert(sid, handle);
-                let mut flat: Vec<FlatOutlineItem> = if bookmarks {
-                    outline.iter().map(flat_item).collect()
-                } else {
-                    Vec::new()
-                };
-                sheaf_doc::file::style_flat_items(&mut flat, &incoming.outline_styles);
                 let label = format!("Insert {name}");
                 let mut outcome = None;
                 let mixed = doc.model.scripts_mixed();
                 doc.model.set_source_form(sid, incoming.form.clone());
+                doc.model.set_source_renamed(sid, &incoming.renamed);
+                doc.model.set_source_assets(sid, &incoming.assets);
                 match doc.model.apply(
                     Edit::InsertPages {
                         source: sid,
                         range: 0..page_count,
                         before,
-                        outline: Some(flat),
+                        outline: Some(std::mem::take(&mut incoming.outline)),
                         annots: incoming.edit_marks(),
                     },
                     &label,
@@ -2755,6 +2783,10 @@ impl DocView {
                             let n = doc.notice.take().unwrap_or_default();
                             doc.notice = Some(format!("{n}. {form}"));
                         }
+                        if let Some(text) = doc.model.unencodable_notice(&out) {
+                            let n = doc.notice.take().unwrap_or_default();
+                            doc.notice = Some(format!("{n}. {text}"));
+                        }
                         if timing {
                             eprintln!(
                                 "[timing] inserted {name} ({page_count} pages) in {:?}",
@@ -2762,27 +2794,13 @@ impl DocView {
                             );
                         }
                     }
-                    Err(e) => doc.notice = Some(format!("Insert failed: {e:#}")),
+                    Err(e) => doc.notice = Some(failed("Insert", &e)),
                 }
                 doc.touched();
                 match outcome {
                     Some(out) => view.after_model_change(label, out, cx),
                     None => cx.notify(),
                 }
-                // Sizes for the new source arrive on their own.
-                cx.spawn(async move |this, cx| {
-                    if let Ok(Ok(sizes)) = sizes_rx.await {
-                        this.update(cx, |view, cx| {
-                            if let State::Ready(doc) = &mut view.state {
-                                doc.model.set_source_sizes(sid, sizes);
-                                doc.touched();
-                                cx.notify();
-                            }
-                        })
-                        .ok();
-                    }
-                })
-                .detach();
             })
             .ok();
         })
@@ -2944,25 +2962,8 @@ impl DocView {
         let Some(index) = doc.model.index_of(hit.page) else {
             return;
         };
-        let Some(pref) = doc.shown_ref(index) else {
-            return;
-        };
-        let src = doc
-            .model
-            .source(pref.source)
-            .map(|s| s.page_size(pref.index))
-            .unwrap_or(PageSize {
-                width: 612.0,
-                height: 792.0,
-            });
         if let Some(r) = hit.rects.first() {
-            let r = rotate_rect(*r, src, pref.rotation);
-            let ps = src.rotated(pref.rotation);
-            doc.scroll_to(ScrollTo::Reveal {
-                page: index,
-                fx: (r.x + r.w / 2.0) / ps.width.max(1.0),
-                fy: (r.y + r.h / 2.0) / ps.height.max(1.0),
-            });
+            doc.reveal(index, *r);
         }
         cx.notify();
     }
@@ -3447,6 +3448,9 @@ impl DocView {
     /// Run a print job: write the print file in the background, then hand
     /// it to the printer (or, for Save as PDF, ask where to save it).
     pub(crate) fn print(&mut self, req: crate::print_dialog::PrintRequest, cx: &mut Context<Self>) {
+        if self.still_opening(cx) {
+            return;
+        }
         let State::Ready(doc) = &mut self.state else {
             return;
         };
@@ -3544,9 +3548,7 @@ impl DocView {
         let src = doc.model.source(doc.model.primary())?;
         Some(crate::properties_dialog::PropertiesContext {
             path: self.path.clone(),
-            source: src.path.clone(),
-            password: src.password.clone(),
-            bytes: src.bytes,
+            source: src.src.clone(),
             page_size: doc
                 .shown_ref(doc.current_page())
                 .map(|p| doc.model.page_size(&p))
@@ -3563,35 +3565,148 @@ impl DocView {
     }
 }
 
-/// Each page's marks as the `/NM`s PDFium should hide, by page index.
+/// Whether opening failed for a wrong or missing password, as the source's
+/// reader or PDFium found.
+pub(crate) fn needs_password(e: &anyhow::Error) -> bool {
+    sheaf_doc::source::OpenError::is_password(e) || sheaf_render::OpenError::is_password(e)
+}
+
+/// Each page's marks as the `/NM`s PDFium should hide, by page index,
+/// with those the `renamed` ones had (by page index).
 pub(crate) fn marks_by_page(
     by_index: &std::collections::HashMap<u32, Vec<sheaf_doc::Annot>>,
+    renamed: impl Iterator<Item = (u32, AnnotId)>,
 ) -> Vec<(u32, Vec<String>)> {
-    by_index
+    let mut pages: Vec<(u32, Vec<String>)> = by_index
         .iter()
         .map(|(i, list)| (*i, list.iter().flat_map(|a| a.pdf_names()).collect()))
+        .collect();
+    hide_renamed(&mut pages, renamed);
+    pages
+}
+
+/// `pages`, the `/NM`s PDFium hides by page index, with the names the
+/// marks given new ids at open had (`renamed`, by page index): the file
+/// says those until it's saved.
+fn hide_renamed(
+    pages: &mut Vec<(u32, Vec<String>)>,
+    renamed: impl Iterator<Item = (u32, AnnotId)>,
+) {
+    let mut at: HashMap<u32, usize> = pages
+        .iter()
+        .enumerate()
+        .map(|(k, (i, _))| (*i, k))
+        .collect();
+    for (index, id) in renamed {
+        let k = *at.entry(index).or_insert_with(|| {
+            pages.push((index, Vec::new()));
+            pages.len() - 1
+        });
+        pages[k].1.extend(id.sheaf_names());
+    }
+}
+
+/// The notice for marks the open gave new ids, when there are any.
+fn renamed_notice(n: usize) -> Option<String> {
+    match n {
+        0 => None,
+        1 => Some(
+            "1 annotation shared an id with another (copied by another program); it gets a new \
+             one when you save"
+                .into(),
+        ),
+        n => Some(format!(
+            "{n} annotations shared an id with another (copied by another program); they get \
+             new ones when you save"
+        )),
+    }
+}
+
+/// The model a file opens as in the app while its facts are read: its
+/// pages, as [`sheaf_doc::open::start`] makes them, with `author` on the
+/// marks made in it. [`take_facts`] opens it.
+pub(crate) fn opening_model(store: Arc<Store>, primary: SourceInfo, author: String) -> Document {
+    let mut model = sheaf_doc::open::start(store, primary, sheaf_doc::history::default_policy());
+    model.set_author(author);
+    model
+}
+
+/// `facts`, read from the file `blob`, made `model`'s opened version, and
+/// what the view shows beside it; a `recovered` file stays unsaved. None
+/// when `model` no longer shows that file, or has opened already: another
+/// open of the same bytes had its facts first.
+pub(crate) fn take_facts(
+    model: &mut Document,
+    blob: sheaf_doc::BlobId,
+    facts: sheaf_doc::open::Facts,
+    recovered: bool,
+) -> Option<sheaf_doc::open::ViewFacts> {
+    let primary = model.primary();
+    if model.source(primary).is_none_or(|s| s.src.id() != blob) {
+        return None;
+    }
+    let view = model.ready(facts).ok()?;
+    if recovered {
+        model.mark_unsaved();
+    }
+    Some(view)
+}
+
+/// The status line while a file's facts are read: the page its first
+/// pass is on, while it's on one before the last.
+fn opening_line(reading: Option<&sheaf_ops::Tracker>) -> String {
+    let s = reading
+        .map(sheaf_ops::Tracker::snapshot)
+        .unwrap_or_default();
+    match s.total {
+        Some(total) if (1..total).contains(&s.done) => {
+            format!("Opening: page {} of {total}…", s.done)
+        }
+        _ => "Opening…".into(),
+    }
+}
+
+/// The notice for an edit the model refused: [`STILL_OPENING`] while the
+/// file opens, or else that `what` failed, and why.
+pub(crate) fn failed(what: &str, e: &anyhow::Error) -> String {
+    if e.is::<sheaf_doc::NotReady>() {
+        STILL_OPENING.into()
+    } else {
+        format!("{what} failed: {e:#}")
+    }
+}
+
+/// The marks sheaf draws itself, as `/NM`s by page index, when `st`'s
+/// pages are the primary file's in order: as it opened, or as a save
+/// wrote it.
+fn drawn_marks(st: &sheaf_doc::DocState) -> Vec<(u32, Vec<String>)> {
+    st.pages
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| {
+            let list = st.annots.get(&p.id)?;
+            Some((i as u32, list.iter().flat_map(|a| a.pdf_names()).collect()))
+        })
         .collect()
 }
 
-/// Read `path`'s third-party comments in the background and list them as
-/// `source`'s (after a save, the file's pages have new numbers).
-fn reread_foreign(source: SourceId, path: PathBuf, cx: &mut Context<DocView>) {
+/// Read the third-party comments in `src`, the file a save wrote, in the
+/// background and list them as `source`'s (after a save, the file's pages
+/// have new numbers), and what sheaf's marks hold in it, which is where
+/// they're found from then on: a file attached since the last save is the
+/// saved file's.
+fn reread_foreign(source: SourceId, src: sheaf_doc::Src, cx: &mut Context<DocView>) {
     cx.spawn(async move |this, cx| {
         let found = cx
             .background_executor()
-            .spawn(async move { sheaf_doc::file::read_annots(&path, None) })
+            .spawn(async move { sheaf_doc::file::annots_in(src.pdf(), src.page_ids()) })
             .await;
-        let foreign = match found {
-            Ok(a) => a.foreign,
-            Err(e) => {
-                log::warn!("reading third-party comments: {e:#}");
-                return;
-            }
-        };
         this.update(cx, |view, cx| {
             if let State::Ready(doc) = &mut view.state
                 && doc.model.primary() == source
             {
+                let foreign = found.foreign;
+                doc.model.set_saved_assets(source, &found.assets);
                 doc.foreign_annots.retain(|(s, _)| *s != source);
                 doc.foreign_annots
                     .extend(foreign.into_iter().map(|f| (source, f)));
@@ -3604,17 +3719,6 @@ fn reread_foreign(source: SourceId, path: PathBuf, cx: &mut Context<DocView>) {
     .detach();
 }
 
-fn flat_item(i: &OutlineItem) -> FlatOutlineItem {
-    FlatOutlineItem {
-        title: i.title.clone(),
-        page: i.page,
-        depth: i.depth,
-        view: i.view.clone(),
-        color: None,
-        style: Default::default(),
-    }
-}
-
 /// Wrap a BGRA raster as a GPUI image without copying the pixel data.
 /// `RenderImage` is documented as BGRA; `RgbaImage` here is just the container.
 pub(crate) fn to_render_image(raster: sheaf_image::raster::Raster) -> RenderImage {
@@ -3622,32 +3726,6 @@ pub(crate) fn to_render_image(raster: sheaf_image::raster::Raster) -> RenderImag
     let buf = image::RgbaImage::from_raw(raster.width, raster.height, raster.data)
         .expect("raster size matches buffer");
     RenderImage::new(smallvec::smallvec![image::Frame::new(buf)])
-}
-
-/// Map a rect in a page's source orientation (size `src`) to where it lands
-/// after rotating the page clockwise by `rot`.
-pub(crate) fn rotate_rect(r: Rect, src: PageSize, rot: Rotation) -> Rect {
-    match rot {
-        Rotation::R0 => r,
-        Rotation::R90 => Rect {
-            x: src.height - (r.y + r.h),
-            y: r.x,
-            w: r.h,
-            h: r.w,
-        },
-        Rotation::R180 => Rect {
-            x: src.width - (r.x + r.w),
-            y: src.height - (r.y + r.h),
-            w: r.w,
-            h: r.h,
-        },
-        Rotation::R270 => Rect {
-            x: r.y,
-            y: src.width - (r.x + r.w),
-            w: r.h,
-            h: r.w,
-        },
-    }
 }
 
 impl Focusable for DocView {
@@ -3871,13 +3949,13 @@ fn plan_pane(
     let overdraw = view_h * TILE_OVERDRAW;
     let fetch = visible.start.saturating_sub(PREFETCH)..(visible.end + PREFETCH).min(count);
     for i in visible.start.saturating_sub(KEEP)..(visible.end + KEEP).min(count) {
-        frame
-            .keep
-            .push((layout.refs[i].id, layout.refs[i].rotation));
+        let pref = &layout.refs[i];
+        frame.keep.push((pref.id, doc.model.render_delta(pref)));
     }
     for i in fetch {
         let Some(r) = layout.rect(i) else { continue };
         let pref = layout.refs[i];
+        let rotation = doc.model.render_delta(&pref);
         let (left, top, w, h) = (r.left, r.top, r.w, r.h);
         let dev_w = (w * scale).round().max(1.0) as u32;
         let dev_h = (h * scale).round().max(1.0) as u32;
@@ -3891,7 +3969,7 @@ fn plan_pane(
                 page: PageIndex(pref.index),
                 job: Job::Page {
                     width: PREVIEW_W,
-                    rotation: pref.rotation,
+                    rotation,
                 },
                 format: PixelFormat::Bgra,
                 priority: if on_screen_page { 0 } else { 2 },
@@ -3929,7 +4007,7 @@ fn plan_pane(
                             y,
                             w: tw,
                             h: th,
-                            rotation: pref.rotation,
+                            rotation,
                         },
                         if on_screen { 1 } else { 3 },
                     ));
@@ -4055,7 +4133,9 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
         .h(px(pl.h))
         .bg(theme::PAGE)
         .shadow_md();
-    if let Some(prev) = doc.previews.get(&(pl.pref.id, pl.pref.rotation)) {
+    // The turn the page's images were rendered with.
+    let rot = doc.model.render_delta(&pl.pref);
+    if let Some(prev) = doc.previews.get(&(pl.pref.id, rot)) {
         page_div = page_div.child(
             div()
                 .absolute()
@@ -4066,7 +4146,7 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
     let mut page_tiles: Vec<(&TileKey, &Arc<RenderImage>)> = doc
         .tiles
         .iter()
-        .filter(|((p, j), _)| *p == pl.pref.id && j.rotation() == pl.pref.rotation)
+        .filter(|((p, j), _)| *p == pl.pref.id && j.rotation() == rot)
         .collect();
     // Stale zoom levels first so current ones paint over them.
     page_tiles.sort_by_key(|((_, j), _)| match j {
@@ -4099,17 +4179,21 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
                 .child(img(im.clone()).size_full().object_fit(ObjectFit::Fill)),
         );
     }
-    // Hit rects and marks are in the source page's displayed space.
-    let src = doc
-        .model
-        .source(pl.pref.source)
-        .map(|s| s.page_size(pl.pref.index))
-        .unwrap_or(PageSize {
-            width: 612.0,
-            height: 792.0,
-        });
-    let rot = pl.pref.rotation;
-    let k = pl.w / src.rotated(rot).width.max(1.0);
+    // Hit rects, text and marks are in PageSpace; the pane frame puts them
+    // on the page as drawn.
+    let pane = doc.model.geom(&pl.pref);
+    let to_pane = pane.to_view();
+    let size = pane.shown();
+    let k = pl.w / size.width.max(1.0);
+    // A box in the pane frame, in page-local logical px.
+    let place = |r: Box2| {
+        div()
+            .absolute()
+            .left(px(r.x * k))
+            .top(px(r.y * k))
+            .w(px(r.w * k))
+            .h(px(r.h * k))
+    };
     let hit_rects = |hits: &[Hit], current: Option<usize>, color, current_color| {
         let mut out = Vec::new();
         for (ix, hit) in hits.iter().enumerate() {
@@ -4117,20 +4201,11 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
                 continue;
             }
             for r in &hit.rects {
-                let r = rotate_rect(*r, src, rot);
-                out.push(
-                    div()
-                        .absolute()
-                        .left(px(r.x * k))
-                        .top(px(r.y * k))
-                        .w(px(r.w * k))
-                        .h(px(r.h * k))
-                        .bg(if current == Some(ix) {
-                            current_color
-                        } else {
-                            color
-                        }),
-                );
+                out.push(place(to_pane.apply_box(*r)).bg(if current == Some(ix) {
+                    current_color
+                } else {
+                    color
+                }));
             }
         }
         out
@@ -4161,35 +4236,23 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
         && let Some((_, chars)) = doc.page_chars.get(&sel.page)
     {
         let (a, b) = sel.range();
-        page_div = page_div.children(chars.rects(a, b).into_iter().map(|r| {
-            let r = rotate_rect(
-                Rect {
-                    x: r.x,
-                    y: r.y,
-                    w: r.w,
-                    h: r.h,
-                },
-                src,
-                rot,
-            );
-            div()
-                .absolute()
-                .left(px(r.x * k))
-                .top(px(r.y * k))
-                .w(px(r.w * k))
-                .h(px(r.h * k))
-                .bg(theme::SELECTION)
-        }));
+        page_div = page_div.children(
+            chars
+                .rects(a, b)
+                .into_iter()
+                .map(|r| place(to_pane.apply_box(r)).bg(theme::SELECTION)),
+        );
     }
     // A header/footer not yet saved into the file, drawn as it will be.
     page_div = page_div.children(header_footer_elements(doc, pl, k));
-    // Our markup, drawn over the page in the displayed orientation, less
-    // what the comment filter or View > Hide Comments hides.
+    // Our markup, drawn over the page as the pane shows it, less what the
+    // comment filter or View > Hide Comments hides.
     if let Some(list) = doc.model.state().annots_on(pl.pref.id)
         && !doc.comments_hidden
     {
+        let assets = doc.model.assets();
         for a in list.iter().filter(|a| !doc.hidden_marks.contains(&a.id)) {
-            page_div = page_div.children(annot_elements(a, src, rot, k));
+            page_div = page_div.children(annot_elements(a, assets, &to_pane, size, k));
         }
     }
     // Selection outlines; handles when one mark is selected and nothing is
@@ -4206,27 +4269,17 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
         .map(|(_, a)| a)
         .collect();
     for a in &selected {
-        let b = a.bounds();
-        let r = rotate_rect(
-            Rect {
-                x: b.x - 2.0,
-                y: b.y - 2.0,
-                w: b.w + 4.0,
-                h: b.h + 4.0,
-            },
-            src,
-            rot,
-        );
+        let r = to_pane.apply_box(a.page_bounds());
         page_div = page_div.child(
-            div()
-                .absolute()
-                .left(px(r.x * k))
-                .top(px(r.y * k))
-                .w(px(r.w * k))
-                .h(px(r.h * k))
-                .border_1()
-                .border_dashed()
-                .border_color(theme::ACCENT),
+            place(Box2 {
+                x: r.x - 2.0,
+                y: r.y - 2.0,
+                w: r.w + 4.0,
+                h: r.h + 4.0,
+            })
+            .border_1()
+            .border_dashed()
+            .border_color(theme::ACCENT),
         );
     }
     if let [a] = selected.as_slice()
@@ -4234,13 +4287,13 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
         && doc.drag.is_none()
     {
         const HANDLE: f32 = 7.0;
-        for (_, q) in crate::markup_tools::handle_spots(a) {
-            let d = rotate_pt(q, src, rot);
+        // Where the edit frame's handles are, as the pane shows them.
+        for (_, q) in crate::markup_tools::handle_spots(&a.mapped(&to_pane)) {
             page_div = page_div.child(
                 div()
                     .absolute()
-                    .left(px(d.x * k - HANDLE / 2.0))
-                    .top(px(d.y * k - HANDLE / 2.0))
+                    .left(px(q.x * k - HANDLE / 2.0))
+                    .top(px(q.y * k - HANDLE / 2.0))
                     .w(px(HANDLE))
                     .h(px(HANDLE))
                     .bg(theme::PAGE)
@@ -4257,26 +4310,17 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
             .annots_on(ed.page)
             .and_then(|l| l.iter().find(|a| a.id == ed.id))
     {
-        // Under the mark (a callout's: under its box).
+        // Under the mark as shown (a callout's: under its box).
         let b = match &a.kind {
             AnnotKind::Callout { rect, .. } => *rect,
-            _ => a.bounds(),
+            _ => a.page_bounds(),
         };
-        let r = rotate_rect(
-            Rect {
-                x: b.x,
-                y: b.y + b.h + 2.0,
-                w: b.w,
-                h: 24.0,
-            },
-            src,
-            rot,
-        );
+        let r = to_pane.apply_box(b);
         page_div = page_div.child(
             div()
                 .absolute()
                 .left(px(r.x * k))
-                .top(px(r.y * k))
+                .top(px((r.bottom() + 2.0) * k))
                 .w(px(300.0))
                 .child(ed.input.clone()),
         );
@@ -4285,18 +4329,21 @@ fn page_element(doc: &Doc, pl: &PagePlan, ov: &Overlays) -> gpui::Div {
         && pl.pref.source == *source
         && f.page == pl.pref.index
     {
-        page_div = page_div.child(crate::comments_panel::foreign_outline(f, src, rot, k));
+        page_div = page_div.child(crate::comments_panel::foreign_outline(f, &to_pane, k));
     }
-    if let Some(overlay) = crate::region::overlay(ov.region, pl.pref.id, src, rot, k) {
+    if let Some(overlay) = crate::region::overlay(ov.region, pl.pref.id, &to_pane, k) {
         page_div = page_div.child(overlay);
     }
-    if let Some(preview) = DocView::drag_preview(doc, ov.tool, ov.tool_color, pl.index, src, rot, k)
+    // Drags and drafts are in the edit frame.
+    let edit = doc.edit_geom(pl.index).unwrap_or(pane);
+    if let Some(preview) =
+        DocView::drag_preview(doc, ov.tool, ov.tool_color, pl.index, &edit, &pane, k)
     {
         page_div = page_div.child(preview);
     }
     let [r, g, b] = ov.tool_color;
     let tool_rgb = rgb(((r as u32) << 16) | ((g as u32) << 8) | b as u32);
-    if let Some(draft) = crate::shapes::draft_preview(doc, tool_rgb, pl.index, src, rot, k) {
+    if let Some(draft) = crate::shapes::draft_preview(doc, tool_rgb, pl.index, &edit, &pane, k) {
         page_div = page_div.child(draft);
     }
     page_div
@@ -4528,7 +4575,13 @@ impl DocView {
             doc.page_position(doc.current_page(), count),
             layout.zoom_percent(),
         );
-        let notice = doc.notice.clone().map(Into::into);
+        // Until the file's facts are read, it says it's still opening,
+        // and how far it has read.
+        let notice = doc
+            .notice
+            .clone()
+            .or_else(|| (!doc.model.is_ready()).then(|| opening_line(doc.reading.as_ref())))
+            .map(Into::into);
         let wants: Vec<_> = frames.into_iter().flat_map(|f| f.wants).collect();
         for (pref, want) in wants {
             self.ensure_rendered(pref, want, cx);
@@ -5001,7 +5054,7 @@ impl DocView {
 
         let visible = layout.visible_in(scroll_y, view_h);
         doc.thumb_keep = (visible.start.saturating_sub(2)..(visible.end + 2).min(count))
-            .map(|i| (refs[i].id, refs[i].rotation))
+            .map(|i| (refs[i].id, doc.model.render_delta(&refs[i])))
             .collect();
 
         // Pages that are bookmark targets get a marker (a delete would cascade).
@@ -5020,20 +5073,21 @@ impl DocView {
         let mut items = Vec::new();
         for i in visible {
             let pref = &refs[i];
+            let rotation = doc.model.render_delta(pref);
             wants.push((
                 *pref,
                 RenderRequest {
                     page: PageIndex(pref.index),
                     job: Job::Page {
                         width: PREVIEW_W,
-                        rotation: pref.rotation,
+                        rotation,
                     },
                     format: PixelFormat::Bgra,
                     priority: 2,
                 },
             ));
             let h = thumb_w * sizes[i].height / sizes[i].width.max(1.0);
-            let image = doc.previews.get(&(pref.id, pref.rotation)).cloned();
+            let image = doc.previews.get(&(pref.id, rotation)).cloned();
             let current = i == cur;
             let selected = selection.contains(&pref.id);
             let bookmarked = targets.contains(&pref.id);
@@ -5238,26 +5292,26 @@ fn header_footer_elements(doc: &Doc, pl: &PagePlan, k: f32) -> Vec<AnyElement> {
         .collect()
 }
 
-/// GPUI elements for one annotation, positioned in page-local logical px.
-/// `src` is the source page size, `rot` the page's extra rotation, `k` logical
-/// px per point.
-/// A polygon's or polyline's outline (a cloud's scallops when it's
-/// cloudy), filled when it's closed and has a fill.
+/// A shape's outline (a cloud's scallops when it's cloudy), filled when
+/// it's closed, as all but a polyline are, and has a fill: `shape`, `a`'s
+/// laid out upright, with `m` taking it onto the page as drawn, `shown` in
+/// size, at `k` logical px a point.
 fn outline_elements(
     a: &Annot,
-    closed: bool,
-    src: PageSize,
-    rot: Rotation,
+    shape: &AnnotKind,
+    m: &Affine,
+    shown: PageSize,
     k: f32,
     stroke: gpui::Rgba,
     alpha: u32,
 ) -> Vec<AnyElement> {
     let px_of = |p: Pt| {
-        let q = rotate_pt(p, src, rot);
+        let q = m.apply(p);
         (q.x * k, q.y * k)
     };
+    let closed = !matches!(shape, AnnotKind::Polyline { .. });
     let mut path: Vec<(f32, f32)> = if closed && a.cloudy {
-        let outline = sheaf_doc::annot::outline_of(&a.kind).unwrap_or_default();
+        let outline = sheaf_doc::annot::outline_of(shape).unwrap_or_default();
         let curves =
             sheaf_doc::annot::cloud_curves(&outline, sheaf_doc::annot::cloud_step(a.stroke));
         let mut pts = Vec::new();
@@ -5279,7 +5333,7 @@ fn outline_elements(
         }
         pts
     } else {
-        match &a.kind {
+        match shape {
             AnnotKind::Polygon { points } | AnnotKind::Polyline { points } => {
                 points.iter().map(|p| px_of(*p)).collect()
             }
@@ -5299,7 +5353,7 @@ fn outline_elements(
         out.push(crate::markup_tools::fill_canvas(
             vec![path.clone()],
             rgba((u << 8) | alpha),
-            src.rotated(rot),
+            shown,
             k,
         ));
     }
@@ -5308,40 +5362,45 @@ fn outline_elements(
         stroke,
         a.stroke * k,
         a.dashed.then_some(k),
-        src.rotated(rot),
+        shown,
         k,
     ));
     out
 }
 
-/// A text edit's caret, drawn as the file draws it.
-fn caret_element(at: Box2, color: gpui::Rgba, src: PageSize, rot: Rotation, k: f32) -> AnyElement {
+/// A text edit's caret, drawn as the file draws it: `at` upright, and `m`
+/// taking it onto the page (see [`outline_elements`]).
+fn caret_element(at: Box2, color: gpui::Rgba, m: &Affine, shown: PageSize, k: f32) -> AnyElement {
     let tri = sheaf_doc::annot::caret_points(at)
         .into_iter()
         .map(|p| {
-            let q = rotate_pt(p, src, rot);
+            let q = m.apply(p);
             (q.x * k, q.y * k)
         })
         .collect();
-    crate::markup_tools::fill_canvas(vec![tri], color, src.rotated(rot), k)
+    crate::markup_tools::fill_canvas(vec![tri], color, shown, k)
 }
 
-pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) -> Vec<AnyElement> {
+/// GPUI elements for one mark, positioned in page-local logical px:
+/// `to_pane` takes PageSpace onto the page as drawn, `shown` in size, at
+/// `k` logical px a point. The mark is laid out as it reads (upright),
+/// then turned onto the page, as the file draws it; a page stamp's page
+/// is one of `assets`, its document's.
+pub(crate) fn annot_elements(
+    a: &Annot,
+    assets: &Arc<MarkAssets>,
+    to_pane: &Affine,
+    shown: PageSize,
+    k: f32,
+) -> Vec<AnyElement> {
+    let up = a.upright();
+    let m = Affine::upright(a.turn).inverse().then(*to_pane);
     let rgb_u32 = ((a.color[0] as u32) << 16) | ((a.color[1] as u32) << 8) | a.color[2] as u32;
     let color = rgb(rgb_u32);
     let alpha = (a.opacity.clamp(0.0, 1.0) * 255.0) as u32;
     let fill = rgba((rgb_u32 << 8) | alpha);
     let place = |b: Box2| {
-        let r = rotate_rect(
-            Rect {
-                x: b.x,
-                y: b.y,
-                w: b.w,
-                h: b.h,
-            },
-            src,
-            rot,
-        );
+        let r = m.apply_box(b);
         div()
             .absolute()
             .left(px(r.x * k))
@@ -5350,7 +5409,7 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
             .h(px(r.h * k))
     };
     let mut out = Vec::new();
-    match &a.kind {
+    match &up {
         AnnotKind::Highlight { rects } => {
             for r in rects {
                 out.push(place(*r).bg(fill).into_any_element());
@@ -5393,11 +5452,10 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
         AnnotKind::Square { .. } | AnnotKind::Ellipse { .. } | AnnotKind::Polygon { .. }
             if a.cloudy =>
         {
-            out.extend(outline_elements(a, true, src, rot, k, fill, alpha));
+            out.extend(outline_elements(a, &up, &m, shown, k, fill, alpha));
         }
         AnnotKind::Polygon { .. } | AnnotKind::Polyline { .. } => {
-            let closed = matches!(a.kind, AnnotKind::Polygon { .. });
-            out.extend(outline_elements(a, closed, src, rot, k, fill, alpha));
+            out.extend(outline_elements(a, &up, &m, shown, k, fill, alpha));
         }
         AnnotKind::Measure {
             what,
@@ -5406,7 +5464,7 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
         } => {
             use sheaf_doc::measure::Measured;
             let px_of = |p: Pt| {
-                let q = rotate_pt(p, src, rot);
+                let q = m.apply(p);
                 (q.x * k, q.y * k)
             };
             let mut line: Vec<(f32, f32)> = points.iter().map(|p| px_of(*p)).collect();
@@ -5427,7 +5485,7 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
                 fill,
                 a.stroke * k,
                 a.dashed.then_some(k),
-                src.rotated(rot),
+                shown,
                 k,
             ));
             if let Some(b) = sheaf_doc::annot::measure_label_box(*what, points, scale) {
@@ -5456,13 +5514,13 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
                 .map(|path| {
                     path.into_iter()
                         .map(|p| {
-                            let q = rotate_pt(p, src, rot);
+                            let q = m.apply(p);
                             (q.x * k, q.y * k)
                         })
                         .collect()
                 })
                 .collect();
-            out.push(stroke_canvas(paths, fill, 1.5 * k, src.rotated(rot), k));
+            out.push(stroke_canvas(paths, fill, 1.5 * k, shown, k));
         }
         AnnotKind::Callout {
             rect,
@@ -5471,7 +5529,7 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
             size,
         } => {
             let px_of = |p: Pt| {
-                let q = rotate_pt(p, src, rot);
+                let q = m.apply(p);
                 (q.x * k, q.y * k)
             };
             let end = sheaf_doc::annot::callout_end(*rect, *knee);
@@ -5483,7 +5541,7 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
                 ],
                 fill,
                 a.stroke * k,
-                src.rotated(rot),
+                shown,
                 k,
             ));
             out.push(
@@ -5511,7 +5569,7 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
                     .border_color(fill)
                     .when(a.dashed, |d| d.border_dashed())
                     .when_some(inside, |d, c| d.bg(c))
-                    .when(matches!(a.kind, AnnotKind::Ellipse { .. }), |d| {
+                    .when(matches!(up, AnnotKind::Ellipse { .. }), |d| {
                         d.rounded_full()
                     })
                     .into_any_element(),
@@ -5541,8 +5599,8 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
                 // GPUI can't turn text: a picture of the tape as the file
                 // draws it.
                 let el = match crate::stamp_preview::tape_picture(a) {
-                    Some(path) => {
-                        place(*rect).child(img(path).size_full().object_fit(ObjectFit::Fill))
+                    Some(image) => {
+                        place(*rect).child(img(image).size_full().object_fit(ObjectFit::Fill))
                     }
                     None => place(*rect)
                         .bg(paper)
@@ -5648,7 +5706,7 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
         | AnnotKind::Squiggly { rects }
         | AnnotKind::Replace { rects, .. } => {
             // A replacement crosses its text out, then shows its caret.
-            let lines = match &a.kind {
+            let lines = match &up {
                 AnnotKind::Replace { .. } => AnnotKind::StrikeOut {
                     rects: rects.clone(),
                 },
@@ -5659,19 +5717,19 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
                 .map(|path| {
                     path.into_iter()
                         .map(|p| {
-                            let q = rotate_pt(p, src, rot);
+                            let q = m.apply(p);
                             (q.x * k, q.y * k)
                         })
                         .collect()
                 })
                 .collect();
             let width = sheaf_doc::annot::text_line_width(rects);
-            out.push(stroke_canvas(paths, fill, width * k, src.rotated(rot), k));
-            if let AnnotKind::Replace { at, .. } = &a.kind {
-                out.push(caret_element(*at, fill, src, rot, k));
+            out.push(stroke_canvas(paths, fill, width * k, shown, k));
+            if let AnnotKind::Replace { at, .. } = &up {
+                out.push(caret_element(*at, fill, &m, shown, k));
             }
         }
-        AnnotKind::Insert { at } => out.push(caret_element(*at, fill, src, rot, k)),
+        AnnotKind::Insert { at } => out.push(caret_element(*at, fill, &m, shown, k)),
         // In their parent's thread, not on the page.
         AnnotKind::Reply { .. } | AnnotKind::Status { .. } => {}
         AnnotKind::PageStamp {
@@ -5680,10 +5738,10 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
             name,
             text,
         } => {
-            let el = match crate::stamp_preview::picture(stamp) {
-                Some(path) => place(*rect)
+            let el = match crate::stamp_preview::picture(stamp, assets) {
+                Some(image) => place(*rect)
                     .opacity(a.opacity.clamp(0.0, 1.0))
-                    .child(img(path).size_full().object_fit(ObjectFit::Fill)),
+                    .child(img(image).size_full().object_fit(ObjectFit::Fill)),
                 // Until its picture is made (a moment), its name in a box.
                 None => place(*rect)
                     .border_1()
@@ -5754,7 +5812,7 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
             arrow,
             arrow_start,
         } => {
-            let (qa, qb) = (rotate_pt(*pa, src, rot), rotate_pt(*pb, src, rot));
+            let (qa, qb) = (m.apply(*pa), m.apply(*pb));
             let (a2, b2) = ((qa.x * k, qa.y * k), (qb.x * k, qb.y * k));
             let head = (6.0 + a.stroke * 2.0) * k;
             out.push(stroke_canvas_dashed(
@@ -5762,7 +5820,7 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
                 fill,
                 a.stroke * k,
                 a.dashed.then_some(k),
-                src.rotated(rot),
+                shown,
                 k,
             ));
             let mut heads = Vec::new();
@@ -5773,13 +5831,7 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
                 heads.push(arrow_head(b2, a2, head));
             }
             if !heads.is_empty() {
-                out.push(stroke_canvas(
-                    heads,
-                    fill,
-                    a.stroke * k,
-                    src.rotated(rot),
-                    k,
-                ));
+                out.push(stroke_canvas(heads, fill, a.stroke * k, shown, k));
             }
         }
         AnnotKind::Ink { paths } => {
@@ -5788,7 +5840,7 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
                 .map(|p| {
                     p.iter()
                         .map(|q| {
-                            let r = rotate_pt(*q, src, rot);
+                            let r = m.apply(*q);
                             (r.x * k, r.y * k)
                         })
                         .collect()
@@ -5799,7 +5851,7 @@ pub(crate) fn annot_elements(a: &Annot, src: PageSize, rot: Rotation, k: f32) ->
                 fill,
                 a.stroke * k,
                 a.dashed.then_some(k),
-                src.rotated(rot),
+                shown,
                 k,
             ));
         }
@@ -5902,6 +5954,7 @@ fn reveal_new_bookmarks(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Context as _;
     use sheaf_doc::OutlineNode;
 
     fn node(id: u64, children: Vec<OutlineNode>) -> OutlineNode {
@@ -5912,6 +5965,7 @@ mod tests {
             view: None,
             color: None,
             style: Default::default(),
+            open: true,
             children: children.into(),
         }
     }
@@ -5932,5 +5986,157 @@ mod tests {
         let mut got: Vec<u64> = expanded.iter().map(|i| i.0).collect();
         got.sort();
         assert_eq!(got, [1, 2, 4]);
+    }
+
+    /// `path` opened as the view opens it, with no window: the model
+    /// [`DocView::install`] makes, and the facts [`DocView::ready`] takes
+    /// in, read as `finish_open` reads them.
+    fn as_the_view_opens(
+        path: &std::path::Path,
+        recovered: bool,
+    ) -> anyhow::Result<(Document, sheaf_doc::open::ViewFacts)> {
+        let store = Store::new();
+        let primary = SourceInfo::read(&store, path, None)?;
+        let (src, blob) = (primary.src.clone(), primary.src.id());
+        let mut model = opening_model(store, primary, "Me".into());
+        let facts = sheaf_doc::open::finish(&src, &sheaf_ops::NoProgress);
+        let view = take_facts(&mut model, blob, facts, recovered).context("not taken")?;
+        Ok((model, view))
+    }
+
+    /// Whether the view's open of `path` and the command line's both open
+    /// it (false: neither does) as one document, or how they differ:
+    /// whether it opens at all, the opened state, ids included, the
+    /// view's facts, the version, or the ids the next edit draws.
+    fn opens_alike(path: &std::path::Path) -> Result<bool, &'static str> {
+        let (app, headless) = match (
+            as_the_view_opens(path, false),
+            sheaf_doc::open::file(path, None),
+        ) {
+            (Ok(app), Ok(headless)) => (app, headless),
+            (Err(_), Err(_)) => return Ok(false),
+            _ => return Err("it opens one way only"),
+        };
+        let ((mut a, view), mut h) = (app, headless.doc);
+        if a.state() != h.state() {
+            return Err("the opened state");
+        }
+        if view != headless.view {
+            return Err("the view's facts");
+        }
+        let version = |d: &Document| (d.current_version(), d.is_dirty(), d.can_undo());
+        if version(&a) != version(&h) {
+            return Err("the version");
+        }
+        // A copy of a page draws a page id, and a field id for each field
+        // on it.
+        let duplicate = |d: &mut Document| {
+            let ids = vec![d.page(0).expect("a source has pages").id];
+            d.apply(Edit::DuplicatePages { ids }, "Duplicate")
+                .map(|_| ())
+                .map_err(|e| format!("{e:#}"))
+        };
+        if duplicate(&mut a) != duplicate(&mut h) || a.state() != h.state() {
+            return Err("the ids the next edit draws");
+        }
+        Ok(true)
+    }
+
+    /// The view's open and the command line's are one open: on a file
+    /// that says every fact, on one with every kind of field, and over
+    /// Greg's corpus (skipped without it), they give one document. A
+    /// recovered file opens the same, unsaved, and facts read from other
+    /// bytes, or that come again, aren't taken.
+    #[test]
+    fn the_app_opens_as_the_command_line_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixtures = [
+            ("every-fact.pdf", sheaf_doc::forms::fixture::every_fact()),
+            ("every-kind.pdf", sheaf_doc::forms::fixture::every_kind()),
+        ];
+        for (name, mut f) in fixtures {
+            let path = dir.path().join(name);
+            std::fs::write(&path, f.bytes()).unwrap();
+            assert_eq!(opens_alike(&path), Ok(true), "{name}");
+        }
+        let path = dir.path().join("every-fact.pdf");
+        let (recovered, _) = as_the_view_opens(&path, true).unwrap();
+        let headless = sheaf_doc::open::file(&path, None).unwrap().doc;
+        assert!(recovered.state() == headless.state());
+        assert!(recovered.is_dirty() && !recovered.can_undo());
+        let store = Store::new();
+        let primary = SourceInfo::read(&store, &path, None).unwrap();
+        let src = primary.src.clone();
+        let mut model = opening_model(store, primary, "Me".into());
+        let other = sheaf_doc::forms::fixture::every_kind().source();
+        let facts = || sheaf_doc::open::finish(&src, &sheaf_ops::NoProgress);
+        assert!(take_facts(&mut model, other.id(), facts(), false).is_none());
+        assert!(!model.is_ready());
+        assert!(take_facts(&mut model, src.id(), facts(), false).is_some());
+        assert!(take_facts(&mut model, src.id(), facts(), false).is_none());
+
+        let Some(corpus) = sheaf_doc::forms::corpus::Corpus::or_skip() else {
+            return;
+        };
+        let entries = corpus.manifest().unwrap();
+        let outcomes = sheaf_doc::forms::corpus::each_entry(&entries, |entry| {
+            opens_alike(&corpus.path(entry))
+        });
+        let differ: Vec<(&str, &str)> = entries
+            .iter()
+            .zip(&outcomes)
+            .filter_map(|(entry, alike)| Some((entry.path.as_str(), alike.err()?)))
+            .collect();
+        eprintln!(
+            "{} files: {} open neither way, {} otherwise in the app",
+            entries.len(),
+            outcomes.iter().filter(|o| **o == Ok(false)).count(),
+            differ.len()
+        );
+        assert!(differ.is_empty(), "{differ:#?}");
+    }
+
+    /// PDFium hides the marks given new ids at open under the names the
+    /// file still says, on their pages beside the others', and one notice
+    /// counts them.
+    #[test]
+    fn renamed_marks_are_hidden_by_their_old_names() {
+        let note = sheaf_doc::forms::fixture::note();
+        let marks = HashMap::from([(0, vec![note.clone()])]);
+        let renamed = [(0, AnnotId(7)), (2, AnnotId(8))];
+        let mut pages = marks_by_page(&marks, renamed.into_iter());
+        pages.sort_by_key(|(i, _)| *i);
+        let names = |id: u64| [format!("sheaf:{id}"), format!("sheaf:{id}:strike")];
+        let mut first = vec![note.name()];
+        first.extend(names(7));
+        assert_eq!(pages, [(0, first), (2, names(8).to_vec())]);
+        assert_eq!(renamed_notice(0), None);
+        assert!(
+            renamed_notice(1)
+                .unwrap()
+                .starts_with("1 annotation shared an id")
+        );
+        assert!(
+            renamed_notice(3)
+                .unwrap()
+                .starts_with("3 annotations shared an id")
+        );
+    }
+
+    #[test]
+    fn the_status_bar_counts_the_pages_read() {
+        use sheaf_ops::Progress;
+        let reading = sheaf_ops::Tracker::new();
+        assert_eq!(opening_line(None), "Opening…");
+        assert_eq!(opening_line(Some(&reading)), "Opening…");
+        reading.set_total(Some(40_000), Default::default());
+        reading.set(12_000);
+        assert_eq!(
+            opening_line(Some(&reading)),
+            "Opening: page 12000 of 40000…"
+        );
+        // The pages are read: the rest of the facts.
+        reading.set(40_000);
+        assert_eq!(opening_line(Some(&reading)), "Opening…");
     }
 }

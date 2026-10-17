@@ -1,8 +1,8 @@
 //! The appearances sheaf writes for text markup and text edits are what
 //! other viewers draw: this saves an underline, a strikethrough, a
 //! replacement and an insertion, renders the file with PDFium, and looks
-//! for their colors where they should be, on a plain page and on one with
-//! `/Rotate 90`.
+//! for their colors where they should be, on a plain page and on ones
+//! with `/Rotate`.
 //!
 //! Needs libpdfium (`scripts/fetch-pdfium.sh`), like the app itself.
 
@@ -11,9 +11,11 @@ use std::path::{Path, PathBuf};
 use lopdf::{Document as Pdf, Object, Stream, dictionary};
 use sheaf_core::{PageIndex, PageSize, Rotation};
 use sheaf_doc::annot::caret_box;
-use sheaf_doc::{Annot, AnnotId, AnnotKind, Box2, Document, Edit, FixedCount, Pt, SourceInfo};
+use sheaf_doc::{
+    Annot, AnnotId, AnnotKind, Box2, Document, Edit, FixedCount, Pt, SourceInfo, Store,
+};
 use sheaf_image::raster::PixelFormat;
-use sheaf_render::pdfium::PdfiumEngine;
+use sheaf_render::pdfium::{PdfiumEngine, appearance_text};
 use sheaf_render::{Job, Renderer};
 
 fn tempdir() -> PathBuf {
@@ -67,12 +69,20 @@ fn mark(kind: AnnotKind, color: [u8; 3]) -> Annot {
         fill: None,
         dashed: false,
         cloudy: false,
+        turn: Rotation::R0,
         name: String::new(),
     }
 }
 
-/// A one-page red stamp, 100 × 50, in the generated-file cache; its name.
-fn red_stamp() -> String {
+/// `a`, placed where the first page shows it, as the model keeps it: in
+/// PageSpace, reading upright as the page shows.
+fn placed(model: &Document, a: Annot) -> Annot {
+    a.to_page(&model.geom(model.page(0).unwrap()))
+}
+
+/// A one-page red stamp, 100 × 50, placed in `model` as the stamps panel
+/// places one; its name.
+fn red_stamp(model: &Document) -> String {
     let mut pdf = Pdf::with_version("1.5");
     let pages_id = pdf.new_object_id();
     let content = pdf.add_object(Stream::new(
@@ -93,7 +103,8 @@ fn red_stamp() -> String {
     pdf.trailer.set("Root", catalog);
     let mut bytes = Vec::new();
     pdf.save_to(&mut bytes).unwrap();
-    sheaf_doc::generated::stem_of(&sheaf_doc::generated::store(&bytes).unwrap())
+    model.assets().intern_stamp("red", bytes.into());
+    "red".into()
 }
 
 fn row(y: f32) -> Box2 {
@@ -119,20 +130,9 @@ fn check(rotate: i64) {
         height: 792.0,
     }
     .rotated(Rotation::from_degrees(rotate as i32));
-    let mut model = Document::new(
-        SourceInfo {
-            path: src.clone(),
-            page_count: 1,
-            first_page: shown,
-            page_sizes: None,
-            bytes: 0,
-            password: None,
-            data: None,
-            derived: None,
-        },
-        &[],
-        Box::new(FixedCount(10)),
-    );
+    let store = Store::new();
+    let primary = SourceInfo::read(&store, &src, None).unwrap();
+    let mut model = Document::new(store, primary, &[], Box::new(FixedCount(10)));
     let page = model.page(0).unwrap().id;
     let replaced = row(300.0);
     for a in [
@@ -171,7 +171,7 @@ fn check(rotate: i64) {
                     w: 100.0,
                     h: 50.0,
                 },
-                stamp: red_stamp(),
+                stamp: red_stamp(&model),
                 name: "Red".into(),
                 text: None,
             },
@@ -191,9 +191,8 @@ fn check(rotate: i64) {
             BLUE,
         ),
     ] {
-        model
-            .apply(Edit::AnnotAdd { page, annot: a }, "mark")
-            .unwrap();
+        let annot = placed(&model, a);
+        model.apply(Edit::AnnotAdd { page, annot }, "mark").unwrap();
     }
     let out = dir.join("marked.pdf");
     sheaf_doc::save::rewrite_to_path(&model.snapshot(), &out).unwrap();
@@ -293,6 +292,12 @@ fn text_markup_draws_where_it_should_on_a_turned_page() {
 }
 
 #[test]
+fn text_markup_draws_where_it_should_turned_further() {
+    check(180);
+    check(270);
+}
+
+#[test]
 fn another_tools_comment_hides_and_shows_by_slot() {
     let dir = tempdir();
     let path = dir.join("square.pdf");
@@ -369,24 +374,9 @@ fn tapes_draw_turned_and_from_old_text() {
     let dir = tempdir();
     let src = dir.join("src.pdf");
     blank_pdf(&src, 0);
-    let letter = PageSize {
-        width: 612.0,
-        height: 792.0,
-    };
-    let mut model = Document::new(
-        SourceInfo {
-            path: src.clone(),
-            page_count: 1,
-            first_page: letter,
-            page_sizes: None,
-            bytes: 0,
-            password: None,
-            data: None,
-            derived: None,
-        },
-        &[],
-        Box::new(FixedCount(10)),
-    );
+    let store = Store::new();
+    let primary = SourceInfo::read(&store, &src, None).unwrap();
+    let mut model = Document::new(store, primary, &[], Box::new(FixedCount(10)));
     let page = model.page(0).unwrap().id;
     let mut tape = Tape {
         lines: vec![
@@ -426,9 +416,8 @@ fn tapes_draw_turned_and_from_old_text() {
         [20, 20, 20],
     );
     a.contents = tape.text(2);
-    model
-        .apply(Edit::AnnotAdd { page, annot: a }, "tape")
-        .unwrap();
+    let annot = placed(&model, a);
+    model.apply(Edit::AnnotAdd { page, annot }, "tape").unwrap();
     // From before rows were kept: text only, read back from it.
     let mut old = mark(
         AnnotKind::Tape {
@@ -445,9 +434,8 @@ fn tapes_draw_turned_and_from_old_text() {
         [20, 20, 20],
     );
     old.contents = "1,234.50 +\n250.00 +\n1,484.50 T".into();
-    model
-        .apply(Edit::AnnotAdd { page, annot: old }, "tape")
-        .unwrap();
+    let annot = placed(&model, old);
+    model.apply(Edit::AnnotAdd { page, annot }, "tape").unwrap();
     let out = dir.join("tapes.pdf");
     sheaf_doc::save::rewrite_to_path(&model.snapshot(), &out).unwrap();
 
@@ -494,23 +482,9 @@ fn clouds_and_callouts_draw() {
     let dir = tempdir();
     let src = dir.join("src.pdf");
     blank_pdf(&src, 0);
-    let mut model = Document::new(
-        SourceInfo {
-            path: src.clone(),
-            page_count: 1,
-            first_page: PageSize {
-                width: 612.0,
-                height: 792.0,
-            },
-            page_sizes: None,
-            bytes: 0,
-            password: None,
-            data: None,
-            derived: None,
-        },
-        &[],
-        Box::new(FixedCount(10)),
-    );
+    let store = Store::new();
+    let primary = SourceInfo::read(&store, &src, None).unwrap();
+    let mut model = Document::new(store, primary, &[], Box::new(FixedCount(10)));
     let page = model.page(0).unwrap().id;
     let mut cloud = mark(
         AnnotKind::Square {
@@ -540,9 +514,8 @@ fn clouds_and_callouts_draw() {
         BLUE,
     );
     for a in [cloud, callout] {
-        model
-            .apply(Edit::AnnotAdd { page, annot: a }, "mark")
-            .unwrap();
+        let annot = placed(&model, a);
+        model.apply(Edit::AnnotAdd { page, annot }, "mark").unwrap();
     }
     let out = dir.join("shapes.pdf");
     sheaf_doc::save::rewrite_to_path(&model.snapshot(), &out).unwrap();
@@ -579,5 +552,41 @@ fn clouds_and_callouts_draw() {
     let leader = count(255, 320, 335, 395, &blue);
     assert!(edge > 10, "box's left edge: {edge}");
     assert!(leader > 10, "leader: {leader}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A FreeText in characters WinAnsi has beyond Latin-1 (the euro, the em
+/// dash, curly quotes) reads back from its appearance: PDFium flattens it
+/// into the page, as a viewer that draws only appearances shows it, and
+/// reads the page's text through the codes and font it's drawn with.
+#[test]
+fn free_text_reads_back_from_its_appearance() {
+    let dir = tempdir();
+    let src = dir.join("src.pdf");
+    blank_pdf(&src, 0);
+    let store = Store::new();
+    let primary = SourceInfo::read(&store, &src, None).unwrap();
+    let mut model = Document::new(store, primary, &[], Box::new(FixedCount(10)));
+    let page = model.page(0).unwrap().id;
+    let text = "é € — “ ”";
+    let mut note = mark(
+        AnnotKind::FreeText {
+            rect: Box2 {
+                x: 100.0,
+                y: 100.0,
+                w: 300.0,
+                h: 40.0,
+            },
+            size: 14.0,
+        },
+        BLUE,
+    );
+    note.contents = text.into();
+    let annot = placed(&model, note);
+    let out = model.apply(Edit::AnnotAdd { page, annot }, "note").unwrap();
+    assert!(!out.unencodable, "WinAnsi has every one");
+    let bytes = sheaf_doc::save::rewrite(&model.snapshot()).unwrap();
+    let read = appearance_text(&bytes, None, PageIndex(0)).unwrap();
+    assert!(read.contains(text), "{read:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }

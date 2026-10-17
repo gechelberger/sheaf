@@ -4,7 +4,7 @@ use image::{Rgb, RgbImage};
 use lopdf::Document as Pdf;
 use sheaf_ocr::OcrConfig;
 use sheaf_ops::scan::{ScanOptions, scan};
-use sheaf_progress::NoProgress;
+use sheaf_ops::{NoProgress, Tracker};
 
 /// An off-white page with a little sensor noise, and lines of "text"
 /// when `text`.
@@ -51,8 +51,13 @@ fn blank_pages_are_left_out() {
     opts.clean.orient = false;
     opts.clean.deskew = false;
     let out = dir.join("out.pdf");
-    let report = scan(&inputs, &opts, &OcrConfig::default(), &out, &NoProgress).unwrap();
+    let tracker = Tracker::new();
+    let report = scan(&inputs, &opts, &OcrConfig::default(), &out, &tracker).unwrap();
     assert_eq!((report.pages, report.dropped), (2, 1));
+    // Each page's step reports to the whole scan's bar and status.
+    let s = tracker.snapshot();
+    assert_eq!((s.fraction, s.message_count), (Some(1.0), 1));
+    assert!(s.message.unwrap().1.ends_with("1.png: blank, left out"));
     assert_eq!(Pdf::load(&out).unwrap().get_pages().len(), 2);
 
     // Off, every page stays.

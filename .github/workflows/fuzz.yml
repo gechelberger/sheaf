@@ -1,0 +1,71 @@
+name: Fuzz
+
+# The fuzz targets in fuzz/ (M10.5's "Tests, fixtures and gates"), a few
+# minutes each, every night: libFuzzer needs nightly. Each starts from the
+# corpus the last night's run grew, seeded with the stable test's fixtures,
+# and a crash's input is kept as an artifact. A stable test runs the same
+# bodies on every push (`fuzz_bodies_survive_mutated_fixtures`).
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  fuzz:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [lazy_reader, page_tree, sheaf_annot, lexer, splice]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            fuzz
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      # The corpus grows from night to night: each run starts from the last
+      # one's.
+      - name: Restore the corpus
+        uses: actions/cache@v4
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+
+      # The fixtures the stable test mutates, built in code, so the
+      # repository holds no PDF: from nothing, libFuzzer seldom gets past a
+      # file's header and cross-reference sections. sheaf_annot's are a
+      # page's annotation objects, lexer's and splice's page content, the
+      # others' six files. Tests run in their crate's directory, hence the
+      # absolute path.
+      - name: Seed the corpus
+        env:
+          SHEAF_FUZZ_SEEDS: ${{ github.workspace }}/fuzz/corpus/${{ matrix.target }}
+          SHEAF_FUZZ_TARGET: ${{ matrix.target }}
+        run: cargo test -p sheaf-doc --lib -- --ignored --exact source::fuzz::tests::write_fuzz_seeds
+
+      # rust-toolchain.toml pins stable for everything else.
+      - name: Fuzz
+        run: >
+          cargo +nightly fuzz run --target x86_64-unknown-linux-gnu ${{ matrix.target }} --
+          -max_total_time=300 -dict=fuzz/pdf.dict -rss_limit_mb=2048 -timeout=10
+
+      - name: Keep what crashed
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}

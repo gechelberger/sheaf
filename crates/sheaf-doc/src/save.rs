@@ -13,11 +13,14 @@ use anyhow::{Context, Result, bail};
 use im::Vector;
 use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, StringFormat, dictionary};
 
-use crate::annot::{Annot, AnnotId, AnnotKind, PageGeom};
+use crate::annot::{Annot, AnnotId, AnnotKind};
+use crate::attachments::Objects;
 use crate::forms::merge::{CopyMaps, FormCopy};
+use crate::geom::{Geom, Rect};
 use crate::model::{DocState, OutlineNode, PageId, PageRef, Snapshot, SourceId, SourceInfo};
+use crate::source::Source;
 use crate::text_layer;
-use sheaf_core::{DestView, PageFrame};
+use sheaf_core::{DestView, Rotation};
 
 /// Page-level keys a page may inherit from its ancestors in the page tree.
 /// We flatten the tree, so these must be copied onto each page.
@@ -36,7 +39,7 @@ pub fn export_clean_copy(model: &Snapshot, path: &Path) -> Result<()> {
         .source(model.primary)
         .context("primary source missing")?;
     if path.exists()
-        && std::fs::canonicalize(path).ok() == std::fs::canonicalize(&primary.path).ok()
+        && std::fs::canonicalize(path).ok() == std::fs::canonicalize(&primary.name).ok()
     {
         bail!("a clean copy can't replace the open file; choose another name");
     }
@@ -135,6 +138,8 @@ fn subset(model: &Snapshot, ids: &[PageId], outline: bool) -> Option<Snapshot> {
         removes_content: false,
         // Fields on pages left out go.
         form_changed: model.form_changed || model.state.widgets.keys().any(|p| !keep.contains(p)),
+        renamed: model.renamed.clone(),
+        assets: model.assets.clone(),
     })
 }
 
@@ -169,6 +174,7 @@ fn prune_outline(nodes: &Vector<OutlineNode>, keep: &HashSet<PageId>) -> Vector<
                 target,
                 color: n.color,
                 style: n.style,
+                open: n.open,
                 children,
             })
         })
@@ -184,7 +190,7 @@ pub fn export_flattened(model: &Snapshot, path: &Path) -> Result<usize> {
         .source(model.primary)
         .context("primary source missing")?;
     if path.exists()
-        && std::fs::canonicalize(path).ok() == std::fs::canonicalize(&primary.path).ok()
+        && std::fs::canonicalize(path).ok() == std::fs::canonicalize(&primary.name).ok()
     {
         bail!("a flattened copy can't replace the open file; choose another name");
     }
@@ -251,7 +257,11 @@ fn flatten_annots(pdf: &mut Pdf) -> Result<usize> {
                 .ok()
                 .and_then(|o| pdf.dereference(o).ok())
                 .and_then(|(_, o)| o.as_array().ok())
-                .map(|a| a.iter().map(|v| v.as_float().unwrap_or(0.0)).collect())
+                .map(|a| {
+                    a.iter()
+                        .map(|v| v.as_float().unwrap_or(0.0) as f32)
+                        .collect()
+                })
                 .unwrap_or_default();
             if rect.len() != 4 {
                 continue;
@@ -268,14 +278,22 @@ fn flatten_annots(pdf: &mut Pdf) -> Result<usize> {
                 .get(b"BBox")
                 .ok()
                 .and_then(|o| o.as_array().ok())
-                .map(|a| a.iter().map(|v| v.as_float().unwrap_or(0.0)).collect())
+                .map(|a| {
+                    a.iter()
+                        .map(|v| v.as_float().unwrap_or(0.0) as f32)
+                        .collect()
+                })
                 .unwrap_or_else(|| vec![llx, lly, urx, ury]);
             let m: Vec<f32> = stream
                 .dict
                 .get(b"Matrix")
                 .ok()
                 .and_then(|o| o.as_array().ok())
-                .map(|a| a.iter().map(|v| v.as_float().unwrap_or(0.0)).collect())
+                .map(|a| {
+                    a.iter()
+                        .map(|v| v.as_float().unwrap_or(0.0) as f32)
+                        .collect()
+                })
                 .filter(|m: &Vec<f32>| m.len() == 6)
                 .unwrap_or_else(|| vec![1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
             if bbox.len() != 4 {
@@ -397,14 +415,13 @@ fn build_rewrite(model: &Snapshot, clean: bool) -> Result<(Pdf, Vec<String>)> {
     let pages_id = pdf.new_object_id();
     let mut kids: Vec<Object> = Vec::with_capacity(state.pages.len());
     let mut page_obj: HashMap<PageId, ObjectId> = HashMap::new();
-    // Each page's geometry before our rotation, for bookmark positions.
-    let mut frames: HashMap<PageId, PageFrame> = HashMap::new();
     let mut used: HashSet<ObjectId> = HashSet::new();
     let mut copy_maps: CopyMaps = HashMap::new();
     let mut connectors = Vec::new();
-    let mut stamp_forms = StampForms::new();
-    let mut ocr_objects = None;
-    let mut stamp_objects = None;
+    // Fonts, ExtGStates, property lists, the isolating `q`s, and the
+    // stamps' pages and attachments' files, once a save; the primary's
+    // where it has them.
+    let mut cx = crate::annot::WriteCx::new(model.assets.clone()).owning(primary_info.src.id());
     let own_objects = reserve_page_objects(
         model,
         &origins,
@@ -515,12 +532,6 @@ fn build_rewrite(model: &Snapshot, clean: bool) -> Result<(Pdf, Vec<String>)> {
                 dict.set(k.clone(), v.clone());
             }
         }
-        // Rotation: the source's own /Rotate plus our delta.
-        let original = dict
-            .get(b"Rotate")
-            .ok()
-            .and_then(|o| o.as_i64().ok())
-            .unwrap_or(0);
         if clean {
             strip_markup_annots(&pdf, &mut dict);
         } else {
@@ -530,76 +541,39 @@ fn build_rewrite(model: &Snapshot, clean: bool) -> Result<(Pdf, Vec<String>)> {
             ) {
                 (None, None) => strip_sheaf_annots(&pdf, &mut dict),
                 (list, removed) => {
-                    let geom = geom_of(&dict, original as i32);
                     let marks = list.into_iter().flatten();
+                    let index = origin.map_or(pref.index, |(_, i)| i);
+                    let renamed = model.renamed_on(source, index);
                     connectors.extend(
-                        write_page_annots(
-                            &mut pdf,
-                            &mut dict,
-                            marks,
-                            removed,
-                            &geom,
-                            &mut stamp_forms,
-                        )
-                        .connectors,
+                        write_page_annots(&mut pdf, &mut dict, marks, removed, renamed, &mut cx)
+                            .connectors,
                     );
                 }
             }
         }
         if let Some(layer) = state.text_layers.get(&pref.id) {
-            let geom = geom_of(&dict, original as i32);
-            text_layer::install(&mut pdf, &mut dict, layer, &geom, &mut ocr_objects);
+            text_layer::install(&mut pdf, &mut dict, layer, &mut cx.res);
         }
-        // A header/footer the file doesn't have drawn yet.
+        // A header/footer the file doesn't have drawn yet, laid out on the
+        // page as it shows.
         if model.header_footer_dirty
             && let Some(hf) = &state.header_footer
             && hf.covers(pref.id)
         {
-            let geom = geom_of(&dict, original as i32);
-            let extra = pref.rotation.degrees();
-            let [x0, y0, x1, y1] = geom.media;
-            let total = (geom.rotate + extra).rem_euclid(360);
-            let size = if total % 180 == 0 {
-                sheaf_core::PageSize {
-                    width: x1 - x0,
-                    height: y1 - y0,
-                }
-            } else {
-                sheaf_core::PageSize {
-                    width: y1 - y0,
-                    height: x1 - x0,
-                }
-            };
+            let geom = geom_of(&dict, pref.rotation);
             let position = kids.len();
             let facts = crate::stamps::PageFacts {
                 index: position,
                 count: state.pages.len(),
                 bates: bates.get(position).copied().flatten(),
             };
-            let placed = hf.layout(size, &facts);
-            crate::stamps::install(
-                &mut pdf,
-                &mut dict,
-                &placed,
-                hf.color,
-                &geom,
-                extra,
-                &mut stamp_objects,
-            );
+            let placed = hf.layout(geom.shown(), &facts);
+            crate::stamps::install(&mut pdf, &mut dict, &placed, hf.color, &geom, &mut cx.res);
         }
-        let g = geom_of(&dict, original as i32);
-        frames.insert(
-            pref.id,
-            PageFrame {
-                media: g.media,
-                rotate: g.rotate,
-            },
-        );
-        let rotate = (original + pref.rotation.degrees() as i64).rem_euclid(360);
-        if rotate == 0 {
+        if pref.rotation == Rotation::R0 {
             dict.remove(b"Rotate");
         } else {
-            dict.set("Rotate", rotate);
+            dict.set("Rotate", pref.rotation.degrees());
         }
         dict.set("Parent", pages_id);
         dict.remove(b"Type");
@@ -624,7 +598,7 @@ fn build_rewrite(model: &Snapshot, clean: bool) -> Result<(Pdf, Vec<String>)> {
         page_obj.insert(pref.id, id);
     }
 
-    link_connectors(&mut pdf, &connectors, state, &page_obj);
+    link_connectors(&mut pdf, &connectors, model, &page_obj);
 
     pdf.objects.insert(
         pages_id,
@@ -671,9 +645,7 @@ fn build_rewrite(model: &Snapshot, clean: bool) -> Result<(Pdf, Vec<String>)> {
     }
     catalog.remove(b"Outlines");
     if !state.outline.is_empty() {
-        let outlines_id = write_outline(&mut pdf, &state.outline, &page_obj, &|id| {
-            frames.get(&id).copied()
-        });
+        let outlines_id = write_outline(&mut pdf, &state.outline, &page_obj);
         pdf.get_dictionary_mut(catalog_id)?
             .set("Outlines", outlines_id);
     }
@@ -718,16 +690,16 @@ pub fn cropped_copy(src: &SourceInfo, pages: &[(u32, [f32; 4])]) -> Result<Vec<u
 
 /// Pages of `src` as a new PDF, each with a new `/CropBox` when given,
 /// then passed to `fix` (with the new PDF, the page's dictionary, its
-/// geometry, and its position in `pages`) to change its content. sheaf's
-/// own marks are left out, since the model keeps them; other
-/// annotations, links and fields come along, and the form the fields are
-/// in, so the page shows them (see [`copy_form`]). A save writes the page
-/// it was made from instead, with the copy's content
+/// geometry with its own `/Rotate`, and its position in `pages`) to change
+/// its content. sheaf's own marks are left out, since the model keeps
+/// them; other annotations, links and fields come along, and the form the
+/// fields are in, so the page shows them (see [`copy_form`]). A save
+/// writes the page it was made from instead, with the copy's content
 /// (`SourceInfo::derived`).
 pub fn derived_copy(
     src: &SourceInfo,
     pages: &[(u32, Option<[f32; 4]>)],
-    fix: &mut dyn FnMut(&mut Pdf, &mut Dictionary, &PageGeom, usize) -> Result<()>,
+    fix: &mut dyn FnMut(&mut Pdf, &mut Dictionary, &Geom, usize) -> Result<()>,
 ) -> Result<Vec<u8>> {
     let from = crate::file::load_source(src)?;
     let loaded = LoadedSource::from_pdf(&from)?;
@@ -747,7 +719,7 @@ pub fn derived_copy(
         let page = *loaded
             .pages
             .get(index as usize)
-            .with_context(|| format!("no page {index} in {}", src.path.display()))?;
+            .with_context(|| format!("no page {index} in {}", src.name.display()))?;
         let mut dict = copy_page_dict(&from, page, &mut pdf, &mut map)?;
         let id = if filled.insert(page) {
             map[&page]
@@ -764,15 +736,15 @@ pub fn derived_copy(
         if let Some(crop) = crop {
             dict.set(
                 "CropBox",
-                crop.iter().map(|&v| Object::Real(v)).collect::<Vec<_>>(),
+                crop.iter().map(|&v| Object::from(v)).collect::<Vec<_>>(),
             );
         }
         let rotate = dict
             .get(b"Rotate")
             .ok()
             .and_then(|o| o.as_i64().ok())
-            .unwrap_or(0) as i32;
-        let geom = geom_of(&dict, rotate);
+            .unwrap_or(0);
+        let geom = geom_of(&dict, crate::geom::quarter_turns(rotate));
         fix(&mut pdf, &mut dict, &geom, position)?;
         dict.set("Parent", pages_id);
         dict.set("Type", Object::Name(b"Page".to_vec()));
@@ -904,11 +876,10 @@ pub fn save_to_path_noting(
     let primary = model
         .source(model.primary)
         .context("primary source missing")?;
-    let same_file = std::fs::canonicalize(path).ok() == std::fs::canonicalize(&primary.path).ok();
-    let unchanged = primary.bytes == 0
-        || std::fs::metadata(&primary.path)
-            .map(|m| m.len() as usize == primary.bytes)
-            .unwrap_or(false);
+    let same_file = std::fs::canonicalize(path).ok() == std::fs::canonicalize(&primary.name).ok();
+    let unchanged = std::fs::metadata(&primary.name)
+        .map(|m| m.len() as usize == primary.src.bytes().len())
+        .unwrap_or(false);
     if signed == Signed::Append {
         if same_file && !unchanged {
             bail!(
@@ -930,7 +901,7 @@ pub fn save_to_path_noting(
         }
     }
     if signed == Signed::Ask
-        && let Some(e) = signatures_broken(primary)?
+        && let Some(e) = signatures_broken(&primary.src)
     {
         return Err(e.into());
     }
@@ -939,16 +910,15 @@ pub fn save_to_path_noting(
     Ok((Strategy::Rewrite, notes))
 }
 
-/// What a rewrite of `info` would break: its signed fields and its
+/// What a rewrite of `src` would break: its signed fields and its
 /// certification. None when it has neither.
-fn signatures_broken(info: &SourceInfo) -> Result<Option<WouldBreakSignatures>> {
-    let pdf = crate::file::load_source(info)?;
-    let facts = crate::forms::read(&pdf).facts;
+fn signatures_broken(src: &Source) -> Option<WouldBreakSignatures> {
+    let facts = crate::forms::read(src).facts;
     let signatures = facts.signed.max(usize::from(facts.certified));
-    Ok((signatures > 0).then(|| WouldBreakSignatures {
+    (signatures > 0).then(|| WouldBreakSignatures {
         signatures,
-        encrypted: pdf.encryption_state.is_some() || info.password.is_some(),
-    }))
+        encrypted: src.pdf().is_encrypted(),
+    })
 }
 
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -1202,7 +1172,7 @@ pub(crate) fn reserve_pages(
 }
 
 /// A page or a node of the page tree.
-pub(crate) fn is_page_node(pdf: &Pdf, id: ObjectId) -> bool {
+pub(crate) fn is_page_node<P: Objects + ?Sized>(pdf: &P, id: ObjectId) -> bool {
     matches!(
         pdf.get_object(id),
         Ok(Object::Dictionary(d)) if d
@@ -1216,8 +1186,8 @@ pub(crate) fn is_page_node(pdf: &Pdf, id: ObjectId) -> bool {
 /// `id` copied into `dst`, or None for a page that isn't being copied
 /// (bug 14: following a link, or a page's `/Parent`, used to copy the
 /// whole file it came from).
-pub(crate) fn copy_object(
-    src: &Pdf,
+pub(crate) fn copy_object<P: Objects + ?Sized>(
+    src: &P,
     id: ObjectId,
     dst: &mut Pdf,
     map: &mut HashMap<ObjectId, ObjectId>,
@@ -1241,8 +1211,8 @@ pub(crate) fn copy_object(
 /// `obj` from `src` in `dst`, copying what it references. A page is never
 /// copied this way: one in `map` (being copied too) is referred to there,
 /// and any other becomes null, for [`crate::kept::keep_only`] to tidy.
-pub(crate) fn remap(
-    src: &Pdf,
+pub(crate) fn remap<P: Objects + ?Sized>(
+    src: &P,
     obj: &Object,
     dst: &mut Pdf,
     map: &mut HashMap<ObjectId, ObjectId>,
@@ -1278,9 +1248,10 @@ pub(crate) fn remap(
     })
 }
 
-/// PDF text string: PDFDocEncoding when ASCII, otherwise UTF-16BE with BOM.
+/// PDF text string: as is when PDFDocEncoding reads it back so
+/// (`file::is_pdf_doc_ascii`), otherwise UTF-16BE with BOM.
 pub fn text_string(s: &str) -> Object {
-    if s.is_ascii() {
+    if crate::file::is_pdf_doc_ascii(s) {
         Object::String(s.as_bytes().to_vec(), StringFormat::Literal)
     } else {
         let mut bytes = vec![0xFE, 0xFF];
@@ -1292,17 +1263,14 @@ pub fn text_string(s: &str) -> Object {
 }
 
 /// A bookmark's `/Dest`: its page and, when it has one, its position (see
-/// [`DestView`]); otherwise the top of the page.
-fn outline_dest(page: ObjectId, view: Option<&DestView>, frame: Option<PageFrame>) -> Vec<Object> {
-    let num = |v: Option<f32>| v.map(Object::Real).unwrap_or(Object::Null);
+/// [`DestView`], in PageSpace as the file has it); otherwise the top of
+/// the page.
+fn outline_dest(page: ObjectId, view: Option<&DestView>) -> Vec<Object> {
+    let num = |v: Option<f32>| v.map(Object::from).unwrap_or(Object::Null);
     let mut dest = vec![Object::Reference(page)];
     match view {
         Some(DestView::Xyz { left, top, zoom }) => {
-            let (ux, uy) = match frame {
-                Some(f) => f.to_user(*left, *top),
-                None => (None, None),
-            };
-            dest.extend(["XYZ".into(), num(ux), num(uy), num(*zoom)]);
+            dest.extend(["XYZ".into(), num(*left), num(*top), num(*zoom)]);
         }
         Some(DestView::Other { kind, params }) => {
             dest.push(Object::Name(kind.as_bytes().to_vec()));
@@ -1313,23 +1281,23 @@ fn outline_dest(page: ObjectId, view: Option<&DestView>, frame: Option<PageFrame
     dest
 }
 
-/// Write the outline tree. `frame` gives a page's geometry (before any
-/// rotation added in sheaf) for converting bookmark positions to user space.
+/// Write the outline tree. A `/Count` is how many items show below an
+/// open item, and that many negated for a closed one: how many would show
+/// were it opened.
 pub(crate) fn write_outline(
     pdf: &mut Pdf,
     nodes: &Vector<OutlineNode>,
     page_obj: &HashMap<PageId, ObjectId>,
-    frame: &dyn Fn(PageId) -> Option<PageFrame>,
 ) -> ObjectId {
     fn level(
         pdf: &mut Pdf,
         parent: ObjectId,
         nodes: &Vector<OutlineNode>,
         page_obj: &HashMap<PageId, ObjectId>,
-        frame: &dyn Fn(PageId) -> Option<PageFrame>,
     ) -> (Option<ObjectId>, Option<ObjectId>, i64) {
         let ids: Vec<ObjectId> = nodes.iter().map(|_| pdf.new_object_id()).collect();
-        let mut total = 0;
+        // How many items show below `parent` while it's open.
+        let mut shown = 0;
         for (i, node) in nodes.iter().enumerate() {
             let mut dict = dictionary! { "Title" => text_string(&node.title), "Parent" => parent };
             if i > 0 {
@@ -1341,7 +1309,7 @@ pub(crate) fn write_outline(
             if let Some(t) = node.target
                 && let Some(obj) = page_obj.get(&t)
             {
-                dict.set("Dest", outline_dest(*obj, node.view.as_ref(), frame(t)));
+                dict.set("Dest", outline_dest(*obj, node.view.as_ref()));
             }
             if let Some([r, g, b]) = node.color {
                 dict.set(
@@ -1357,19 +1325,19 @@ pub(crate) fn write_outline(
             if flags != 0 {
                 dict.set("F", flags);
             }
-            let (first, last, count) = level(pdf, ids[i], &node.children, page_obj, frame);
+            let (first, last, below) = level(pdf, ids[i], &node.children, page_obj);
             if let (Some(f), Some(l)) = (first, last) {
                 dict.set("First", f);
                 dict.set("Last", l);
-                dict.set("Count", count);
+                dict.set("Count", if node.open { below } else { -below });
             }
-            total += 1 + count;
+            shown += 1 + if node.open { below } else { 0 };
             pdf.objects.insert(ids[i], Object::Dictionary(dict));
         }
-        (ids.first().copied(), ids.last().copied(), total)
+        (ids.first().copied(), ids.last().copied(), shown)
     }
     let outlines_id = pdf.new_object_id();
-    let (first, last, count) = level(pdf, outlines_id, nodes, page_obj, frame);
+    let (first, last, count) = level(pdf, outlines_id, nodes, page_obj);
     let mut dict = dictionary! { "Type" => "Outlines" };
     if let (Some(f), Some(l)) = (first, last) {
         dict.set("First", f);
@@ -1385,25 +1353,26 @@ pub(crate) fn write_outline(
 pub fn validate(model: &Snapshot) -> Result<()> {
     for p in &model.state.pages {
         let info = model.source(p.source).context("unknown source")?;
-        if p.index >= info.page_count {
-            bail!("page ref {:?} out of range for {}", p, info.path.display());
+        if p.index >= info.src.page_count() {
+            bail!("page ref {:?} out of range for {}", p, info.name.display());
         }
     }
     Ok(())
 }
 
-/// Page geometry from a (flattened) page dictionary and its original rotation.
-pub(crate) fn geom_of(dict: &Dictionary, rotate: i32) -> PageGeom {
+/// A (flattened) page dictionary's boxes, as [`Geom::read`] reads them,
+/// turned `rotate`: for the old writers, until slice 9.
+pub(crate) fn geom_of(dict: &Dictionary, rotate: Rotation) -> Geom {
     let boxed = |key: &[u8]| {
         dict.get(key)
             .ok()
             .and_then(|o| o.as_array().ok())
             .and_then(|a| crate::annot::box_of(a))
+            .map(|[a, b, c, d]| Rect::new(a, b, c, d))
     };
-    let media = boxed(b"MediaBox").unwrap_or([0.0, 0.0, 612.0, 792.0]);
-    PageGeom {
-        media: crate::annot::visible_box(media, boxed(b"CropBox")),
-        rotate: rotate.rem_euclid(360),
+    Geom {
+        rotate,
+        ..Geom::read(boxed(b"MediaBox"), boxed(b"CropBox"), 0)
     }
 }
 
@@ -1450,9 +1419,11 @@ pub(crate) fn strip_sheaf_annots(pdf: &Pdf, page: &mut Dictionary) {
     else {
         return;
     };
+    let annots = crate::file::PageAnnots::new(&existing);
     let kept: Vec<Object> = existing
-        .into_iter()
-        .filter(|e| !crate::file::is_ours(pdf, e))
+        .iter()
+        .filter(|e| !crate::file::is_ours(pdf, e, &annots))
+        .cloned()
         .collect();
     if kept.is_empty() {
         page.remove(b"Annots");
@@ -1471,10 +1442,6 @@ pub(crate) struct ConnectorRef {
     pub top_left: (f32, f32),
 }
 
-/// Stamp pages imported into the file being written, by stamp, so each is
-/// in it once (see `annot::to_pdf_in`).
-pub(crate) type StampForms = HashMap<String, Option<(ObjectId, sheaf_core::PageSize)>>;
-
 /// What writing a page's marks did besides the page dict.
 pub(crate) struct PageAnnotsWritten {
     /// The connectors written, for `link_connectors`.
@@ -1490,29 +1457,49 @@ pub(crate) struct PageAnnotsWritten {
 /// appearance streams. `/P` is left unset; PDFium and Acrobat don't need it.
 ///
 /// Replies and statuses (`Annot::thread_parent`) are written after what
-/// they're in the thread of, with `/IRT` to it and its `/Rect`.
+/// they're in the thread of, with `/IRT` to it and its `/Rect`. `renamed`
+/// are the page's marks the open gave new ids (`Snapshot::renamed_on`):
+/// the file names each by the id it had, and other tools' replies to it
+/// follow it to the name it has. What the marks draw with is written once
+/// a save, through `cx`.
 pub(crate) fn write_page_annots<'a>(
     pdf: &mut Pdf,
     page: &mut Dictionary,
     annots: impl Iterator<Item = &'a Annot>,
     removed: Option<&im::OrdSet<String>>,
-    geom: &PageGeom,
-    forms: &mut StampForms,
+    renamed: &[(AnnotId, AnnotId)],
+    cx: &mut crate::annot::WriteCx,
 ) -> PageAnnotsWritten {
+    let annots: Vec<&Annot> = annots.collect();
+    let writing: std::collections::HashSet<String> = annots.iter().map(|a| a.name()).collect();
+    // A renamed mark's old name, where no mark written keeps it.
+    let renamed: HashMap<String, String> = renamed
+        .iter()
+        .map(|(was, id)| (was.sheaf_names(), id.sheaf_names()))
+        .map(|([was, _], [now, _])| (was, now))
+        .filter(|(was, _)| !writing.contains(was))
+        .collect();
     // Our marks as the file has them now, by object, so other tools'
-    // replies to them can follow them to the objects this writes.
-    let mut before: HashMap<ObjectId, String> = page
+    // replies to them can follow them to the objects this writes: the
+    // name the file gives each, and the one it has now.
+    let existing = page
         .get(b"Annots")
         .ok()
         .and_then(|a| pdf.dereference(a).ok())
         .and_then(|(_, o)| o.as_array().ok().cloned())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    let page_annots = crate::file::PageAnnots::new(&existing);
+    let mut before: HashMap<ObjectId, (String, String)> = existing
         .iter()
         .filter_map(|e| {
             let id = e.as_reference().ok()?;
             let d = pdf.get_dictionary(id).ok()?;
-            (d.has(b"SheafAnnot") && crate::file::is_ours(pdf, e))
-                .then(|| (id, crate::file::thread_name(d)))
+            if !(d.has(b"SheafAnnot") && crate::file::is_ours(pdf, e, &page_annots)) {
+                return None;
+            }
+            let name = crate::file::thread_name(d);
+            let now = renamed.get(&name).cloned().unwrap_or_else(|| name.clone());
+            Some((id, (name, now)))
         })
         .collect();
     strip_sheaf_annots(pdf, page);
@@ -1522,10 +1509,6 @@ pub(crate) fn write_page_annots<'a>(
         .and_then(|a| pdf.dereference(a).ok())
         .and_then(|(_, o)| o.as_array().ok().cloned())
         .unwrap_or_default();
-    // Other tools' comments deleted in sheaf go, with their threads, and
-    // so do their replies to our marks that are gone.
-    let annots: Vec<&Annot> = annots.collect();
-    let writing: std::collections::HashSet<String> = annots.iter().map(|a| a.name()).collect();
     // Another tool's comment that one of our marks now is (made editable
     // in sheaf, or imported over it) gives way to it, with the parts
     // grouped under it (`/RT /Group`, which the mark draws itself); its
@@ -1537,7 +1520,7 @@ pub(crate) fn write_page_annots<'a>(
             && let name = crate::file::thread_name(d)
             && writing.contains(&name)
         {
-            before.insert(id, name);
+            before.insert(id, (name.clone(), name));
             replaced.insert(id);
         }
     }
@@ -1559,8 +1542,16 @@ pub(crate) fn write_page_annots<'a>(
                 .is_some_and(|irt| replaced.contains(&irt));
         !(writing.contains(&crate::file::thread_name(d)) || grouped_under_replaced)
     });
+    // Other tools' comments deleted in sheaf go, with their threads, and
+    // so do their replies to our marks that are gone, by the names the
+    // file gives those.
     let mut removed = removed.cloned().unwrap_or_default();
-    removed.extend(before.values().filter(|n| !writing.contains(*n)).cloned());
+    removed.extend(
+        before
+            .values()
+            .filter(|(_, now)| !writing.contains(now))
+            .map(|(name, _)| name.clone()),
+    );
     if !removed.is_empty() {
         let comments: Vec<(String, Option<String>)> = list
             .iter()
@@ -1605,7 +1596,7 @@ pub(crate) fn write_page_annots<'a>(
         .partition(|a| a.thread_parent().is_some());
     let mut connectors = Vec::new();
     for a in marks {
-        let written = crate::annot::to_pdf_in(a, geom, pdf, forms);
+        let written = crate::annot::to_pdf_in(a, pdf, cx);
         let rect = rect_of(pdf, &written.main);
         let id = pdf.add_object(Object::Dictionary(written.main));
         list.push(Object::Reference(id));
@@ -1617,12 +1608,11 @@ pub(crate) fn write_page_annots<'a>(
             list.push(Object::Reference(pdf.add_object(Object::Dictionary(part))));
         }
         if let AnnotKind::Connector { rect, label, .. } = &a.kind {
-            let [llx, _, _, ury] = geom.box_to_user(*rect);
             connectors.push(ConnectorRef {
                 obj: id,
                 id: a.id,
                 label: label.clone(),
-                top_left: (llx, ury),
+                top_left: (rect.x, rect.bottom()),
             });
         }
     }
@@ -1639,7 +1629,7 @@ pub(crate) fn write_page_annots<'a>(
             .partition(|a| named.contains_key(a.thread_parent().unwrap_or_default()));
         let stuck = ready.is_empty();
         for a in if stuck { &waiting } else { &ready } {
-            let mut main = crate::annot::to_pdf_in(a, geom, pdf, forms).main;
+            let mut main = crate::annot::to_pdf_in(a, pdf, cx).main;
             if let Some((parent, rect)) = a.thread_parent().and_then(|p| named.get(p)).cloned() {
                 main.set("IRT", parent);
                 main.set("Rect", rect);
@@ -1663,7 +1653,7 @@ pub(crate) fn write_page_annots<'a>(
             .ok()
             .and_then(|o| o.as_reference().ok())
             .and_then(|irt| before.get(&irt))
-            .and_then(|name| named.get(name))
+            .and_then(|(_, now)| named.get(now))
             .map(|(obj, _)| *obj);
         let name = (!d.has(b"NM"))
             .then(|| crate::file::anon_name(d))
@@ -1699,13 +1689,13 @@ pub(crate) fn write_page_annots<'a>(
 pub(crate) fn link_connectors(
     pdf: &mut Pdf,
     connectors: &[ConnectorRef],
-    state: &DocState,
+    model: &Snapshot,
     page_obj: &HashMap<PageId, ObjectId>,
 ) {
     let mut groups: HashMap<&str, Vec<(usize, PageId, Annot)>> = HashMap::new();
     for c in connectors {
         let members = groups.entry(c.label.as_str()).or_insert_with(|| {
-            state.group_members(&crate::annot::Group::Connector(c.label.clone()))
+            model.group_members(&crate::annot::Group::Connector(c.label.clone()))
         });
         if members.len() < 2 {
             continue;
@@ -1721,8 +1711,8 @@ pub(crate) fn link_connectors(
         match connectors.iter().find(|g| g.id == next.id) {
             // Land with it a little in from the top-left corner.
             Some(g) => dest.extend([
-                Object::Real(g.top_left.0 - 36.0),
-                Object::Real(g.top_left.1 + 36.0),
+                Object::from(g.top_left.0 - 36.0),
+                Object::from(g.top_left.1 + 36.0),
                 Object::Null,
             ]),
             None => dest.extend([Object::Null, Object::Null, Object::Null]),
@@ -1738,8 +1728,9 @@ mod tests {
     use super::*;
     use crate::history::FixedCount;
     use crate::model::{Document, Edit, FlatOutlineItem};
+    use crate::store::Store;
     use lopdf::content::{Content, Operation};
-    use sheaf_core::{PageSize, Rotation};
+    use sheaf_core::Rotation;
 
     /// A PDF whose page i has content "MARK <tag> <i>" and /Rotate from `rot`.
     fn make_pdf(
@@ -1824,20 +1815,20 @@ mod tests {
         path
     }
 
-    fn info(path: &Path, n: u32) -> SourceInfo {
-        SourceInfo {
-            path: path.to_path_buf(),
-            page_count: n,
-            first_page: PageSize {
-                width: 612.0,
-                height: 792.0,
-            },
-            page_sizes: None,
-            bytes: 0,
-            password: None,
-            data: None,
-            derived: None,
-        }
+    /// The file at `path`, read into `store`.
+    fn info(store: &Store, path: &Path) -> SourceInfo {
+        SourceInfo::read(store, path, None).unwrap()
+    }
+
+    /// A document over the file at `path`, in a store of its own.
+    fn open(
+        path: &Path,
+        outline: &[FlatOutlineItem],
+        policy: Box<dyn crate::history::HistoryPolicy>,
+    ) -> Document {
+        let store = Store::new();
+        let primary = info(&store, path);
+        Document::new(store, primary, outline, policy)
     }
 
     /// (marker text, /Rotate) per page of a written PDF, in order.
@@ -1985,16 +1976,17 @@ mod tests {
             view,
             color: None,
             style: Default::default(),
+            open: true,
         };
-        let mut model = Document::new(
-            info(&a, 2),
+        let mut model = open(
+            &a,
             &[
                 item(
                     "At a spot",
                     0,
                     Some(DestView::Xyz {
                         left: Some(36.0),
-                        top: Some(100.0),
+                        top: Some(692.0),
                         zoom: None,
                     }),
                 ),
@@ -2011,7 +2003,7 @@ mod tests {
             Box::new(FixedCount(10)),
         );
         // Turning the page in sheaf mustn't move the stored position: it's
-        // relative to the page as the file draws it.
+        // in PageSpace, which a turn leaves alone.
         let p0 = model.page(0).unwrap().id;
         model
             .apply(
@@ -2035,7 +2027,7 @@ mod tests {
                     target: Some(p1),
                     view: Some(DestView::Xyz {
                         left: None,
-                        top: Some(0.0),
+                        top: Some(792.0),
                         zoom: Some(1.5),
                     }),
                 },
@@ -2052,8 +2044,8 @@ mod tests {
     fn identity_round_trip() {
         let dir = tempdir();
         let a = make_pdf(&dir, "a.pdf", "A", 3, &[("One", 0, 0), ("Three", 2, 0)]);
-        let model = Document::new(
-            info(&a, 3),
+        let model = open(
+            &a,
             &[
                 FlatOutlineItem {
                     title: "One".into(),
@@ -2062,6 +2054,7 @@ mod tests {
                     view: None,
                     color: None,
                     style: Default::default(),
+                    open: true,
                 },
                 FlatOutlineItem {
                     title: "Three".into(),
@@ -2070,6 +2063,7 @@ mod tests {
                     view: None,
                     color: None,
                     style: Default::default(),
+                    open: true,
                 },
             ],
             Box::new(FixedCount(10)),
@@ -2090,8 +2084,8 @@ mod tests {
         let dir = tempdir();
         let a = make_pdf(&dir, "a.pdf", "A", 4, &[]);
         let b = make_pdf(&dir, "b.pdf", "B", 2, &[]);
-        let mut model = Document::new(
-            info(&a, 4),
+        let mut model = open(
+            &a,
             &[
                 FlatOutlineItem {
                     title: "Top".into(),
@@ -2100,6 +2094,7 @@ mod tests {
                     view: None,
                     color: None,
                     style: Default::default(),
+                    open: true,
                 },
                 FlatOutlineItem {
                     title: "Child é".into(),
@@ -2108,11 +2103,12 @@ mod tests {
                     view: None,
                     color: None,
                     style: Default::default(),
+                    open: true,
                 },
             ],
             Box::new(FixedCount(10)),
         );
-        let sb = model.add_source(info(&b, 2));
+        let sb = model.add_source(info(model.store(), &b));
         let ids: Vec<PageId> = model.state().pages.iter().map(|p| p.id).collect();
         model
             .apply(Edit::DeletePages { ids: vec![ids[1]] }, "del")
@@ -2180,7 +2176,7 @@ mod tests {
     fn rewrite_to_path_is_atomic() {
         let dir = tempdir();
         let a = make_pdf(&dir, "a.pdf", "A", 2, &[]);
-        let model = Document::new(info(&a, 2), &[], Box::new(FixedCount(10)));
+        let model = open(&a, &[], Box::new(FixedCount(10)));
         let out = dir.join("out.pdf");
         rewrite_to_path(&model.snapshot(), &out).unwrap();
         assert!(out.exists());
@@ -2203,12 +2199,8 @@ mod tests {
             save_modern(&a);
         }
         let original = std::fs::read(&a).unwrap();
-        let mut model = Document::new(
-            {
-                let mut i = info(&a, 4);
-                i.bytes = original.len();
-                i
-            },
+        let mut model = open(
+            &a,
             &[FlatOutlineItem {
                 title: "One".into(),
                 page: Some(2),
@@ -2216,6 +2208,7 @@ mod tests {
                 view: None,
                 color: None,
                 style: Default::default(),
+                open: true,
             }],
             Box::new(FixedCount(10)),
         );
@@ -2245,7 +2238,7 @@ mod tests {
         assert_eq!(read_outline(&bytes), vec![(0, "One".into(), Some(3))]);
 
         // Structural: delete, insert from another file, bookmark rename.
-        let sb = model.add_source(info(&b, 1));
+        let sb = model.add_source(info(model.store(), &b));
         model
             .apply(Edit::DeletePages { ids: vec![ids[0]] }, "del")
             .unwrap();
@@ -2347,9 +2340,7 @@ mod tests {
 
     /// A one-page model of `path`, its page turned a quarter.
     fn rotated(path: &Path) -> Document {
-        let mut i = info(path, 1);
-        i.bytes = std::fs::metadata(path).unwrap().len() as usize;
-        let mut model = Document::new(i, &[], Box::new(FixedCount(10)));
+        let mut model = opened(path);
         let page = model.state().pages[0].id;
         let rotate = Edit::RotatePages {
             ids: vec![page],
@@ -2445,16 +2436,7 @@ mod tests {
         assert_eq!(found.foreign.len(), 1);
         assert_eq!(found.foreign[0].subtype, "Polygon");
         for incremental in [true, false] {
-            let len = std::fs::metadata(&path).unwrap().len() as usize;
-            let mut model = Document::new(
-                {
-                    let mut i = info(&path, 2);
-                    i.bytes = len;
-                    i
-                },
-                &[],
-                Box::new(FixedCount(10)),
-            );
+            let mut model = open(&path, &[], Box::new(FixedCount(10)));
             let p0 = model.page(0).unwrap().id;
             let ours = Annot {
                 id: AnnotId(0),
@@ -2476,6 +2458,7 @@ mod tests {
                 fill: None,
                 dashed: false,
                 cloudy: false,
+                turn: Rotation::R0,
                 name: String::new(),
             };
             model
@@ -2552,36 +2535,13 @@ mod tests {
             pdf.get_dictionary_mut(third).unwrap().set("F", 3);
             pdf.save(&path).unwrap();
         }
-        let styles = crate::file::outline_styles(&Pdf::load(&path).unwrap());
-        assert_eq!(styles.len(), 3);
-        // As PDFium hands them over: no colors or styles.
-        let mut items: Vec<FlatOutlineItem> = ["Red", "Plain", "Both"]
-            .iter()
-            .enumerate()
-            .map(|(i, t)| FlatOutlineItem {
-                title: t.to_string(),
-                page: Some(i as u32),
-                depth: 0,
-                view: None,
-                color: None,
-                style: Default::default(),
-            })
-            .collect();
-        crate::file::style_flat_items(&mut items, &styles);
+        let items = crate::open::outline(&info(&Store::new(), &path).src);
+        assert_eq!(items.len(), 3);
         assert_eq!(items[0].color, Some([255, 0, 0]));
         assert!(items[1].color.is_none() && items[1].style.is_plain());
         assert!(items[2].style.bold && items[2].style.italic);
         for incremental in [true, false] {
-            let len = std::fs::metadata(&path).unwrap().len() as usize;
-            let mut model = Document::new(
-                {
-                    let mut i = info(&path, 3);
-                    i.bytes = len;
-                    i
-                },
-                &items,
-                Box::new(FixedCount(10)),
-            );
+            let mut model = open(&path, &items, Box::new(FixedCount(10)));
             // A bookmark edit, so the incremental save rewrites the outline.
             let plain = model.state().outline[1].id;
             model
@@ -2602,7 +2562,7 @@ mod tests {
             } else {
                 rewrite(&model.snapshot()).unwrap()
             };
-            let back = crate::file::outline_styles(&Pdf::load_mem(&bytes).unwrap());
+            let back = crate::open::outline(&crate::forms::fixture::source(bytes));
             assert_eq!(back.len(), 3, "{incremental}");
             assert_eq!(back[0].color, Some([255, 0, 0]), "{incremental}");
             assert_eq!(back[1].title, "Renamed");
@@ -2610,14 +2570,101 @@ mod tests {
         }
     }
 
-    /// A source as the app makes one: its bytes kept from when it opened.
-    fn kept(path: &Path, n: u32) -> SourceInfo {
-        let bytes = std::fs::read(path).unwrap();
-        SourceInfo {
-            bytes: bytes.len(),
-            data: Some(crate::model::SourceData(std::sync::Arc::new(bytes))),
-            derived: None,
-            ..info(path, n)
+    /// A closed bookmark comes in closed and goes out closed: its
+    /// `/Count` negative, how many would show were it opened, and an open
+    /// one's positive, whether the save rewrites the file or appends.
+    #[test]
+    fn a_closed_bookmark_stays_closed_through_a_rewrite() {
+        let dir = tempdir();
+        let mut f = crate::forms::fixture::Form::new(3);
+        let p = f.pages.clone();
+        let item = |title: &str, page: usize| {
+            dictionary! { "Title" => text_string(title), "Dest" => vec![p[page].into(), "Fit".into()] }
+        };
+        let mut closed = item("Closed", 0);
+        closed.set("Count", -2);
+        crate::forms::fixture::outline_tree(
+            &mut f,
+            vec![
+                (0, closed),
+                (1, item("Under closed", 1)),
+                (2, item("Deeper", 1)),
+                (0, item("Open", 2)),
+                (1, item("Under open", 2)),
+            ],
+        );
+        let path = dir.join("closed.pdf");
+        std::fs::write(&path, f.bytes()).unwrap();
+        let items = crate::open::outline(&info(&Store::new(), &path).src);
+        let open_flags =
+            |items: &[FlatOutlineItem]| items.iter().map(|i| i.open).collect::<Vec<_>>();
+        assert_eq!(open_flags(&items), [false, true, true, true, true]);
+        /// (title, `/Count`) of each item below `first`, in pre-order.
+        fn counts(pdf: &Pdf, first: Option<ObjectId>, out: &mut Vec<(String, Option<i64>)>) {
+            let mut next = first;
+            while let Some(id) = next {
+                let d = pdf.get_dictionary(id).unwrap();
+                let count = d.get(b"Count").and_then(Object::as_i64).ok();
+                out.push((crate::file::pdf_text(d.get(b"Title").unwrap()), count));
+                counts(
+                    pdf,
+                    d.get(b"First").and_then(Object::as_reference).ok(),
+                    out,
+                );
+                next = d.get(b"Next").and_then(Object::as_reference).ok();
+            }
+        }
+        for incremental in [true, false] {
+            let mut model = open(&path, &items, Box::new(FixedCount(10)));
+            // A bookmark edit, so the incremental save rewrites the outline.
+            let leaf = model.state().outline[1].children[0].id;
+            model
+                .apply(
+                    Edit::OutlineEdit {
+                        id: leaf,
+                        title: Some("Renamed".into()),
+                        target: None,
+                        color: None,
+                        view: None,
+                        style: None,
+                    },
+                    "rename",
+                )
+                .unwrap();
+            let bytes = if incremental {
+                crate::incremental::incremental(&model.snapshot()).unwrap()
+            } else {
+                rewrite(&model.snapshot()).unwrap()
+            };
+            let pdf = Pdf::load_mem(&bytes).unwrap();
+            let root = pdf
+                .catalog()
+                .unwrap()
+                .get(b"Outlines")
+                .and_then(Object::as_reference)
+                .unwrap();
+            let root = pdf.get_dictionary(root).unwrap();
+            // Shown: Closed, Open and what's under Open.
+            assert_eq!(root.get(b"Count").unwrap().as_i64().unwrap(), 3);
+            let mut got = Vec::new();
+            counts(
+                &pdf,
+                root.get(b"First").and_then(Object::as_reference).ok(),
+                &mut got,
+            );
+            let want: Vec<(String, Option<i64>)> = [
+                ("Closed", Some(-2)),
+                ("Under closed", Some(1)),
+                ("Deeper", None),
+                ("Open", Some(1)),
+                ("Renamed", None),
+            ]
+            .into_iter()
+            .map(|(t, c)| (t.to_string(), c))
+            .collect();
+            assert_eq!(got, want, "{incremental}");
+            let back = crate::open::outline(&crate::forms::fixture::source(bytes));
+            assert_eq!(open_flags(&back), open_flags(&items), "{incremental}");
         }
     }
 
@@ -2628,7 +2675,7 @@ mod tests {
         for incremental_first in [true, false] {
             let dir = tempdir();
             let a = make_pdf(&dir, "a.pdf", "A", 3, &[]);
-            let mut model = Document::new(kept(&a, 3), &[], Box::new(FixedCount(10)));
+            let mut model = open(&a, &[], Box::new(FixedCount(10)));
             let ids: Vec<PageId> = model.state().pages.iter().map(|p| p.id).collect();
             model
                 .apply(
@@ -2646,8 +2693,8 @@ mod tests {
             }
             let saved = read_pages(&std::fs::read(&a).unwrap());
             assert_eq!(saved[0].0, "A 2");
-            model.rebase_to_saved(kept(&a, 3));
-            model.undo();
+            model.rebase_to_saved(info(model.store(), &a));
+            model.undo().unwrap();
             save_to_path(&model.snapshot(), &a).unwrap();
             let pages: Vec<String> = read_pages(&std::fs::read(&a).unwrap())
                 .into_iter()
@@ -2672,6 +2719,7 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            turn: Rotation::R0,
             name: String::new(),
         }
     }
@@ -2693,16 +2741,22 @@ mod tests {
             .collect()
     }
 
-    fn opened(path: &Path, bytes: usize) -> Document {
-        Document::new(
-            {
-                let mut i = info(path, 1);
-                i.bytes = bytes;
-                i
-            },
-            &[],
-            Box::new(FixedCount(10)),
-        )
+    fn opened(path: &Path) -> Document {
+        open(path, &[], Box::new(FixedCount(10)))
+    }
+
+    /// `path` opened as a file opens, saying it has `marks`, sheaf's own
+    /// as read from it.
+    fn opened_with(path: &Path, marks: HashMap<u32, Vec<Annot>>) -> Document {
+        let store = Store::new();
+        let primary = info(&store, path);
+        let mut d = crate::open::start(store, primary, Box::new(FixedCount(10)));
+        let facts = crate::open::Facts {
+            marks,
+            ..Default::default()
+        };
+        d.ready(facts).unwrap();
+        d
     }
 
     #[test]
@@ -2710,8 +2764,7 @@ mod tests {
         use crate::annot::{AnnotKind, Pt};
         let dir = tempdir();
         let a_path = make_pdf(&dir, "a.pdf", "A", 1, &[]);
-        let original = std::fs::read(&a_path).unwrap();
-        let mut model = opened(&a_path, original.len());
+        let mut model = opened(&a_path);
         let p0 = model.page(0).unwrap().id;
         let note = thread_mark(
             AnnotKind::Note {
@@ -2797,8 +2850,7 @@ mod tests {
     fn file_with_their_comments(dir: &Path) -> (std::path::PathBuf, Vec<Annot>) {
         use crate::annot::{AnnotKind, Pt};
         let a_path = make_pdf(dir, "a.pdf", "A", 1, &[]);
-        let original = std::fs::read(&a_path).unwrap();
-        let mut model = opened(&a_path, original.len());
+        let mut model = opened(&a_path);
         let p0 = model.page(0).unwrap().id;
         let note = thread_mark(
             AnnotKind::Note {
@@ -2867,9 +2919,7 @@ mod tests {
         assert_eq!(reply.parent.as_deref(), Some(ours[0].name().as_str()));
 
         for incremental in [true, false] {
-            let bytes = std::fs::read(&path).unwrap();
-            let mut model = opened(&path, bytes.len());
-            model.set_initial_annots(found.sheaf.clone()).unwrap();
+            let mut model = opened_with(&path, found.sheaf.clone());
             let p0 = model.page(0).unwrap().id;
             let mut note = model.state().annots_on(p0).unwrap()[0].clone();
             note.contents = "ours, edited".into();
@@ -2991,8 +3041,7 @@ mod tests {
                 .is_none()
         );
         for incremental in [true, false] {
-            let bytes = std::fs::read(&path).unwrap();
-            let mut model = opened(&path, bytes.len());
+            let mut model = opened(&path);
             let p0 = model.page(0).unwrap().id;
             for annot in [square.clone(), replace.clone()] {
                 model
@@ -3068,9 +3117,7 @@ mod tests {
                 .collect()
         };
         for incremental in [true, false] {
-            let bytes = std::fs::read(&path).unwrap();
-            let mut model = opened(&path, bytes.len());
-            model.set_initial_annots(found.sheaf.clone()).unwrap();
+            let mut model = opened_with(&path, found.sheaf.clone());
             let p0 = model.page(0).unwrap().id;
             // Theirs, by name.
             model
@@ -3105,8 +3152,8 @@ mod tests {
                 "incremental {incremental}"
             );
             // Undone, they're all written again.
-            model.undo().unwrap();
-            model.undo().unwrap();
+            model.undo().unwrap().unwrap();
+            model.undo().unwrap().unwrap();
             let mut back = contents(&save(&model));
             back.sort();
             assert_eq!(
@@ -3134,9 +3181,7 @@ mod tests {
             crate::file::read_annots(&path, None).unwrap().foreign,
             found.foreign
         );
-        let bytes = std::fs::read(&path).unwrap();
-        let mut model = opened(&path, bytes.len());
-        model.set_initial_annots(found.sheaf.clone()).unwrap();
+        let mut model = opened_with(&path, found.sheaf.clone());
         let p0 = model.page(0).unwrap().id;
         model
             .apply(
@@ -3187,201 +3232,289 @@ mod tests {
         assert!(back.foreign.iter().any(|f| f.name == unnamed.name));
     }
 
-    #[test]
-    fn an_attachment_is_embedded_and_recovered() {
-        // Named as sheaf names files now, and as it did before xxh3 (a
-        // mark saved then keeps that name).
-        for legacy in [false, true] {
-            attachment_round_trip(legacy);
+    /// A one-page stamp PDF of its own, 100 by 50 points, unlike any
+    /// other test's: its content says `tag`.
+    fn stamp_page(tag: &str) -> Vec<u8> {
+        let mut out = Pdf::with_version("1.5");
+        let pages_id = out.new_object_id();
+        let content = out.add_object(lopdf::Stream::new(
+            dictionary! {},
+            format!("% {tag}\n1 0 0 rg 0 0 100 50 re f").into_bytes(),
+        ));
+        let page = out.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages_id, "Contents" => content,
+            "MediaBox" => vec![0.into(), 0.into(), 100.into(), 50.into()],
+        });
+        out.objects.insert(
+            pages_id,
+            Object::Dictionary(
+                dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 },
+            ),
+        );
+        let cat = out.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        out.trailer.set("Root", cat);
+        let mut b = Vec::new();
+        out.save_to(&mut b).unwrap();
+        b
+    }
+
+    fn page_stamp(stem: &str) -> crate::annot::AnnotKind {
+        crate::annot::AnnotKind::PageStamp {
+            rect: crate::annot::Box2 {
+                x: 100.0,
+                y: 100.0,
+                w: 100.0,
+                h: 50.0,
+            },
+            stamp: stem.into(),
+            name: "Paid".into(),
+            text: Some("GE 10/14/2026".into()),
         }
     }
 
-    fn attachment_round_trip(legacy: bool) {
-        use crate::annot::{AnnotKind, Pt};
-        let bytes = format!("workpaper notes {:x}", fastrand::u64(..)).into_bytes();
-        let stem = if legacy {
-            let stem = crate::generated::legacy_name_of(&bytes);
-            crate::generated::store_blob_as(&stem, &bytes).unwrap();
-            stem
-        } else {
-            crate::generated::store_blob(&bytes).unwrap()
-        };
-        let dir = tempdir();
-        let a_path = make_pdf(&dir, "a.pdf", "A", 1, &[]);
-        let original = std::fs::read(&a_path).unwrap();
-        let mut model = opened(&a_path, original.len());
-        let p0 = model.page(0).unwrap().id;
-        model
-            .apply(
-                Edit::AnnotAdd {
-                    page: p0,
-                    annot: thread_mark(
-                        AnnotKind::FileAttachment {
-                            pos: Pt { x: 50.0, y: 50.0 },
-                            icon: "Paperclip".into(),
-                            file: stem.clone(),
-                            name: "notes.txt".into(),
-                            size: bytes.len() as u64,
-                        },
-                        "",
-                    ),
-                },
-                "attach",
-            )
-            .unwrap();
-        let out = crate::incremental::incremental(&model.snapshot()).unwrap();
-        let pdf = Pdf::load_mem(&out).unwrap();
-        let (_, d) = &page_annots(&out)[0];
-        assert_eq!(
-            d.get(b"Subtype").unwrap().as_name().unwrap(),
-            b"FileAttachment"
-        );
-        assert_eq!(d.get(b"Name").unwrap().as_name().unwrap(), b"Paperclip");
-        // The file is in it, byte for byte; ours aren't listed twice.
-        let embedded = pdf
-            .dereference(
-                d.get(b"FS")
-                    .unwrap()
-                    .as_dict()
-                    .unwrap()
-                    .get(b"EF")
-                    .unwrap()
-                    .as_dict()
-                    .unwrap()
-                    .get(b"F")
-                    .unwrap(),
-            )
-            .unwrap()
-            .1
-            .as_stream()
-            .unwrap()
-            .decompressed_content()
-            .unwrap();
-        assert_eq!(embedded, bytes);
-        assert!(crate::attachments::attachments_in(&pdf).is_empty());
-        // Elsewhere, without the cache: back from the file.
-        let path = crate::generated::blob_path(&stem).unwrap();
-        std::fs::remove_file(&path).unwrap();
-        crate::file::recover_cached(&pdf);
-        assert_eq!(std::fs::read(&path).unwrap(), bytes);
-        let _ = std::fs::remove_file(&path);
+    fn attachment(stem: &str, size: usize) -> crate::annot::AnnotKind {
+        crate::annot::AnnotKind::FileAttachment {
+            pos: crate::annot::Pt { x: 50.0, y: 50.0 },
+            icon: "Paperclip".into(),
+            file: stem.into(),
+            name: "notes.txt".into(),
+            size: size as u64,
+        }
     }
 
-    #[test]
-    fn a_page_stamp_is_written_once_and_recovered_from_the_file() {
-        use crate::annot::{AnnotKind, Box2};
-        // A stamp page of its own, unlike any other test's.
-        let stamp_pdf = {
-            let mut out = Pdf::with_version("1.5");
-            let pages_id = out.new_object_id();
-            let tag = format!("{:x}", fastrand::u64(..));
-            let content = out.add_object(lopdf::Stream::new(
-                dictionary! {},
-                format!("% {tag}\n1 0 0 rg 0 0 100 50 re f").into_bytes(),
-            ));
-            let page = out.add_object(dictionary! {
-                "Type" => "Page", "Parent" => pages_id, "Contents" => content,
-                "MediaBox" => vec![0.into(), 0.into(), 100.into(), 50.into()],
-            });
-            out.objects.insert(
-                pages_id,
-                Object::Dictionary(
-                    dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 },
-                ),
-            );
-            let cat = out.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
-            out.trailer.set("Root", cat);
-            let mut b = Vec::new();
-            out.save_to(&mut b).unwrap();
-            b
-        };
-        let path = crate::generated::store(&stamp_pdf).unwrap();
-        let stem = crate::generated::stem_of(&path);
+    /// An appearance's one form: its name in the resources, its number,
+    /// and the form.
+    fn drawn_form<'a>(pdf: &'a Pdf, annot: &Dictionary) -> (Vec<u8>, ObjectId, &'a lopdf::Stream) {
+        let n = annot.get(b"AP").unwrap().as_dict().unwrap();
+        let n = n.get(b"N").unwrap().as_reference().unwrap();
+        let ap = pdf.get_object(n).unwrap().as_stream().unwrap();
+        let resources = ap.dict.get(b"Resources").unwrap().as_dict().unwrap();
+        let forms = resources.get(b"XObject").unwrap().as_dict().unwrap();
+        assert_eq!(forms.len(), 1);
+        let (name, form) = forms.iter().next().unwrap();
+        let content = ap
+            .decompressed_content()
+            .unwrap_or_else(|_| ap.content.clone());
+        let content = String::from_utf8_lossy(&content).into_owned();
+        let shown = format!("/{} Do", String::from_utf8_lossy(name));
+        assert!(
+            content.contains(&shown) && content.contains("Tj"),
+            "{content}"
+        );
+        let id = form.as_reference().unwrap();
+        (
+            name.clone(),
+            id,
+            pdf.get_object(id).unwrap().as_stream().unwrap(),
+        )
+    }
 
+    /// An attachment's embedded file: its stream, and its bytes.
+    fn embedded(pdf: &Pdf, annot: &Dictionary) -> (ObjectId, Vec<u8>) {
+        let fs = annot.get(b"FS").unwrap().as_dict().unwrap();
+        let ef = fs.get(b"EF").unwrap().as_dict().unwrap();
+        let id = ef.get(b"F").unwrap().as_reference().unwrap();
+        let s = pdf.get_object(id).unwrap().as_stream().unwrap();
+        (id, s.decompressed_content().unwrap())
+    }
+
+    /// Stamps on two pages draw one page of it, a form named as a
+    /// resource of the appearance's own, never `/SheafStamp`.
+    #[test]
+    fn a_page_stamp_is_written_once_under_a_name_of_its_own() {
+        let tag = format!("{:x}", fastrand::u64(..));
         let dir = tempdir();
         let a_path = make_pdf(&dir, "a.pdf", "A", 2, &[]);
-        let original = std::fs::read(&a_path).unwrap();
-        let mut model = Document::new(
-            {
-                let mut i = info(&a_path, 2);
-                i.bytes = original.len();
-                i
-            },
-            &[],
-            Box::new(FixedCount(10)),
-        );
-        let stamp = |page| Edit::AnnotAdd {
-            page,
-            annot: thread_mark(
-                AnnotKind::PageStamp {
-                    rect: Box2 {
-                        x: 100.0,
-                        y: 100.0,
-                        w: 100.0,
-                        h: 50.0,
-                    },
-                    stamp: stem.clone(),
-                    name: "Paid".into(),
-                    text: Some("GE 10/14/2026".into()),
-                },
-                "",
-            ),
-        };
+        let mut model = open(&a_path, &[], Box::new(FixedCount(10)));
+        let stem = format!("stamp-{tag}");
+        model.assets().intern_stamp(&stem, stamp_page(&tag).into());
         let (p0, p1) = (model.page(0).unwrap().id, model.page(1).unwrap().id);
-        model.apply(stamp(p0), "stamp").unwrap();
-        model.apply(stamp(p1), "stamp").unwrap();
+        for page in [p0, p1] {
+            let annot = thread_mark(page_stamp(&stem), "");
+            model
+                .apply(Edit::AnnotAdd { page, annot }, "stamp")
+                .unwrap();
+        }
         let bytes = crate::incremental::incremental(&model.snapshot()).unwrap();
         let pdf = Pdf::load_mem(&bytes).unwrap();
-        // Both appearances draw the one imported page.
         let mut forms = std::collections::HashSet::new();
         for page in pdf.get_pages().into_values() {
-            let annots = pdf
-                .get_dictionary(page)
-                .unwrap()
-                .get(b"Annots")
-                .unwrap()
-                .as_array()
-                .unwrap();
-            let d = pdf
-                .get_dictionary(annots[0].as_reference().unwrap())
-                .unwrap();
-            let n = d
-                .get(b"AP")
-                .unwrap()
-                .as_dict()
-                .unwrap()
-                .get(b"N")
-                .unwrap()
-                .as_reference()
-                .unwrap();
-            let Object::Stream(ap) = pdf.get_object(n).unwrap() else {
-                panic!()
-            };
-            let xo = ap
-                .dict
-                .get(b"Resources")
-                .unwrap()
-                .as_dict()
-                .unwrap()
-                .get(b"XObject")
-                .unwrap()
-                .as_dict()
-                .unwrap();
-            forms.insert(xo.get(b"SheafStamp").unwrap().as_reference().unwrap());
-            let content = String::from_utf8_lossy(&ap.content).into_owned();
-            assert!(
-                content.contains("/SheafStamp Do") && content.contains("Tj"),
-                "{content}"
-            );
+            let annots = pdf.get_dictionary(page).unwrap().get(b"Annots").unwrap();
+            let id = annots.as_array().unwrap()[0].as_reference().unwrap();
+            let (name, form, stream) = drawn_form(&pdf, pdf.get_dictionary(id).unwrap());
+            assert!(name.starts_with(b"Sh") && name != b"SheafStamp");
+            forms.insert(form);
+            let content =
+                String::from_utf8_lossy(&stream.decompressed_content().unwrap()).into_owned();
+            assert!(content.contains(&tag), "{content}");
         }
         assert_eq!(forms.len(), 1);
+    }
 
-        // On a machine without the stamp, it comes back from the file.
-        std::fs::remove_file(&path).unwrap();
-        crate::file::recover_cached(&pdf);
-        let back = Pdf::load_mem(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(back.get_pages().len(), 1);
-        let _ = std::fs::remove_file(&path);
+    /// Two attachments of one file embed it once.
+    #[test]
+    fn two_attachments_of_one_file_embed_it_once() {
+        let bytes = format!("workpaper notes {:x}", fastrand::u64(..)).into_bytes();
+        let dir = tempdir();
+        let a_path = make_pdf(&dir, "a.pdf", "A", 1, &[]);
+        let mut model = opened(&a_path);
+        model.assets().intern_file("notes", bytes.as_slice().into());
+        let p0 = model.page(0).unwrap().id;
+        for _ in 0..2 {
+            let annot = thread_mark(attachment("notes", bytes.len()), "");
+            model
+                .apply(Edit::AnnotAdd { page: p0, annot }, "attach")
+                .unwrap();
+        }
+        let out = rewrite(&model.snapshot()).unwrap();
+        let pdf = Pdf::load_mem(&out).unwrap();
+        let files: Vec<(ObjectId, Vec<u8>)> = page_annots(&out)
+            .iter()
+            .map(|(_, d)| embedded(&pdf, d))
+            .collect();
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0], files[1]);
+        assert_eq!(files[0].1, bytes);
+        // Ours aren't listed with other tools' attachments.
+        assert!(crate::attachments::attachments_in(&pdf, pdf.page_iter()).is_empty());
+        let streams = pdf
+            .objects
+            .values()
+            .filter_map(|o| o.as_stream().ok())
+            .filter(|s| s.dict.get(b"Type").and_then(Object::as_name).ok() == Some(b"EmbeddedFile"))
+            .count();
+        assert_eq!(streams, 1);
+    }
+
+    /// A stamp placed from the library and a file attached, saved, open
+    /// on a machine whose cache has neither: the marks are still sheaf's,
+    /// and saved again either way, the stamp's page draws and the file's
+    /// bytes are the same, from the file each time. Appended to, the file
+    /// keeps the page and the file where they are.
+    #[test]
+    fn stamps_and_attachments_survive_an_empty_cache() {
+        use crate::annot::AnnotKind;
+        let tag = format!("{:x}", fastrand::u64(..));
+        let pdf = stamp_page(&tag);
+        let stamp_path = crate::generated::store(&pdf).unwrap();
+        let stamp = crate::generated::stem_of(&stamp_path);
+        let bytes = format!("workpaper notes {tag}").into_bytes();
+        let file = crate::generated::store_blob(&bytes).unwrap();
+        let dir = tempdir();
+        let a_path = make_pdf(&dir, "a.pdf", "A", 1, &[]);
+        let mut model = opened(&a_path);
+        // Placed, as the stamps panel places one; attached, as the
+        // attach tool leaves its file in the cache.
+        model.assets().intern_stamp(&stamp, pdf.into());
+        let p0 = model.page(0).unwrap().id;
+        for kind in [page_stamp(&stamp), attachment(&file, bytes.len())] {
+            let annot = thread_mark(kind, "");
+            model
+                .apply(Edit::AnnotAdd { page: p0, annot }, "add")
+                .unwrap();
+        }
+        let saved = dir.join("saved.pdf");
+        save_to_path(&model.snapshot(), &saved).unwrap();
+        std::fs::remove_file(&stamp_path).unwrap();
+        std::fs::remove_file(crate::generated::blob_path(&file).unwrap()).unwrap();
+
+        let check = |path: &Path| -> (Document, [ObjectId; 2]) {
+            let mut doc = crate::open::file(path, None).unwrap().doc;
+            let p0 = doc.page(0).unwrap().id;
+            let marks: Vec<Annot> = doc.state().annots_on(p0).unwrap().iter().cloned().collect();
+            assert!(matches!(&marks[0].kind, AnnotKind::PageStamp { stamp: s, .. } if *s == stamp));
+            assert!(
+                matches!(&marks[1].kind, AnnotKind::FileAttachment { file: f, .. } if *f == file)
+            );
+            assert_eq!(*doc.assets().file_bytes(&file).unwrap(), *bytes);
+            let back = Pdf::load_mem(&doc.assets().stamp_pdf(&stamp).unwrap()).unwrap();
+            assert_eq!(back.get_pages().len(), 1);
+            let written = std::fs::read(path).unwrap();
+            let pdf = Pdf::load_mem(&written).unwrap();
+            let annots = page_annots(&written);
+            let (_, form, stream) = drawn_form(&pdf, &annots[0].1);
+            let content = stream
+                .decompressed_content()
+                .unwrap_or_else(|_| stream.content.clone());
+            assert!(String::from_utf8_lossy(&content).contains(&tag));
+            let (file_id, embedded) = embedded(&pdf, &annots[1].1);
+            assert_eq!(embedded, bytes);
+            // Their next save writes them again.
+            for mut a in marks {
+                a.contents = format!("{} again", a.contents);
+                doc.apply(Edit::AnnotUpdate { page: p0, annot: a }, "edit")
+                    .unwrap();
+            }
+            (doc, [form, file_id])
+        };
+        let (doc, held) = check(&saved);
+        let rewritten = dir.join("rewritten.pdf");
+        rewrite_to_path(&doc.snapshot(), &rewritten).unwrap();
+        check(&rewritten);
+        let appended = dir.join("appended.pdf");
+        std::fs::write(
+            &appended,
+            crate::incremental::incremental(&doc.snapshot()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(check(&appended).1, held);
+    }
+
+    /// Pages that come in from a file whose mark names one of the
+    /// document's stamps by its stem, with another page behind it, don't
+    /// change what the document's own mark draws.
+    #[test]
+    fn a_file_whose_pages_come_in_cant_replace_a_stamp() {
+        let (ours, theirs) = (
+            format!("ours-{:x}", fastrand::u64(..)),
+            format!("theirs-{:x}", fastrand::u64(..)),
+        );
+        let stem = format!("stamp-{ours}");
+        let dir = tempdir();
+        let mut other = opened(&make_pdf(&dir, "b.pdf", "B", 1, &[]));
+        other
+            .assets()
+            .intern_stamp(&stem, stamp_page(&theirs).into());
+        let page = other.page(0).unwrap().id;
+        let annot = thread_mark(page_stamp(&stem), "");
+        other
+            .apply(Edit::AnnotAdd { page, annot }, "stamp")
+            .unwrap();
+        let b_saved = dir.join("b-saved.pdf");
+        save_to_path(&other.snapshot(), &b_saved).unwrap();
+
+        let mut model = opened(&make_pdf(&dir, "a.pdf", "A", 1, &[]));
+        model.assets().intern_stamp(&stem, stamp_page(&ours).into());
+        let page = model.page(0).unwrap().id;
+        let annot = thread_mark(page_stamp(&stem), "");
+        model
+            .apply(Edit::AnnotAdd { page, annot }, "stamp")
+            .unwrap();
+        let incoming = info(model.store(), &b_saved);
+        let found = crate::file::annots_in(incoming.src.pdf(), incoming.src.page_ids());
+        assert!(found.assets.stamps.contains_key(&stem));
+        let sb = model.add_source(incoming);
+        model.set_source_assets(sb, &found.assets);
+        let insert = Edit::InsertPages {
+            source: sb,
+            range: 0..1,
+            before: None,
+            outline: None,
+            annots: Vec::new(),
+        };
+        model.apply(insert, "ins").unwrap();
+
+        let out = rewrite(&model.snapshot()).unwrap();
+        let pdf = Pdf::load_mem(&out).unwrap();
+        let (_, _, stream) = drawn_form(&pdf, &page_annots(&out)[0].1);
+        let content = stream
+            .decompressed_content()
+            .unwrap_or_else(|_| stream.content.clone());
+        let content = String::from_utf8_lossy(&content);
+        assert!(
+            content.contains(&ours) && !content.contains(&theirs),
+            "{content}"
+        );
     }
 
     #[test]
@@ -3389,16 +3522,7 @@ mod tests {
         use crate::annot::{AnnotKind, Box2};
         let dir = tempdir();
         let a_path = make_pdf(&dir, "a.pdf", "A", 1, &[]);
-        let original = std::fs::read(&a_path).unwrap();
-        let mut model = Document::new(
-            {
-                let mut i = info(&a_path, 1);
-                i.bytes = original.len();
-                i
-            },
-            &[],
-            Box::new(FixedCount(10)),
-        );
+        let mut model = open(&a_path, &[], Box::new(FixedCount(10)));
         let p0 = model.page(0).unwrap().id;
         let words = Box2 {
             x: 72.0,
@@ -3419,6 +3543,7 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            turn: Rotation::R0,
             name: String::new(),
         };
         let replace = mk(
@@ -3517,16 +3642,7 @@ mod tests {
         assert!(back.foreign.is_empty(), "{:?}", back.foreign);
 
         // Saved again from the reopened file: the companion isn't doubled.
-        let mut model2 = Document::new(
-            {
-                let mut i = info(&out, 1);
-                i.bytes = bytes.len();
-                i
-            },
-            &[],
-            Box::new(FixedCount(10)),
-        );
-        model2.set_initial_annots(back.sheaf).unwrap();
+        let mut model2 = opened_with(&out, back.sheaf);
         let p = model2.page(0).unwrap().id;
         let mut changed = model2.state().annots_on(p).unwrap()[0].clone();
         changed.contents = "newer words".into();
@@ -3554,15 +3670,7 @@ mod tests {
         let dir = tempdir();
         let a_path = make_pdf(&dir, "a.pdf", "A", 2, &[]);
         let original = std::fs::read(&a_path).unwrap();
-        let mut model = Document::new(
-            {
-                let mut i = info(&a_path, 2);
-                i.bytes = original.len();
-                i
-            },
-            &[],
-            Box::new(FixedCount(10)),
-        );
+        let mut model = open(&a_path, &[], Box::new(FixedCount(10)));
         let p0 = model.page(0).unwrap().id;
         let mk = |kind: AnnotKind| Annot {
             id: crate::annot::AnnotId(0),
@@ -3577,6 +3685,7 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            turn: Rotation::R0,
             name: String::new(),
         };
         model
@@ -3652,16 +3761,7 @@ mod tests {
         // Reopen, delete one, save again: no duplicates.
         let out2 = dir.join("inc2.pdf");
         std::fs::copy(&out, &out2).unwrap();
-        let mut model2 = Document::new(
-            {
-                let mut i = info(&out2, 2);
-                i.bytes = bytes.len();
-                i
-            },
-            &[],
-            Box::new(FixedCount(10)),
-        );
-        model2.set_initial_annots(back).unwrap();
+        let mut model2 = opened_with(&out2, back);
         let p0b = model2.page(0).unwrap().id;
         let first = model2.state().annots_on(p0b).unwrap()[0].clone();
         model2
@@ -3698,8 +3798,7 @@ mod tests {
         use crate::annot::{AnnotKind, Box2};
         let dir = tempdir();
         let a_path = make_pdf(&dir, "g.pdf", "G", 3, &[]);
-        let original = std::fs::read(&a_path).unwrap();
-        let mut model = opened_n(&a_path, 3, original.len());
+        let mut model = opened(&a_path);
         let page = |i: usize| model.page(i).unwrap().id;
         let (p0, p1, p2) = (page(0), page(1), page(2));
         let connector = |y: f32| Annot {
@@ -3724,6 +3823,7 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            turn: Rotation::R0,
             name: String::new(),
         };
         for pg in [p0, p1, p2] {
@@ -3756,7 +3856,7 @@ mod tests {
                             let d = pdf.get_dictionary(o.as_reference().unwrap()).unwrap();
                             let top = d.get(b"Rect").unwrap().as_array().unwrap()[3]
                                 .as_float()
-                                .unwrap();
+                                .unwrap() as f32;
                             let to = d.get(b"Dest").unwrap().as_array().unwrap()[0]
                                 .as_reference()
                                 .unwrap();
@@ -3775,10 +3875,7 @@ mod tests {
         // first now goes to its neighbour, and page 3 comes back to it.
         let out = dir.join("g2.pdf");
         std::fs::write(&out, &bytes).unwrap();
-        let mut model = opened_n(&out, 3, bytes.len());
-        model
-            .set_initial_annots(crate::file::read_sheaf_annots(&out).unwrap())
-            .unwrap();
+        let mut model = opened_with(&out, crate::file::read_sheaf_annots(&out).unwrap());
         let p0 = model.page(0).unwrap().id;
         model
             .apply(
@@ -3793,18 +3890,6 @@ mod tests {
         assert_eq!(dests(&bytes), [vec![1, 2], vec![3], vec![1]]);
     }
 
-    fn opened_n(path: &Path, n: u32, bytes: usize) -> Document {
-        Document::new(
-            {
-                let mut i = info(path, n);
-                i.bytes = bytes;
-                i
-            },
-            &[],
-            Box::new(FixedCount(10)),
-        )
-    }
-
     /// Connectors come out as Link annotations whose /Dest is the partner's
     /// page, in both save strategies.
     #[test]
@@ -3812,16 +3897,7 @@ mod tests {
         use crate::annot::{AnnotKind, Box2};
         let dir = tempdir();
         let a_path = make_pdf(&dir, "c.pdf", "C", 3, &[]);
-        let original = std::fs::read(&a_path).unwrap();
-        let mut model = Document::new(
-            {
-                let mut i = info(&a_path, 3);
-                i.bytes = original.len();
-                i
-            },
-            &[],
-            Box::new(FixedCount(10)),
-        );
+        let mut model = open(&a_path, &[], Box::new(FixedCount(10)));
         let (p0, p2) = (model.page(0).unwrap().id, model.page(2).unwrap().id);
         let mk = || Annot {
             id: crate::annot::AnnotId(0),
@@ -3845,6 +3921,7 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            turn: Rotation::R0,
             name: String::new(),
         };
         model
@@ -3935,12 +4012,8 @@ mod tests {
             pdf.save(&a_path).unwrap();
         }
         let original = std::fs::read(&a_path).unwrap();
-        let mut model = Document::new(
-            {
-                let mut i = info(&a_path, 2);
-                i.bytes = original.len();
-                i
-            },
+        let mut model = open(
+            &a_path,
             &[
                 FlatOutlineItem {
                     title: "Top".into(),
@@ -3949,6 +4022,7 @@ mod tests {
                     view: None,
                     color: None,
                     style: Default::default(),
+                    open: true,
                 },
                 FlatOutlineItem {
                     title: "Second".into(),
@@ -3957,6 +4031,7 @@ mod tests {
                     view: None,
                     color: None,
                     style: Default::default(),
+                    open: true,
                 },
             ],
             Box::new(FixedCount(10)),
@@ -3987,6 +4062,7 @@ mod tests {
                         fill: None,
                         dashed: false,
                         cloudy: false,
+                        turn: Rotation::R0,
                         name: String::new(),
                     },
                 },
@@ -4017,6 +4093,7 @@ mod tests {
             fill: None,
             dashed: false,
             cloudy: false,
+            turn: Rotation::R0,
             name: String::new(),
         };
         model
@@ -4141,12 +4218,11 @@ mod tests {
                 .is_encrypted()
         );
 
+        let store = Store::new();
+        let primary = SourceInfo::read(&store, &enc, Some("secret")).unwrap();
         let mut model = Document::new(
-            {
-                let mut i = info(&enc, 2);
-                i.password = Some("secret".into());
-                i
-            },
+            store,
+            primary,
             &[FlatOutlineItem {
                 title: "Top".into(),
                 page: Some(0),
@@ -4154,6 +4230,7 @@ mod tests {
                 view: None,
                 color: None,
                 style: Default::default(),
+                open: true,
             }],
             Box::new(FixedCount(10)),
         );
@@ -4206,8 +4283,8 @@ mod tests {
         use crate::annot::{AnnotKind, Box2};
         let dir = tempdir();
         let a = make_pdf(&dir, "x.pdf", "X", 4, &[]);
-        let mut model = Document::new(
-            info(&a, 4),
+        let mut model = open(
+            &a,
             &[
                 FlatOutlineItem {
                     title: "Part".into(),
@@ -4216,6 +4293,7 @@ mod tests {
                     view: None,
                     color: None,
                     style: Default::default(),
+                    open: true,
                 },
                 FlatOutlineItem {
                     title: "Second".into(),
@@ -4224,6 +4302,7 @@ mod tests {
                     view: None,
                     color: None,
                     style: Default::default(),
+                    open: true,
                 },
                 FlatOutlineItem {
                     title: "Fourth".into(),
@@ -4232,6 +4311,7 @@ mod tests {
                     view: None,
                     color: None,
                     style: Default::default(),
+                    open: true,
                 },
                 FlatOutlineItem {
                     title: "Third".into(),
@@ -4240,6 +4320,7 @@ mod tests {
                     view: None,
                     color: None,
                     style: Default::default(),
+                    open: true,
                 },
             ],
             Box::new(FixedCount(10)),
@@ -4281,6 +4362,7 @@ mod tests {
                             fill: None,
                             dashed: false,
                             cloudy: false,
+                            turn: Rotation::R0,
                             name: String::new(),
                         },
                     },
@@ -4317,17 +4399,16 @@ mod tests {
         assert!(extract_pages(&model.snapshot(), &[], &out).is_err());
     }
 
-    /// The print file has just the chosen pages, no bookmarks, and its marks
-    /// drawn in or left out.
     /// A header/footer is drawn into page content as pagination
     /// artifacts on save, its settings kept in the catalog; a derived copy
     /// can strip it again.
     #[test]
     fn header_footer_is_drawn_stored_and_strippable() {
-        use crate::stamps::{HeaderFooter, has_artifacts};
+        use crate::content::{PagOrigin, PaginationKind};
+        use crate::stamps::{HEADER_FOOTER, HeaderFooter};
         let dir = tempdir();
         let a = make_pdf(&dir, "hf.pdf", "H", 2, &[]);
-        let mut model = Document::new(info(&a, 2), &[], crate::history::default_policy());
+        let mut model = open(&a, &[], crate::history::default_policy());
         let hf = HeaderFooter {
             texts: [
                 String::new(),
@@ -4352,10 +4433,22 @@ mod tests {
         // In place it falls back from incremental to a rewrite.
         rewrite_to_path(&model.snapshot(), &out).unwrap();
         let pdf = Pdf::load(&out).unwrap();
+        let src = crate::forms::fixture::source(std::fs::read(&out).unwrap());
         let pages: Vec<ObjectId> = pdf.get_pages().into_values().collect();
         for (i, &p) in pages.iter().enumerate() {
             let dict = pdf.get_dictionary(p).unwrap();
-            assert!(has_artifacts(&pdf, dict, crate::stamps::HEADER_FOOTER));
+            // A footer of sheaf's before M10.5.
+            let blocks = src.blocks(i as u32).unwrap();
+            let found: Vec<_> = blocks
+                .pagination
+                .iter()
+                .map(|p| (p.kind, p.origin))
+                .collect();
+            assert_eq!(
+                found,
+                [(PaginationKind::Footer, PagOrigin::SheafLegacy)],
+                "page {i}"
+            );
             let all: Vec<u8> = dict
                 .get(b"Contents")
                 .unwrap()
@@ -4378,23 +4471,27 @@ mod tests {
         let (stored, scope) = crate::stamps::from_catalog(&pdf).unwrap();
         assert_eq!(stored.texts, hf.texts);
         assert_eq!(scope, None);
+        // Read from a source, as it opens: the same.
+        assert_eq!(
+            crate::stamps::from_catalog(src.pdf()),
+            Some((stored, scope))
+        );
         // Stripped, both pages come back clean.
         let bytes = derived_copy(
-            &info(&out, 2),
+            &info(&Store::new(), &out),
             &[(0, None), (1, None)],
-            &mut |pdf, d, _, _| {
-                crate::stamps::strip(pdf, d, crate::stamps::HEADER_FOOTER);
+            &mut |pdf, d, _, at| {
+                assert!(crate::stamps::strip(pdf, d, at as u32, HEADER_FOOTER)?);
                 Ok(())
             },
         )
         .unwrap();
-        let clean = Pdf::load_mem(&bytes).unwrap();
-        for p in clean.get_pages().into_values() {
-            assert!(!has_artifacts(
-                &clean,
-                clean.get_dictionary(p).unwrap(),
-                crate::stamps::HEADER_FOOTER
-            ));
+        let clean = crate::forms::fixture::source(bytes);
+        for i in 0..clean.page_count() {
+            let blocks = clean.blocks(i).unwrap();
+            assert!(!blocks.has(HEADER_FOOTER), "page {i}");
+            // The page's own content is left, and its balance.
+            assert_eq!(blocks.balance, Default::default());
         }
     }
 
@@ -4405,15 +4502,7 @@ mod tests {
         use crate::labels::{LabelSpec, Style, label_ranges, labels_for};
         let dir = tempdir();
         let a = make_pdf(&dir, "labels.pdf", "L", 4, &[]);
-        let bytes = std::fs::metadata(&a).unwrap().len() as usize;
-        let mut model = Document::new(
-            SourceInfo {
-                bytes,
-                ..info(&a, 4)
-            },
-            &[],
-            crate::history::default_policy(),
-        );
+        let mut model = open(&a, &[], crate::history::default_policy());
         let ids: Vec<PageId> = model.state().pages.iter().map(|p| p.id).collect();
         let spec = |id, style, first| LabelSpec {
             start: id,
@@ -4464,23 +4553,24 @@ mod tests {
         assert_eq!(read(&out), None);
     }
 
-    /// Displayed positions start at the CropBox's corner, as viewers draw.
+    /// The view starts at the CropBox's corner, as viewers draw.
     #[test]
     fn geometry_follows_the_crop_box() {
         let d = dictionary! {
             "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
             "CropBox" => vec![100.into(), 100.into(), 400.into(), 500.into()],
         };
-        let g = geom_of(&d, 0);
-        assert_eq!(g.media, [100.0, 100.0, 400.0, 500.0]);
-        let u = g.to_user(crate::annot::Pt { x: 10.0, y: 10.0 });
+        let g = geom_of(&d, Rotation::R0);
+        assert_eq!(g.visible(), Rect::new(100.0, 100.0, 400.0, 500.0));
+        let u = g.from_view().apply(crate::annot::Pt { x: 10.0, y: 10.0 });
         assert_eq!((u.x, u.y), (110.0, 490.0));
-        // A crop outside the media box is ignored.
+        // A crop outside the media box leaves nothing shown, as PDFium
+        // reads it.
         let d = dictionary! {
             "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
             "CropBox" => vec![700.into(), 700.into(), 800.into(), 900.into()],
         };
-        assert_eq!(geom_of(&d, 0).media, [0.0, 0.0, 612.0, 792.0]);
+        assert!(geom_of(&d, Rotation::R0).visible().is_empty());
     }
 
     #[test]
@@ -4488,8 +4578,8 @@ mod tests {
         use crate::annot::{AnnotKind, Box2};
         let dir = tempdir();
         let a = make_pdf(&dir, "p.pdf", "P", 3, &[]);
-        let mut model = Document::new(
-            info(&a, 3),
+        let mut model = open(
+            &a,
             &[FlatOutlineItem {
                 title: "Top".into(),
                 page: Some(1),
@@ -4497,6 +4587,7 @@ mod tests {
                 view: None,
                 color: None,
                 style: Default::default(),
+                open: true,
             }],
             Box::new(FixedCount(10)),
         );
@@ -4525,6 +4616,7 @@ mod tests {
                         fill: None,
                         dashed: false,
                         cloudy: false,
+                        turn: Rotation::R0,
                         name: String::new(),
                     },
                 },
@@ -4574,7 +4666,7 @@ mod tests {
                 .set("Annots", Object::Array(vec![link.into()]));
             pdf.save(&a).unwrap();
         }
-        let mut model = Document::new(info(&a, 1), &[], Box::new(FixedCount(10)));
+        let mut model = open(&a, &[], Box::new(FixedCount(10)));
         let p0 = model.page(0).unwrap().id;
         model
             .apply(
@@ -4600,6 +4692,7 @@ mod tests {
                         fill: None,
                         dashed: false,
                         cloudy: false,
+                        turn: Rotation::R0,
                         name: String::new(),
                     },
                 },
@@ -4638,7 +4731,7 @@ mod tests {
         );
         // The form content is the square's stroke.
         let form_ops = String::from_utf8_lossy(&form.decompressed_content().unwrap()).into_owned();
-        assert!(form_ops.contains(" re S"), "{form_ops}");
+        assert!(form_ops.contains(" re\nS\n"), "{form_ops}");
     }
 
     // ----- OCR text layers ---------------------------------------------------
@@ -4657,11 +4750,7 @@ mod tests {
                 },
                 confidence: 0.95,
             }],
-            PageSize {
-                width: 612.0,
-                height: 792.0,
-            },
-            Rotation::R0,
+            &crate::geom::Geom::read(None, None, 0),
             "test",
         ))
     }
@@ -4730,7 +4819,7 @@ mod tests {
     fn rewrite_writes_invisible_text_layer() {
         let dir = tempdir();
         let a = make_pdf(&dir, "a.pdf", "A", 3, &[]);
-        let mut model = Document::new(info(&a, 3), &[], Box::new(FixedCount(10)));
+        let mut model = open(&a, &[], Box::new(FixedCount(10)));
         let ids: Vec<PageId> = model.state().pages.iter().map(|p| p.id).collect();
         set_layer(&mut model, ids[1], "Hello");
         let bytes = rewrite(&model.snapshot()).unwrap();
@@ -4775,15 +4864,7 @@ mod tests {
         let dir = tempdir();
         let a = make_pdf(&dir, "a.pdf", "A", 2, &[]);
         let original = std::fs::read(&a).unwrap();
-        let mut model = Document::new(
-            {
-                let mut i = info(&a, 2);
-                i.bytes = original.len();
-                i
-            },
-            &[],
-            Box::new(FixedCount(10)),
-        );
+        let mut model = open(&a, &[], Box::new(FixedCount(10)));
         let ids: Vec<PageId> = model.state().pages.iter().map(|p| p.id).collect();
         set_layer(&mut model, ids[0], "Hello");
         let bytes = crate::incremental::incremental(&model.snapshot()).unwrap();
@@ -4820,15 +4901,7 @@ mod tests {
         let dir = tempdir();
         let a = make_pdf(&dir, "a.pdf", "A", 3, &[]);
         let original = std::fs::read(&a).unwrap();
-        let mut model = Document::new(
-            {
-                let mut i = info(&a, 3);
-                i.bytes = original.len();
-                i
-            },
-            &[],
-            Box::new(FixedCount(10)),
-        );
+        let mut model = open(&a, &[], Box::new(FixedCount(10)));
         let ids: Vec<PageId> = model.state().pages.iter().map(|p| p.id).collect();
         set_layer(&mut model, ids[2], "Hello");
         model
@@ -4853,7 +4926,7 @@ mod tests {
     fn one_font_set_per_file() {
         let dir = tempdir();
         let a = make_pdf(&dir, "a.pdf", "A", 3, &[]);
-        let mut model = Document::new(info(&a, 3), &[], Box::new(FixedCount(10)));
+        let mut model = open(&a, &[], Box::new(FixedCount(10)));
         let ids: Vec<PageId> = model.state().pages.iter().map(|p| p.id).collect();
         model
             .apply(
@@ -4885,7 +4958,7 @@ mod tests {
     fn duplicate_shares_layer_and_is_not_double_rotated() {
         let dir = tempdir();
         let a = make_pdf(&dir, "a.pdf", "A", 2, &[]);
-        let mut model = Document::new(info(&a, 2), &[], Box::new(FixedCount(10)));
+        let mut model = open(&a, &[], Box::new(FixedCount(10)));
         let ids: Vec<PageId> = model.state().pages.iter().map(|p| p.id).collect();
         model
             .apply(
@@ -4918,14 +4991,14 @@ mod tests {
     fn reinstall_replaces_previous_layer() {
         let dir = tempdir();
         let a = make_pdf(&dir, "a.pdf", "A", 1, &[]);
-        let mut model = Document::new(info(&a, 1), &[], Box::new(FixedCount(10)));
+        let mut model = open(&a, &[], Box::new(FixedCount(10)));
         let p0 = model.page(0).unwrap().id;
         set_layer(&mut model, p0, "Hello");
         let b = dir.join("b.pdf");
         rewrite_to_path(&model.snapshot(), &b).unwrap();
 
         // Re-OCR the saved file: the old layer goes, the new one comes.
-        let mut model = Document::new(info(&b, 1), &[], Box::new(FixedCount(10)));
+        let mut model = open(&b, &[], Box::new(FixedCount(10)));
         let p0 = model.page(0).unwrap().id;
         set_layer(&mut model, p0, "World");
         let bytes = rewrite(&model.snapshot()).unwrap();
@@ -4939,7 +5012,7 @@ mod tests {
         assert_eq!(glyphless_fonts(&pdf), 1);
 
         // Saving the file again with no layer in the model keeps what's baked.
-        let model = Document::new(info(&b, 1), &[], Box::new(FixedCount(10)));
+        let model = open(&b, &[], Box::new(FixedCount(10)));
         let bytes = rewrite(&model.snapshot()).unwrap();
         let pdf = Pdf::load_mem(&bytes).unwrap();
         let page = pdf.get_pages()[&1];
@@ -4951,7 +5024,7 @@ mod tests {
         use crate::annot::{AnnotKind, Box2};
         let dir = tempdir();
         let a = make_pdf(&dir, "a.pdf", "A", 2, &[]);
-        let mut model = Document::new(info(&a, 2), &[], Box::new(FixedCount(10)));
+        let mut model = open(&a, &[], Box::new(FixedCount(10)));
         let ids: Vec<PageId> = model.state().pages.iter().map(|p| p.id).collect();
         set_layer(&mut model, ids[1], "Hello");
         model
@@ -4978,6 +5051,7 @@ mod tests {
                         fill: None,
                         dashed: false,
                         cloudy: false,
+                        turn: Rotation::R0,
                         name: String::new(),
                     },
                 },
@@ -5013,15 +5087,11 @@ mod tests {
     fn empty_layer_writes_nothing() {
         let dir = tempdir();
         let a = make_pdf(&dir, "a.pdf", "A", 1, &[]);
-        let mut model = Document::new(info(&a, 1), &[], Box::new(FixedCount(10)));
+        let mut model = open(&a, &[], Box::new(FixedCount(10)));
         let p0 = model.page(0).unwrap().id;
         let empty = std::sync::Arc::new(crate::text_layer::TextLayer::from_engine(
             vec![],
-            PageSize {
-                width: 612.0,
-                height: 792.0,
-            },
-            Rotation::R0,
+            &crate::geom::Geom::read(None, None, 0),
             "test",
         ));
         model

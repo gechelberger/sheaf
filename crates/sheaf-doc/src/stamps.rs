@@ -4,21 +4,29 @@
 //! center and right of the header and of the footer) whose text can use
 //! tokens for the page number, page count, date, file name and Bates
 //! number. On screen it's drawn over the pages until saved. A save
-//! writes it into each page's content as marked-content artifacts, the
-//! way Acrobat writes its headers and footers:
-//! `/Artifact <</Type /Pagination /Subtype /Header>> BDC … EMC`.
-//! [`strip`] removes those again, ours or Acrobat's, so Update and
-//! Remove work on files from either.
+//! writes it into each page's content as marked-content artifacts, as
+//! Acrobat marks its headers and footers, `<</Type /Pagination /Subtype
+//! /Header>>`, the list named in the page's `/Properties`:
+//! `/Artifact /Sh… BDC … EMC`. [`strip`] removes those again, and
+//! Acrobat's, so Update and Remove work on files Acrobat marked too; an
+//! author's own running heads stay (proposal 31).
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
-use lopdf::content::{Content, Operation};
-use lopdf::{Dictionary, Document as Pdf, Object, ObjectId, Stream, dictionary};
+use lopdf::{Dictionary, Document as Pdf, Object, Stream, dictionary};
 use serde::{Deserialize, Serialize};
 use sheaf_core::PageSize;
 
-use crate::annot::{PageGeom, Pt};
+use crate::annot::Pt;
+use crate::attachments::Objects;
+use crate::content::{
+    self, Color, ContentError, ContentWriter, DrawnForms, Font, PagOrigin, PageBlocks, PageContent,
+    Pagination, PaginationKind, ResCx, ResObjects, Reserved, ResourceNeeds, Std14,
+};
+use crate::geom::{Affine, Geom};
 use crate::model::PageId;
+use crate::source::Limits;
 
 /// Bates numbering: `<prefix><number, zero-padded to digits><suffix>`,
 /// counting pages in scope in document order from `start`.
@@ -151,16 +159,37 @@ impl HeaderFooter {
             )
     }
 
+    /// Each slot's text on the page `f` says, by slot, the empty ones left
+    /// out: what [`layout`](Self::layout) places and
+    /// [`unencodable`](Self::unencodable) reads.
+    fn slots<'a>(&'a self, f: &'a PageFacts) -> impl Iterator<Item = (usize, String)> + 'a {
+        self.texts
+            .iter()
+            .enumerate()
+            .map(|(slot, text)| (slot, self.expand(text, f)))
+            .filter(|(_, text)| !text.trim().is_empty())
+    }
+
+    /// Whether some of its text can't be drawn in [`FONT`]: it shows as
+    /// `?` in the file. Its tokens draw the same characters on every page
+    /// but the digits, which every font has, so the first page answers
+    /// for all.
+    pub fn unencodable(&self) -> bool {
+        let first = PageFacts {
+            index: 0,
+            count: 1,
+            bates: self.bates.as_ref().map(|b| b.start),
+        };
+        self.slots(&first)
+            .any(|(_, text)| FONT.encode(&text).1.0 > 0)
+    }
+
     /// The texts on a page of `size` (as shown).
     pub fn layout(&self, size: PageSize, f: &PageFacts) -> Vec<Placed> {
         let fs = self.font_size;
         let mut out = Vec::new();
-        for (slot, text) in self.texts.iter().enumerate() {
-            let text = self.expand(text, f);
-            if text.trim().is_empty() {
-                continue;
-            }
-            let width = helvetica_width(&text, fs);
+        for (slot, text) in self.slots(f) {
+            let width = FONT.width(&text, fs);
             let x = match slot % 3 {
                 0 => self.left,
                 1 => (size.width - width) / 2.0,
@@ -204,182 +233,87 @@ impl HeaderFooter {
     }
 }
 
-/// Helvetica's advance widths (AFM, per 1000 em) for printable ASCII.
-const HELVETICA: [u16; 95] = [
-    278, 278, 355, 556, 556, 889, 667, 191, 333, 333, 389, 584, 278, 333, 278,
-    278, // ␠ … /
-    556, 556, 556, 556, 556, 556, 556, 556, 556, 556, // 0-9
-    278, 278, 584, 584, 584, 556, 1015, // : … @
-    667, 667, 722, 722, 667, 611, 778, 722, 278, 500, 667, 556, 833, 722, 778, 667, 778, 722, 667,
-    611, 722, 667, 944, 667, 667, 611, // A-Z
-    278, 278, 278, 469, 556, 333, // [ … `
-    556, 556, 500, 556, 556, 278, 556, 556, 222, 222, 500, 222, 833, 556, 556, 556, 556, 333, 500,
-    278, 556, 500, 722, 500, 500, 500, // a-z
-    334, 260, 334, 584, // { … ~
-];
-
-/// Helvetica-Bold's, the same way.
-const HELVETICA_BOLD: [u16; 95] = [
-    278, 333, 474, 556, 556, 889, 722, 238, 333, 333, 389, 584, 278, 333, 278,
-    278, // ␠ … /
-    556, 556, 556, 556, 556, 556, 556, 556, 556, 556, // 0-9
-    333, 333, 584, 584, 584, 611, 975, // : … @
-    722, 722, 722, 722, 667, 611, 778, 722, 278, 556, 722, 611, 833, 722, 778, 667, 778, 722, 667,
-    611, 722, 667, 944, 667, 667, 611, // A-Z
-    333, 278, 333, 584, 556, 333, // [ … `
-    556, 611, 556, 611, 556, 333, 611, 611, 278, 278, 556, 278, 889, 611, 611, 611, 611, 389, 556,
-    333, 611, 556, 778, 556, 556, 500, // a-z
-    389, 280, 389, 584, // { … ~
-];
-
-/// The advance of `c` in Helvetica (or Helvetica-Bold), per 1000 em: the
-/// AFM widths of ASCII and of WinAnsi's punctuation; anything else counts
-/// as an "n".
-pub fn helvetica_advance(c: char, bold: bool) -> f32 {
-    let w = match c as u32 {
-        32..=126 if bold => HELVETICA_BOLD[c as usize - 32],
-        32..=126 => HELVETICA[c as usize - 32],
-        _ => match (c, bold) {
-            ('‘' | '’' | '‚', false) => 222,
-            ('‘' | '’' | '‚', true) => 278,
-            ('“' | '”' | '„', false) => 333,
-            ('“' | '”' | '„', true) => 500,
-            ('•', _) => 350,
-            ('‹' | '›', _) => 333,
-            ('…' | '—' | '‰' | '™', _) => 1000,
-            _ => 556,
-        },
-    };
-    w as f32
-}
-
-pub fn helvetica_width(s: &str, size: f32) -> f32 {
-    s.chars().map(|c| helvetica_advance(c, false)).sum::<f32>() * size / 1000.0
-}
-
-/// `s` in WinAnsi: printable ASCII and Latin-1 as they are, the curly
-/// quotes, dashes and the rest of Windows-1252's punctuation at their
-/// codes, anything else as "?".
-pub fn win_ansi(s: &str) -> Vec<u8> {
-    s.chars()
-        .map(|c| match c as u32 {
-            0x20..=0x7e | 0xa0..=0xff => c as u8,
-            _ => match c {
-                '€' => 0x80,
-                '‚' => 0x82,
-                '„' => 0x84,
-                '…' => 0x85,
-                '†' => 0x86,
-                '‡' => 0x87,
-                '‰' => 0x89,
-                '‹' => 0x8b,
-                '‘' => 0x91,
-                '’' => 0x92,
-                '“' => 0x93,
-                '”' => 0x94,
-                '•' => 0x95,
-                '–' => 0x96,
-                '—' => 0x97,
-                '™' => 0x99,
-                '›' => 0x9b,
-                _ => b'?',
-            },
-        })
-        .collect()
-}
-
-/// `s` as a PDF literal string's bytes (without the parentheses), in
-/// WinAnsi.
-pub fn pdf_literal(s: &str) -> Vec<u8> {
-    win_ansi(s)
-        .into_iter()
-        .flat_map(|b| match b {
-            b'(' | b')' | b'\\' => vec![b'\\', b],
-            b => vec![b],
-        })
-        .collect()
-}
-
-/// The resource name our font goes by on a page.
+/// What the header/footer is drawn in.
+pub const FONT: Std14 = Std14::Helvetica;
+/// The resource name its font goes by on a page, until slice 17's
+/// generator.
 pub const FONT_NAME: &str = "SheafHF";
 /// Marks our artifacts so they can be found again.
 const MARKER: &str = "SheafStamp";
 
-/// The artifact stream for `placed` on a page with geometry `geom` whose
-/// shown orientation includes `extra` degrees of rotation beyond the
-/// file's own (sheaf's page rotation).
-pub fn to_content(placed: &[Placed], color: [u8; 3], geom: &PageGeom, extra: i32) -> Vec<u8> {
+/// The artifact stream for `placed`, laid out on the page as it shows
+/// with geometry `geom`, its rotation the page's, absolute; and the
+/// resources it draws with, named clear of `reserved`. Each piece of text
+/// is an `/Artifact` whose property list is named in the page's
+/// `/Properties`. It starts with the `Q` that closes the `q` [`install`]
+/// puts before the page's own content.
+pub fn to_content(
+    placed: &[Placed],
+    color: [u8; 3],
+    geom: &Geom,
+    reserved: &Reserved,
+) -> (Vec<u8>, ResourceNeeds) {
     // Draw in the shown frame: map shown points to user space.
-    let rotate = (geom.rotate + extra).rem_euclid(360);
-    let g = PageGeom {
-        media: geom.media,
-        rotate,
-    };
-    let theta = (rotate as f32).to_radians();
+    let to_user = geom.from_view();
+    let theta = (geom.rotate.degrees() as f32).to_radians();
     let (cs, sn) = (theta.cos(), theta.sin());
-    let [r, gr, b] = color.map(|v| v as f32 / 255.0);
-    let mut s = b"Q\n".to_vec();
+    let mut w = ContentWriter::new();
+    w.restore();
     for p in placed {
         let subtype = if p.header { "Header" } else { "Footer" };
-        let o = g.to_user(Pt {
+        let o = to_user.apply(Pt {
             x: p.x,
             y: p.baseline,
         });
-        s.extend_from_slice(
-            format!(
-                "/Artifact <</Type /Pagination /Subtype /{subtype} /{MARKER} true>> BDC\n\
-                 q BT {r:.3} {gr:.3} {b:.3} rg /{FONT_NAME} {:.2} Tf \
-                 {cs:.4} {sn:.4} {:.4} {cs:.4} {:.3} {:.3} Tm (",
-                p.size, -sn, o.x, o.y
-            )
-            .as_bytes(),
+        w.begin_marked(
+            "Artifact",
+            dictionary! {
+                "Type" => "Pagination",
+                "Subtype" => Object::Name(subtype.into()),
+                MARKER => true,
+            },
         );
-        s.extend(pdf_literal(&p.text));
-        s.extend_from_slice(b") Tj ET Q\nEMC\n");
+        w.save();
+        w.begin_text();
+        w.fill_color(Color::rgb8(color));
+        w.font(&FONT, p.size);
+        w.text_matrix(Affine {
+            a: cs,
+            b: sn,
+            c: -sn,
+            d: cs,
+            e: o.x,
+            f: o.y,
+        });
+        w.text(&p.text);
+        w.end_text();
+        w.restore();
+        w.end_marked();
     }
-    s
+    w.finish(reserved, &[(FONT.resource().id, FONT_NAME)])
 }
 
-/// Objects shared by every page's stamp: a font and the `q` that
-/// isolates the page's own content.
-#[derive(Clone, Copy)]
-pub struct StampObjects {
-    font: ObjectId,
-    q: ObjectId,
-}
-
-fn objects(pdf: &mut Pdf, cache: &mut Option<StampObjects>) -> StampObjects {
-    if let Some(o) = *cache {
-        return o;
-    }
-    let font = pdf.add_object(dictionary! {
-        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
-        "Encoding" => "WinAnsiEncoding",
-    });
-    let q = pdf.add_object(Stream::new(dictionary! {}, b"q\n".to_vec()));
-    let o = StampObjects { font, q };
-    *cache = Some(o);
-    o
-}
-
-/// Draw `placed` on `page`, after its own content.
+/// Draw `placed` on `page`, after its own content, as [`to_content`]
+/// lays it out: `/Contents` becomes `[q, original…, ours]`, the `q` and
+/// the resources written once a save through `res`.
 pub fn install(
     pdf: &mut Pdf,
     page: &mut Dictionary,
     placed: &[Placed],
     color: [u8; 3],
-    geom: &PageGeom,
-    extra: i32,
-    cache: &mut Option<StampObjects>,
+    geom: &Geom,
+    res: &mut ResObjects,
 ) {
     if placed.is_empty() {
         return;
     }
-    let o = objects(pdf, cache);
-    let mut stream = Stream::new(dictionary! {}, to_content(placed, color, geom, extra));
+    let reserved = Reserved::read(pdf, page.get(b"Resources").ok());
+    let (content, needs) = to_content(placed, color, geom, &reserved);
+    let q = res.stream(pdf, dictionary! {}, b"q\n".to_vec());
+    let mut stream = Stream::new(dictionary! {}, content);
     let _ = stream.compress();
     let ours = pdf.add_object(stream);
-    let mut entries = vec![Object::Reference(o.q)];
+    let mut entries = vec![Object::Reference(q)];
     match page.get(b"Contents").ok().cloned() {
         None => {}
         Some(Object::Array(a)) => entries.extend(a),
@@ -391,140 +325,75 @@ pub fn install(
     }
     entries.push(Object::Reference(ours));
     page.set("Contents", Object::Array(entries));
-    let deref_dict = |pdf: &Pdf, o: Option<&Object>| -> Dictionary {
-        o.and_then(|o| pdf.dereference(o).ok())
-            .and_then(|(_, o)| o.as_dict().ok().cloned())
-            .unwrap_or_default()
-    };
-    let mut resources = deref_dict(pdf, page.get(b"Resources").ok());
-    let mut fonts = deref_dict(pdf, resources.get(b"Font").ok());
-    fonts.set(FONT_NAME, Object::Reference(o.font));
-    resources.set("Font", Object::Dictionary(fonts));
+    let mut resources = content::resources_of(pdf, page);
+    res.bind(pdf, &needs, &mut resources);
     page.set("Resources", Object::Dictionary(resources));
 }
 
-/// Artifact subtypes, by what they are.
-pub const HEADER_FOOTER: &[&[u8]] = &[b"Header", b"Footer"];
-pub const WATERMARK: &[&[u8]] = &[b"Watermark"];
-pub const BACKGROUND: &[&[u8]] = &[b"Background"];
+/// Pagination kinds, by what's removed together.
+pub const HEADER_FOOTER: &[PaginationKind] = &[PaginationKind::Header, PaginationKind::Footer];
+pub const WATERMARK: &[PaginationKind] = &[PaginationKind::Watermark];
+pub const BACKGROUND: &[PaginationKind] = &[PaginationKind::Background];
 
-/// Is this the property list of a pagination artifact of one of `kinds`
-/// (ours or Acrobat's)?
-fn is_kind(props: &Object, pdf: &Pdf, kinds: &[&[u8]]) -> bool {
-    let Ok((_, Object::Dictionary(d))) = pdf.dereference(props) else {
-        return false;
-    };
-    let name = |k: &[u8]| d.get(k).ok().and_then(|o| o.as_name().ok());
-    (name(b"Type") == Some(b"Pagination") || d.has(MARKER.as_bytes()))
-        && name(b"Subtype").is_some_and(|s| kinds.contains(&s))
+/// The pagination artifacts of `kinds` that [`strip`] removes from a page
+/// whose blocks are `blocks`: Acrobat's and sheaf's, never an author's own
+/// (proposal 31), which slice 17's `include_authored` asks for.
+pub fn stripped<'a>(
+    blocks: &'a PageBlocks,
+    kinds: &'a [PaginationKind],
+) -> impl Iterator<Item = &'a Pagination> + 'a {
+    blocks
+        .pagination
+        .iter()
+        .filter(|p| kinds.contains(&p.kind) && p.origin != PagOrigin::Authored)
 }
 
-/// Remove artifacts of `kinds` from one content stream's operations.
-/// Returns whether any went.
-fn strip_ops(ops: &mut Vec<Operation>, pdf: &Pdf, kinds: &[&[u8]]) -> bool {
-    let mut out = Vec::with_capacity(ops.len());
-    // Depth of marked content inside a stripped artifact, or none.
-    let mut skipping: Option<usize> = None;
-    let mut removed = false;
-    for op in ops.drain(..) {
-        match (&mut skipping, op.operator.as_str()) {
-            (Some(d), "BDC" | "BMC") => *d += 1,
-            (Some(d), "EMC") => {
-                if *d == 0 {
-                    skipping = None;
-                } else {
-                    *d -= 1;
-                }
-            }
-            (Some(_), _) => {}
-            (None, "BDC")
-                if op.operands.first().and_then(|o| o.as_name().ok()) == Some(b"Artifact")
-                    && op.operands.get(1).is_some_and(|p| is_kind(p, pdf, kinds)) =>
-            {
-                skipping = Some(0);
-                removed = true;
-            }
-            (None, _) => out.push(op),
-        }
+/// Remove the pagination artifacts of `kinds` ([`HEADER_FOOTER`],
+/// [`WATERMARK`], [`BACKGROUND`]) that Acrobat or sheaf drew from `page`'s
+/// content ([`stripped`]); `index` is the page's, from 0, for errors. The
+/// page's streams are spliced: what isn't removed stays byte for byte, and
+/// each stream that changes is written as a new object, so a page that
+/// shares it keeps it. Content that can't be read, or an artifact that
+/// can't be removed without changing what else the page draws, is an
+/// error, and nothing is changed. Returns whether any were found.
+pub fn strip(
+    pdf: &mut Pdf,
+    page: &mut Dictionary,
+    index: u32,
+    kinds: &[PaginationKind],
+) -> Result<bool, ContentError> {
+    let lim = Limits::DEFAULT;
+    let read = |fault| ContentError::Read { page: index, fault };
+    let content = PageContent::read(pdf, &content::contents(page), &lim).map_err(read)?;
+    let resources = page.get(b"Resources").ok();
+    let blocks =
+        PageBlocks::of(pdf, &content, resources, &lim, &DrawnForms::default()).map_err(read)?;
+    let res = ResCx::read(pdf, resources);
+    let mut drop = Vec::new();
+    for p in stripped(&blocks, kinds) {
+        let cuts = p.cuts(content.concat(), &res, &lim);
+        drop.extend(cuts.map_err(|e| read(content.fault(e)))?);
     }
-    *ops = out;
-    removed
-}
-
-/// Remove artifacts of `kinds` ([`HEADER_FOOTER`], [`WATERMARK`],
-/// [`BACKGROUND`]) from `page`'s content, rewriting the streams that had
-/// any. Returns whether any were found.
-pub fn strip(pdf: &mut Pdf, page: &Dictionary, kinds: &[&[u8]]) -> bool {
-    let ids: Vec<ObjectId> = match page.get(b"Contents") {
-        Ok(Object::Reference(r)) => match pdf.get_object(*r) {
-            Ok(Object::Array(a)) => a.iter().filter_map(|o| o.as_reference().ok()).collect(),
-            _ => vec![*r],
-        },
-        Ok(Object::Array(a)) => a.iter().filter_map(|o| o.as_reference().ok()).collect(),
-        _ => Vec::new(),
-    };
-    let mut any = false;
-    for id in ids {
-        let Ok(Object::Stream(s)) = pdf.get_object(id) else {
-            continue;
-        };
-        let bytes = s
-            .decompressed_content()
-            .unwrap_or_else(|_| s.content.clone());
-        // Cheap test before parsing.
-        if !contains(&bytes, b"Artifact") {
-            continue;
-        }
-        let Ok(mut content) = Content::decode(&bytes) else {
-            continue;
-        };
-        if strip_ops(&mut content.operations, pdf, kinds)
-            && let Ok(encoded) = content.encode()
-        {
-            let mut stream = Stream::new(dictionary! {}, encoded);
-            let _ = stream.compress();
-            pdf.objects.insert(id, Object::Stream(stream));
-            any = true;
-        }
+    if drop.is_empty() {
+        return Ok(false);
     }
-    any
-}
-
-/// Whether `page`'s content may have artifacts of `kinds` (a quick look
-/// at the bytes: a false yes only costs an unneeded copy).
-pub fn has_artifacts(pdf: &Pdf, page: &Dictionary, kinds: &[&[u8]]) -> bool {
-    let streams: Vec<&Stream> = match page.get(b"Contents") {
-        Ok(Object::Reference(r)) => match pdf.get_object(*r) {
-            Ok(Object::Array(a)) => a
-                .iter()
-                .filter_map(|o| o.as_reference().ok())
-                .filter_map(|id| pdf.get_object(id).ok()?.as_stream().ok())
-                .collect(),
-            Ok(Object::Stream(s)) => vec![s],
-            _ => Vec::new(),
-        },
-        Ok(Object::Array(a)) => a
-            .iter()
-            .filter_map(|o| o.as_reference().ok())
-            .filter_map(|id| pdf.get_object(id).ok()?.as_stream().ok())
-            .collect(),
-        _ => Vec::new(),
-    };
-    streams.iter().any(|s| {
-        let bytes = s
-            .decompressed_content()
-            .unwrap_or_else(|_| s.content.clone());
-        contains(&bytes, b"/Artifact")
-            && kinds.iter().any(|k| {
-                let mut tag = b"/".to_vec();
-                tag.extend_from_slice(k);
-                contains(&bytes, &tag)
-            })
-    })
-}
-
-fn contains(hay: &[u8], needle: &[u8]) -> bool {
-    hay.windows(needle.len()).any(|w| w == needle)
+    let streams = content::splice(content.concat(), &res, &lim, &drop)
+        .map_err(|error| ContentError::Unsafe { page: index, error })?;
+    let entries: Vec<Object> = content
+        .ids()
+        .iter()
+        .zip(streams)
+        .map(|(&id, stream)| match stream {
+            Cow::Borrowed(_) => id.into(),
+            Cow::Owned(bytes) => {
+                let mut stream = Stream::new(dictionary! {}, bytes);
+                let _ = stream.compress();
+                pdf.add_object(stream).into()
+            }
+        })
+        .collect();
+    page.set("Contents", entries);
+    Ok(true)
 }
 
 /// The catalog key sheaf keeps its header/footer settings under, so
@@ -561,7 +430,7 @@ pub fn to_catalog(hf: &HeaderFooter, pages: &[PageId]) -> Object {
 
 /// Settings read back from a file's catalog: the header/footer and the
 /// page indexes it was on (none: every page).
-pub fn from_catalog(pdf: &Pdf) -> Option<(HeaderFooter, Option<Vec<usize>>)> {
+pub fn from_catalog<P: Objects + ?Sized>(pdf: &P) -> Option<(HeaderFooter, Option<Vec<usize>>)> {
     let catalog = pdf.catalog().ok()?;
     let s = catalog.get(CATALOG_KEY.as_bytes()).ok()?.as_str().ok()?;
     let stored: Stored = serde_json::from_slice(s).ok()?;
@@ -573,7 +442,10 @@ pub type Shared = Arc<HeaderFooter>;
 
 #[cfg(test)]
 mod tests {
+    use lopdf::ObjectId;
+
     use super::*;
+    use crate::content::{Res, ResKind};
 
     fn hf() -> HeaderFooter {
         HeaderFooter {
@@ -634,54 +506,335 @@ mod tests {
         assert_eq!(h.bates_text(7), "ABC000007");
     }
 
+    /// A slot is as wide as Helvetica draws it, whatever its characters.
     #[test]
-    fn widths_are_helvetica() {
-        assert_eq!(helvetica_width("Il", 1000.0), 278.0 + 222.0);
-        assert_eq!(helvetica_advance('m', true), 889.0);
-        assert_eq!(helvetica_advance('“', false), 333.0);
+    fn slots_are_as_wide_as_helvetica_draws_them() {
+        let h = HeaderFooter {
+            texts: ["Il “€”", "Œuvre", "Ω", "", "", ""].map(String::from),
+            ..Default::default()
+        };
+        let size = PageSize {
+            width: 612.0,
+            height: 792.0,
+        };
+        let f = PageFacts {
+            index: 0,
+            count: 1,
+            bates: None,
+        };
+        let widths: Vec<f32> = h.layout(size, &f).iter().map(|p| p.width).collect();
+        // I l space “ € ” at 10 pt; Œ u v r e; Ω draws `?`.
+        let at_10 = |w: f32| w * 10.0 / 1000.0;
+        assert_eq!(
+            widths[0],
+            at_10(278.0 + 222.0 + 278.0 + 333.0 + 556.0 + 333.0)
+        );
+        assert_eq!(widths[1], at_10(1000.0 + 556.0 + 500.0 + 333.0 + 556.0));
+        assert_eq!(widths[2], at_10(556.0));
     }
 
-    #[test]
-    fn text_goes_out_in_win_ansi() {
-        assert_eq!(win_ansi("é “x” – €"), b"\xe9 \x93x\x94 \x96 \x80");
-        assert_eq!(pdf_literal("(a\\b)"), b"\\(a\\\\b\\)");
-        // A header's Latin-1 is one byte each in the page, not UTF-8.
-        let placed = [Placed {
+    fn placed(text: &str) -> Placed {
+        Placed {
             header: true,
-            text: "Café".into(),
+            text: text.into(),
             x: 10.0,
             baseline: 20.0,
             size: 9.0,
             width: 20.0,
-        }];
-        let geom = PageGeom {
-            media: [0.0, 0.0, 612.0, 792.0],
-            rotate: 0,
+        }
+    }
+
+    /// Text goes out in WinAnsi, one byte a character, escaped, in
+    /// Helvetica named `/SheafHF`; the artifact's list is named.
+    #[test]
+    fn a_header_goes_out_in_win_ansi_with_a_named_list() {
+        let (out, needs) = to_content(
+            &[placed("Café “x” – € (a\\b)")],
+            [0, 0, 0],
+            &Geom::read(None, None, 0),
+            &Reserved::default(),
+        );
+        let text = b"(Caf\xe9 \x93x\x94 \x96 \x80 \\(a\\\\b\\)) Tj";
+        assert!(out.windows(text.len()).any(|w| w == text), "{out:?}");
+        assert!(out.starts_with(b"Q\n/Artifact /Sh"), "{out:?}");
+        assert!(!out.windows(2).any(|w| w == b"<<"), "no list inline");
+        let [list, font] = &needs.0[..] else {
+            panic!("{needs:?}")
         };
-        let out = to_content(&placed, [0, 0, 0], &geom, 0);
-        assert!(out.windows(6).any(|w| w == b"(Caf\xe9)"), "{out:?}");
+        assert_eq!((list.kind, font.kind), (ResKind::Properties, ResKind::Font));
+        assert_eq!(font.name, b"SheafHF");
+        assert_eq!(font.res, Std14::Helvetica.resource().into());
+        assert_eq!(
+            list.res,
+            Res::dict(dictionary! {
+                "Type" => "Pagination", "Subtype" => "Header", "SheafStamp" => true,
+            })
+        );
+        let name = format!("/{} BDC", String::from_utf8_lossy(&list.name));
+        assert!(String::from_utf8_lossy(&out).contains(&name), "{out:?}");
+    }
+
+    /// The same header gives the same bytes and names, twice and on two
+    /// threads.
+    #[test]
+    fn identical_headers_write_identical_bytes() {
+        fn write() -> (Vec<u8>, ResourceNeeds) {
+            let hf = HeaderFooter {
+                texts: [
+                    "Café “x”".into(),
+                    "Page <<1>> of <<N>>".into(),
+                    "<<bates>>".into(),
+                    "<<file>>".into(),
+                    String::new(),
+                    "<<date>>".into(),
+                ],
+                file: "report.pdf".into(),
+                date: "2026-10-17".into(),
+                bates: Some(Bates::default()),
+                ..Default::default()
+            };
+            let geom = Geom::read(None, None, 90);
+            let facts = PageFacts {
+                index: 4,
+                count: 9,
+                bates: Some(17),
+            };
+            let placed = hf.layout(geom.shown(), &facts);
+            to_content(&placed, [200, 30, 30], &geom, &Reserved::default())
+        }
+        let first = write();
+        assert_eq!(write(), first);
+        let threads: Vec<_> = (0..2).map(|_| std::thread::spawn(write)).collect();
+        for t in threads {
+            assert_eq!(t.join().unwrap(), first);
+        }
+    }
+
+    /// A header installed and then stripped leaves the page drawing what it
+    /// drew: its own stream, untouched, between the isolating `q` and `Q`.
+    /// Pages share the `q`, the font and the list, and a page that has the
+    /// list already names it as before.
+    #[test]
+    fn a_header_installed_then_stripped_leaves_the_page_as_it_was() {
+        let mut pdf = Pdf::with_version("1.7");
+        let body = pdf.add_object(Stream::new(dictionary! {}, b"0 0 9 9 re f".to_vec()));
+        let page = || dictionary! { "Contents" => body, "Resources" => dictionary! {} };
+        let (mut first, mut second) = (page(), page());
+        let geom = Geom::read(None, None, 0);
+        let mut res = ResObjects::default();
+        for p in [&mut first, &mut second] {
+            install(&mut pdf, p, &[placed("Head")], [0; 3], &geom, &mut res);
+        }
+        let entries = |p: &Dictionary| content::contents(p);
+        let names = |p: &Dictionary, key: &[u8]| -> Vec<(Vec<u8>, Object)> {
+            let resources = p.get(b"Resources").unwrap().as_dict().unwrap();
+            let category = resources.get(key).unwrap().as_dict().unwrap();
+            category
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        };
+        assert_eq!(entries(&first)[0], entries(&second)[0], "one q");
+        for key in [&b"Font"[..], b"Properties"] {
+            assert_eq!(names(&first, key), names(&second, key), "one {key:?}");
+        }
+        let blocks = |pdf: &Pdf, p: &Dictionary| {
+            let resources = p.get(b"Resources").ok();
+            let (lim, known) = (&Limits::DEFAULT, DrawnForms::default());
+            PageBlocks::read(pdf, &content::contents(p), resources, lim, &known).unwrap()
+        };
+        let found: Vec<_> = blocks(&pdf, &first)
+            .pagination
+            .iter()
+            .map(|p| (p.kind, p.origin))
+            .collect();
+        assert_eq!(
+            found,
+            [(PaginationKind::Header, content::PagOrigin::SheafLegacy)]
+        );
+
+        assert!(strip(&mut pdf, &mut first, 0, HEADER_FOOTER).unwrap());
+        assert!(!blocks(&pdf, &first).has(HEADER_FOOTER));
+        let after = streams(&pdf, &first);
+        let kept: Vec<&[u8]> = after.iter().map(|(_, s)| s.trim_ascii()).collect();
+        assert_eq!(kept, [&b"q"[..], b"0 0 9 9 re f", b"Q"]);
+        assert_eq!(after[1].0, body);
+        assert_eq!(blocks(&pdf, &first).balance, Default::default());
+
+        // Written again, the list keeps its name rather than being bumped.
+        let before = names(&first, b"Properties");
+        install(
+            &mut pdf,
+            &mut first,
+            &[placed("Head")],
+            [0; 3],
+            &geom,
+            &mut res,
+        );
+        assert_eq!(names(&first, b"Properties"), before);
+    }
+
+    /// A page of `streams`, each its own object in `pdf`.
+    fn page_of(pdf: &mut Pdf, streams: &[&[u8]]) -> Dictionary {
+        let ids: Vec<Object> = streams
+            .iter()
+            .map(|s| {
+                pdf.add_object(Stream::new(dictionary! {}, s.to_vec()))
+                    .into()
+            })
+            .collect();
+        dictionary! { "Contents" => ids }
+    }
+
+    /// `page`'s streams, by object, decoded.
+    fn streams(pdf: &Pdf, page: &Dictionary) -> Vec<(ObjectId, Vec<u8>)> {
+        let content = PageContent::read(pdf, &content::contents(page), &Limits::DEFAULT).unwrap();
+        let c = content.concat();
+        let ids = content.ids().iter().copied();
+        ids.zip((0..c.stream_count()).map(|i| c.stream(i).to_vec()))
+            .collect()
+    }
+
+    /// A header sheaf drew before M10.5.
+    const HEADER: &[u8] = b"/Artifact <</Type /Pagination /Subtype /Header /SheafStamp true>> BDC \
+        q BT /F1 9 Tf (Head) Tj ET Q EMC";
+
+    /// Strip takes sheaf's and Acrobat's artifacts of its kinds, and leaves
+    /// the rest byte for byte: other kinds, other artifacts, and an
+    /// author's own running heads (proposal 31).
+    #[test]
+    fn strip_removes_its_kinds_and_nothing_else() {
+        let mut pdf = Pdf::with_version("1.7");
+        let authored = b"/Artifact <</Type /Pagination /Subtype /Header>> BDC (author) Tj EMC";
+        let content = [
+            b"q 1 0 0 rg 0 0 10 10 re f Q\n".as_slice(),
+            HEADER,
+            b"\n/Artifact <</Type /Layout>> BDC 0 0 m 9 9 l S EMC\n\
+            /Artifact <</Type /Pagination /Subtype /Footer /SheafStamp true>> BDC \
+            /Span <</ActualText (x)>> BDC (nested) Tj EMC EMC\n",
+            authored,
+            b"\n/Artifact <</Type /Pagination /Subtype /Watermark /SheafStamp true>> BDC \
+            (wm) Tj EMC\n0 0 1 rg",
+        ]
+        .concat();
+        let mut page = page_of(&mut pdf, &[&content]);
+        assert!(strip(&mut pdf, &mut page, 0, HEADER_FOOTER).unwrap());
+        // Byte for byte, but for sheaf's header and footer.
+        let [(_, out)] = &streams(&pdf, &page)[..] else {
+            panic!("one stream")
+        };
+        assert_eq!(
+            String::from_utf8_lossy(out),
+            "q 1 0 0 rg 0 0 10 10 re f Q\n\
+             \n/Artifact <</Type /Layout>> BDC 0 0 m 9 9 l S EMC\n\
+             \n\
+             /Artifact <</Type /Pagination /Subtype /Header>> BDC (author) Tj EMC\n\
+             /Artifact <</Type /Pagination /Subtype /Watermark /SheafStamp true>> BDC \
+             (wm) Tj EMC\n0 0 1 rg"
+        );
+        assert!(!strip(&mut pdf, &mut page, 0, HEADER_FOOTER).unwrap());
+        assert!(strip(&mut pdf, &mut page, 0, WATERMARK).unwrap());
+    }
+
+    /// Unfiltered data holding ` EI ` is counted, not scanned for: a strip
+    /// leaves the image as it was.
+    #[test]
+    fn an_inline_image_holding_ei_survives_a_strip() {
+        let image: &[u8] = b"BI /W 6 /H 1 /BPC 8 /CS /G ID  EI EI\nEI";
+        let content = [HEADER, b"\nq 6 0 0 1 0 0 cm ", image, b" Q"].concat();
+        let mut pdf = Pdf::with_version("1.7");
+        let mut page = page_of(&mut pdf, &[&content]);
+        assert!(strip(&mut pdf, &mut page, 0, HEADER_FOOTER).unwrap());
+        let [(_, out)] = &streams(&pdf, &page)[..] else {
+            panic!("one stream")
+        };
+        assert_eq!(out, &[b"\nq 6 0 0 1 0 0 cm ", image, b" Q"].concat());
+    }
+
+    /// A header that opens in one stream and ends in the next goes: both
+    /// streams are written anew, and the rest stay as they were.
+    #[test]
+    fn a_header_across_two_streams_goes() {
+        let mut pdf = Pdf::with_version("1.7");
+        let mut page = page_of(
+            &mut pdf,
+            &[
+                b"q 0 0 1 rg /Artifact <</Subtype /Header /SheafStamp true>> BDC q BT /F1 9 Tf",
+                b"(Head) Tj ET Q EMC 0 0 9 9 re f Q",
+                b"0 g",
+            ],
+        );
+        let before = streams(&pdf, &page);
+        assert!(strip(&mut pdf, &mut page, 0, HEADER_FOOTER).unwrap());
+        let after = streams(&pdf, &page);
+        assert_eq!(after[0].1, b"q 0 0 1 rg ");
+        assert_eq!(after[1].1, b" 0 0 9 9 re f Q");
+        assert_eq!(after[2], before[2]);
+        assert!(after[0].0 != before[0].0 && after[1].0 != before[1].0);
+        // The old streams are as they were.
+        for (id, bytes) in &before {
+            let s = pdf.get_object(*id).unwrap().as_stream().unwrap();
+            assert_eq!(&s.content, bytes);
+        }
+    }
+
+    /// Blank pages share a stream: stripping one page leaves the stream,
+    /// and so the other page, as it was.
+    #[test]
+    fn a_shared_stream_is_never_changed_in_place() {
+        let mut pdf = Pdf::with_version("1.7");
+        let shared = pdf.add_object(Stream::new(dictionary! {}, HEADER.to_vec()));
+        let mut first = dictionary! { "Contents" => shared };
+        let second = dictionary! { "Contents" => shared };
+        assert!(strip(&mut pdf, &mut first, 0, HEADER_FOOTER).unwrap());
+        assert_ne!(content::contents(&first), [shared]);
+        assert_eq!(streams(&pdf, &first)[0].1, b"");
+        assert_eq!(streams(&pdf, &second), [(shared, HEADER.to_vec())]);
     }
 
     #[test]
-    fn strip_removes_ours_and_acrobats() {
+    fn content_that_cant_be_read_is_an_error_naming_the_page() {
         let mut pdf = Pdf::with_version("1.7");
-        let content = b"q 1 0 0 rg 0 0 10 10 re f Q\n\
-            /Artifact <</Type /Pagination /Subtype /Header>> BDC BT /F1 9 Tf (Acrobat) Tj ET EMC\n\
-            /Artifact <</Type /Layout>> BDC 0 0 m EMC\n\
-            /Artifact <</Type /Pagination /Subtype /Footer /SheafStamp true>> BDC \
-            /Span <</ActualText (x)>> BDC (nested) Tj EMC EMC\n\
-            0 0 1 rg"
-            .to_vec();
-        let id = pdf.add_object(Stream::new(dictionary! {}, content));
-        let page = dictionary! { "Contents" => id };
-        assert!(has_artifacts(&pdf, &page, HEADER_FOOTER));
-        assert!(!has_artifacts(&pdf, &page, WATERMARK));
-        assert!(strip(&mut pdf, &page, HEADER_FOOTER));
-        let s = pdf.get_object(id).unwrap().as_stream().unwrap();
-        let out = String::from_utf8(s.decompressed_content().unwrap()).unwrap();
-        assert!(!out.contains("Acrobat") && !out.contains("nested"), "{out}");
-        // Other artifacts and the page's own drawing stay.
-        assert!(out.contains("Layout") && out.contains("re") && out.contains("rg"));
-        assert!(!has_artifacts(&pdf, &page, HEADER_FOOTER));
+        let bad = pdf.add_object(Stream::new(
+            dictionary! { "Filter" => "JBIG2Decode" },
+            b"q".to_vec(),
+        ));
+        let unended = [HEADER, b" /Artifact <</Subtype /Footer>> BDC (x) Tj"].concat();
+        for contents in [
+            vec![bad.into()],
+            page_of(&mut pdf, &[&unended])
+                .get(b"Contents")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .clone(),
+        ] {
+            let mut page = dictionary! { "Contents" => contents };
+            let before = page.clone();
+            let e = strip(&mut pdf, &mut page, 11, HEADER_FOOTER).unwrap_err();
+            assert!(matches!(e, ContentError::Read { page: 11, .. }), "{e}");
+            assert_eq!(
+                e.to_string(),
+                "page 12's content can't be read; nothing was changed"
+            );
+            assert_eq!(page, before);
+        }
+    }
+
+    /// A header drawn inside the body's text object that sets the font the
+    /// body text goes on in can't be taken out.
+    #[test]
+    fn a_header_that_cant_go_safely_is_refused() {
+        let mut pdf = Pdf::with_version("1.7");
+        let mut page = page_of(
+            &mut pdf,
+            &[b"BT /F1 12 Tf 72 700 Td \
+                /Artifact <</Subtype /Header /SheafStamp true>> BDC /F2 9 Tf (Head) Tj EMC \
+                (Body) Tj ET"],
+        );
+        let before = page.clone();
+        let e = strip(&mut pdf, &mut page, 2, HEADER_FOOTER).unwrap_err();
+        assert!(matches!(e, ContentError::Unsafe { page: 2, .. }), "{e}");
+        assert_eq!(page, before);
     }
 }

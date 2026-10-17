@@ -124,6 +124,22 @@ pub enum Error {
     /// Encountered when a differences glyph name is invalid.
     #[error("invalid encoding difference glyph name: {name}")]
     InvalidEncodingDifferenceGlyph { name: String },
+    /// sheaf: reading the file breaks one of [`crate::ReadLimits`]' caps.
+    #[error("the file breaks the {0} limit")]
+    Limit(Limit),
+}
+
+/// sheaf: a cap of [`crate::ReadLimits`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum Limit {
+    #[error("decompressed size")]
+    Decompressed,
+    #[error("cross-reference section")]
+    Sections,
+    #[error("object number")]
+    Objects,
+    #[error("resolution depth")]
+    Depth,
 }
 
 #[derive(Error, Debug)]
@@ -167,4 +183,7 @@ pub enum XrefError {
     /// The trailer's "XRefStm" field was invalid.
     #[error("invalid start value of XRefStm")]
     StreamStart,
+    /// sheaf: the table's first object in use isn't where its entry says.
+    #[error("the cross-reference table doesn't point at its objects")]
+    Offsets,
 }

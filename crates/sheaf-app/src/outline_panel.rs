@@ -10,14 +10,12 @@ use gpui::{
     AnchoredPositionMode, AnyElement, Context, DragMoveEvent, Entity, Focusable, MouseButton,
     Pixels, Point, Subscription, Window, anchored, deferred, div, point, prelude::*, px, rgb,
 };
-use sheaf_core::Rotation;
-use sheaf_doc::{DestView, Edit, OutlineId, OutlineNode, PageId, Pt};
+use sheaf_doc::{DestView, Edit, OutlineId, OutlineNode, PageId};
 use sheaf_ui::list::ListLayout;
 use sheaf_ui::text_input::{TextInput, TextInputEvent};
 use sheaf_ui::theme;
 
 use crate::docview::{DocView, ScrollTo, State};
-use crate::markup_tools::rotate_pt;
 use crate::{
     CollapseAllBookmarks, DeleteBookmark, DeselectBookmark, ExpandAllBookmarks, NewBookmark, Redo,
     RenameBookmark, Save, SetBookmarkDestination, Undo,
@@ -94,13 +92,13 @@ fn locate(
 
 impl DocView {
     /// The current view as a bookmark destination, as Acrobat records it:
-    /// the page in view and how far down it the top of the window is. None
-    /// for the position when the page's top is in view.
+    /// the page in view and how far down it the top of the window is, in
+    /// PageSpace. None for the position when the page's top is in view.
     pub(crate) fn current_view(&self) -> Option<(PageId, Option<DestView>)> {
         let State::Ready(doc) = &self.state else {
             return None;
         };
-        let pref = doc.shown_ref(doc.current_page())?;
+        let pref = doc.page_ref(doc.current_page())?;
         let pane = doc.pane();
         let Some(r) = pane
             .layout
@@ -114,19 +112,16 @@ impl DocView {
         if fy <= 0.0 {
             return Some((pref.id, None));
         }
-        // Back from the page as shown (with our rotation) to the page as the
-        // file draws it, where positions are kept.
-        let shown = doc.model.page_size(&pref);
-        let p = Pt {
-            x: 0.0,
-            y: fy.min(1.0) * shown.height,
-        };
-        let back = rotate_pt(p, shown, Rotation::R0.minus(pref.rotation));
+        // The page's left edge at the window's top, as the pane shows it.
+        let geom = doc.pane_geom(doc.current_page())?;
+        let (left, top) = geom
+            .from_view()
+            .apply_axes(Some(0.0), Some(fy.min(1.0) * geom.shown().height));
         Some((
             pref.id,
             Some(DestView::Xyz {
-                left: Some(back.x),
-                top: Some(back.y),
+                left,
+                top,
                 zoom: None,
             }),
         ))
@@ -141,23 +136,15 @@ impl DocView {
     ) {
         let point = match (view, &self.state) {
             (Some(DestView::Xyz { left, top, .. }), State::Ready(doc)) => {
-                doc.shown_ref(index).map(|pref| {
-                    // Positions are on the page as the file draws it; ours
-                    // may be turned, and so may the view.
-                    let src = doc
-                        .model
-                        .page_size(&pref)
-                        .rotated(Rotation::R0.minus(pref.rotation));
-                    let shown = doc.model.page_size(&pref);
-                    let p = rotate_pt(
-                        Pt {
-                            x: left.unwrap_or(0.0),
-                            y: top.unwrap_or(0.0),
-                        },
-                        src,
-                        pref.rotation,
-                    );
-                    (p.x / shown.width.max(1.0), p.y / shown.height.max(1.0))
+                doc.pane_geom(index).map(|geom| {
+                    // Positions are in PageSpace; the pane shows the page
+                    // turned, and a missing coordinate is the page's edge.
+                    let (x, y) = geom.to_view().apply_axes(*left, *top);
+                    let shown = geom.shown();
+                    (
+                        x.unwrap_or(0.0) / shown.width.max(1.0),
+                        y.unwrap_or(0.0) / shown.height.max(1.0),
+                    )
                 })
             }
             _ => None,
@@ -460,7 +447,7 @@ impl DocView {
                 }
             }));
 
-        if !doc.outline_loaded {
+        if !doc.model.is_ready() {
             return container
                 .p_2()
                 .text_sm()

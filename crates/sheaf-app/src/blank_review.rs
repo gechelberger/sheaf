@@ -115,7 +115,7 @@ impl DocView {
                 self.after_model_change(label.clone(), out, cx);
                 self.set_notice(format!("{label} — Ctrl+Z brings them back"), cx);
             }
-            Err(e) => self.set_notice(format!("Delete failed: {e:#}"), cx),
+            Err(e) => self.set_notice(crate::docview::failed("Delete", &e), cx),
         }
     }
 
@@ -140,14 +140,15 @@ impl DocView {
         let mut tiles = Vec::new();
         for (at, c) in &rows {
             let pref = st.pages[*at];
-            doc.review_keep.insert((pref.id, pref.rotation));
+            let rotation = doc.model.render_delta(&pref);
+            doc.review_keep.insert((pref.id, rotation));
             wants.push((
                 pref,
                 RenderRequest {
                     page: PageIndex(pref.index),
                     job: Job::Page {
                         width: 320,
-                        rotation: pref.rotation,
+                        rotation,
                     },
                     format: PixelFormat::Bgra,
                     priority: 3,
@@ -155,7 +156,7 @@ impl DocView {
             ));
             let size = doc.model.page_size(&pref);
             let h = THUMB * size.height / size.width.max(1.0);
-            let image = doc.previews.get(&(pref.id, pref.rotation)).cloned();
+            let image = doc.previews.get(&(pref.id, rotation)).cloned();
             let checked = review.checked.contains(&c.id);
             let id = c.id;
             let at = *at;

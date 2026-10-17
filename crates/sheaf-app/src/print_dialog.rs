@@ -14,7 +14,7 @@ use gpui::{
     RenderImage, Subscription, Task, Window, div, img, prelude::*, px,
 };
 use serde::{Deserialize, Serialize};
-use sheaf_core::{PageIndex, PageSize};
+use sheaf_core::PageIndex;
 use sheaf_doc::{PageId, Snapshot, SourceId};
 use sheaf_image::raster::PixelFormat;
 use sheaf_print::{Duplex, JobSettings, Orientation, Paper, Printer, Sizing};
@@ -494,7 +494,7 @@ impl PrintDialog {
             page: PageIndex(pref.index),
             job: Job::Page {
                 width,
-                rotation: pref.rotation,
+                rotation: self.ctx.snapshot.render_delta(&pref),
             },
             format: PixelFormat::Bgra,
             priority: 0,
@@ -785,16 +785,8 @@ impl PrintDialog {
         if let Some(index) = index
             && let Some(pref) = self.ctx.snapshot.state.pages.get(index).copied()
         {
-            let src = self
-                .ctx
-                .snapshot
-                .source(pref.source)
-                .map(|s| s.page_size(pref.index))
-                .unwrap_or(PageSize {
-                    width: 612.0,
-                    height: 792.0,
-                });
-            let shown = src.rotated(pref.rotation);
+            let geom = self.ctx.snapshot.geom(&pref);
+            let shown = geom.shown();
             let p = sheaf_print::place(
                 shown.width,
                 shown.height,
@@ -820,9 +812,12 @@ impl PrintDialog {
             if self.markup
                 && let Some(list) = self.ctx.snapshot.state.annots_on(pref.id)
             {
-                let k = w / shown.width.max(1.0);
+                let (to_view, k) = (geom.to_view(), w / shown.width.max(1.0));
                 for a in list.iter() {
-                    page = page.children(crate::docview::annot_elements(a, src, pref.rotation, k));
+                    let assets = &self.ctx.snapshot.assets;
+                    page = page.children(crate::docview::annot_elements(
+                        a, assets, &to_view, shown, k,
+                    ));
                 }
             }
             sheet = sheet.w(px(p.sheet_w * s)).h(px(p.sheet_h * s)).child(page);

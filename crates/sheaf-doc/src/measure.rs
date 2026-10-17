@@ -5,10 +5,11 @@
 //! `/PolygonDimension` and a `/Measure` dictionary, so Acrobat reads them
 //! as measurements.
 
-use lopdf::{Dictionary, Document as Pdf, Object, dictionary};
+use lopdf::{Dictionary, Object, dictionary};
 use serde::{Deserialize, Serialize};
 
 use crate::annot::Pt;
+use crate::attachments::Objects;
 
 /// What a measurement measures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -294,7 +295,7 @@ pub fn measure_dict(scale: &Scale) -> Dictionary {
         dictionary! {
             "Type" => "NumberFormat",
             "U" => Object::string_literal(unit),
-            "C" => Object::Real(c as f32),
+            "C" => Object::Real(c),
             "F" => "D",
             "D" => denominator,
         }
@@ -311,7 +312,7 @@ pub fn measure_dict(scale: &Scale) -> Dictionary {
 
 /// A scale from a `/Measure` dictionary: its x number format's unit and
 /// conversion (`/C`, real units per point), and decimals (`/D`).
-pub fn scale_of(pdf: &Pdf, measure: &Dictionary) -> Option<Scale> {
+pub fn scale_of<P: Objects + ?Sized>(pdf: &P, measure: &Dictionary) -> Option<Scale> {
     let deref = |o: &Object| match o {
         Object::Reference(id) => pdf.get_object(*id).ok().cloned(),
         o => Some(o.clone()),
@@ -324,7 +325,7 @@ pub fn scale_of(pdf: &Pdf, measure: &Dictionary) -> Option<Scale> {
         .ok()
         .map(crate::file::pdf_text)
         .unwrap_or_else(|| "pt".into());
-    let c = f.get(b"C").ok()?.as_float().ok()? as f64;
+    let c = f.get(b"C").ok()?.as_float().ok()?;
     let precision = f
         .get(b"D")
         .ok()
@@ -344,6 +345,7 @@ pub fn scale_of(pdf: &Pdf, measure: &Dictionary) -> Option<Scale> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lopdf::Document as Pdf;
 
     fn p(x: f32, y: f32) -> Pt {
         Pt { x, y }

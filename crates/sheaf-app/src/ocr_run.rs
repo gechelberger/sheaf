@@ -109,8 +109,8 @@ impl DocView {
                 id: p.id,
                 source: p.source,
                 index: p.index,
-                rotation: p.rotation,
-                size: doc.model.page_size(p),
+                geom: doc.model.geom(p),
+                render: doc.model.render_delta(p),
             })
             .collect();
         let sources: HashMap<_, Arc<dyn PageSource>> = doc
@@ -356,7 +356,7 @@ impl DocView {
                 }
                 Err(e) => {
                     log::error!("ocr: applying results: {e:#}");
-                    doc.notice = Some(format!("OCR: applying results failed: {e:#}"));
+                    doc.notice = Some(crate::docview::failed("OCR: applying results", &e));
                     false
                 }
             };

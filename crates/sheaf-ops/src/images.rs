@@ -3,10 +3,10 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use in_progress::{Progress, Unit};
 use serde::{Deserialize, Serialize};
 use sheaf_doc::images::PageFit;
 use sheaf_image::io::PageImage;
-use sheaf_progress::{Progress, Unit};
 
 /// Page size for pages made from images.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -57,7 +57,7 @@ pub fn read_all(
     if inputs.is_empty() {
         bail!("no images given");
     }
-    progress.set_total(Some(inputs.len() as u64), Unit::Items);
+    progress.set_total(Some(inputs.len() as u64), Unit::ITEMS);
     let mut pages = Vec::new();
     for (i, path) in inputs.iter().enumerate() {
         progress.check()?;

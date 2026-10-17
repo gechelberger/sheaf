@@ -3,7 +3,7 @@ pub mod crypt_filters;
 mod pkcs5;
 mod rc4;
 
-use crate::{Dictionary, Document, Error, Object, ObjectId};
+use crate::{Dictionary, Document, Error, Object, ObjectId, Stream};
 use bitflags::bitflags;
 use crypt_filters::*;
 use std::collections::BTreeMap;
@@ -52,6 +52,9 @@ pub enum DecryptionError {
 
     #[error("the document uses an encryption scheme that is not implemented in lopdf")]
     UnsupportedEncryption,
+    /// sheaf: a crypt filter named that is neither `/Identity` nor in `/CF`.
+    #[error("the crypt filter /{} is neither Identity nor in /CF", String::from_utf8_lossy(.0))]
+    UndefinedCryptFilter(Vec<u8>),
     #[error("the encryption version is not implemented in lopdf")]
     UnsupportedVersion,
     #[error("the encryption revision is not implemented in lopdf")]
@@ -210,6 +213,8 @@ pub struct EncryptionState {
     pub(crate) file_encryption_key: Vec<u8>,
     pub(crate) stream_filter: Vec<u8>,
     pub(crate) string_filter: Vec<u8>,
+    /// sheaf: `/EFF`, the filter for embedded files' data; the stream filter when `None`.
+    pub(crate) embedded_file_filter: Option<Vec<u8>>,
     pub(crate) owner_value: Vec<u8>,
     pub(crate) owner_encrypted: Vec<u8>,
     pub(crate) user_value: Vec<u8>,
@@ -506,6 +511,7 @@ fn aes256_state(revision: i64, params: Aes256Params<'_>) -> Result<EncryptionSta
         file_encryption_key: file_encryption_key.to_vec(),
         stream_filter,
         string_filter,
+        embedded_file_filter: None,
         owner_value: algorithm.owner_value,
         owner_encrypted: algorithm.owner_encrypted,
         user_value: algorithm.user_value,
@@ -547,6 +553,16 @@ impl EncryptionState {
 
     pub fn default_string_filter(&self) -> &[u8] {
         self.string_filter.as_ref()
+    }
+
+    /// sheaf: the filter for embedded files' data, `/EFF`: the stream filter unless one is named.
+    pub fn default_embedded_file_filter(&self) -> &[u8] {
+        self.embedded_file_filter.as_deref().unwrap_or(&self.stream_filter)
+    }
+
+    /// sheaf: names the filter for embedded files' data (`/EFF`, meaningful for V4 and V5).
+    pub fn set_embedded_file_filter(&mut self, name: Vec<u8>) {
+        self.embedded_file_filter = Some(name);
     }
 
     pub fn owner_value(&self) -> &[u8] {
@@ -632,22 +648,24 @@ impl EncryptionState {
         };
 
         // StmF and StrF are meaningful only when the value of V is 4 (PDF 1.5) or 5 (PDF 2.0).
+        // sheaf: and EFF. StmF and StrF are Identity when absent, and EFF is StmF (ISO 32000-1,
+        // Table 20). A filter named that isn't defined fails here, not at every object.
         if algorithm.version == 4 || algorithm.version == 5 {
-            if let Ok(stream_filter) = document
-                .get_encrypted()
-                .and_then(|dict| dict.get(b"StmF"))
-                .and_then(|object| object.as_name())
-            {
-                state.stream_filter = stream_filter.to_vec();
-            }
+            let name = |key: &[u8]| {
+                document
+                    .get_encrypted()
+                    .and_then(|dict| dict.get(key))
+                    .and_then(|object| object.as_name())
+                    .map(<[u8]>::to_vec)
+                    .ok()
+            };
+            state.stream_filter = name(b"StmF").unwrap_or_else(|| b"Identity".to_vec());
+            state.string_filter = name(b"StrF").unwrap_or_else(|| b"Identity".to_vec());
+            state.embedded_file_filter = name(b"EFF");
 
-            if let Ok(string_filter) = document
-                .get_encrypted()
-                .and_then(|dict| dict.get(b"StrF"))
-                .and_then(|object| object.as_name())
-            {
-                state.string_filter = string_filter.to_vec();
-            }
+            state.get_stream_filter()?;
+            state.get_string_filter()?;
+            state.get_embedded_file_filter()?;
         }
 
         Ok(state)
@@ -690,6 +708,10 @@ impl EncryptionState {
             encrypted.set(b"CF", Object::Dictionary(filters));
             encrypted.set(b"StmF", Object::Name(self.stream_filter.clone()));
             encrypted.set(b"StrF", Object::Name(self.string_filter.clone()));
+            // sheaf: EFF, when it isn't StmF.
+            if self.default_embedded_file_filter() != self.stream_filter {
+                encrypted.set(b"EFF", Object::Name(self.default_embedded_file_filter().to_vec()));
+            }
         }
 
         if self.revision >= 5 {
@@ -701,18 +723,38 @@ impl EncryptionState {
         Ok(encrypted)
     }
 
-    pub fn get_stream_filter(&self) -> Arc<dyn CryptFilter> {
-        self.crypt_filters
-            .get(&self.stream_filter)
-            .cloned()
-            .unwrap_or(Arc::new(Rc4CryptFilter))
+    // sheaf: the filters' names are resolved by `default_filter`: before V4 every filter is RC4;
+    // from V4 a name is `/Identity` or one of `/CF`'s, never RC4 for a name `/CF` doesn't have.
+    pub fn get_stream_filter(&self) -> Result<Arc<dyn CryptFilter>, DecryptionError> {
+        self.default_filter(&self.stream_filter)
     }
 
-    pub fn get_string_filter(&self) -> Arc<dyn CryptFilter> {
+    pub fn get_string_filter(&self) -> Result<Arc<dyn CryptFilter>, DecryptionError> {
+        self.default_filter(&self.string_filter)
+    }
+
+    /// sheaf: the filter for the data of an embedded file stream (`/Type /EmbeddedFile`).
+    pub fn get_embedded_file_filter(&self) -> Result<Arc<dyn CryptFilter>, DecryptionError> {
+        self.default_filter(self.default_embedded_file_filter())
+    }
+
+    /// sheaf: the filter a default (`StmF`, `StrF`, `EFF`) names, which is RC4 before V4.
+    fn default_filter(&self, name: &[u8]) -> Result<Arc<dyn CryptFilter>, DecryptionError> {
+        if self.version < 4 {
+            return Ok(Arc::new(Rc4CryptFilter));
+        }
+        self.named_filter(name)
+    }
+
+    /// sheaf: the crypt filter `name` names: the predefined `/Identity`, or one of `/CF`'s.
+    fn named_filter(&self, name: &[u8]) -> Result<Arc<dyn CryptFilter>, DecryptionError> {
+        if name == b"Identity" {
+            return Ok(Arc::new(IdentityCryptFilter));
+        }
         self.crypt_filters
-            .get(&self.string_filter)
+            .get(name)
             .cloned()
-            .unwrap_or(Arc::new(Rc4CryptFilter))
+            .ok_or_else(|| DecryptionError::UndefinedCryptFilter(name.to_vec()))
     }
 }
 
@@ -750,78 +792,108 @@ fn transform_object(
         return Ok(());
     }
 
-    // A stream's DecodeParms /Crypt /Name may override the document's default crypt filter;
-    // Identity is used when absent.
-    let override_crypt_filter = obj
-        .as_stream()
-        .ok()
-        .filter(|stream| {
-            stream
-                .filters()
-                .map(|filters| filters.contains(&&b"Crypt"[..]))
-                .unwrap_or(false)
-        })
-        .and_then(|stream| stream.dict.get(b"DecodeParms").ok())
-        .and_then(|object| object.as_dict().ok())
-        .map(|dict| {
-            dict.get(b"Name")
-                .and_then(|object| object.as_name())
-                .ok()
-                .and_then(|name| state.crypt_filters.get(name).cloned())
-                .unwrap_or(Arc::new(IdentityCryptFilter))
-        });
-
-    // Retrieve the payload and the crypt filter to use to transform it.
-    let (mut crypt_filter, payload) = match obj {
+    match obj {
         // Every string and stream is covered, so recurse into arrays and dictionaries
         // to reach the ones nested inside.
         Object::Array(objects) => {
             for obj in objects {
                 transform_object(state, obj_id, obj, direction)?;
             }
-
-            return Ok(());
         }
-        Object::Dictionary(objects) => {
-            for (_, obj) in objects.iter_mut() {
-                transform_object(state, obj_id, obj, direction)?;
+        // sheaf: but not the strings in an encryption dictionary, an earlier revision's included.
+        Object::Dictionary(dict) => {
+            if !is_encryption_dictionary(dict) {
+                transform_entries(state, obj_id, dict, direction)?;
             }
-
-            return Ok(());
         }
-        // Encryption applies to all strings and streams in the document's PDF file. We return the
-        // crypt filter and the content here.
-        Object::String(content, _) => (state.get_string_filter(), &*content),
-        Object::Stream(stream) => (state.get_stream_filter(), &stream.content),
+        // Encryption applies to all strings and streams in the document's PDF file.
+        Object::String(content, _) => {
+            *content = transform(&*state.get_string_filter()?, state, obj_id, content, direction)?;
+        }
+        // sheaf: a stream's dictionary too, its strings with the string filter (lopdf #603).
+        Object::Stream(stream) => {
+            let crypt_filter = stream_crypt_filter(state, stream)?;
+            transform_entries(state, obj_id, &mut stream.dict, direction)?;
+            let content = transform(&*crypt_filter, state, obj_id, &stream.content, direction)?;
+            stream.set_content(content);
+        }
         // Encryption is not applied to other object types such as integers and boolean values.
-        _ => {
-            return Ok(());
-        }
-    };
-
-    // If the stream object specifies its own crypt filter, override the default one with the one
-    // from this stream object.
-    if let Some(filter) = override_crypt_filter {
-        crypt_filter = filter;
-    }
-
-    // Compute the key from the original file encryption key and the object identifier to use for
-    // the corresponding object.
-    let key = crypt_filter.compute_key(&state.file_encryption_key, obj_id)?;
-
-    let transformed = match direction {
-        Direction::Encrypt => crypt_filter.encrypt(&key, payload)?,
-        Direction::Decrypt => crypt_filter.decrypt(&key, payload)?,
-    };
-
-    // Store the result in the object.
-    match obj {
-        Object::Stream(stream) => stream.set_content(transformed),
-        Object::String(content, _) => *content = transformed,
         _ => (),
     }
 
     Ok(())
+}
+
+/// sheaf: `dict`'s values, but a signature's `/Contents` (ISO 32000-2, 7.6.2).
+fn transform_entries(
+    state: &EncryptionState, obj_id: ObjectId, dict: &mut Dictionary, direction: Direction,
+) -> Result<(), DecryptionError> {
+    let signature = is_signature_dictionary(dict);
+    for (key, obj) in dict.iter_mut() {
+        if signature && key == b"Contents" {
+            continue;
+        }
+        transform_object(state, obj_id, obj, direction)?;
+    }
+    Ok(())
+}
+
+/// sheaf: `payload` through `crypt_filter`, under the key it derives for `obj_id`.
+fn transform(
+    crypt_filter: &dyn CryptFilter, state: &EncryptionState, obj_id: ObjectId, payload: &[u8], direction: Direction,
+) -> Result<Vec<u8>, DecryptionError> {
+    // Compute the key from the original file encryption key and the object identifier to use for
+    // the corresponding object.
+    let key = crypt_filter.compute_key(&state.file_encryption_key, obj_id)?;
+
+    match direction {
+        Direction::Encrypt => crypt_filter.encrypt(&key, payload),
+        Direction::Decrypt => crypt_filter.decrypt(&key, payload),
+    }
+}
+
+/// sheaf: the crypt filter for `stream`'s data. A stream's DecodeParms /Crypt /Name may override
+/// the document's default crypt filter; Identity is used when absent, also when the stream has
+/// no DecodeParms, and the entry at /Crypt's place among the filters is read from an array of
+/// them. The name is resolved as `StmF`'s is. An embedded file's default is `EFF`'s filter.
+fn stream_crypt_filter(state: &EncryptionState, stream: &Stream) -> Result<Arc<dyn CryptFilter>, DecryptionError> {
+    let crypt = stream
+        .filters()
+        .ok()
+        .and_then(|filters| filters.iter().position(|&filter| filter == b"Crypt"));
+    if let Some(index) = crypt {
+        let parms = match stream.dict.get(b"DecodeParms") {
+            Ok(Object::Array(parms)) => parms.get(index),
+            parms => parms.ok(),
+        };
+        return match parms
+            .and_then(|parms| parms.as_dict().ok())
+            .and_then(|dict| dict.get(b"Name").and_then(|object| object.as_name()).ok())
+        {
+            Some(name) => state.named_filter(name),
+            None => Ok(Arc::new(IdentityCryptFilter)),
+        };
+    }
+    if stream.dict.has_type(b"EmbeddedFile") {
+        state.get_embedded_file_filter()
+    } else {
+        state.get_stream_filter()
+    }
+}
+
+/// sheaf: a dictionary with an encryption dictionary's keys: the trailer's `/Encrypt`, or an
+/// earlier revision's.
+fn is_encryption_dictionary(dict: &Dictionary) -> bool {
+    dict.get(b"Filter").and_then(Object::as_name).is_ok() && dict.has(b"O") && dict.has(b"U")
+}
+
+/// sheaf: a signature dictionary as PDFium tells one: `/Type /Sig` (or `/DocTimeStamp`), or
+/// with no `/Type`, `/FT /Sig`.
+fn is_signature_dictionary(dict: &Dictionary) -> bool {
+    dict.get(b"Type")
+        .or_else(|_| dict.get(b"FT"))
+        .and_then(Object::as_name)
+        .is_ok_and(|kind| kind == b"Sig" || kind == b"DocTimeStamp")
 }
 
 /// Encrypts `obj`.

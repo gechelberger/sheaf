@@ -129,7 +129,7 @@ running any plugin code.
 | `api` | Semver requirement on the API, e.g. `"^0.3"`. sheaf serves 0.3 and 0.2, and refuses a plugin whose range takes neither. |
 | `[[commands]]` | `id`; `label` (`&` marks the menu mnemonic); `icon`, an SVG in the plugin folder such as `"icons/scan.svg"` (see [Icons](#icons)); `help`, a sentence or two of plain text shown in tooltips and the command palette. Optional: `keywords` (more words the palette finds it by), `category` (palette prefix; defaults to `name`), `menu` (a path like `"Tools/Workpapers"`; menus and submenus are created as needed), `keys` (a default binding in `keymap.json` syntax; the user's keymap overrides it), `keys-context` (where `keys` applies, as a keymap context such as `"DocView && !TextInput"`; by default anywhere in the window, text fields included, so give single-key bindings a context), `when` (what must hold for it to run, all of: `"document"` a document is open, `"selection"` an annotation is selected, `"pages"` pages are selected in the thumbnails, `"region"` a region is Shift+dragged; menus and the palette grey the command out otherwise, and sheaf decides without running plugin code). `icon` and `help` are required. |
 | `[[panels]]` | `id`, `label`. Each gets a dock tab and a **View → Plugin Panels** entry. |
-| `events` | Document events to receive: any of `"opened"`, `"edited"`, `"saved"`, `"selection-changed"`, `"closed"`, `"region"` (the region the user Shift+drags on a page, live while dragging, and its clearing). |
+| `events` | Document events to receive: any of `"opened"` (once the file has opened: its marks, form, bookmarks and the rest are read), `"edited"`, `"saved"`, `"selection-changed"`, `"closed"`, `"region"` (the region the user Shift+drags on a page, live while dragging, and its clearing). |
 | `[[presets]]` | `name`, `regex`: pattern-search presets shown (read-only) in the Patterns panel. |
 | `[marks]` | `tickmarks = [{ name, marks = ["Σ", …] }]` and `stamps = ["PBC", …]` for the markup toolbar. |
 | `[permissions]` | `read = ["~/Documents/Clients"]`, `write = [...]`: absolute paths or `~/…`. `network = ["api.example.com"]`: hosts the plugin may make HTTP requests to (`"*.example.com"` includes subdomains, `"host:8080"` limits the port). See [Trust model](#trust-model). |
@@ -199,6 +199,8 @@ stamp's) are filled in as dynamic stamps fill them: write
 with their boxes in page coordinates: points, top-left origin, the page as
 the file displays it (the same space annotations use). Pattern matches also
 carry their capture groups. OCR text the user hasn't saved yet counts.
+This frame is 0.3's and stays so: sheaf keeps pages' geometry in their
+unrotated user space now, and converts at the API's edge.
 
 **`edits`**: `submit(label, edits)` queues a batch that becomes one undo step
 labelled `label`. Batches are applied in order **after your call returns**,
@@ -264,9 +266,12 @@ and needs no permission for it. Declare its keys in the manifest
 **`progress`** (0.2.1): for long commands. `task(label, total, unit)` shows
 in the document's status bar as "label: 12 of 300 pages…" with a progress
 strip; `set`, `inc` and `set-total` move it, `message` replaces the line,
-and `child(label, weight)` makes a step covering part of it. Escape asks
-the command to stop: `is-cancelled` turns true, and the plugin should
-return (an error like "Stopped" is fine). The call's time limit still
+and `child(label, weight)` makes a step covering part of it. Dropping a
+task or step, or returning from the command, fills its part of the strip;
+one the user stopped stays where it was. Make one task per command: the
+strip follows the first, and a later one only changes the status line.
+Escape asks the command to stop: `is-cancelled` turns true, and the plugin
+should return (an error like "Stopped" is fine). The call's time limit still
 applies. The SDK's `progress::pages(label, n)` and `progress::check(&task)?`
 cover the usual loop:
 
@@ -308,6 +313,14 @@ call's limit. There are no raw sockets.
   one, newer ones replace each other and only the newest is sent next. For
   live work, fetch a page's words once and filter them yourself, as
   `plugins/subtotal` does.
+- **While a file opens**, its pages show before sheaf has read the rest
+  of it, and a plugin's commands are greyed out. A call given meanwhile
+  (a command by its keys, a panel action, an event) waits: once the file
+  is read, `opened` comes first, then the calls that waited, in order,
+  each seeing the document as it is then. Of region events only the
+  newest waits. A file closed before it's read drops the calls that
+  waited, and `closed` comes only to a document that had `opened` (a
+  recovery opens a file again).
 
 ## Versioning
 

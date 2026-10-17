@@ -65,7 +65,8 @@ impl Document {
     /// Prune all unused objects.
     pub fn prune_objects(&mut self) -> Vec<ObjectId> {
         let mut ids = vec![];
-        let refs = self.traverse_objects(|_| {});
+        // sheaf: a set, so each object is looked up in it at once.
+        let refs: std::collections::HashSet<ObjectId> = self.traverse_objects(|_| {}).into_iter().collect();
         for id in self.objects.keys() {
             if !refs.contains(id) {
                 ids.push(*id);

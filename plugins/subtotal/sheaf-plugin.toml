@@ -2,6 +2,6 @@ id = "subtotal"
 name = "Subtotal"
 version = "0.2.0"
 api = "^0.3"
-homepage = "https://github.com/gechelberger/sheaf/tree/main/plugins/subtotal"
+homepage = "https://github.com/sheaf-pdf/sheaf/tree/main/plugins/subtotal"
 description = "Shift+drag over numbers on a page to see their sum and count in the status bar, live as you drag."
 events = ["region", "edited"]

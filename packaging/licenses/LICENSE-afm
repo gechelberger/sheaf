@@ -1,0 +1,10 @@
+afm/*.afm are Adobe's Core 14 font metrics (Core14_AFMs, as Apache PDFBox
+redistributes them with Adobe's notice: pdfbox/src/main/resources/org/apache/
+pdfbox/resources/afm, https://github.com/apache/pdfbox). sheaf reads their
+glyph widths and built-in encodings to lay out text in the standard 14 fonts.
+Each file is modified, and says so in a Comment on its second line: its
+kerning data and the blank lines between its lines are removed.
+
+Adobe's notice, from the set's MustRead.html, follows unmodified.
+
+This file and the 14 PostScript(R) AFM files it accompanies may be used, copied, and distributed for any purpose and without charge, with or without modification, provided that all copyright notices are retained; that the AFM files are not distributed without this file; that all modifications to this file or any of the AFM files are prominently noted in the modified file(s); and that this paragraph is not modified. Adobe Systems has no responsibility or obligation to support the use of the AFM files.

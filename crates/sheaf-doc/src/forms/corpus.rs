@@ -9,6 +9,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 
@@ -87,6 +88,28 @@ impl Corpus {
     pub fn path(&self, entry: &Entry) -> PathBuf {
         self.root.join(&entry.path)
     }
+}
+
+/// `read` of each of `entries`, in their order, on a thread per core (16
+/// at most).
+pub fn each_entry<T: Send>(entries: &[Entry], read: impl Fn(&Entry) -> T + Sync) -> Vec<T> {
+    let outcomes = Mutex::new(BTreeMap::new());
+    let queue = Mutex::new(entries.iter().enumerate());
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get().min(16));
+    std::thread::scope(|s| {
+        for _ in 0..threads {
+            s.spawn(|| {
+                loop {
+                    let Some((i, entry)) = queue.lock().unwrap().next() else {
+                        break;
+                    };
+                    let outcome = read(entry);
+                    outcomes.lock().unwrap().insert(i, outcome);
+                }
+            });
+        }
+    });
+    outcomes.into_inner().unwrap().into_values().collect()
 }
 
 /// `manifest.tsv`'s rows, by its header's column names.

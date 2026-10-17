@@ -3492,6 +3492,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6e44b0a4eaa4c82f441d50a963f2d5f05a787240aeee097597033e72accfd22f"
 
 [[package]]
+name = "in-progress"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b688f7dc59663fd2c84756e4e8bed087d461713bc6c9977db29c7d442b69425c"
+
+[[package]]
 name = "indexmap"
 version = "2.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6513,6 +6519,7 @@ dependencies = [
  "ctrlc",
  "env_logger",
  "image",
+ "in-progress",
  "indicatif",
  "log",
  "lopdf",
@@ -6520,7 +6527,6 @@ dependencies = [
  "sheaf-image",
  "sheaf-ocr",
  "sheaf-ops",
- "sheaf-progress",
 ]
 
 [[package]]
@@ -6541,8 +6547,10 @@ dependencies = [
  "flate2",
  "im",
  "image",
+ "in-progress",
  "log",
  "lopdf",
+ "proc-macro2",
  "proptest",
  "quick-xml",
  "regex",
@@ -6550,7 +6558,10 @@ dependencies = [
  "serde_json",
  "sheaf-core",
  "sheaf-image",
+ "syn 2.0.119",
  "thiserror 2.0.21",
+ "unicode-normalization",
+ "zeroize",
 ]
 
 [[package]]
@@ -6561,11 +6572,11 @@ dependencies = [
  "fax",
  "image",
  "imageproc",
+ "in-progress",
  "log",
  "png 0.18.1",
  "serde",
  "serde_json",
- "sheaf-progress",
  "tiff",
 ]
 
@@ -6613,6 +6624,7 @@ dependencies = [
  "anyhow",
  "fastrand",
  "image",
+ "in-progress",
  "log",
  "lopdf",
  "regex",
@@ -6622,7 +6634,6 @@ dependencies = [
  "sheaf-doc",
  "sheaf-image",
  "sheaf-ocr",
- "sheaf-progress",
  "sheaf-render",
  "toml 0.9.12+spec-1.1.0",
 ]
@@ -6636,14 +6647,15 @@ dependencies = [
  "futures",
  "http",
  "http-body-util",
+ "in-progress",
  "log",
+ "lopdf",
  "regex",
  "semver",
  "serde",
  "serde_json",
  "sheaf-core",
  "sheaf-doc",
- "sheaf-progress",
  "toml 0.9.12+spec-1.1.0",
  "usvg",
  "wasmtime",
@@ -6670,10 +6682,6 @@ dependencies = [
  "sheaf-render",
  "windows 0.61.3",
 ]
-
-[[package]]
-name = "sheaf-progress"
-version = "0.1.0-alpha.1"
 
 [[package]]
 name = "sheaf-render"

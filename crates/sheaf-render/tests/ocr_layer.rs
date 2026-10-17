@@ -1,7 +1,8 @@
 //! The OCR text layer `sheaf-doc` writes must be real text to PDFium: this
 //! saves a layer and checks the engine finds the words where the glyphs
-//! are, for every combination of the file's own `/Rotate` and the extra
-//! rotation the page was shown with when it was recognized.
+//! are, for every combination of the file's own `/Rotate` and the turn
+//! the page was shown with when it was recognized, on a page whose crop
+//! box is off the origin.
 //!
 //! Needs libpdfium (`scripts/fetch-pdfium.sh`), like the app itself; it
 //! fails rather than skips without it so CI can't silently lose it.
@@ -10,16 +11,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use lopdf::{Document as Pdf, Object, Stream, dictionary};
-use sheaf_core::{PageIndex, PageSize, Rotation};
-use sheaf_doc::text_layer::rotate_box;
-use sheaf_doc::{Box2, Document, Edit, FixedCount, OcrWord, PageChars, Pt, SourceInfo, TextLayer};
+use sheaf_core::{PageIndex, Rotation};
+use sheaf_doc::{
+    Box2, Document, Edit, FixedCount, OcrWord, PageChars, Pt, SourceInfo, Store, TextLayer,
+};
 use sheaf_render::Renderer;
 use sheaf_render::pdfium::PdfiumEngine;
-
-const LETTER: PageSize = PageSize {
-    width: 612.0,
-    height: 792.0,
-};
 
 fn tempdir() -> PathBuf {
     let d = std::env::temp_dir().join(format!(
@@ -34,7 +31,8 @@ fn tempdir() -> PathBuf {
     d
 }
 
-/// A one-page Letter PDF with no content and the given `/Rotate`.
+/// A one-page Letter PDF with no content, a crop box off the origin and
+/// the given `/Rotate`.
 fn blank_pdf(path: &Path, rotate: i64) {
     let mut pdf = Pdf::with_version("1.5");
     let pages_id = pdf.new_object_id();
@@ -42,6 +40,7 @@ fn blank_pdf(path: &Path, rotate: i64) {
     let mut page = dictionary! {
         "Type" => "Page", "Parent" => pages_id, "Contents" => content,
         "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        "CropBox" => vec![20.into(), 30.into(), 600.into(), 770.into()],
     };
     if rotate != 0 {
         page.set("Rotate", rotate);
@@ -58,59 +57,54 @@ fn blank_pdf(path: &Path, rotate: i64) {
     pdf.save(path).unwrap();
 }
 
-fn word(text: &str, x: f32, y: f32, w: f32, h: f32) -> OcrWord {
+fn word(text: &str, b: Box2) -> OcrWord {
     OcrWord {
         text: text.into(),
-        rect: Box2 { x, y, w, h },
+        rect: b,
         confidence: 1.0,
     }
 }
 
+fn to_box(r: &sheaf_render::Rect) -> Box2 {
+    Box2 {
+        x: r.x,
+        y: r.y,
+        w: r.w,
+        h: r.h,
+    }
+}
+
 fn union(rects: &[sheaf_render::Rect]) -> Box2 {
-    rects
-        .iter()
-        .map(|r| Box2 {
-            x: r.x,
-            y: r.y,
-            w: r.w,
-            h: r.h,
-        })
-        .reduce(Box2::union)
-        .unwrap()
+    rects.iter().map(to_box).reduce(Box2::union).unwrap()
 }
 
 fn close(a: f32, b: f32) -> bool {
     (a - b).abs() <= 2.0
 }
 
-/// Save a layer recognized with the page shown at `upright` on top of a
-/// file whose page has `/Rotate rotate`, then search the saved file.
-fn check(rotate: i64, upright: Rotation) {
+fn close_box(a: Box2, b: Box2) -> bool {
+    close(a.x, b.x)
+        && close(a.y, b.y)
+        && close(a.right(), b.right())
+        && close(a.bottom(), b.bottom())
+}
+
+/// Save a layer recognized with the page shown turned `by` beyond a file
+/// whose page has `/Rotate rotate`, then search the saved file.
+fn check(rotate: i64, by: Rotation) {
     let dir = tempdir();
     let src = dir.join("src.pdf");
     blank_pdf(&src, rotate);
-    let displayed = LETTER.rotated(Rotation::from_degrees(rotate as i32));
-    let mut model = Document::new(
-        SourceInfo {
-            path: src.clone(),
-            page_count: 1,
-            first_page: displayed,
-            page_sizes: None,
-            bytes: 0,
-            password: None,
-            data: None,
-            derived: None,
-        },
-        &[],
-        Box::new(FixedCount(10)),
-    );
+    let store = Store::new();
+    let primary = SourceInfo::read(&store, &src, None).unwrap();
+    let mut model = Document::new(store, primary, &[], Box::new(FixedCount(10)));
     let page = model.page(0).unwrap().id;
-    if upright != Rotation::R0 {
+    if by != Rotation::R0 {
         model
             .apply(
                 Edit::RotatePages {
                     ids: vec![page],
-                    by: upright,
+                    by,
                 },
                 "rotate",
             )
@@ -118,7 +112,7 @@ fn check(rotate: i64, upright: Rotation) {
     }
     // Two words on a line, as the engine would report them in the frame
     // the page was shown in.
-    let rendered = displayed.rotated(upright);
+    let shown = model.geom(&model.state().pages[0]);
     let hello = Box2 {
         x: 72.0,
         y: 100.0,
@@ -132,15 +126,15 @@ fn check(rotate: i64, upright: Rotation) {
         h: 12.0,
     };
     let layer = TextLayer::from_engine(
-        vec![
-            word("Hello", hello.x, hello.y, hello.w, hello.h),
-            word("World", world.x, world.y, world.w, world.h),
-        ],
-        rendered,
-        upright,
+        vec![word("Hello", hello), word("World", world)],
+        &shown,
         "test",
     );
     let unsaved = PageChars::from_layer(&layer);
+    let unsaved_hit = |query: &str| {
+        let hits = sheaf_doc::text_layer::search(&layer, query, true);
+        hits[0].rects.iter().copied().reduce(Box2::union).unwrap()
+    };
     model
         .apply(
             Edit::SetTextLayers {
@@ -152,31 +146,29 @@ fn check(rotate: i64, upright: Rotation) {
     let out = dir.join("ocr.pdf");
     sheaf_doc::save::rewrite_to_path(&model.snapshot(), &out).unwrap();
 
-    // The saved page's /Rotate is the file's plus the extra, so PDFium's
-    // displayed space is exactly the frame the words were recognized in.
+    // The saved page's /Rotate is the page's rotation, so PDFium's
+    // displayed space is the frame the words were recognized in, and
+    // through the saved page's geometry its hits are in PageSpace.
+    let base = sheaf_doc::forms::fixture::source(std::fs::read(&out).unwrap()).geom(0);
+    assert_eq!(base.rotate, shown.rotate);
     let engine = PdfiumEngine::open(&out, None).unwrap();
-    let ctx = format!("rotate {rotate}, upright {upright:?}");
+    let ctx = format!("rotate {rotate}, by {by:?}");
     assert_eq!(engine.page_text_len(PageIndex(0)).unwrap(), 10, "{ctx}");
     let hits = engine.search_page(PageIndex(0), "hello", false).unwrap();
     assert_eq!(hits.len(), 1, "{ctx}: {hits:?}");
     let r = union(&hits[0].rects);
-    assert!(
-        close(r.x, hello.x)
-            && close(r.y, hello.y)
-            && close(r.right(), hello.right())
-            && close(r.bottom(), hello.bottom()),
-        "{ctx}: hit {r:?} vs word {hello:?}"
-    );
+    assert!(close_box(r, hello), "{ctx}: hit {r:?} vs word {hello:?}");
+    let r = base.from_view().apply_box(r);
+    let want = unsaved_hit("Hello");
+    assert!(close_box(r, want), "{ctx}: hit {r:?} vs unsaved {want:?}");
     // The gap between the words became a space, so a phrase matches too.
     let hits = engine
         .search_page(PageIndex(0), "Hello World", true)
         .unwrap();
     assert_eq!(hits.len(), 1, "{ctx}: {hits:?}");
-    let r = union(&hits[0].rects);
-    assert!(
-        close(r.x, hello.x) && close(r.right(), world.right()),
-        "{ctx}: phrase hit {r:?}"
-    );
+    let r = base.from_view().apply_box(union(&hits[0].rects));
+    let want = unsaved_hit("Hello World");
+    assert!(close_box(r, want), "{ctx}: phrase hit {r:?} vs {want:?}");
 
     // Selecting text: the saved page's characters read the same, and a
     // point on "W" is just before it.
@@ -185,25 +177,16 @@ fn check(rotate: i64, upright: Rotation) {
             .page_chars(PageIndex(0))
             .unwrap()
             .into_iter()
-            .map(|(c, r)| {
-                (
-                    c,
-                    r.map(|r| Box2 {
-                        x: r.x,
-                        y: r.y,
-                        w: r.w,
-                        h: r.h,
-                    }),
-                )
-            })
+            .map(|(c, r)| (c, r.as_ref().map(to_box)))
             .collect(),
-        rendered,
+        &base,
     );
     assert_eq!(chars.text(0, chars.len()).trim(), "Hello World", "{ctx}");
-    let on_w = Pt {
+    assert_eq!(chars.upright, unsaved.upright, "{ctx}");
+    let on_w = shown.from_view().apply(Pt {
         x: world.x + 2.0,
         y: world.y + 6.0,
-    };
+    });
     let at = chars.boundary_at(on_w, 0.0).expect("on the text");
     assert_eq!(chars.text(at, chars.len()).trim(), "World", "{ctx}");
     // Before the save, the layer's characters are where PDFium puts them.
@@ -215,10 +198,9 @@ fn check(rotate: i64, upright: Rotation) {
             .and_then(|g| g.rect)
             .unwrap()
     };
-    let saved_w = w_of(&chars);
-    let unsaved_w = rotate_box(w_of(&unsaved), layer.page, upright);
+    let (saved_w, unsaved_w) = (w_of(&chars), w_of(&unsaved));
     assert!(
-        close(saved_w.x, unsaved_w.x) && close(saved_w.right(), unsaved_w.right()),
+        close_box(saved_w, unsaved_w),
         "{ctx}: W at {saved_w:?} saved, {unsaved_w:?} unsaved"
     );
     let _ = std::fs::remove_dir_all(&dir);

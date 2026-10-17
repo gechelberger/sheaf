@@ -11,6 +11,18 @@ icon = "icons/bookmark.svg"
 help = "Counts with progress for the host tests."
 
 [[commands]]
+id = "early"
+label = "Early"
+icon = "icons/bookmark.svg"
+help = "Returns short of its progress total, for the host tests."
+
+[[commands]]
+id = "many-steps"
+label = "Many Steps"
+icon = "icons/bookmark.svg"
+help = "Holds more progress steps than the host allows, for the host tests."
+
+[[commands]]
 id = "bookmark"
 label = "Bookmark Pages"
 icon = "icons/bookmark.svg"

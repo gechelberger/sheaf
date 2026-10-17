@@ -2,7 +2,7 @@ id = "amount-crossref"
 name = "Amount Cross-Reference"
 version = "0.2.1"
 api = "^0.3"
-homepage = "https://github.com/gechelberger/sheaf/tree/main/plugins/amount-crossref"
+homepage = "https://github.com/sheaf-pdf/sheaf/tree/main/plugins/amount-crossref"
 description = "Finds the same dollar amount on different pages (a K-1 total and the 1040 line it flows to) and links the pairs you accept with connectors."
 
 [[commands]]

@@ -1,11 +1,11 @@
 [workspace]
 resolver = "3"
 # Plugins build for wasm32-wasip2 in their own workspaces. vendor/lopdf is
-# a patched dependency, not one of ours (its SHEAF.md).
-exclude = ["plugins", "crates/sheaf-plugin/tests/fixtures", "vendor/lopdf"]
+# a patched dependency, not one of ours (its SHEAF.md). fuzz/ builds on
+# nightly, with libFuzzer.
+exclude = ["plugins", "crates/sheaf-plugin/tests/fixtures", "vendor/lopdf", "fuzz"]
 members = [
     "crates/sheaf-core",
-    "crates/sheaf-progress",
     "crates/sheaf-ops",
     "crates/sheaf-image",
     "crates/sheaf-cli",
@@ -24,7 +24,7 @@ members = [
 version = "0.1.0-alpha.1"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/gechelberger/sheaf"
+repository = "https://github.com/sheaf-pdf/sheaf"
 rust-version = "1.98"
 
 [workspace.dependencies]
@@ -35,7 +35,6 @@ sheaf-ui = { path = "crates/sheaf-ui" }
 sheaf-ocr = { path = "crates/sheaf-ocr" }
 sheaf-print = { path = "crates/sheaf-print" }
 sheaf-plugin = { path = "crates/sheaf-plugin" }
-sheaf-progress = { path = "crates/sheaf-progress" }
 sheaf-ops = { path = "crates/sheaf-ops" }
 sheaf-image = { path = "crates/sheaf-image" }
 sheaf-cli = { path = "crates/sheaf-cli" }
@@ -64,6 +63,9 @@ regex = "1"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 schemars = { version = "1", default-features = false, features = ["derive", "std"] }
+# Progress and cooperative cancel for ops, the CLI bar and plugin tasks:
+# sheaf's own crate, published as sheaf-pdf/in-progress.
+in-progress = "0.1"
 
 # Zed's workspace patches that GPUI's Linux backend relies on. Mirrored from
 # zed/Cargo.toml [patch.crates-io] at the pinned rev; patches here are not
@@ -79,8 +81,11 @@ windows-capture = { git = "https://github.com/zed-industries/windows-capture.git
 # files (todos/m10.md, slice 2's note). vendor/lopdf is lopdf's main at
 # 39492cb, which fixes that (#598) and brings 22 other commits since 0.45.0,
 # a refactor of the reader, writer and encryption code among them. sheaf's
-# patch on top reads each cross-reference stream once. vendor/lopdf/SHEAF.md
-# has the details and the way back to crates.io.
+# patch on top adds LazyPdf (each object read when it's asked for, under
+# caps), reads each cross-reference stream once, reads reals as f64s and
+# encrypts and decrypts each string and stream as ISO 32000 has it.
+# vendor/lopdf/SHEAF.md has the details, and why the way back to crates.io
+# is now upstreaming the patch.
 lopdf = { path = "vendor/lopdf" }
 
 [profile.dev]
