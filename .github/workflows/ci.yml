@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -48,6 +48,7 @@ jobs:
           path: |
             ~/.tesseract-rs
             ~/AppData/Roaming/tesseract-rs
+            ~/Library/Application Support/tesseract-rs
           key: tesseract-rs-0.4.0-${{ runner.os }}
 
       - name: Fetch PDFium
@@ -104,6 +105,17 @@ jobs:
         run: |
           ldd target/debug/sheaf
           ! ldd target/debug/sheaf | grep -E 'libc\+\+|libunwind|onnxruntime|tesseract|leptonica'
+
+      # The same for macOS, where libc++ and the frameworks ship with the
+      # system: anything outside /usr/lib and /System is missing from a
+      # packaged build.
+      - name: Only system libraries (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          otool -L target/debug/sheaf
+          bad=$(otool -L target/debug/sheaf | tail -n +2 | awk '{print $1}' \
+            | grep -vE '^(/usr/lib/|/System/Library/)' || true)
+          if [ -n "$bad" ]; then echo "sheaf links: $bad"; exit 1; fi
 
       # ONNX Runtime is loaded on demand (the ort crate's static binaries
       # are x86-64-v3 and crashed here before main); keep it that way.
