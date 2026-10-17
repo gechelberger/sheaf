@@ -16,11 +16,23 @@ pub fn quarter_turns(img: &RgbImage) -> Option<u16> {
 }
 
 /// The model's confidence, for k = 0..4, that `img` needs k clockwise
-/// quarter turns to be upright; `None` without the model.
+/// quarter turns to be upright; `None` without the model. Averaged over
+/// `img` turned all four ways: on its own the model has favourite
+/// answers, and a page on its side can fall below [`quarter_turns`]'
+/// threshold (it did on macOS).
 pub fn scores(img: &RgbImage) -> Option<[f32; 4]> {
     #[cfg(feature = "oar")]
     {
-        model::scores(img)
+        use image::imageops::{rotate90, rotate180, rotate270};
+        let mut avg = [0f32; 4];
+        let turned = [img.clone(), rotate90(img), rotate180(img), rotate270(img)];
+        for (r, im) in turned.iter().enumerate() {
+            // Turned r more clockwise, it needs r fewer turns.
+            for (j, v) in model::scores(im)?.iter().enumerate() {
+                avg[(j + r) % 4] += v / 4.0;
+            }
+        }
+        Some(avg)
     }
     #[cfg(not(feature = "oar"))]
     {
