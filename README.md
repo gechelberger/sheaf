@@ -109,7 +109,7 @@ magnitude snappier than Acrobat on the same machine.
 |---|---|---|
 | Windows (x64) | **1** | Primary daily-driver target. Must be fast on older hardware. |
 | Linux (x64, Wayland + X11) | **1** | Development platform. GPUI uses wgpu here. |
-| macOS (arm64) | 2 | Should mostly fall out of the Linux work; not blocking releases. |
+| macOS (arm64) | 2 | Should mostly fall out of the Linux work. CI builds and tests it; not blocking releases. |
 
 Tier 1 platforms gate every release and run the perf budgets in CI.
 

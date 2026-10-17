@@ -135,14 +135,9 @@ pub fn orientation_votes(img: &image::RgbImage) -> Option<[f32; 4]> {
             ((img.height() as f32 * s) as u32).max(1),
             image::imageops::FilterType::Triangle,
         );
-        for r in 0..4u16 {
-            if let Some(sc) = sheaf_ocr::orient::scores(&sheaf_image::clean::turn(small.clone(), r))
-            {
-                for (j, v) in sc.iter().enumerate() {
-                    votes[(j + r as usize) % 4] += v / 4.0;
-                }
-                any = true;
-            }
+        if let Some(sc) = sheaf_ocr::orient::scores(&small) {
+            votes = sc;
+            any = true;
         }
     }
     if sheaf_ocr::orient::osd_available() {

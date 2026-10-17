@@ -188,12 +188,15 @@ fn oar_orientation_undoes_a_turn() {
     use image::imageops::{rotate90, rotate180, rotate270};
     assert!(sheaf_ocr::orient::available());
     let page = text_page();
-    let turns = sheaf_ocr::orient::quarter_turns;
-    assert_eq!(turns(&page), Some(0));
+    let check = |img: &image::RgbImage, want: u16| {
+        use sheaf_ocr::orient::{quarter_turns, scores};
+        assert_eq!(quarter_turns(img), Some(want), "scores {:?}", scores(img));
+    };
+    check(&page, 0);
     // Turned clockwise once, it takes three more to come back.
-    assert_eq!(turns(&rotate90(&page)), Some(3));
-    assert_eq!(turns(&rotate180(&page)), Some(2));
-    assert_eq!(turns(&rotate270(&page)), Some(1));
+    check(&rotate90(&page), 3);
+    check(&rotate180(&page), 2);
+    check(&rotate270(&page), 1);
 }
 
 #[test]
